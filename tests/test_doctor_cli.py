@@ -2369,3 +2369,394 @@ def test_the_worker_and_the_server_agree_on_the_host_fact_keys():
     from remote_ci_monitor import capabilities, remote_worker
 
     assert remote_worker.HOST_KEYS == capabilities.HOST_FACT_KEYS
+
+
+# ── 생성형: 필수 사실이 없으면 0 이나 1 이 아니다 (P3 3라운드 HIGH · 근본 원인) ────
+#
+# 원인: doctor 에는 「모름」이라는 값이 없었다. 읽는 자리마다 없거나 null 인 값을 `or default` 로
+# 확정값으로 바꿨고, 종료 3 은 자리마다 손으로 넣어야 나왔다. 그래서 답 하나씩이 아니라 표로
+# 잠근다 — 역할마다 성한 답을 두고, 그 답의 **모든 칸**을 지우고 · null 로 · 틀린 타입으로 · 빈
+# 그릇으로 바꿔 본다. 칸마다 무엇이 맞는지는 아래 표가 정한다(필수면 3, 아니면 성한 답과 같은 종료).
+# 새 칸이 생기면 표에 없어서 빨갛다 — 칸마다 확정인지 모름인지 정하게 한다.
+
+B = "baseline"  # 성한 답과 같은 종료 코드
+ANY = "any"  # 빈 그릇이 다른 확정 답인 칸 — 종료는 따지지 않고 None · 경계 · traceback 만 본다
+REQUIRED = {"drop": 3, "null": 3, "wrong": 3}  # 없으면 이 답을 알아볼 수 없거나 판정할 수 없다
+OPTIONAL = {"drop": B, "null": B, "wrong": 3}  # 없으면 모르는 값으로 null — 판정은 그대로
+FREE = {"drop": B, "null": B, "wrong": B}  # doctor 가 읽지 않는 칸
+ITEM = {"null": 3, "wrong": 3}  # 목록의 항목 — 빼는 것은 다른 확정 답이라 보지 않는다
+ENTRY = {"drop": B, "null": 3, "wrong": 3}  # 이름이 서버가 정한 객체의 값
+
+
+def walk(value: Any, path: str = "") -> Iterator[tuple[str, Any]]:
+    """(경로, 값) — 답의 모든 칸과 목록 항목. 경로는 `presets[0].requires` 꼴이다."""
+    if isinstance(value, dict):
+        for k, v in value.items():
+            p = f"{path}.{k}" if path else k
+            yield p, v
+            yield from walk(v, p)
+    elif isinstance(value, list):
+        for i, v in enumerate(value):
+            p = f"{path}[{i}]"
+            yield p, v
+            yield from walk(v, p)
+
+
+def _steps(path: str) -> list[str | int]:
+    import re
+
+    return [int(i) if i else k for k, i in re.findall(r"([^.\[\]]+)|\[(\d+)\]", path)]
+
+
+def wrong_value(value: Any) -> Any:
+    """그 칸의 타입이 아닌 값 — 문자열 칸에는 목록, 목록 칸에는 문자열."""
+    if isinstance(value, bool):
+        return "yes"
+    if isinstance(value, (int, float)):
+        return "soon"
+    if isinstance(value, (list, dict)):
+        return "x" if isinstance(value, list) else ["x"]
+    return [7]
+
+
+def mutated(doc: Any, path: str, how: str) -> Any:
+    import copy
+
+    out = copy.deepcopy(doc)
+    *head, last = _steps(path)
+    parent = out
+    for step in head:
+        parent = parent[step]
+    if how == "drop":
+        del parent[last]
+    elif how == "null":
+        parent[last] = None
+    elif how == "wrong":
+        parent[last] = wrong_value(parent[last])
+    else:  # empty
+        parent[last] = type(parent[last])()
+    return out
+
+
+def mutations(value: Any, rule: dict[str, Any], is_item: bool) -> list[tuple[str, Any]]:
+    """(어떻게, 기대 종료) — 이미 null 인 칸은 null 로 다시 바꾸지 않는다."""
+    out = [(how, rule[how]) for how in ("drop", "null", "wrong") if how in rule]
+    if is_item:
+        out = [(h, w) for h, w in out if h != "drop"]
+    if value is None:
+        out = [(h, w) for h, w in out if h != "null"]
+    if isinstance(value, (list, dict)) and value:
+        out.append(("empty", rule.get("empty", B)))
+    return out
+
+
+GEN_SPEC: dict[str, Any] = {
+    "generation": "1:0",
+    "probe_interval_seconds": 600,
+    "probes": [{"name": "ver", "argv": ["rcm-td-version"], "timeout_seconds": 5}],
+    "presets": [
+        {
+            "name": "build",
+            "requires": [HAVE],
+            "env_passthrough": ["PATH"],
+            "env": {"TD_A": "1"},
+            "pool": "mbp",
+            "pools": ["mbp2"],
+            "placement": "pool",
+            "checks": [],
+            "source_modes": ["tree", "git_ref"],
+            "repo": "app",
+            "unreachable_checks": [],
+        },
+        {
+            "name": "wide",
+            "requires": [HAVE],
+            "env_passthrough": [],
+            "env": {},
+            "pool": "default",
+            "pools": [],
+            "placement": "any-capable",
+            "checks": ["build"],
+            "source_modes": ["tree"],
+            "repo": None,
+            "unreachable_checks": [{"name": "build", "code": "check_local_only"}],
+        },
+    ],
+    "tools": [LACK_HINT],
+}
+#: 워커 명세의 칸마다 — 필수 칸, 판정에 쓰는 칸(없으면 모름), 표시만 하는 칸
+GEN_SPEC_RULES: dict[str, dict[str, Any]] = {
+    "generation": OPTIONAL,
+    "probe_interval_seconds": FREE,
+    "probes": OPTIONAL,
+    "probes[0].name": REQUIRED,
+    "probes[0].argv": {**REQUIRED, "empty": 3},
+    "probes[0].timeout_seconds": OPTIONAL,
+    "presets": {**REQUIRED, "empty": 1},  # 빈 목록은 「서버에 프리셋이 없다」는 확정 답이다
+    "presets[0].name": REQUIRED,
+    "presets[0].requires": REQUIRED,
+    "presets[0].env_passthrough": {**REQUIRED, "empty": ANY},
+    "presets[0].env": REQUIRED,
+    "presets[0].env.TD_A": ENTRY,
+    "presets[0].pool": REQUIRED,  # 이 머신의 풀에 오는지가 이것으로 정해진다
+    "presets[0].pools": OPTIONAL,  # `pool` 이 이미 이 머신의 풀이다
+    "presets[0].placement": REQUIRED,  # TD5: 옛 서버는 모름이다 — `pool` 로 짐작하지 않는다
+    "presets[0].checks": REQUIRED,
+    "presets[0].source_modes": {**REQUIRED, "empty": B},
+    "presets[0].repo": REQUIRED,  # git_ref 프리셋의 저장소를 모르면 repo_missing 도 모른다
+    "presets[0].unreachable_checks": OPTIONAL,  # 점검이 없다
+    "presets[1].name": REQUIRED,
+    "presets[1].requires": {**REQUIRED, "empty": B},
+    "presets[1].env_passthrough": REQUIRED,
+    "presets[1].env": REQUIRED,
+    "presets[1].pool": OPTIONAL,  # any-capable 은 풀을 보지 않는다
+    "presets[1].pools": OPTIONAL,
+    "presets[1].placement": REQUIRED,
+    "presets[1].checks": {**REQUIRED, "empty": ANY},
+    "presets[1].source_modes": {**OPTIONAL, "empty": B},  # 오지 않는 프리셋이다
+    "presets[1].repo": OPTIONAL,  # git_ref 가 아니다
+    "presets[1].unreachable_checks": {**REQUIRED, "empty": ANY},  # 점검이 있다 — 없으면 모름
+    "presets[1].unreachable_checks[0].name": REQUIRED,
+    "presets[1].unreachable_checks[0].code": REQUIRED,
+    "tools": OPTIONAL,
+    "tools[0].name": REQUIRED,
+    "tools[0].docs": OPTIONAL,
+    "tools[0].install": OPTIONAL,
+    "tools[0].install.darwin": ENTRY,
+    "tools[0].install.linux": ENTRY,
+}
+GEN_HEALTH = {"ok": True, "version": __version__}
+GEN_HEALTH_RULES = {"ok": REQUIRED, "version": REQUIRED}
+GEN_LANE_HEALTH = {
+    **GEN_HEALTH,
+    "preset_env": {"unit": {"missing_tools": [], "missing_passthrough": []}},
+}
+#: coordinator-worker 는 로컬 레인을 `preset_env` 로 판정한다 — 없으면 모름
+GEN_LANE_HEALTH_RULES = {
+    **GEN_HEALTH_RULES,
+    "preset_env": {**REQUIRED, "empty": 3},
+    "preset_env.unit": REQUIRED,
+    "preset_env.unit.missing_tools": REQUIRED,
+    "preset_env.unit.missing_passthrough": REQUIRED,
+}
+#: coordinator 는 `preset_env` 를 읽지 않는다 — 그래도 있는 칸의 모양은 본다
+GEN_COORD_HEALTH_RULES = {
+    **GEN_HEALTH_RULES,
+    "preset_env": OPTIONAL,
+    "preset_env.unit": ENTRY,
+    "preset_env.unit.missing_tools": REQUIRED,
+    "preset_env.unit.missing_passthrough": REQUIRED,
+}
+GEN_WORKER_ME = {"name": "mbp", "admin": False, "kind": "worker"}
+GEN_CLIENT_ME = {"name": "alice", "admin": False, "kind": "client"}
+GEN_ME_RULES = {"name": OPTIONAL, "admin": OPTIONAL, "kind": REQUIRED}
+GEN_OK = {"state": "eligible", "code": "ok", "detail": {}}
+GEN_MACHINES = {
+    "generation": "1:0",
+    "machines": [
+        {
+            "id": "@local",
+            "display_name": "build-01",
+            "kind": "local",
+            "pool": "default",
+            "lanes": 1,
+            "alive": True,
+            "presets": {"unit": dict(GEN_OK)},
+        },
+        {
+            "id": "mbp",
+            "display_name": "mbp",
+            "kind": "remote",
+            "pool": "default",
+            "lanes": 1,
+            "alive": True,
+            "presets": {"unit": dict(GEN_OK)},
+        },
+    ],
+}
+GEN_MACHINE_RULES: dict[str, dict[str, Any]] = {"generation": OPTIONAL, "machines": OPTIONAL}
+GEN_MACHINE_RULES["machines"] = {**REQUIRED, "empty": B}
+for _i in (0, 1):
+    GEN_MACHINE_RULES.update(
+        {
+            f"machines[{_i}].id": REQUIRED,
+            f"machines[{_i}].display_name": OPTIONAL,
+            f"machines[{_i}].kind": REQUIRED,  # 로컬 레인인지 원격인지가 이것으로 정해진다
+            f"machines[{_i}].pool": OPTIONAL,
+            f"machines[{_i}].lanes": FREE,
+            f"machines[{_i}].alive": OPTIONAL,
+            f"machines[{_i}].presets": OPTIONAL,
+            f"machines[{_i}].presets.unit": ENTRY,
+            f"machines[{_i}].presets.unit.state": OPTIONAL,
+            f"machines[{_i}].presets.unit.code": OPTIONAL,
+            f"machines[{_i}].presets.unit.detail": FREE,
+        }
+    )
+#: 역할 → 라우트 → (성한 답, 칸 규칙)
+GEN_ROLES: dict[str, dict[str, tuple[Any, dict[str, dict[str, Any]]]]] = {
+    "worker": {
+        "/api/health": (GEN_HEALTH, GEN_HEALTH_RULES),
+        "/api/whoami": (GEN_WORKER_ME, GEN_ME_RULES),
+        "/worker/spec": (GEN_SPEC, GEN_SPEC_RULES),
+    },
+    "client": {
+        "/api/health": (GEN_HEALTH, GEN_HEALTH_RULES),
+        "/api/whoami": (GEN_CLIENT_ME, GEN_ME_RULES),
+    },
+    "coordinator": {
+        "/api/health": (GEN_LANE_HEALTH, GEN_COORD_HEALTH_RULES),
+        "/api/whoami": (GEN_CLIENT_ME, GEN_ME_RULES),
+        "/api/machines": (GEN_MACHINES, GEN_MACHINE_RULES),
+    },
+    "coordinator-worker": {
+        "/api/health": (GEN_LANE_HEALTH, GEN_LANE_HEALTH_RULES),
+        "/api/whoami": (GEN_CLIENT_ME, GEN_ME_RULES),
+        "/api/machines": (GEN_MACHINES, GEN_MACHINE_RULES),
+    },
+}
+WHOLE = "(the whole answer)"
+GEN_CASES = [
+    pytest.param(role, route, path, id=f"{role}{route.replace('/', '-')}:{path}")
+    for role, routes in GEN_ROLES.items()
+    for route, (doc, _rules) in routes.items()
+    for path in [WHOLE, *(p for p, _v in walk(doc))]
+]
+
+
+def gen_server(role: str) -> FakeRcm:
+    s = FakeRcm()
+    for route, (doc, _rules) in GEN_ROLES[role].items():
+        s.route("GET", route, doc)
+    return s
+
+
+def gen_argv(role: str, env: Path, s: FakeRcm, svcbin: Path, monkeypatch) -> list[str]:
+    if role == "worker":
+        monkeypatch.setenv("RCM_WORKER_TOKEN", TOKEN)
+        script(svcbin / "git", "echo 'git version 2.45.0'")
+        monkeypatch.setattr(cli, "_ls_remote_problem", lambda url, timeout=10.0, **_kw: None)
+        cfg = worker_toml(env, s.url, extra=REPO)
+        sf = plist(env / "svc", f"{svcbin}:/usr/bin:/bin")
+        return ["--role", role, "--config", str(cfg), "--service-file", str(sf)]
+    monkeypatch.setenv("RCM_TOKEN", CLIENT_TOKEN)
+    if role == "client":
+        return ["--role", role, "--server", s.url]
+    cfg = env / "server.toml"
+    cfg.write_text(
+        f'[server]\nbind = "127.0.0.1"\nport = {s.port}\ndata_dir = "{env / "data"}"\n\n'
+        f'[[presets]]\nname = "unit"\nargv = ["true"]\nrequires = ["{HAVE}"]\n'
+        'env_passthrough = ["PATH"]\n'
+    )
+    sf = plist(env / "svc", f"{svcbin}:/usr/bin:/bin", command="serve")
+    return ["--role", role, "--config", str(cfg), "--service-file", str(sf)]
+
+
+@pytest.mark.parametrize("role,route,path", GEN_CASES)
+def test_a_required_fact_the_server_did_not_give_is_never_exit_0_or_1(
+    env, svcbin, monkeypatch, capsys, role, route, path
+):
+    """역할 · 라우트 · 칸마다 성한 답을 망가뜨린다. 필수 칸이 없거나 null · 틀린 타입이면 종료 3,
+    답 전체가 `{}` 나 남의 서비스의 `{"status":"ok"}` 여도 3 이다. 필수가 아닌 칸을 지우거나 null 로
+    두면 성한 답과 같은 종료다. 어느 경우에도 출력에 `None` 이 없고 경계 줄 · traceback 이 없다."""
+    doc, rules = GEN_ROLES[role][route]
+    s = gen_server(role)
+    try:
+        argv = [*gen_argv(role, env, s, svcbin, monkeypatch), "--json"]
+        base_code, out, err = run_guarded(capsys, *argv)
+        assert base_code == 0 and "Traceback" not in err, (base_code, out, err)
+        if path == WHOLE:
+            cases = [("{}", {}, 3), ('{"status":"ok"}', {"status": "ok"}, 3)]
+        else:
+            assert path in rules or path.endswith("]"), f"{route} {path}: not in the rule table"
+            rule = rules.get(path, ITEM)
+            value = dict(walk(doc))[path]
+            cases = [
+                (how, mutated(doc, path, how), want)
+                for how, want in mutations(value, rule, path.endswith("]"))
+            ]
+        wrong: list[Any] = []
+        for how, body, want in cases:
+            s.route("GET", route, body)
+            code, out, err = run_guarded(capsys, *argv)
+            lines = said_lines(out, err) if code is not None and out.strip() else [err]
+            expected = base_code if want == B else want
+            bad = []
+            if "Traceback" in err or code is None:
+                bad.append("traceback")
+            elif want != ANY and code != expected:
+                bad.append(f"exit {code}, want {expected}")
+            if "None" in out + err:
+                bad.append("'None' in the output")
+            if any(BOUNDARY in ln for ln in lines):
+                bad.append("reached the outer boundary")
+            if bad:
+                wrong.append((how, bad, json.loads(out)["undecided"] if out.strip() else err))
+        assert not wrong, wrong
+    finally:
+        s.close()
+
+
+# ── 생성형: 못 읽은 서비스 파일 뒤에 PATH 를 짐작하지 않는다 (P3 3라운드 HIGH) ───
+
+FILE_STATES = ("readable", "unreadable", "absent")
+SERVICE_ORDER_CASES = [
+    pytest.param(installed, staged, tool, id=f"installed-{installed}-staged-{staged}-{tool}")
+    for installed in FILE_STATES
+    for staged in FILE_STATES
+    for tool in ("present", "missing")
+]
+
+
+@pytest.mark.parametrize("installed,staged,tool", SERVICE_ORDER_CASES)
+def test_an_unreadable_service_file_leaves_the_path_unknown_in_every_order(
+    env, srv, svcbin, monkeypatch, capsys, installed, staged, tool
+):
+    """`--service-file` 없이 설치 자리와 setup 자리의 파일을 {읽힘, 못 읽음, 없음} 으로, 필요한
+    도구를 {있음, 없음} 으로 엇갈린다. 읽은 파일을 고르지 못했는데 못 읽은 후보가 있었으면 서비스
+    PATH 는 null 이고 도구를 재지 않으며 종료 3 이다. 기본 PATH 를 짐작해도 되는 것은 후보가 하나도
+    없을 때뿐이다. 설치 자리의 파일을 못 읽었으면 setup 자리의 사본으로 넘어가지 않는다 — 서비스
+    관리자가 읽는 것은 설치 자리의 파일이다."""
+    monkeypatch.setenv("RCM_WORKER_TOKEN", TOKEN)
+    srv.route(
+        "GET",
+        "/worker/spec",
+        spec_doc(preset("build", requires=(HAVE if tool == "present" else LACK,))),
+    )
+    cfg = worker_toml(env, srv.url)
+    home = env / "home"
+    places = {
+        "installed": (home / "Library" / "LaunchAgents", "com.remote-ci-monitor.worker.plist"),
+        "staged": (home / ".config" / "rcm" / "service", "worker.plist"),
+    }
+    for where, state in (("installed", installed), ("staged", staged)):
+        folder, name = places[where]
+        if state == "readable":
+            plist(folder, f"{svcbin}:/usr/bin:/bin", name=name)
+        elif state == "unreadable":
+            folder.mkdir(parents=True, exist_ok=True)
+            (folder / name).write_bytes(TRUNCATED_PLIST)
+    code, out, err = run_guarded(capsys, "--role", "worker", "--config", str(cfg), "--json")
+    assert code is not None and "Traceback" not in err, err
+    doc = json.loads(out)
+    chosen = (
+        "installed"
+        if installed == "readable"
+        else "staged"
+        if installed == "absent" and staged == "readable"
+        else None
+    )
+    seen_unreadable = installed == "unreadable" or (
+        installed == "absent" and staged == "unreadable"
+    )
+    if chosen is None and seen_unreadable:
+        assert doc["service"]["path"] is None, doc["service"]
+        assert doc["presets"] == [], doc["presets"]
+        assert code == 3, doc
+        assert any("cannot read the service file" in u for u in doc["undecided"]), doc
+    elif chosen is not None:
+        folder, name = places[chosen]
+        assert doc["service"]["file"] == "~/" + str((folder / name).relative_to(home)), doc
+        assert doc["service"]["path"] == "~/svcbin:/usr/bin:/bin", doc["service"]
+        assert code == (1 if tool == "missing" else 3 if seen_unreadable else 0), doc
+    else:
+        assert doc["service"]["file"] is None and doc["service"]["path"], doc["service"]
