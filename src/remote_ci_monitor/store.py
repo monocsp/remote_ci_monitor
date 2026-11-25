@@ -861,6 +861,9 @@ class Claimant:
     #: 집은 쪽이 `preset_missing` 으로 바로 끝낸다(pool 잡과 같다). 안 집으면 아무의 `capable`
     #: 에도 없는 이름이라 영원히 대기한다(reload 로 지우거나 이름을 바꾼 프리셋 · 엣지 검증)
     known: tuple[str, ...] = ()
+    #: 이 워커가 **어느 갈래로도** 집지 못하는 프리셋(M5t-a 결정 254) — 서버의 후보 함수가 이
+    #: 워커를 뺀 `local_only` 프리셋이다. SQL 은 Python 함수를 못 부르므로 이름으로 넘긴다
+    excluded: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
