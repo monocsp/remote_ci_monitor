@@ -1325,6 +1325,29 @@ def test_s1_a_first_setup_prints_no_swap(cfg, tmp_path):
     assert not any(line.startswith("launchctl bootout") for line in _lines(fake))
 
 
+@pytest.mark.parametrize("platform", ["darwin", "linux"])
+def test_s2_the_output_says_how_to_remove_it(cfg, home, tmp_path, platform):
+    # B-E3: 출력 끝(마지막 doctor 줄 바로 앞)에 제거하는 한 줄
+    fake = Fake(platform=platform)
+    assert go(fake, *coordinator_args(tmp_path / "data")) == 0
+    lines = _lines(fake)
+    remove = lines[-2]
+    assert remove.startswith("to remove: "), lines[-3:]
+    if platform == "darwin":
+        installed = home / "Library" / "LaunchAgents" / "test.rcm.server.plist"
+        assert "launchctl bootout gui/$(id -u)/test.rcm.server" in remove
+    else:
+        installed = home / ".config" / "systemd" / "user" / "test.rcm.server.service"
+        assert "systemctl --user disable --now test.rcm.server.service" in remove
+    assert f"rm -f {installed}" in remove and str(cfg / "server.toml") in remove
+
+
+def test_s2_a_client_is_told_which_file_to_remove(cfg, tmp_path):
+    fake = Fake()
+    assert go(fake, "--role", "client", "--server", "http://10.0.0.5:1", "--yes") == 0
+    assert _lines(fake)[-2] == f"to remove: rm -f {cfg / 'client.toml'}"
+
+
 def test_s3_on_linux_linger_comes_before_the_start(cfg, tmp_path):
     # B-E5: 헤드리스 머신에는 user manager 가 없다 — linger 가 시작 명령보다 앞이다
     fake = Fake(platform="linux")

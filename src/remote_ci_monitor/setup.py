@@ -965,6 +965,13 @@ def _report(plan: Plan, world: World) -> None:
     err.write("advice — checks that need no server (they do not change the exit code):\n")
     for line in advice(plan, world):
         err.write(f"{line}\n")
+    removal = core.remove_line(
+        plan.manager,
+        installed=plan.installed,
+        label=plan.label,
+        files=[f.path for f in plan.files],
+    )
+    err.write(f"{removal}\n")
     if plan.role == dc.ROLE_CLIENT:
         err.write(f"then: add your token and run `{core.doctor_command(plan.role)}`\n")
     elif token_first:

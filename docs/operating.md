@@ -159,6 +159,13 @@ file is the one setup just wrote. When a service with the same label is already 
 asks: `launchctl print`, or `systemctl --user is-active` and `is-enabled`), it says so and leaves
 it alone. Once the file is installed, `rcm doctor` reads the installed copy, `--label` or not.
 
+**To remove it.** Unload the service, then delete the installed file and the files setup wrote.
+On macOS: `launchctl bootout gui/$(id -u)/<label>` and `rm -f ~/Library/LaunchAgents/<label>.plist`;
+on Linux: `systemctl --user disable --now <unit>`, `rm -f ~/.config/systemd/user/<unit>` and
+`systemctl --user daemon-reload`. The config file and `<config dir>/service/<file>` go the same
+way; a `data_dir` and its database stay until you delete them. setup prints this as one
+`to remove: …` line with its own paths, just before its last line.
+
 **What it refuses or warns about.**
 
 - An existing config or service file is kept: the run stops with exit 1 and writes nothing.

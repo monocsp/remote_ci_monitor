@@ -3530,6 +3530,18 @@ MUTANTS = (
             "tests/test_setup.py::test_s5_a_worker_puts_the_token_in_before_starting_the_service",
         ),
     ),
+    Mutant(
+        # 제거하는 한 줄을 찍지 않는다 — 되돌리는 길(bootout · disable, 설치한 파일)을 모른다
+        # (P5 B-E3)
+        name="setup-remove-line-dropped",
+        path="src/remote_ci_monitor/setup.py",
+        old='    err.write(f"{removal}\\n")\n',
+        new="    pass\n",
+        tests=(
+            "tests/test_setup.py::test_s2_the_output_says_how_to_remove_it",
+            "tests/test_setup.py::test_s2_a_client_is_told_which_file_to_remove",
+        ),
+    ),
     # ── M5t-a PR3 — 분배 전용 코디네이터 `lanes = 0` (docs/m5t-workplan.md §7 변이 검사) ──
     Mutant(
         # `lanes = 0` 에서 `@local` 을 살아 있다고 본다 — 레인이 없는 서버의 머신 목록이 로컬

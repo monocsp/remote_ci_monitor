@@ -494,6 +494,24 @@ def replace_commands(manager: str, *, staged: Path, installed: Path, label: str)
     ]
 
 
+def remove_line(
+    manager: str | None, *, installed: Path | None, label: str | None, files: Sequence[Path]
+) -> str:
+    """setup 이 한 일을 되돌리는 한 줄(P5 B-E3) — 서비스를 내리고(launchd `bootout`, systemd
+    `disable --now`), 설치한 서비스 파일과 setup 이 쓴 파일을 지운다. data_dir 은 지우지 않는다."""
+    q = shlex.quote
+    rm = "rm -f " + " ".join(q(str(p)) for p in ([installed] if installed else []) + list(files))
+    if manager == LAUNCHD and installed is not None and label:
+        return f"to remove: launchctl bootout gui/$(id -u)/{q(label)}; {rm}"
+    if manager == SYSTEMD and installed is not None:
+        unit = q(installed.name)
+        return (
+            f"to remove: systemctl --user disable --now {unit}; {rm}; "
+            "systemctl --user daemon-reload"
+        )
+    return f"to remove: {rm}"
+
+
 def token_commands(rcm: Path, config: Path) -> list[str]:
     """coordinator 계열의 토큰 명령 — 서비스와 같은 빌드로 실행한다(다른 빌드는 DB 를 열면서
     마이그레이션한다). client 권한이고 `--admin` 은 붙이지 않는다. `--config` 는 하위 명령
