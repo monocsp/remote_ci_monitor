@@ -16,9 +16,9 @@ stdin 으로 받아 판정 JSON 을 stdout 으로 낸다.
 `$XDG_CONFIG_HOME/rcm/server.toml`)과 PATH 의 실행 파일(`_which`)뿐이다.
 발견 `find_production()` 이 기계를 본다.
 
-`rcm setup` 에는 규칙 셋이 있다(M5t-a §4.1): 운영 설정 폴더에 쓰는 것, 운영 라벨의 서비스
-파일을 쓰는 것, 운영 `data_dir`(그 안 포함)을 고르는 것을 막는다. setup 은 DB 를 열지 않으므로
-`DB_OPENING` · `MIGRATING` 에는 넣지 않는다.
+`rcm setup` 에는 규칙 셋이 있다(M5t-a §4.1): 운영 뿌리(편집 규칙과 같은 `production_root`)나
+서비스 관리자 자리에 쓰는 것, 운영 라벨의 서비스 파일을 쓰는 것, 운영 `data_dir`(그 안 포함)을
+고르는 것을 막는다. setup 은 DB 를 열지 않으므로 `DB_OPENING` · `MIGRATING` 에는 넣지 않는다.
 
 운영 설치가 없어도 하나는 본다 — **다른 빌드가 옛 DB 를 그 자리에서 마이그레이션하는 것**(사건 6f,
 2026-11-20: 검증 에이전트가 dev 워크트리 안에서 `--config` 없이 `rcm token add` · `rcm serve` 를
@@ -124,7 +124,7 @@ _STANDARD_UNITS = {
     "com.remote-ci-monitor.worker": "rcm-worker",
 }
 #: 서비스 관리자가 서비스 파일을 읽는 자리(launchd · systemd, 사용자 · 시스템). `SERVICE_UNITS` 가
-#: 모두 이 안에 있다. `rcm setup --service-file` 이 이 안을 가리키면 거절한다 — 운영 서비스 파일
+#: 모두 이 안에 있다. `rcm setup` 의 설정 · 서비스 파일이 이 안이면 거절한다 — 운영 서비스 파일
 #: (`com.remote-ci-monitor.*.plist` · `rcm-*.service`)과 그 drop-in(`<유닛>.d/`)을 라벨과 상관없이
 #: 덮을 수 있고, setup 자신도 이 자리에는 쓰지 않는다(§4.1 「설치 자리에 쓰지 않는다」)
 SETUP_SERVICE_PLACES = (
@@ -226,15 +226,28 @@ def inside(path: Path | None, parent: Path | None) -> bool:
     return True
 
 
+def production_root(path: Path, prod: Production) -> tuple[str, Path] | None:
+    """`path` 가 운영 뿌리(체크아웃 · 서비스 venv · 설정 폴더 · data_dir) 안이면 (이름, 뿌리).
+
+    이 집의 「운영」 정의는 이것 하나다 — 편집 규칙(`_edit_verdict`), 지우기 규칙(`_hit`),
+    `rcm setup` 규칙(`_setup_place_verdict`)이 모두 이 함수를 부른다. setup 규칙이 설정 폴더만
+    따로 「운영」으로 들고 있다가 체크아웃 · venv · data_dir 에 쓰는 setup 을 지나보냈다(P3
+    3라운드 v1-1)."""
+    for name, root in prod.labelled():
+        if inside(path, root):
+            return name, root
+    return None
+
+
 def _hit(tokens: list[str], cwd: Path, prod: Production) -> tuple[str, Path] | None:
     """토큰들 중 운영 경로를 가리키는 첫 자리를 돌려준다."""
     for token in tokens:
         path = _as_path(token, cwd)
         if path is None:
             continue
-        for name, root in prod.labelled():
-            if inside(path, root):
-                return name, path
+        found = production_root(path, prod)
+        if found is not None:
+            return found[0], path
     return None
 
 
@@ -417,7 +430,11 @@ def _edit_verdict(file_path: str, cwd: Path, prod: Production) -> Verdict | None
     target = _as_path(file_path, cwd)
     if target is None:
         return None
-    if inside(target, prod.checkout):
+    found = production_root(target, prod)
+    if found is None:
+        return None
+    name, root = found
+    if root == prod.checkout:
         return Verdict(
             "deny",
             f"{target} is inside the production checkout ({prod.checkout}): the build machine "
@@ -425,14 +442,11 @@ def _edit_verdict(file_path: str, cwd: Path, prod: Production) -> Verdict | None
             "right now, and the next `git pull` will conflict. Make the change in a worktree, "
             f"open a pull request to `dev`, and let it reach `main`. See {DOCS}.",
         )
-    for name, root in prod.labelled():
-        if inside(target, root):
-            return Verdict(
-                "deny",
-                f"{target} is inside {name} ({root}). A development session does not write there; "
-                f"give a test server its own config, port and data_dir instead. See {DOCS}.",
-            )
-    return None
+    return Verdict(
+        "deny",
+        f"{target} is inside {name} ({root}). A development session does not write there; "
+        f"give a test server its own config, port and data_dir instead. See {DOCS}.",
+    )
 
 
 def _bash_verdict(
@@ -1156,8 +1170,9 @@ def _setup_verdict(segment: str, cwd: Path, prod: Production, env: SegmentEnv) -
     운영 `data_dir` 을 고른 서버 설정을 만들 수 있다 — 그 서비스는 setup 을 돌린 빌드로 운영 DB 를
     연다. 자리는 setup 의 해석기 `core.where` 가 정한다(셸 단계는 `_setup_calls`).
 
-    1. 쓸 자리(설정 파일 · 서비스 파일)가 운영 설정 폴더 안이거나, 서비스 파일이 서비스 관리자가
-       읽는 자리(`SETUP_SERVICE_PLACES` — 운영 서비스 파일이 있는 곳) 안이면 거절한다.
+    1. 쓸 자리(설정 파일 · 서비스 파일)가 운영 뿌리 넷(`production_root` — 체크아웃 · 서비스
+       venv · 설정 폴더 · data_dir, 편집 규칙과 같은 함수) 안이거나 서비스 관리자가 읽는 자리
+       (`SETUP_SERVICE_PLACES` — 운영 서비스 파일이 있는 곳) 안이면 거절한다.
     2. 서비스 라벨이 운영 라벨이면 거절한다. `--label` 이 없으면 역할의 표준 라벨이다. 역할을 안
        주면 setup 이 물을 수 있으니 모든 역할로 본다. client 는 서비스 파일이 없다.
     3. 역할 2 · 4 의 `data_dir` 이 운영 `data_dir` 이거나 그 안이면 거절한다(6-A-L4 · 6-B-V5).
@@ -1223,27 +1238,28 @@ def _setup_verdict(segment: str, cwd: Path, prod: Production, env: SegmentEnv) -
 def _setup_place_verdict(
     places: list[Any], prod: Production, session_home: Path, units: set[str]
 ) -> Verdict | None:
-    """`core.where` 의 답 하나하나에 세 규칙을 댄다."""
+    """`core.where` 의 답 하나하나에 세 규칙을 댄다. 쓰는 파일(설정 · 서비스)마다 운영 뿌리 넷
+    (`production_root` — 편집 규칙과 같은 함수)과 서비스 관리자 자리를 본다."""
     for found in places:
         for target in (found.config, found.service_file):
             if target is None:
                 continue
-            if inside(target, prod.config_dir):
+            hit = production_root(target, prod)
+            if hit is not None:
+                name, root = hit
                 return Verdict(
                     "deny",
-                    f"`rcm setup` here would write {target}, inside the server's config directory "
-                    f"({prod.config_dir}). Give it a test HOME or XDG_CONFIG_HOME, or `--config` "
-                    f"and `--service-file` paths of its own. See {DOCS}.",
+                    f"`rcm setup` here would write {target}, inside {name} ({root}). Give it a "
+                    "test HOME or XDG_CONFIG_HOME, or `--config` and `--service-file` paths of its "
+                    f"own. See {DOCS}.",
                 )
-        if found.service_file is not None:
-            target = found.service_file
             place = _service_place(target, session_home)
             if place is not None:
                 return Verdict(
                     "deny",
-                    f"`rcm setup --service-file {target}` would write inside {place}, where the "
-                    "service manager reads service files — the production service's files live "
-                    "there. Let setup write under its config folder's `service/` and copy the "
+                    f"`rcm setup` here would write {target} inside {place}, where the service "
+                    "manager reads service files — the production service's files live there. "
+                    "Let setup write its config and service file elsewhere and copy the service "
                     f"file yourself. See {DOCS}.",
                 )
         label = found.label
