@@ -1340,3 +1340,22 @@ def test_to10_to16_the_readme_exit_code_paragraph_names_the_local_only_409s():
         "프리셋을 서버 레인이 받을 수 없을 때의 409 `no_capable_machine` · `tool_missing` 이 그렇다"
     ) in ko
     assert "그 밖의 409 는 작업이 생겼는지 알 수 없으므로 3 이다" in ko
+
+
+def test_t6_the_example_server_config_shows_local_only_on_a_preset():
+    """# T6 — 설정 키는 `examples/server.toml` 에도 (주석으로라도)있다(docs 스킬 체크리스트 3).
+    `gate` 프리셋 안, `[presets.env]` 앞의 주석 줄이다."""
+    text = (Path(__file__).resolve().parents[1] / "examples" / "server.toml").read_text()
+    gate = text[text.index('name = "gate"\n') : text.index("[presets.env]")]
+    line = next((ln for ln in gate.splitlines() if ln.lstrip("# ").startswith("local_only")), None)
+    assert line is not None, gate
+    assert line.startswith("# local_only = true"), line
+    assert "remote worker" in line, line
+
+
+def test_t7_plan_says_rcm_eta_ahead_is_null_without_a_local_lane():
+    """# T7 — PLAN 「서버 API」 표의 `POST /api/eta` 행이 `ahead` 를 늘 숫자로 적지 않는다.
+    갈 로컬 레인이 없는 `local_only` 프리셋은 null 이다(설정 문서의 local_only 절)."""
+    text = (Path(__file__).resolve().parents[1] / "PLAN.md").read_text()
+    row = next(ln for ln in text.splitlines() if ln.startswith("| `POST /api/eta` |"))
+    assert "갈 로컬 레인이 없는 `local_only` 프리셋은 null" in row, row
