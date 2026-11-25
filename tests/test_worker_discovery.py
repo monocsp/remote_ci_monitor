@@ -102,25 +102,40 @@ def at(srv: FakeRcm, name: str = "macmini"):
     return found(name, "127.0.0.1", srv.port)
 
 
+@pytest.fixture
+def confirmed(monkeypatch) -> list[str]:
+    """터미널에서 사람이 「예」라고 답한다. M5t-a §4.7 · TD28 부터 mDNS 로 찾은 서버는 확인을 받아야
+    `rcm worker --check` 가 그 서버에 묻는다 — 비TTY 는 종료 3 이다(tests/test_doctor_cli.py)."""
+    from remote_ci_monitor import doctor
+
+    asked: list[str] = []
+    monkeypatch.setattr(doctor, "is_tty", lambda: True)
+    monkeypatch.setattr(doctor, "ask", lambda q: asked.append(q) or True)
+    return asked
+
+
 # ═══ K. 서버 찾기 ════════════════════════════════════════════════════════════
 
 
-def test_auto_with_one_discovered_server_uses_it(env, srv, fake_discover, capsys):
+def test_auto_with_one_discovered_server_uses_it(env, srv, fake_discover, confirmed, capsys):
     rec = fake_discover(at(srv))
     code, out, err = worker_check(capsys, env, config(env, 'server = "auto"\npool = "mbp"\n'))
     assert rec.called
+    assert confirmed and "macmini" in confirmed[0], confirmed  # TD28 — 묻고 나서야 쓴다
     assert check_row(out, "server") == ("ok", f"{srv.url} · v{__version__}"), out + err
     assert code == 0, out + err
 
 
-def test_an_empty_server_also_discovers(env, srv, fake_discover, capsys):
+def test_an_empty_server_also_discovers(env, srv, fake_discover, confirmed, capsys):
     rec = fake_discover(at(srv))
     code, out, err = worker_check(capsys, env, config(env, 'server = ""\npool = "mbp"\n'))
     assert rec.called, err
     assert check_row(out, "server") == ("ok", f"{srv.url} · v{__version__}"), out + err
 
 
-def test_several_servers_pick_the_one_named_by_server_name(env, srv, fake_discover, capsys):
+def test_several_servers_pick_the_one_named_by_server_name(
+    env, srv, fake_discover, confirmed, capsys
+):
     other = found("build-02", "127.0.0.1", free_port())
     fake_discover(other, at(srv, "macmini"))
     cfg = config(env, 'server = "auto"\nserver_name = "macmini"\npool = "mbp"\n')

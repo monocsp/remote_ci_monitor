@@ -148,7 +148,12 @@ alike. `/usr/bin/java` and the other Java stubs are not detected this way.
 `rcm worker --check` keeps its rows and adds two: `version` (ok when it matches the server; a
 warning when registering will follow the server's version; FAIL when this install cannot follow,
 such as an editable or pinned one) and a last line with the number of missing tools that points
-at `rcm doctor --role worker`.
+at `rcm doctor --role worker`. That line is ok only when nothing is missing, and a warning when
+something is or when the server sent no spec to count from (`—`); it never fails the check.
+
+With `server = "auto"`, `rcm worker --check` now asks before it talks to the server it found on
+the network, as `rcm doctor` does. Without a terminal there is nobody to ask, so it exits 3 and
+sends nothing; pass `--server URL` in scripts.
 
 ## Docker (Linux build machine)
 

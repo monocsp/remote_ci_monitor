@@ -4366,10 +4366,15 @@ def _found_server_from_boot() -> str | None:
     return os.environ.pop("RCM_SERVER", None) or None
 
 
+#: 마지막으로 mDNS 가 찾은 서버들 — 확인 질문에 주소만이 아니라 이름도 보이려고 둔다
+_LAST_FOUND: list[Any] = []
+
+
 def _pick_worker_server(cfg: Any, *, timeout: float = 1.5) -> str:
     """같은 망의 rcm 서버를 찾는다(M5n §9). 하나면 그것, 여럿이면 `server_name` 과 이름이 맞는
     것. 그래도 모호하거나 없으면 `ConfigError`(이름들과 고치는 법을 말한다)."""
     found = discover(timeout=timeout)
+    _LAST_FOUND[:] = list(found)  # 확인 질문(`_confirm_found_server`)이 이름을 보인다
     want = (cfg.server_name or "").strip()
     picks = [f for f in found if f.name == want] if want else list(found)
     if len(picks) == 1:
@@ -4532,6 +4537,8 @@ def cmd_worker(args: argparse.Namespace) -> int:
         )
     client = WorkerClient(cfg.server, cfg.token)
     if getattr(args, "check", False):
+        if getattr(cfg, "discovered_server", False) and not _confirm_found_server(cfg.server):
+            return EXIT_UNKNOWN
         return _worker_check(cfg, client)
     following = bool(getattr(args, "follow_enabled", False))
     state = None
@@ -4613,6 +4620,26 @@ def _worker_exec_installed(args: argparse.Namespace, worker: Any, code: int) -> 
     return code  # 가짜 execve 가 돌아온 경우(시험)
 
 
+def _confirm_found_server(url: str) -> bool:
+    """mDNS 로 찾은 서버 — 사람이 확인하기 전에는 아무 요청도 보내지 않는다(M5t-a §4.5 「첫 실행
+    안전」 · §4.7 · TD28). 프로브 argv 는 그 서버의 설정에서 오므로 확인 안 한 서버의 명령을 돌리지
+    않는다. 비TTY 면 물을 사람이 없다 — 거짓(종료 3). `rcm doctor` 와 같은 함수로 묻는다."""
+    from remote_ci_monitor import doctor
+
+    name = next((f.name for f in _LAST_FOUND if f.address == url), "")
+    where = f"{name} ({url})" if name else url
+    if not doctor.is_tty():
+        _err(
+            f"server {where} was found on this network and nobody confirmed it — pass "
+            "--server URL or run rcm worker --check in a terminal"
+        )
+        return False
+    if not doctor.ask(f"Use the rcm server {where} found on this network?"):
+        _err(f"server {where} was not confirmed")
+        return False
+    return True
+
+
 def _ls_remote_problem(url: str, timeout: float = 10.0) -> str | None:
     """`git ls-remote` 가 닿는지. 문제면 짧은 사유(경로·URL 없이), 아니면 None."""
     import subprocess
@@ -4691,10 +4718,15 @@ def _worker_check(cfg: Any, client: Any) -> int:
     version = _worker_version_row(health)
     if version is not None:
         rows.append(version)
-    # 끝 줄(M5t-a §4.5): 빠진 도구 수와 설치 안내를 볼 곳. 지금 줄들처럼 FAIL 이 되지 않는다
+    # 끝 줄(M5t-a §4.5): 빠진 도구 수와 설치 안내를 볼 곳. 0개일 때만 ok 이고 하나라도 있거나
+    # 셀 수 없으면(—) warn 이다(결정표 3). 지금 줄들처럼 FAIL 이 되지 않는다 — 종료 코드는 그대로
     count = "—" if missing is None else f"{missing}"
     rows.append(
-        ("missing", True, f"{count} missing · rcm doctor --role worker for what to install")
+        (
+            "missing",
+            True if missing == 0 else None,
+            f"{count} missing · rcm doctor --role worker for what to install",
+        )
     )
     ok_all = all(ok is not False for _, ok, _ in rows)
     for name, ok, detail in rows:

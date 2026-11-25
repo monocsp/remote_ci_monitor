@@ -814,3 +814,64 @@ def test_td18_worker_check_version_row(env, srv, svcbin, monkeypatch, capsys, ki
         assert code == 0, lines
     else:
         assert "cannot follow" in version and code == 1, lines
+
+
+@pytest.mark.parametrize(
+    "presets,mark",
+    [
+        ((preset("build"),), "ok "),  # 빠진 것 0개
+        ((preset("build"), preset("lint", requires=(LACK,))), "warn"),  # 1개
+    ],
+)
+def test_td18_the_missing_line_is_ok_only_when_nothing_is_missing(
+    env, srv, svcbin, monkeypatch, capsys, presets, mark
+):
+    """결정표 3: 끝 줄은 빠진 것이 0개일 때만 ok, 하나라도 있거나 셀 수 없으면(—) warn 이다.
+    프로세스 종료 코드는 다른 행이 정한 그대로다 — 이 줄은 FAIL 이 되지 않는다."""
+    monkeypatch.setenv("RCM_WORKER_TOKEN", TOKEN)
+    monkeypatch.setenv("PATH", f"{svcbin}:/usr/bin:/bin")
+    srv.route("GET", "/worker/spec", spec_doc(*presets))
+    code, lines = worker_check(capsys, env, srv)
+    assert lines[-1].startswith(mark) and " missing " in lines[-1], lines
+    assert code == 0, lines
+
+
+def test_td18_the_missing_line_warns_when_it_cannot_count(env, srv, monkeypatch, capsys):
+    monkeypatch.setenv("RCM_WORKER_TOKEN", TOKEN)
+    srv.routes.pop(("GET", "/worker/spec"))  # 옛 서버 — 명세를 못 받는다
+    code, lines = worker_check(capsys, env, srv)
+    assert lines[-1].startswith("warn") and "— missing" in lines[-1], lines
+    assert code == 0, lines
+
+
+@pytest.mark.parametrize("tty,answer", [(False, None), (True, False)])
+def test_td28_worker_check_with_a_discovered_server_needs_a_person(
+    env, srv, monkeypatch, capsys, tty, answer
+):
+    """§4.7: 비TTY 에서 mDNS 로 찾은 서버를 확인받지 못한 `rcm worker --check` 는 종료 3 이다.
+    TTY 에서 사람이 거절해도 같다. 어느 쪽이든 서버에는 요청이 하나도 가지 않는다(TD10 과 같은
+    규칙 — 프로브 argv 는 그 서버가 정한다)."""
+    monkeypatch.setenv("RCM_WORKER_TOKEN", TOKEN)
+    monkeypatch.setattr(doctor, "is_tty", lambda: tty)
+    monkeypatch.setattr(doctor, "ask", lambda _q: answer)
+    monkeypatch.setattr(cli, "discover", FakeDiscover((found("macmini", "127.0.0.1", srv.port),)))
+    cfg = worker_toml(env, "auto")
+    code = cli.main(["worker", "--check", "--config", str(cfg), "--data", str(env / "wd")])
+    cap = capsys.readouterr()
+    assert code == 3, (cap.out, cap.err)
+    assert srv.requests == [], [(r.method, r.path) for r in srv.requests]
+    assert "macmini" in cap.err or srv.url in cap.err, cap.err
+
+
+def test_td28_worker_check_asks_and_goes_on_once_confirmed(env, srv, monkeypatch, capsys):
+    monkeypatch.setenv("RCM_WORKER_TOKEN", TOKEN)
+    asked: list[str] = []
+    monkeypatch.setattr(doctor, "is_tty", lambda: True)
+    monkeypatch.setattr(doctor, "ask", lambda q: asked.append(q) or True)
+    monkeypatch.setattr(cli, "discover", FakeDiscover((found("macmini", "127.0.0.1", srv.port),)))
+    cfg = worker_toml(env, "auto")
+    code = cli.main(["worker", "--check", "--config", str(cfg), "--data", str(env / "wd")])
+    cap = capsys.readouterr()
+    assert code == 0, (cap.out, cap.err)
+    assert asked and "macmini" in asked[0], asked
+    assert srv.calls("GET", "/worker/spec")
