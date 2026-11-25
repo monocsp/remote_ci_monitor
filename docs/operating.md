@@ -86,6 +86,70 @@ Three things learned from a real deployment (a Flutter monorepo gate on a Mac mi
   service. Until then sessions reach the server by address — `server = "http://<host>.local:8787"`
   in `client.toml` works on the same Wi-Fi without any permission.
 
+## Check a machine before you use it: `rcm doctor`
+
+`rcm doctor` says what this machine can build and test, and what to install first. It measures the
+way the service will run, not the way your shell does: it starts from an empty environment, adds
+what the service manager sets (launchd: `HOME` `USER` `LOGNAME` `SHELL` `TMPDIR` `PATH`; systemd
+user units: `HOME` `USER` `LOGNAME` `SHELL` `XDG_RUNTIME_DIR` `PATH`) and the variables in the
+service file, and runs the server's probes and `requires` checks there. A `JAVA_HOME` exported in
+your shell does not count.
+
+```sh
+rcm doctor                                    # the role the config files on this machine name
+rcm doctor --role worker --service-file ~/Library/LaunchAgents/com.remote-ci-monitor.worker.plist
+rcm doctor --role coordinator-worker --json   # the server's own service measurements
+```
+
+| role | what it reads | what decides the exit code |
+|---|---|---|
+| `worker` | `worker.toml` (or `RCM_WORKER_TOKEN` and `--server`), the service file, and the server's `/worker/spec` | a tool missing for a `pool` preset of this machine's pool, rcm's own needs, or no preset that would come to this machine |
+| `coordinator-worker` | the local `server.toml` (never the database) and the server's `/api/health` and `/api/machines`, read with a client token | the same rules, for the server's own lane as its service measured it |
+| `coordinator` | the same files and routes | rcm's own needs (the lane-free rules come with `lanes = 0`) |
+| `client` | `client.toml` or `RCM_SERVER` / `RCM_TOKEN` | the server answers and the token works |
+
+Each preset shows one state: `ready` (it starts taking jobs once the service reports), `needs
+check` (its tools are there and rcm runs its check presets once after the worker registers — not
+"ok" yet), `missing` (with the install hint and docs link from the coordinator's `[[tools]]` when
+there is one), or `unknown`. An `any-capable` preset that misses a tool is "not coming to this
+machine" — a warning, not a failure. A preset for another pool is listed and left out.
+
+The service file is found in this order: `--service-file`; the standard places
+(`~/Library/LaunchAgents/com.remote-ci-monitor.*.plist`, `~/.config/systemd/user/rcm-*.service`);
+`~/.config/rcm/service/`. Only files that start the role's command (`rcm worker` or `rcm serve`)
+count. Two in the same place need `--service-file` (exit 2 without a terminal). With none, the
+worker's default service `PATH` is used and the report says so. `--shell-path` measures once more
+in your shell and marks the presets whose result differs.
+
+| exit | meaning |
+|---|---|
+| 0 | every preset that comes to this machine is `ready` or `needs check`, and rcm's own needs are met; warnings allowed |
+| 1 | a tool is missing, rcm's own needs fail (Python 3.11.4+, git 2.31+ for `token_file`), or nothing would come to this machine |
+| 2 | usage: a bad flag, a config file that does not exist, several roles or service files to choose from |
+| 3 | could not decide: the server is down or older, a probe timed out, no token or a refused one, a server found on the network that nobody confirmed |
+
+1 wins over 3, and 3 over 0. `rcm check` keeps its own exit codes.
+
+What it never does: it sends nothing to the server (no registration, no capability report — the
+server's judgement stays the server's), opens no database, runs no install hint and never uses
+`sudo` (as root, as in a container, rcm's own hints drop it; the coordinator's `[[tools]]` text is
+shown as written, after control characters are removed). It prints no home folder (`~` instead),
+no preset `env` value and no value from the service file, only the names. A server found by mDNS
+gets no request before you confirm it in a terminal; `--server URL` skips the question.
+`--offline` skips `git ls-remote` for `[[repos]]` and still asks the coordinator.
+
+macOS Command Line Tools shims: `/usr/bin/git`, `make`, `xcrun` and the other tools that only
+forward to the Command Line Tools open an install dialog when the tools are not installed. rcm
+treats a file directly in `/usr/bin/` that links `libxcselect` as such a shim and, when
+`xcode-select -p` fails, reports it as `missing (needs Command Line Tools)` without running it —
+in `rcm doctor`, in the job's `requires` check, in the server's tool rows and in worker probes
+alike. `/usr/bin/java` and the other Java stubs are not detected this way.
+
+`rcm worker --check` keeps its rows and adds two: `version` (ok when it matches the server; a
+warning when registering will follow the server's version; FAIL when this install cannot follow,
+such as an editable or pinned one) and a last line with the number of missing tools that points
+at `rcm doctor --role worker`.
+
 ## Docker (Linux build machine)
 
 `Dockerfile` builds a server image (`python:3.12-slim` + git for `git_ref` presets, non-root user

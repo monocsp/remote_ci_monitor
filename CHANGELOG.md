@@ -7,6 +7,25 @@ of a key bumps that number and is listed here.
 
 ## [Unreleased]
 
+### Added
+- **`rcm doctor` says what this machine can build and test, and what to install first.** It
+  measures in the service's environment (the service manager's defaults plus the service file's
+  variables, not your shell), lists every preset that would come to this machine as `ready`,
+  `needs check`, `missing` (with the coordinator's install hint) or `unknown`, checks rcm's own
+  needs (Python 3.11.4+, git, the host sampler's commands), and exits 0, 1 (something is missing
+  or nothing would come here), 2 (usage) or 3 (could not decide). Roles: `worker`,
+  `coordinator-worker`, `coordinator` and `client`; `--json`, `--shell-path`, `--offline`,
+  `--service-file`. It sends nothing to the server and opens no database.
+- **`rcm worker --check` shows a `version` row and a last line with the number of missing
+  tools.** A different server version is a warning when registering will follow it and FAIL when
+  this install cannot follow; the existing rows are unchanged.
+
+### Fixed
+- **macOS Command Line Tools shims are no longer run when the tools are not installed.** A file
+  directly in `/usr/bin/` that links `libxcselect` counts as missing (`needs Command Line Tools`)
+  in the job's `requires` check, the server's tool measurements, `rcm check` and worker probes,
+  instead of opening the install dialog on a headless service.
+
 ## [0.10.0] - 2026-11-23
 
 A job can now wait for a time you name (`rcm run --at` / `--in`, the new states `scheduled` and
