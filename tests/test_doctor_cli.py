@@ -3480,3 +3480,482 @@ def test_a_pool_preset_with_unknown_checks_is_unknown_even_with_a_missing_tool(w
     code, doc = worker(capsys)
     assert row(doc, "build")["state"] == "unknown" and doc["problems"] == [], doc
     assert code == 3, doc
+
+
+# ── 검증 사이클 2 의 1라운드: 확정을 모름으로 · 셸이 서비스를 대신하지 않는다 ─────────────
+#
+# 앞 라운드들이 「모름을 확정으로」를 닫았다. 이번 지적 둘은 그 반대(rcm 의 것이 아닌 파일을
+# 「못 읽음」으로, 아는 홈 `%h` 를 모름으로)와, 서비스 대신 doctor 셸의 `RCM_CONFIG` · 작업 폴더를
+# 읽는 누수다. 고치는 김에 「rcm 이 실제로 아는 것은 모름이 아니다」를 `rcm init worker` 와
+# `examples/` 의 서비스 파일 그대로로 잠근다.
+
+CI_WATCH = (
+    Path(cli.__file__).parent
+    / "skills"
+    / "rcm-ci-connect"
+    / "templates"
+    / "com.remote-ci-monitor.ci-watch.plist"
+)
+EXAMPLES = Path(__file__).resolve().parent.parent / "examples"
+
+
+def ci_watch_plist(env: Path) -> Path:
+    """`rcm-ci-connect` 스킬이 빌드 머신의 `~/Library/LaunchAgents` 에 까는 감시기 — 템플릿 그대로
+    (`{{home}}` 만 시험의 홈으로)."""
+    agents = env / "home" / "Library" / "LaunchAgents"
+    agents.mkdir(parents=True, exist_ok=True)
+    p = agents / CI_WATCH.name
+    p.write_bytes(CI_WATCH.read_bytes().replace(b"{{home}}", str(env / "home").encode()))
+    return p
+
+
+def run_input(env, svcbin, monkeypatch, capsys, role, config, service, after=None):
+    """열거 시험의 셋업(모두 읽히는 칸)을 깔고 `after(env)` 로 하나를 더한 뒤 doctor 를 부른다."""
+    monkeypatch.setattr(doctor, "PLATFORM", "darwin")
+    monkeypatch.setattr(cli, "discover", FakeDiscover(()))
+    s = input_server()
+    try:
+        kind = "worker" if role == "worker" else "client"
+        s.route("GET", "/api/whoami", {"name": "td", "admin": False, "kind": kind})
+        monkeypatch.setenv("RCM_WORKER_TOKEN" if role == "worker" else "RCM_TOKEN", TOKEN)
+        argv = input_setup(env, svcbin, monkeypatch, role, config, service, s.port)
+        if after is not None:
+            after(env)
+        code, out, err = run_guarded(capsys, *argv, "--json")
+        return code, out, err, s
+    finally:
+        s.close()
+
+
+@pytest.mark.parametrize("role", ["worker", "coordinator", "coordinator-worker"])
+@pytest.mark.parametrize("service", ["readable", "absent"])
+def test_the_ci_watch_plist_next_to_the_service_is_not_a_candidate(
+    env, svcbin, monkeypatch, capsys, role, service
+):
+    """`rcm-ci-connect` 의 `com.remote-ci-monitor.ci-watch.plist` 는 `python3 rcm_ci_watch.py` 를
+    띄운다 — rcm 의 서비스 파일이 아님이 확실하다. 같은 자리에 있어도 후보도 「못 읽음」도 아니다:
+    모든 입력을 읽은 칸은 그대로 종료 0 이다(검증 사이클 2 의 1라운드 HIGH 1)."""
+    code, out, err, _s = run_input(
+        env, svcbin, monkeypatch, capsys, role, "flag", service, after=ci_watch_plist
+    )
+    assert "Traceback" not in err, err
+    doc = json.loads(out)
+    assert doc["undecided"] == [] and doc["problems"] == [], doc
+    assert code == 0, doc
+    shown = doc["service"]["file"] or ""
+    assert "ci-watch" not in shown, doc["service"]
+
+
+#: (파일 이름, 내용, 후보인가) — rcm 의 것이 아님이 확실한 파일은 빠지고(None), rcm 처럼 보이는데
+#: 풀지 못한 파일만 「못 읽음」이다. 실행 파일이 rcm 도 `python -m remote_ci_monitor` 도 아니고,
+#: 인자에 rcm 이 없고, 라벨(파일 이름)도 worker · server 가 아니면 rcm 의 것이 아니다
+FOREIGN_CASES = {
+    "ci-watch-template": (CI_WATCH.name, None, "skip"),
+    "launchd-shell-script": (
+        "com.remote-ci-monitor.backup.plist",
+        ["/bin/sh", "/x/backup.sh"],
+        "skip",
+    ),
+    "systemd-python-script": (
+        "rcm-ci-watch.service",
+        "[Service]\nExecStart=/usr/bin/python3 /x/watch.py --once\n",
+        "skip",
+    ),
+    "launchd-worker-label-python": (
+        "com.remote-ci-monitor.worker.plist",
+        ["/usr/bin/python3", "/x/w.py"],
+        "unreadable",
+    ),
+    "launchd-env-rcm": (
+        "com.remote-ci-monitor.other.plist",
+        ["/usr/bin/env", "rcm", "worker"],
+        "unreadable",
+    ),
+    "launchd-sh-c-rcm": (
+        "com.remote-ci-monitor.other.plist",
+        ["/bin/sh", "-c", "exec /x/rcm worker"],
+        "unreadable",
+    ),
+    "launchd-python-m": (
+        "com.remote-ci-monitor.other.plist",
+        ["/usr/bin/python3", "-m", "remote_ci_monitor", "worker"],
+        "unreadable",
+    ),
+    "systemd-worker-label-python": (
+        "rcm-worker.service",
+        "[Service]\nExecStart=/usr/bin/python3 /x/w.py\n",
+        "unreadable",
+    ),
+}
+
+
+@pytest.mark.parametrize("case", list(FOREIGN_CASES))
+def test_only_files_that_look_like_rcm_are_named_unreadable(env, case):
+    """표준 자리의 파일 가운데 rcm 의 서비스가 아님이 확실한 것은 후보에서 빠진다. rcm 처럼
+    보이는데(실행 파일 · 인자 · 라벨) 명령을 풀지 못한 것만 「못 읽음」이다."""
+    name, body, want = FOREIGN_CASES[case]
+    home = env / "home"
+    if name.endswith(".plist"):
+        if body is None:
+            ci_watch_plist(env)
+        else:
+            launch_agent_named(env, name, body)
+    else:
+        user = home / ".config" / "systemd" / "user"
+        user.mkdir(parents=True)
+        (user / name).write_text(body)
+    skipped: list[Any] = []
+    got = doctor.pick_service_file(
+        None, "worker", home=home, config_dir=home / ".config" / "rcm", unreadable=skipped
+    )
+    assert got is None
+    if want == "skip":
+        assert skipped == [], [(e.path.name, e.reason) for e in skipped]
+    else:
+        assert [e.path.name for e in skipped] == [name], skipped
+
+
+def launch_agent_named(env: Path, name: str, args: list[str], **keys: Any) -> Path:
+    agents = env / "home" / "Library" / "LaunchAgents"
+    agents.mkdir(parents=True, exist_ok=True)
+    p = agents / name
+    p.write_bytes(plistlib.dumps({"Label": p.stem, "ProgramArguments": args, **keys}))
+    return p
+
+
+SERVER_BODY = (
+    '[server]\nbind = "127.0.0.1"\nport = {port}\ndata_dir = "{data}"\n\n'
+    '[[presets]]\nname = "{preset}"\nargv = ["true"]\nrequires = ["sh"]\n'
+    'env_passthrough = ["PATH"]\n'
+)
+
+
+def server_body(env: Path, port: int, preset: str = "unit") -> str:
+    return SERVER_BODY.format(port=port, data=env / "data", preset=preset)
+
+
+@pytest.mark.parametrize("leak", ["shell-RCM_CONFIG", "cwd-rcm.toml"])
+@pytest.mark.parametrize("service", ["launchd-workdir-home", "launchd-no-workdir", "none"])
+def test_the_doctor_shells_rcm_config_and_folder_never_choose_the_servers_config(
+    env, svcbin, monkeypatch, capsys, leak, service
+):
+    """서비스는 doctor 셸의 `RCM_CONFIG` 도 doctor 가 선 폴더의 `rcm.toml` 도 보지 않는다. 서비스
+    파일이 `--config` 없이 `rcm serve` 를 띄우면 doctor 는 서비스가 읽을 것(서비스 환경의
+    `RCM_CONFIG`, 서비스 작업 폴더의 `rcm.toml`, 표준 자리)을 스스로 정한다 — 서비스 파일이 없을
+    때도 셸의 것은 쓰지 않는다(검증 사이클 2 의 1라운드 HIGH 2)."""
+    home = env / "home"
+
+    def leaks(_env: Path) -> None:
+        other = env / "other.toml"  # 운영 포트가 아닌 빈 포트 — 빨강에서도 아무 서버에 닿지 않는다
+        other.write_text(server_body(env, free_port(), preset="leaked"))
+        other.chmod(0o600)
+        if leak == "shell-RCM_CONFIG":
+            monkeypatch.setenv("RCM_CONFIG", str(other))
+        else:
+            (env / "rcm.toml").write_text(other.read_text())  # doctor 의 작업 폴더(= env)
+        if service != "none":
+            keys = {"EnvironmentVariables": {"PATH": f"{svcbin}:/usr/bin:/bin"}}
+            if service == "launchd-workdir-home":
+                keys["WorkingDirectory"] = str(home)
+            launch_agent_named(
+                env, "com.remote-ci-monitor.server.plist", ["/x/rcm", "serve"], **keys
+            )
+
+    code, out, err, s = run_input(
+        env, svcbin, monkeypatch, capsys, "coordinator-worker", "standard", "absent", after=leaks
+    )
+    assert "Traceback" not in err, err
+    doc = json.loads(out)
+    assert doc["server"]["url"] == f"http://127.0.0.1:{s.port}", (doc["server"], err)
+    assert code == 0, doc
+
+
+def test_the_services_working_directory_rcm_toml_is_the_servers_config(
+    env, svcbin, monkeypatch, capsys
+):
+    """서비스가 `WorkingDirectory` 에서 `rcm serve` 로 뜨면 그 폴더의 `rcm.toml` 이 표준 자리보다
+    먼저다(`rcm serve` 의 탐색 순서). doctor 는 그 폴더를 보고 재며 — doctor 가 선 폴더가 아니다."""
+    wd = env / "svcwd"
+
+    def service(_env: Path) -> None:
+        std = env / "home" / ".config" / "rcm" / "server.toml"
+        good = std.read_text()
+        std.write_text(server_body(env, free_port(), preset="standard"))  # 서비스가 읽지 않는다
+        wd.mkdir()
+        (wd / "rcm.toml").write_text(good)
+        launch_agent_named(
+            env,
+            "com.remote-ci-monitor.server.plist",
+            ["/x/rcm", "serve"],
+            WorkingDirectory=str(wd),
+            EnvironmentVariables={"PATH": f"{svcbin}:/usr/bin:/bin"},
+        )
+
+    code, out, err, s = run_input(
+        env, svcbin, monkeypatch, capsys, "coordinator-worker", "standard", "absent", after=service
+    )
+    doc = json.loads(out)
+    assert doc["server"]["url"] == f"http://127.0.0.1:{s.port}", (doc["server"], err)
+    assert code == 0, doc
+
+
+def test_the_doctor_shells_config_home_does_not_choose_the_workers_config(
+    env, svcbin, monkeypatch, capsys
+):
+    """워커 서비스가 `--config` 없이 `rcm worker` 로 뜨면 그 서비스의 설정 폴더(서비스 환경의
+    `XDG_CONFIG_HOME`, 없으면 서비스 홈의 `.config`)의 `worker.toml` 을 읽는다. doctor 셸의
+    `XDG_CONFIG_HOME` 이 아니다."""
+
+    def leak(_env: Path) -> None:
+        xdg = env / "xdg" / "rcm"
+        xdg.mkdir(parents=True)
+        (xdg / "worker.toml").write_text(
+            f'server = "http://127.0.0.1:{free_port()}"\npool = "default"\n'
+        )
+        (xdg / "worker.toml").chmod(0o600)
+        monkeypatch.setenv("XDG_CONFIG_HOME", str(env / "xdg"))
+        launch_agent_named(
+            env,
+            "com.remote-ci-monitor.worker.plist",
+            ["/x/rcm", "worker"],
+            EnvironmentVariables={"PATH": f"{svcbin}:/usr/bin:/bin"},
+        )
+
+    code, out, err, s = run_input(
+        env, svcbin, monkeypatch, capsys, "worker", "standard", "absent", after=leak
+    )
+    doc = json.loads(out)
+    assert doc["server"]["url"] == s.url, (doc["server"], err)
+    assert code == 0, doc
+
+
+@pytest.mark.parametrize("with_config", [False, True])
+@pytest.mark.parametrize(
+    "args",
+    [["/usr/bin/env", "rcm", "worker"], ["/bin/sh", "-c", "exec /x/rcm worker"]],
+    ids=["env", "sh-c"],
+)
+def test_an_explicit_service_file_whose_command_rcm_cannot_resolve_is_unknown(
+    env, srv, svcbin, monkeypatch, capsys, args, with_config
+):
+    """`--service-file` 로 준 파일도 rcm 이 그 명령을 풀지 못하면 그 실행이 읽는 설정과 PATH 를
+    모른다(`env PATH=…` · `sh -c` 가 바꿀 수 있다). 표준 자리의 설정과 그 파일의 PATH 로 재고 0 을
+    내지 않는다 — 종료 3(검증 사이클 2 의 1라운드 MED 3)."""
+    monkeypatch.setenv("RCM_WORKER_TOKEN", TOKEN)
+    std = env / "home" / ".config" / "rcm"
+    std.mkdir(parents=True)
+    (std / "worker.toml").write_text(f'server = "{srv.url}"\npool = "mbp"\n')
+    (std / "worker.toml").chmod(0o600)
+    (env / "svc").mkdir()
+    sf = env / "svc" / "w.plist"
+    sf.write_bytes(
+        plistlib.dumps(
+            {"ProgramArguments": args, "EnvironmentVariables": {"PATH": f"{svcbin}:/usr/bin"}}
+        )
+    )
+    argv = ["--role", "worker", "--service-file", str(sf), "--json"]
+    if with_config:
+        argv += ["--config", str(std / "worker.toml")]
+    code, out, err = run_guarded(capsys, *argv)
+    assert_handled(code, out, err, "w.plist", codes=(3,))
+    doc = json.loads(out)
+    assert doc["service"]["path"] is None, doc["service"]
+    assert doc["problems"] == [], doc
+
+
+def systemd_user_unit(env: Path, body: str) -> Path:
+    user = env / "home" / ".config" / "systemd" / "user"
+    user.mkdir(parents=True, exist_ok=True)
+    p = user / "rcm-worker.service"
+    p.write_text(body)
+    return p
+
+
+def test_h_in_a_user_unit_is_the_home_doctor_knows(env, srv, svcbin, monkeypatch, capsys):
+    """사용자 유닛(`~/.config/systemd/user/`)의 `%h` 는 그 사용자의 홈이다. doctor 가 아는 홈으로
+    풀어 `ExecStart=%h/.local/bin/rcm worker --config %h/.config/rcm/worker.toml` 과
+    `Environment=PATH=%h/…` 를 읽는다 — 「상대 --config」나 「풀지 않는 지정자」로 모르지 않는다
+    (검증 사이클 2 의 1라운드 MED 4)."""
+    monkeypatch.setenv("RCM_WORKER_TOKEN", TOKEN)
+    monkeypatch.setattr(doctor, "PLATFORM", "linux")
+    conf = env / "home" / ".config" / "rcm"
+    conf.mkdir(parents=True)
+    (conf / "worker.toml").write_text(f'server = "{srv.url}"\npool = "mbp"\n')
+    (conf / "worker.toml").chmod(0o600)
+    systemd_user_unit(
+        env,
+        "[Service]\nWorkingDirectory=%h\n"
+        "ExecStart=%h/.local/bin/rcm worker --config %h/.config/rcm/worker.toml\n"
+        "Environment=PATH=%h/svcbin:/usr/bin:/bin\n",
+    )
+    code, doc = run_json(capsys, "--role", "worker")
+    assert doc["undecided"] == [], doc["undecided"]
+    assert doc["service"]["path"] == "~/svcbin:/usr/bin:/bin", doc["service"]
+    assert srv.calls("GET", "/worker/spec") and code == 0, doc
+
+
+@pytest.mark.parametrize(
+    "where,line",
+    [
+        ("user", "ExecStart=%S/rcm worker --config /x/c.toml"),
+        ("explicit", "ExecStart=%h/.local/bin/rcm worker --config %h/.config/rcm/worker.toml"),
+    ],
+    ids=["other-specifier", "h-outside-the-user-folder"],
+)
+def test_a_specifier_rcm_does_not_resolve_in_exec_start_is_unknown(
+    env, srv, svcbin, monkeypatch, capsys, where, line
+):
+    """`%h` 말고 다른 지정자, 그리고 사용자 유닛인지 모르는 파일(사람이 준 파일)의 `%h` 는 지금처럼
+    모름이다 — 종료 3 이고 그 줄을 이름으로 보인다. 「상대 --config」라고 잘못 말하지 않는다."""
+    monkeypatch.setenv("RCM_WORKER_TOKEN", TOKEN)
+    monkeypatch.setattr(doctor, "PLATFORM", "linux")
+    body = f"[Service]\n{line}\nEnvironment=PATH={svcbin}:/usr/bin:/bin\n"
+    if where == "user":
+        systemd_user_unit(env, body)
+        argv = ["--role", "worker", "--json"]
+    else:
+        (env / "svc").mkdir()
+        sf = env / "svc" / "rcm-worker.service"
+        sf.write_text(body)
+        argv = ["--role", "worker", "--service-file", str(sf), "--json"]
+    code, out, err = run_guarded(capsys, *argv)
+    assert_handled(code, out, err, "ExecStart=", codes=(3,))
+    assert "relative --config" not in out + err, out + err
+    assert srv.requests == [], srv.requests
+
+
+def init_worker(env: Path, url: str) -> Path:
+    """`rcm init worker` 로 설정을 만들고 문서대로 토큰 줄을 넣는다(모드 600 그대로)."""
+    assert cli.main(["init", "worker", "--server", url, "--pool", "default"]) == 0
+    cfg = env / "home" / ".config" / "rcm" / "worker.toml"
+    cfg.write_text(f'token = "{TOKEN}"\n' + cfg.read_text())  # 표(`[host]`) 앞, 맨 위
+    assert stat.S_IMODE(cfg.stat().st_mode) == 0o600
+    return cfg
+
+
+@pytest.mark.parametrize(
+    "shape", ["example-launchd", "example-systemd", "init-launchd", "init-systemd"]
+)
+def test_what_rcm_init_and_the_examples_write_is_known_and_exits_0(env, monkeypatch, capsys, shape):
+    """과잉 교정 잠금: `rcm init worker` 가 쓴 설정과 문서의 서비스 파일(`examples/` 그대로, 또는
+    `rcm init worker --service-file` 이 쓰는 모양)은 rcm 이 다 안다. 도구가 다 있으면 종료 0 이다 —
+    서비스 파일 · 설정 · PATH 가운데 무엇도 모름이 되지 않는다."""
+    monkeypatch.setattr(cli, "discover", FakeDiscover(()))
+    s = input_server()
+    try:
+        s.route("GET", "/api/whoami", {"name": "td", "admin": False, "kind": "worker"})
+        cfg = init_worker(env, s.url)
+        capsys.readouterr()
+        home = env / "home"
+        rcm = home / ".local" / "bin" / "rcm"
+        if shape.endswith("launchd"):
+            monkeypatch.setattr(doctor, "PLATFORM", "darwin")
+            dest = home / "Library" / "LaunchAgents" / "com.remote-ci-monitor.worker.plist"
+            if shape.startswith("example"):
+                src = EXAMPLES / "launchd" / dest.name
+                data = src.read_bytes().replace(b"/Users/me", str(home).encode())
+            else:
+                data = cli.worker_plist(rcm, cfg, home)
+        else:
+            monkeypatch.setattr(doctor, "PLATFORM", "linux")
+            dest = home / ".config" / "systemd" / "user" / "rcm-worker.service"
+            if shape.startswith("example"):
+                src = EXAMPLES / "systemd" / dest.name
+                data = src.read_bytes().replace(b"/home/me", str(home).encode())
+            else:
+                data = cli.worker_unit(rcm, cfg, home)
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_bytes(data)
+        code, doc = run_json(capsys, "--role", "worker")
+        assert doc["service"]["file"] is not None and doc["service"]["path"], doc["service"]
+        assert doc["undecided"] == [] and doc["problems"] == [], doc
+        assert s.calls("GET", "/worker/spec") and code == 0, doc
+    finally:
+        s.close()
+
+
+@pytest.mark.parametrize("shape", ["example-launchd", "example-systemd"])
+def test_the_server_examples_are_known_and_exit_0(env, svcbin, monkeypatch, capsys, shape):
+    """서버 쪽 과잉 교정 잠금: `examples/` 의 서버 서비스 파일 그대로(절대 `--config`,
+    `WorkingDirectory`)는 rcm 이 다 안다 — 도구가 다 있으면 종료 0 이다."""
+    home = env / "home"
+
+    def service(_env: Path) -> None:
+        conf = home / ".config" / "rcm"
+        if shape == "example-launchd":
+            src = EXAMPLES / "launchd" / "com.remote-ci-monitor.server.plist"
+            dest = home / "Library" / "LaunchAgents" / src.name
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            dest.write_bytes(src.read_bytes().replace(b"/Users/rcm", str(home).encode()))
+        else:
+            monkeypatch.setattr(doctor, "PLATFORM", "linux")
+            src = EXAMPLES / "systemd" / "rcm-server.service"
+            dest = home / ".config" / "systemd" / "user" / src.name
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            dest.write_bytes(src.read_bytes().replace(b"/home/rcm", str(home).encode()))
+        assert (conf / "server.toml").is_file()
+
+    code, out, err, s = run_input(
+        env, svcbin, monkeypatch, capsys, "coordinator-worker", "standard", "absent", after=service
+    )
+    doc = json.loads(out)
+    assert doc["service"]["file"] is not None, doc["service"]
+    assert doc["undecided"] == [] and doc["problems"] == [], doc
+    assert doc["server"]["url"] == f"http://127.0.0.1:{s.port}" and code == 0, doc
+
+
+def test_a_relative_config_in_the_service_is_not_compared_from_doctors_folder(
+    env, srv, svcbin, monkeypatch, capsys
+):
+    """서비스의 `--config rel/w.toml` 은 서비스의 작업 폴더에 달렸다. doctor 가 선 폴더로 풀어
+    「같은 파일」이라고 조용히 넘어가지 않는다 — 비교할 수 없다고 알린다(검증 사이클 2 의 1라운드
+    LOW)."""
+    monkeypatch.setenv("RCM_WORKER_TOKEN", TOKEN)
+    (env / "rel").mkdir()
+    mine = env / "rel" / "w.toml"  # doctor 의 작업 폴더(= env) 기준으로는 같은 파일이다
+    mine.write_text(f'server = "{srv.url}"\npool = "mbp"\n')
+    mine.chmod(0o600)
+    launch_agent(env, ["/x/rcm", "worker", "--config", "rel/w.toml"], f"{svcbin}:/usr/bin:/bin")
+    code, doc = run_json(capsys, "--role", "worker", "--config", str(mine))
+    assert any("relative --config" in w for w in doc["warnings"]), doc["warnings"]
+    assert code == 0, doc
+
+
+def test_host_facts_lose_line_separators_and_bidi_controls(tmp_path):
+    """U+2028 · U+2029(줄 · 문단 구분자)와 bidi 제어(U+202A–202E, U+2066–2069)도 지운다 — 터미널과
+    웹에서 줄을 나누거나 글자 순서를 뒤집는다. 규칙은 `core/progress.clean_line` 하나다."""
+    srv = m5n(tmp_path)
+    try:
+        raw = "ubuntu  24.04 ‪‮⁦⁩"
+        register_host(srv, "build-02", {**HOST, "os_release": raw, "os_like": "‮debian"})
+        host = machine(srv, "build-02")["host"]
+        assert host["os_release"] == "ubuntu 24.04", host
+        assert host["os_like"] == "debian", host
+    finally:
+        srv.close()
+
+
+# ── 시험 대조 보강(싸면): 텍스트 출력도 JSON 과 같은 것을 말한다 ──────────────────────
+
+
+def test_td13_the_text_report_shows_the_real_install_command(worker, srv, monkeypatch, capsys):
+    monkeypatch.setattr(doctor, "PLATFORM", "darwin")
+    srv.route(
+        "GET",
+        "/worker/spec",
+        spec_doc(preset("build"), preset("lint", requires=(LACK,)), tools=[LACK_HINT]),
+    )
+    code, out, _err = worker.text(capsys)
+    assert code == 1 and "brew install td-lack" in out, out
+    assert "https://example.invalid/td-lack" in out, out
+
+
+def test_td55_the_text_report_shows_no_service_env_value(worker, capsys):
+    code, out, err = worker.text(capsys, svc_env={"TD_SECRET": "td55-hidden-value"})
+    assert "td55-hidden-value" not in out + err, out + err
+
+
+def test_td35_a_refused_token_says_a_token_is_needed(worker, srv, capsys):
+    srv.route("GET", "/api/whoami", {"error": "unauthorized"}, status=401)
+    code, out, err = worker.text(capsys)
+    assert code == 3 and "needed" in (out + err), out + err
