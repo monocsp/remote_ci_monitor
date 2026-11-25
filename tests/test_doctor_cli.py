@@ -2854,3 +2854,58 @@ def test_abc_unknown_server_values_are_null_never_none_or_down(
     code, out, err = run(capsys, "--role", "client", "--server", coordinator.url)
     assert "None" not in out + err and code == 3, (code, out, err)
     assert "version is missing" in out, out
+
+
+# ── token_file 저장소는 워커와 같은 자격으로 잰다 (P3 3라운드 MED) ──────────────
+
+
+def token_repo(env: Path, token_file: Path) -> str:
+    return (
+        '[[repos]]\nname = "app"\nurl = "https://example.invalid/app.git"\n'
+        f'token_file = "{token_file}"\n'
+    )
+
+
+def credential_git(svcbin: Path, token_file: Path) -> None:
+    """서비스 PATH 의 가짜 git — 워커가 쓰는 자격(그 파일을 읽는 헬퍼 하나)을 받았을 때만
+    `ls-remote` 가 닿는다. 네트워크는 쓰지 않는다."""
+    script(
+        svcbin / "git",
+        'if [ "$1" = "--version" ]; then echo "git version 2.45.0"; exit 0; fi\n'
+        f'case "$GIT_CONFIG_VALUE_1" in *"{token_file}"*) exit 0;; esac\n'
+        'echo "fatal: could not read Username for https://example.invalid" >&2; exit 128',
+    )
+
+
+def test_a_token_file_repo_is_checked_with_the_workers_credential(
+    env, srv, svcbin, monkeypatch, capsys
+):
+    """`token_file` 이 있는 저장소는 워커가 git 을 부를 때처럼(`gitops.git_env` 의 자격 헬퍼)
+    잰다 — URL 만 넘겨 전역 자격으로 재면 워커는 닿는 저장소를 「닿지 않음」(종료 1)으로
+    단정한다."""
+    monkeypatch.setenv("RCM_WORKER_TOKEN", TOKEN)
+    token = env / "home" / "app.token"
+    token.write_text("td-not-a-real-token\n")
+    credential_git(svcbin, token)
+    sf = plist(env / "svc", f"{svcbin}:/usr/bin:/bin")
+    code, doc = run_worker(capsys, env, srv, sf, toml_extra=token_repo(env, token))
+    assert req(doc, "repos")["state"] == "ok", doc["rcm_requirements"]
+    assert code == 0, doc
+    assert "td-not-a-real-token" not in json.dumps(doc)
+
+
+def test_a_token_file_doctor_cannot_read_is_unknown_not_unreachable(
+    env, srv, svcbin, monkeypatch, capsys
+):
+    """doctor 가 그 토큰 파일을 못 읽으면(서비스는 다른 사용자일 수 있다) 저장소에 닿는지 모른다 —
+    「닿지 않음」(종료 1)이 아니라 판정 못 함(종료 3)이다."""
+    monkeypatch.setenv("RCM_WORKER_TOKEN", TOKEN)
+    token = env / "home" / "missing.token"
+    credential_git(svcbin, token)
+    sf = plist(env / "svc", f"{svcbin}:/usr/bin:/bin")
+    code, doc = run_worker(capsys, env, srv, sf, toml_extra=token_repo(env, token))
+    repos = req(doc, "repos")
+    assert repos["state"] == "unknown" and "token_file" in repos["detail"], repos
+    assert any("repos" in u and "token_file" in u for u in doc["undecided"]), doc["undecided"]
+    assert str(env / "home") not in json.dumps(doc)
+    assert code == 3, doc
