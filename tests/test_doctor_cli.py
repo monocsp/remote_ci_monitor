@@ -4492,5 +4492,4 @@ def test_x_mdns_worker_check_cleans_the_name_too(env, srv, monkeypatch, capsys, 
     said = asked + err
     assert any("evil" in s for s in said), said
     for line in said:
-        assert not any(c in line for c in "\x1b\r‮"), repr(line)
-    assert "ok (http" not in "\n".join(said), said  # 가짜 질문 줄이 제 줄로 갈라지지 않았다
+        assert not any(c in line for c in "\x1b\r\n‮"), repr(line)
