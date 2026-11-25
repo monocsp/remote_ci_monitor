@@ -505,6 +505,122 @@ def git_ref_presets(entries: list[Mapping[str, Any]], rows: list[dc.PresetRow]) 
     return out
 
 
+# ── 서버 답의 모양 ───────────────────────────────────────────────────────────
+
+
+@dataclass(frozen=True)
+class Shape:
+    """서버 답에서 doctor 가 쓰는 칸의 모양. 칸이 없거나 null 이면 괜찮다(옛 서버 · 모름). 있는데
+    타입이 틀리면 그 답 전체를 알아볼 수 없는 답으로 둔다 — 쓰다가 터지거나, 문자열을 목록처럼
+    한 글자씩 돌거나, `"yes"` 를 참으로 읽지 않게(P3 2라운드 HIGH)."""
+
+    types: tuple[type, ...]
+    keys: Mapping[str, Shape] = field(default_factory=dict)
+    items: Shape | None = None  # 배열의 항목
+    values: Shape | None = None  # 객체의 값(이름이 서버가 정한 것일 때)
+
+
+_STR = Shape((str,))
+_NUMBER = Shape((int, float))
+_BOOL = Shape((bool,))
+_STRS = Shape((list,), items=_STR)
+_GENERATION = Shape((str, int))
+_PRESET = Shape(
+    (dict,),
+    {
+        "name": _STR,
+        "requires": _STRS,
+        "env_passthrough": _STRS,
+        "env": Shape((dict,), values=_STR),
+        "pool": _STR,
+        "pools": _STRS,
+        "placement": _STR,
+        "checks": _STRS,
+        "source_modes": _STRS,
+        "repo": _STR,
+        "unreachable_checks": Shape((list,), items=Shape((dict,), {"name": _STR, "code": _STR})),
+    },
+)
+_PROBE = Shape((dict,), {"name": _STR, "argv": _STRS, "timeout_seconds": _NUMBER})
+_MACHINE = Shape(
+    (dict,),
+    {
+        "id": _STR,
+        "display_name": _STR,
+        "kind": _STR,
+        "pool": _STR,
+        "alive": _BOOL,
+        "presets": Shape((dict,), values=Shape((dict,), {"state": _STR, "code": _STR})),
+    },
+)
+#: 라우트 → 그 답의 모양. `reach` 가 답을 넘기기 전에 한 번 본다
+ANSWER_SHAPES: dict[str, Shape] = {
+    "/api/health": Shape(
+        (dict,),
+        {
+            "ok": _BOOL,
+            "version": _STR,
+            "error": _STR,
+            "preset_env": Shape(
+                (dict,),
+                values=Shape((dict,), {"missing_tools": _STRS, "missing_passthrough": _STRS}),
+            ),
+        },
+    ),
+    "/api/whoami": Shape((dict,), {"name": _STR, "kind": _STR, "admin": _BOOL}),
+    "/worker/spec": Shape(
+        (dict,),
+        {
+            "generation": _GENERATION,
+            "probes": Shape((list,), items=_PROBE),
+            "presets": Shape((list,), items=_PRESET),
+            "tools": Shape((list,)),
+        },
+    ),
+    "/api/machines": Shape(
+        (dict,), {"generation": _GENERATION, "machines": Shape((list,), items=_MACHINE)}
+    ),
+}
+_JSON_KIND = {dict: "an object", list: "an array", str: "a string", bool: "a boolean"}
+
+
+def _json_kind(t: type) -> str:
+    return _JSON_KIND.get(t, "a number")
+
+
+def _fits(value: Any, types: tuple[type, ...]) -> bool:
+    if isinstance(value, bool):  # bool 은 int 의 하위 형이다 — 숫자 칸에 참거짓을 받지 않는다
+        return bool in types
+    return isinstance(value, types)
+
+
+def shape_problem(value: Any, shape: Shape, where: str = "") -> str | None:
+    """`value` 가 `shape` 에 맞지 않으면 어디가 어떻게 틀렸는지 한 줄(`presets[0].env is an
+    array, not an object`). 값은 넣지 않는다."""
+    if not _fits(value, shape.types):
+        got = "null or empty" if value is None else _json_kind(type(value))
+        want = " or ".join(dict.fromkeys(_json_kind(t) for t in shape.types))
+        return f"{where or 'the answer'} is {got}, not {want}"
+    dot = f"{where}." if where else ""
+    if isinstance(value, dict):
+        for key, sub in shape.keys.items():
+            if value.get(key) is not None:
+                problem = shape_problem(value[key], sub, f"{dot}{key}")
+                if problem:
+                    return problem
+        if shape.values is not None:
+            for key, item in value.items():
+                problem = shape_problem(item, shape.values, f"{dot}{dc.clean_text(key, 64)}")
+                if problem:
+                    return problem
+    if isinstance(value, list) and shape.items is not None:
+        for i, item in enumerate(value):
+            problem = shape_problem(item, shape.items, f"{where or 'the answer'}[{i}]")
+            if problem:
+                return problem
+    return None
+
+
 # ── 실행 ─────────────────────────────────────────────────────────────────────
 
 
@@ -635,12 +751,18 @@ class _Run:
             self.server.update(state="ok", version=version)
 
     def reach(self, call: Callable[[], Any], route: str, token_hint: str) -> tuple[bool, Any]:
-        """GET 하나. 닿지 않거나 401 · 옛 서버면 판정 못 함(종료 3)으로 적고 (False, None)."""
+        """GET 하나. 닿지 않거나 401 · 옛 서버면 판정 못 함(종료 3)으로 적고 (False, None).
+
+        답이 JSON 이 아니거나(틀린 포트의 HTML · 빈 본문) 그 라우트의 모양(`ANSWER_SHAPES`)에
+        맞지 않아도 판정 못 함이다. 모양을 여기 한 곳에서 보므로 뒤에서 쓰는 자리는 답이 dict 이고
+        칸의 타입이 맞다고 믿어도 된다."""
         from remote_ci_monitor.client import ClientError
 
         assert self.server is not None
         try:
-            return True, call()
+            answer = call()
+        except ValueError:  # JSON 이 아니다(UnicodeDecodeError 도 ValueError 다)
+            why: str | None = "not JSON"
         except ClientError as e:
             if e.status == 0:
                 self.undecided.append(f"cannot reach {self.server['url']}")
@@ -653,6 +775,16 @@ class _Run:
             else:
                 self.undecided.append(f"the server answered {e.status}: {dc.clean_text(e.message)}")
             return False, None
+        else:
+            why = shape_problem(answer, ANSWER_SHAPES[route])
+            if why is None:
+                return True, answer
+        self.undecided.append(
+            f"{self.server['url']} gave {route} an answer rcm cannot read ({why}) — check that "
+            "the URL and port are the rcm server's"
+        )
+        self.server["state"] = "unreadable answer"
+        return False, None
 
     def document(self) -> dict[str, Any]:
         rows = self.rows
@@ -828,8 +960,8 @@ class _Run:
                 "token (rcm token add NAME --worker)"
             )
             return
-        ok, spec = self.reach(client.spec, "/worker/spec", WORKER_TOKEN_HINT)
-        if not ok or not isinstance(spec, dict):
+        ok, spec = self.reach(client.spec_answer, "/worker/spec", WORKER_TOKEN_HINT)
+        if not ok:
             return
         self.server["generation"] = dc.clean_text(spec.get("generation"), 64) or None
         self.measure(spec, env, pool=cfg.pool, accept_any=bool(cfg.accept_any))
@@ -1049,7 +1181,7 @@ class _Run:
         ok, machines = self.reach(
             lambda: client.get_json("/api/machines"), "/api/machines", CLIENT_TOKEN_HINT
         )
-        if not ok or not isinstance(machines, dict):
+        if not ok:
             return
         self.server["generation"] = dc.clean_text(machines.get("generation"), 64) or None
         listed = [m for m in machines.get("machines") or [] if isinstance(m, dict)]

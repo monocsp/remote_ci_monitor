@@ -116,6 +116,12 @@ class WorkerClient:
         status, _, raw = self._inner._request("GET", "/worker/spec")
         return json.loads(raw) if raw else {}
 
+    def spec_answer(self) -> Any:
+        """`GET /worker/spec` 의 본문 그대로(빈 본문은 None). `spec()` 은 빈 본문을 `{}` 로 바꿔
+        워커 루프가 멈추지 않게 하지만, `rcm doctor` 는 그것을 「서버가 알아볼 수 없는 답을
+        줬다」로 보여야 한다 — 빈 명세를 「올 프리셋 0개」로 읽지 않게."""
+        return self._inner.get_json("/worker/spec")
+
     def capabilities(self, body: dict[str, Any]) -> dict[str, Any]:
         """`POST /worker/capabilities` — 이 워커가 잰 지문과 프리셋별 도구(M5n §4.2)."""
         return self._post("/worker/capabilities", body) or {}
