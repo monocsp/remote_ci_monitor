@@ -14,6 +14,7 @@ P3 1 · 2라운드의 HIGH 는 모두 훅이 setup 의 계산을 따로 다시 �
 from __future__ import annotations
 
 import argparse
+import ipaddress
 import json
 import os
 import plistlib
@@ -153,6 +154,19 @@ def label_problem(label: str) -> str | None:
 def missing_for_yes(role: str, given: Mapping[str, Any]) -> list[str]:
     """묻지 않고 돌 때 빠진 필수 인자(`--bind` 처럼 플래그 이름으로)."""
     return [f"--{name}" for name in YES_REQUIRED.get(role, ()) if given.get(name) is None]
+
+
+#: 이름을 준 `--bind` 의 거절 — setup 은 이름을 풀지 않는다(DNS · mDNS, P5 A-E7)
+NAME_NOT_ADDRESS = "give an address, not a name"
+
+
+def is_address(text: str) -> bool:
+    """IPv4 · IPv6 주소 글자인가. 이름(`localhost` · `macmini.local`)은 아니다 — 풀지 않는다."""
+    try:
+        ipaddress.ip_address(text)
+    except ValueError:
+        return False
+    return True
 
 
 def bind_kind(address: str) -> str:

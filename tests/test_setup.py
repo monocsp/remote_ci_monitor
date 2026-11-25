@@ -1336,3 +1336,29 @@ def test_s7_an_unknown_answer_warns_that_the_start_may_fail(cfg, tmp_path):
     assert go(fake, *coordinator_args(tmp_path / "data")) == 0
     err = fake.err.getvalue()
     assert "could not tell" in err and "start command" in err and "may fail" in err
+
+
+@pytest.mark.parametrize("name", ["localhost", "macmini.local", "my-host"])
+def test_s10_bind_takes_an_address_not_a_name(cfg, tmp_path, name):
+    # A-E7: 이름은 거절하고 풀지 않는다(DNS · mDNS 를 묻지 않는다)
+    asked: list[str] = []
+
+    def local(address):
+        asked.append(address)
+        return True
+
+    fake = Fake(is_local_address=local)
+    argv = coordinator_args(tmp_path / "data")
+    argv[argv.index("--bind") + 1] = name
+    assert go(fake, *argv) == 2
+    assert "give an address, not a name" in fake.err.getvalue()
+    assert asked == []
+    assert not (cfg / "server.toml").exists()
+
+
+def test_s10_a_typed_name_is_asked_again(cfg, tmp_path):
+    answers = ["coordinator-worker", "localhost", "127.0.0.1", "", "", "n", ""]
+    fake = Fake(answers=answers)
+    assert go(fake, "--data-dir", str(tmp_path / "data"), "--label", "test.rcm.server") == 0
+    assert "give an address, not a name" in fake.err.getvalue()
+    assert read_toml(cfg / "server.toml")["server"]["bind"] == "127.0.0.1"

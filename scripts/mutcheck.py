@@ -3458,6 +3458,17 @@ MUTANTS = (
         new="    return False\n",
         tests=("tests/test_setup.py::test_s7_systemd_only_an_inactive_unit_is_not_loaded",),
     ),
+    Mutant(
+        # `--bind` 의 이름을 받는다 — 묶어 보는 자리에서 DNS · mDNS 로 이름을 푼다(P5 A-E7)
+        name="setup-bind-name-resolved",
+        path="src/remote_ci_monitor/setup.py",
+        old=(
+            "        if not core.is_address(bind):  "
+            "# 이름은 풀지 않는다 — DNS · mDNS 를 묻지 않는다(P5 A-E7)\n"
+        ),
+        new="        if False:\n",
+        tests=("tests/test_setup.py::test_s10_bind_takes_an_address_not_a_name",),
+    ),
     # ── M5t-a PR3 — 분배 전용 코디네이터 `lanes = 0` (docs/m5t-workplan.md §7 변이 검사) ──
     Mutant(
         # `lanes = 0` 에서 `@local` 을 살아 있다고 본다 — 레인이 없는 서버의 머신 목록이 로컬
