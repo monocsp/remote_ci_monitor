@@ -77,6 +77,7 @@ def preset(
     checks: tuple[str, ...] = (),
     env: dict[str, str] | None = None,
     passthrough: tuple[str, ...] = ("PATH",),
+    unreachable: tuple[str, ...] = (),
 ) -> dict[str, Any]:
     return {
         "name": name,
@@ -87,6 +88,7 @@ def preset(
         "pools": list(pools),
         "placement": placement,
         "checks": list(checks),
+        "unreachable_checks": [{"name": c, "code": "check_local_only"} for c in unreachable],
     }
 
 
@@ -388,7 +390,8 @@ def test_td27_workspace_tools(worker, srv, svcbin, capsys):
 
 
 def test_td11_needs_check_is_not_called_ok(worker, srv, capsys):
-    # 서버는 이 머신에서 돌 수 있는 점검 프리셋을 명세에 함께 싣는다 — 없으면 로컬 전용(TO18)
+    # 서버는 점검 프리셋도 명세에 싣는다. 이 머신에서 돌 수 없는 점검은 `unreachable_checks` 로
+    # 따로 말한다(TO18) — 여기서는 빈 목록이다
     srv.route(
         "GET", "/worker/spec", spec_doc(preset("ios", checks=("sim-check",)), preset("sim-check"))
     )
@@ -1181,13 +1184,14 @@ def test_to6_coordinator_asks_the_servers_own_candidate_function(
 def test_to18_a_preset_whose_check_is_local_only_is_not_coming_and_not_needs_check(
     worker, srv, capsys
 ):
-    """서버는 원격 워커의 명세에서 `local_only` 프리셋을 뺀다(후보 함수, PR1). 그래서 `checks` 에
-    오른 점검이 명세에 없으면 그 점검은 이 머신에서 돌 수 없다 — 「오지 않음(점검이 로컬 전용)」
-    이고 「점검 필요」가 아니다(TO18 의 doctor 절반)."""
+    """서버가 프리셋의 `unreachable_checks` 에 그 점검을 적으면 이 머신에서 돌 수 없는 점검이다 —
+    「오지 않음(점검이 로컬 전용)」이고 「점검 필요」가 아니다(TO18 의 doctor 절반)."""
     srv.route(
         "GET",
         "/worker/spec",
-        spec_doc(preset("build"), preset("qa", checks=("localcheck",))),
+        spec_doc(
+            preset("build"), preset("qa", checks=("localcheck",), unreachable=("localcheck",))
+        ),
     )
     code, doc = worker(capsys)
     qa = row(doc, "qa")
@@ -1198,6 +1202,59 @@ def test_to18_a_preset_whose_check_is_local_only_is_not_coming_and_not_needs_che
     code, out, _ = worker.text(capsys)
     line = next(ln for ln in out.splitlines() if " qa " in f" {ln} ")
     assert "needs check" not in line and "local-only" in line, line
+
+
+def test_to18_doctor_reads_unreachable_checks_not_which_presets_are_listed(worker, srv, capsys):
+    """doctor 는 명세 목록에 무엇이 빠졌는지로 짐작하지 않는다 — 점검 프리셋이 목록에 있어도
+    `unreachable_checks` 가 그 이름을 적으면 「오지 않음」이다."""
+    srv.route(
+        "GET",
+        "/worker/spec",
+        spec_doc(
+            preset("build"),
+            preset("localcheck"),
+            preset("qa", checks=("localcheck",), unreachable=("localcheck",)),
+        ),
+    )
+    code, doc = worker(capsys)
+    qa = row(doc, "qa")
+    assert (qa["applies"], qa["code"]) == ("not_coming", "check_local_only"), qa
+    assert "localcheck" in (qa["note"] or ""), qa
+    assert code == 0, doc
+
+
+def test_to18_a_check_missing_from_the_list_is_not_guessed_local_only(worker, srv, capsys):
+    """`unreachable_checks` 가 빈 목록이면 서버가 「닿을 수 있다」고 한 것이다. 점검 프리셋이
+    명세 목록에 없어도(풀로 거른 명세 등) 로컬 전용으로 짐작하지 않는다 — 「점검 필요」다."""
+    srv.route(
+        "GET",
+        "/worker/spec",
+        spec_doc(preset("build"), preset("qa", checks=("elsewhere",))),
+    )
+    code, doc = worker(capsys)
+    qa = row(doc, "qa")
+    assert (qa["applies"], qa["state"]) == ("pool", "needs_check"), qa
+    assert qa["code"] != "check_local_only", qa
+    assert code == 0, doc
+
+
+def test_to18_without_unreachable_checks_the_check_is_unknown_and_exits_3(worker, srv, capsys):
+    """칸이 없는 명세는 그 점검이 이 머신에 닿는지 말하지 않는다 — 「오지 않음」도 「점검 필요」도
+    단정하지 않고 「모름」, 종료 3 이다. `checks` 가 없는 프리셋은 이 칸과 상관없이 판정한다.
+    `placement` 까지 없는 옛 서버는 TD5 가 이미 종료 3 이다(그 명세에는 `checks` 도 없다)."""
+    qa = preset("qa", checks=("localcheck",))
+    build = preset("build")
+    for p in (qa, build):
+        del p["unreachable_checks"]
+    srv.route("GET", "/worker/spec", spec_doc(build, qa))
+    code, doc = worker(capsys)
+    got = row(doc, "qa")
+    assert got["state"] == "unknown" and got["applies"] != "not_coming", got
+    assert got["code"] != "check_local_only", got
+    assert row(doc, "build")["state"] == "ready", doc["presets"]
+    said = [u for u in doc["undecided"] if "check" in u]
+    assert len(said) == 1 and "qa" in said[0] and "build" not in said[0], doc["undecided"]
+    assert code == 3, doc
 
 
 def test_e3_the_local_lane_rows_use_the_coordinators_tools_hints(
@@ -1333,5 +1390,163 @@ def test_td19_tools_hints_are_not_in_status_or_machines(tmp_path):
                 assert status == 200, doc
                 text = json.dumps(doc)
                 assert "td19-install-text" not in text and '"tools"' not in text, path
+    finally:
+        srv.close()
+
+
+# ── /worker/spec 의 새 키 (TD15 · TD51 · TD16 의 서버 절반) ────────────────────
+
+
+def test_td15_worker_spec_carries_pool_pools_placement_checks_and_tools(tmp_path):
+    """doctor 가 이 머신에 올 프리셋만 세려면 서버가 키를 실어야 한다. 더하기만 한다 — 옛 워커는
+    모르는 키를 무시한다(`RemoteWorker.measure` 가 같은 명세로 그대로 잰다)."""
+    from remote_ci_monitor import remote_worker as rw
+    from remote_ci_monitor.config import WorkerConfig
+
+    hint = '\n[[tools]]\nname = "rcm-m5n-faketool"\n[tools.install]\nany = "td15-install"\n'
+    srv = m5n(tmp_path, extra=hint)
+    try:
+        srv.generation("build-02")
+        status, spec = srv.spec()
+        assert status == 200, spec
+        by = {p["name"]: p for p in spec["presets"]}
+        need = by["needtool"]
+        assert (need.get("pool"), need.get("placement")) == ("mac2", "pool"), need
+        assert by["capgate"].get("placement") == "any-capable", by["capgate"]
+        assert by["scenario"].get("checks") == ["simcheck"], by["scenario"]
+        sim = by["simcheck"]
+        assert (sim.get("source_modes"), sim.get("repo")) == (["git_ref"], "app"), sim
+        assert all({"pool", "pools", "placement", "checks"} <= set(p) for p in by.values()), by
+        assert spec.get("tools") == [
+            {"name": "rcm-m5n-faketool", "docs": "", "install": {"any": "td15-install"}}
+        ]
+        cfg = WorkerConfig(server="http://x", token="t", pool="mac2", lanes=1)
+        body = rw.RemoteWorker(cfg, client=None, log=lambda _m: None).measure(spec)  # type: ignore[arg-type]
+        assert set(body["presets"]) == set(by), body["presets"]
+    finally:
+        srv.close()
+
+
+def test_td51_worker_spec_pools_is_the_presets_pools_key_as_written(tmp_path):
+    from test_server_m5n import PRESETS
+
+    extra_preset = '\n[[presets]]\nname = "multi"\nargv = ["true"]\npools = ["mac2", "linux"]\n'
+    srv = m5n(tmp_path, presets=PRESETS + extra_preset)
+    try:
+        srv.generation("build-02")
+        _status, spec = srv.spec()
+        multi = next(p for p in spec["presets"] if p["name"] == "multi")
+        assert (multi.get("pool"), multi.get("pools")) == ("default", ["mac2", "linux"]), multi
+    finally:
+        srv.close()
+
+
+def test_td15_doctor_reads_the_real_servers_spec(tmp_path, monkeypatch, capsys):
+    """생산자(진짜 서버의 `/worker/spec`) → 소비자(doctor). 손으로 쓴 명세만 보면 키 이름이 갈려도
+    초록이다 — 진짜 명세로 옛 서버 판정(TD5)이 나지 않고 풀 · 배치가 읽히는지 본다."""
+    monkeypatch.setattr(doctor, "is_tty", lambda: False)
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    srv = m5n(tmp_path)
+    try:
+        monkeypatch.setenv("RCM_WORKER_TOKEN", srv.tokens["build-02"])
+        cfg = worker_toml(tmp_path, f"http://127.0.0.1:{srv.port}", pool="mac2", extra=REPO)
+        sf = plist(tmp_path / "svc", "/usr/bin:/bin")
+        monkeypatch.setattr(cli, "_ls_remote_problem", lambda url, timeout=10.0: None)
+        code, doc = run_json(
+            capsys, "--role", "worker", "--config", str(cfg), "--service-file", str(sf)
+        )
+        assert not any("older rcm" in u for u in doc["undecided"]), doc["undecided"]
+        assert (
+            row(doc, "needtool")["applies"] == "pool" and row(doc, "needtool")["state"] == "missing"
+        )
+        assert row(doc, "capgate")["applies"] == "not_coming", row(doc, "capgate")
+        assert row(doc, "ok")["applies"] == "other_pool", row(doc, "ok")  # 기본 풀 전용
+        assert code == 1, doc
+    finally:
+        srv.close()
+
+
+# ── /worker/spec 의 unreachable_checks (TO18 의 서버 절반 · 위임 결정 2) ───────
+
+GATED = """
+[[presets]]
+name = "relcheck"
+source_modes = ["git_ref"]
+repo = "app"
+argv = ["true"]
+local_only = true
+
+[[presets]]
+name = "gated"
+pool = "mac2"
+argv = ["true"]
+checks = ["relcheck", "simcheck"]
+"""
+
+
+def test_to18_worker_spec_names_the_checks_a_remote_worker_cannot_reach(tmp_path):
+    """서버가 프리셋마다 그 워커에서 닿을 수 없는 점검을 이유 코드와 함께 적는다. 빠진 것에서
+    짐작하게 두지 않는다. 키는 모든 항목에 있고 없으면 빈 목록이다."""
+    from test_server_m5n import PRESETS
+
+    srv = m5n(tmp_path, presets=PRESETS + GATED)
+    try:
+        srv.generation("build-02")
+        status, spec = srv.spec()
+        assert status == 200, spec
+        by = {p["name"]: p for p in spec["presets"]}
+        assert "relcheck" not in by, sorted(by)
+        assert by["gated"].get("unreachable_checks") == [
+            {"name": "relcheck", "code": "check_local_only"}
+        ], by["gated"]
+        assert by["scenario"].get("unreachable_checks") == [], by["scenario"]
+        assert all(p.get("unreachable_checks") == [] for n, p in by.items() if n != "gated"), by
+    finally:
+        srv.close()
+
+
+def test_to18_worker_spec_asks_the_servers_check_reachable(tmp_path, monkeypatch):
+    """칸은 서버의 후보 함수(`check_reachable`)가 채운다 — 같은 규칙을 다시 쓰지 않는다(6-A-U1).
+    그 함수가 「닿는다」고 하면(변이) 칸이 비어야 한다."""
+    from remote_ci_monitor import capabilities
+    from test_server_m5n import PRESETS
+
+    srv = m5n(tmp_path, presets=PRESETS + GATED)
+    try:
+        srv.generation("build-02")
+        monkeypatch.setattr(
+            capabilities.CapabilitiesMixin, "check_reachable", lambda self, view, check: True
+        )
+        _status, spec = srv.spec()
+        gated = next(p for p in spec["presets"] if p["name"] == "gated")
+        assert gated.get("unreachable_checks") == [], gated
+    finally:
+        srv.close()
+
+
+def test_to18_doctor_reads_the_real_servers_unreachable_checks(tmp_path, monkeypatch, capsys):
+    """생산자(진짜 서버) → 소비자(doctor). 서버가 칸을 비우면(변이) doctor 는 「점검 필요」로
+    잘못 읽는다 — 손으로 쓴 명세만으로는 그 어긋남이 보이지 않는다."""
+    from test_server_m5n import PRESETS
+
+    monkeypatch.setattr(doctor, "is_tty", lambda: False)
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    srv = m5n(tmp_path, presets=PRESETS + GATED)
+    try:
+        monkeypatch.setenv("RCM_WORKER_TOKEN", srv.tokens["build-02"])
+        cfg = worker_toml(tmp_path, f"http://127.0.0.1:{srv.port}", pool="mac2", extra=REPO)
+        sf = plist(tmp_path / "svc", "/usr/bin:/bin")
+        monkeypatch.setattr(cli, "_ls_remote_problem", lambda url, timeout=10.0: None)
+        _code, doc = run_json(
+            capsys, "--role", "worker", "--config", str(cfg), "--service-file", str(sf)
+        )
+        gated = row(doc, "gated")
+        assert (gated["applies"], gated["code"]) == ("not_coming", "check_local_only"), gated
+        assert "relcheck" in (gated["note"] or ""), gated
+        assert not any("check" in u for u in doc["undecided"]), doc["undecided"]
     finally:
         srv.close()
