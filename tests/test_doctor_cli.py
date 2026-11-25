@@ -634,7 +634,9 @@ def test_td17_offline_skips_git_ls_remote_but_still_asks_the_coordinator(
 ):
     monkeypatch.setenv("RCM_WORKER_TOKEN", TOKEN)
     calls: list[str] = []
-    monkeypatch.setattr(cli, "_ls_remote_problem", lambda url, timeout=10.0: calls.append(url))
+    monkeypatch.setattr(
+        cli, "_ls_remote_problem", lambda url, timeout=10.0, **_kw: calls.append(url)
+    )
     repo = '[[repos]]\nname = "app"\nurl = "https://example.invalid/app.git"\n'
     cfg = worker_toml(env, srv.url, extra=repo)
     sf = plist(env / "svc", f"{svcbin}:/usr/bin:/bin")
@@ -1042,7 +1044,9 @@ def test_d4_an_unreachable_repo_fails_and_exits_1_but_offline_is_info(
 ):
     """위임 결정 4: `[[repos]]` 에 닿지 못하면 git_ref 일을 못 받는다 — FAIL, 종료 1.
     `--offline` 이면 `git ls-remote` 를 돌리지 않고 info 다."""
-    monkeypatch.setattr(cli, "_ls_remote_problem", lambda url, timeout=10.0: "unreachable: nope")
+    monkeypatch.setattr(
+        cli, "_ls_remote_problem", lambda url, timeout=10.0, **_kw: "unreachable: nope"
+    )
     sf = plist(env / "svc", f"{svcbin}:/usr/bin:/bin")
     code, doc = run_worker(capsys, env, srv, sf, toml_extra=REPO)
     assert req(doc, "repos")["state"] == "fail", doc["rcm_requirements"]
@@ -1082,7 +1086,7 @@ def test_d6_git_is_measured_for_git_ref_presets_and_a_missing_repo_fails(
     """위임 결정 6 · E4: git 은 `[[repos]]` 유무가 아니라 이 머신에 오는 git_ref 프리셋이 있으면
     잰다. 그 프리셋의 저장소가 이 워커의 `[[repos]]` 에 없으면 `repo_missing` 으로 FAIL 이다 —
     넣어야 할 저장소 이름을 알려 줄 뿐 채우지는 않는다(§3.6 D8)."""
-    monkeypatch.setattr(cli, "_ls_remote_problem", lambda url, timeout=10.0: None)
+    monkeypatch.setattr(cli, "_ls_remote_problem", lambda url, timeout=10.0, **_kw: None)
     sf = plist(env / "svc", f"{svcbin}:/usr/bin:/bin")
     srv.route("GET", "/worker/spec", spec_doc(git_preset("deploy")))
     code, doc = run_worker(capsys, env, srv, sf)
@@ -1453,7 +1457,7 @@ def test_td15_doctor_reads_the_real_servers_spec(tmp_path, monkeypatch, capsys):
         monkeypatch.setenv("RCM_WORKER_TOKEN", srv.tokens["build-02"])
         cfg = worker_toml(tmp_path, f"http://127.0.0.1:{srv.port}", pool="mac2", extra=REPO)
         sf = plist(tmp_path / "svc", "/usr/bin:/bin")
-        monkeypatch.setattr(cli, "_ls_remote_problem", lambda url, timeout=10.0: None)
+        monkeypatch.setattr(cli, "_ls_remote_problem", lambda url, timeout=10.0, **_kw: None)
         code, doc = run_json(
             capsys, "--role", "worker", "--config", str(cfg), "--service-file", str(sf)
         )
@@ -1540,7 +1544,7 @@ def test_to18_doctor_reads_the_real_servers_unreachable_checks(tmp_path, monkeyp
         monkeypatch.setenv("RCM_WORKER_TOKEN", srv.tokens["build-02"])
         cfg = worker_toml(tmp_path, f"http://127.0.0.1:{srv.port}", pool="mac2", extra=REPO)
         sf = plist(tmp_path / "svc", "/usr/bin:/bin")
-        monkeypatch.setattr(cli, "_ls_remote_problem", lambda url, timeout=10.0: None)
+        monkeypatch.setattr(cli, "_ls_remote_problem", lambda url, timeout=10.0, **_kw: None)
         _code, doc = run_json(
             capsys, "--role", "worker", "--config", str(cfg), "--service-file", str(sf)
         )
@@ -1650,3 +1654,109 @@ def test_a_broken_systemd_line_is_named_not_silently_dropped(env, srv, monkeypat
     said = [u for u in doc["undecided"] if "line 3" in u and "Environment" in u]
     assert said and sf.name in said[0], doc["undecided"]
     assert "td-v" not in out + err
+
+
+# ── git ls-remote 는 서비스 환경과 shim 규칙으로 (P3 1라운드 MED · 검증자 1 #1 #2, 2 #2) ──
+
+
+@pytest.fixture
+def clt_shim(env, monkeypatch) -> tuple[Path, Path]:
+    """가짜 `/usr/bin/` 의 `git` shim(바이트에 `libxcselect`)과 CLT 가 없는 `xcode-select`.
+    shim 이 실행되면 표지 파일이 생긴다. (shim 폴더, 표지)"""
+    from remote_ci_monitor import runner
+
+    d = env / "usr-bin"
+    d.mkdir()
+    marker = env / "shim-ran"
+    script(d / "git", f"# links against libxcselect.dylib\ntouch {marker}\necho 'git 2.0'")
+    monkeypatch.setattr(runner, "SHIM_DIR", str(d) + "/")
+    monkeypatch.setattr(runner, "SHIM_PLATFORM", "darwin")
+    monkeypatch.setattr(runner, "XCODE_SELECT", str(script(env / "no-clt-select", "exit 2")))
+    return d, marker
+
+
+def local_repo(env: Path) -> str:
+    """닿지 않는 저장소 — 네트워크를 쓰지 않는 로컬 경로."""
+    return f'[[repos]]\nname = "app"\nurl = "{env / "nowhere.git"}"\n'
+
+
+def shell_git(env: Path, monkeypatch) -> Path:
+    """셸 PATH 에만 있는 `git` — 실행되면 표지를 남긴다. 서비스 환경으로 재는 쪽은 이것을 쓰면
+    안 된다."""
+    d = env / "shellbin"
+    d.mkdir()
+    marker = env / "shell-git-ran"
+    script(d / "git", f"touch {marker}\nexit 128")
+    monkeypatch.setenv("PATH", f"{d}:/usr/bin:/bin")
+    return marker
+
+
+def test_doctor_ls_remote_runs_the_service_paths_git_in_the_service_env(
+    env, srv, svcbin, monkeypatch, capsys
+):
+    """doctor 의 `git ls-remote` 는 셸 PATH 의 git 이 아니라 서비스 PATH 에서 찾은 git 을 서비스
+    환경으로 돌린다 — 셸의 `JAVA_HOME` 이 새지 않고 서비스 파일의 변수는 보인다."""
+    monkeypatch.setenv("RCM_WORKER_TOKEN", TOKEN)
+    monkeypatch.setenv("JAVA_HOME", "/td-shell-java")
+    shell_marker = shell_git(env, monkeypatch)
+    seen = env / "svc-git-env"
+    script(svcbin / "git", f'env > "{seen}"\nexit 0')
+    cfg = worker_toml(env, srv.url, extra=local_repo(env))
+    sf = plist(env / "svc", f"{svcbin}:/usr/bin:/bin", extra={"TD_SVC_ONLY": "1"})
+    code, doc = run_json(
+        capsys, "--role", "worker", "--config", str(cfg), "--service-file", str(sf)
+    )
+    assert not shell_marker.exists(), "doctor ran the shell's git"
+    assert seen.exists(), doc["rcm_requirements"]
+    got = seen.read_text()
+    assert "TD_SVC_ONLY=1" in got and "GIT_TERMINAL_PROMPT=0" in got, got
+    assert "JAVA_HOME" not in got, got
+    assert req(doc, "repos")["state"] == "ok", doc["rcm_requirements"]
+
+
+def test_doctor_never_runs_a_git_shim_for_ls_remote(env, srv, clt_shim, monkeypatch, capsys):
+    """CLT 없는 macOS 의 `/usr/bin/git` shim 을 실행하면 설치 대화상자가 뜬다. doctor 는 그 shim
+    으로 `git ls-remote` 를 돌리지 않고 git 을 「없음(CLT 필요)」으로, 저장소를 FAIL 로 보인다."""
+    shims, marker = clt_shim
+    monkeypatch.setenv("RCM_WORKER_TOKEN", TOKEN)
+    shell_marker = shell_git(env, monkeypatch)
+    cfg = worker_toml(env, srv.url, extra=local_repo(env))
+    sf = plist(env / "svc", f"{shims}:/bin")
+    code, doc = run_json(
+        capsys, "--role", "worker", "--config", str(cfg), "--service-file", str(sf)
+    )
+    assert not marker.exists() and not shell_marker.exists(), "a git ran"
+    repos = req(doc, "repos")
+    assert repos["state"] == "fail" and "git missing" in repos["detail"], repos
+    assert code == 1, doc
+
+
+def test_worker_check_git_row_follows_the_shim_rule(env, srv, clt_shim, monkeypatch, capsys):
+    """`rcm worker --check` 의 git 행도 `shutil.which` 가 아니라 shim 규칙을 거친다. shim 은
+    「missing (needs Command Line Tools)」이고 `git ls-remote` 를 돌리지 않는다."""
+    shims, marker = clt_shim
+    monkeypatch.setenv("RCM_WORKER_TOKEN", TOKEN)
+    monkeypatch.setenv("PATH", f"{shims}:/bin")
+    cfg = worker_toml(env, srv.url, extra=local_repo(env))
+    code = cli.main(["worker", "--check", "--config", str(cfg), "--data", str(env / "wd")])
+    lines = capsys.readouterr().out.splitlines()
+    git = check_line(lines, "git")
+    assert git is not None and git.startswith("FAIL"), lines
+    assert "needs Command Line Tools" in git, git
+    assert not marker.exists(), "worker --check ran the git shim"
+    assert code == 1, lines
+
+
+def test_rcm_check_git_row_follows_the_shim_rule(env, clt_shim, monkeypatch, capsys):
+    shims, marker = clt_shim
+    monkeypatch.setenv("PATH", f"{shims}:/bin")
+    monkeypatch.setenv("RCM_SERVER", f"http://127.0.0.1:{free_port()}")
+    monkeypatch.setenv("RCM_TOKEN", CLIENT_TOKEN)
+    cfg = env / "server.toml"
+    cfg.write_text(f'[server]\ndata_dir = "{env / "data"}"\n\n' + local_repo(env))
+    cli.main(["check", "--config", str(cfg)])
+    lines = capsys.readouterr().out.splitlines()
+    git = check_line(lines, "git")
+    assert git is not None and git.startswith("FAIL"), lines
+    assert "needs Command Line Tools" in git, git
+    assert not marker.exists(), "rcm check ran the git shim"
