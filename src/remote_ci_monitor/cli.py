@@ -3957,7 +3957,8 @@ def _local_preset_tools_row(cfg: Any) -> tuple[str, bool, str] | None:
     """
     from remote_ci_monitor.runner import missing_tools, public_tool_name
 
-    if cfg.server.lanes == 0 and any(p.requires for p in cfg.presets):
+    lanes = getattr(getattr(cfg, "server", None), "lanes", None)
+    if lanes == 0 and any(p.requires for p in cfg.presets):
         # 분배 전용(M5t-a 결정 243) — 이 머신에서 돌 잡이 없으니 빠진 도구는 문제가 아니다
         return ("local preset tools", True, NO_LOCAL_LANES_TEXT)
     parts: list[str] = []
