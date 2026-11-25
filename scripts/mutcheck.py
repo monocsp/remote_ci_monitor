@@ -14,6 +14,11 @@
      + `m5t-check-local-only-claimed-ignored`: 그 머신이 집은 점검도 check_local_only 로 냄
      (`capabilities.py`, batch 7 T3)
      + `m5t-claim-excluded-sql-dropped`: claim SQL 이 제외 목록을 안 씀(`store.py`, batch 7 T5)
+  M5t-a PR2 — `doctor-unknown-exits-0`: 판정 못 함을 0 으로 끝냄(`core/doctor.py`, 결정 246) +
+     `doctor-spec-unreachable-checks-empty`: `/worker/spec` 의 `unreachable_checks` 가 늘 빔
+     (`capabilities.py`, TO18) + P3 1라운드의 넷: 잘린 XML plist 를 안 잡음(`doctor.py`) ·
+     `rcm check` 의 git 행이 shim 규칙을 건너뜀(`cli.py`) · 서버가 재지 않은 로컬 레인 프리셋이
+     ready(`doctor.py`) · 호스트 사실의 제어문자를 안 지움(`capabilities.py`)
   M5s C — `action-*` 다섯: 도는 행의 표식을 이유가 무시 · code 어휘 검사 제거 · note 제어문자를
      안 지움 · 플래그 없이 4 · 취소 중에도 4 + `clean-line-keeps-bidi`(note · 실패 이름이 bidi 를
      남김) (`docs/m5s-workplan.md` §4.3 · 결정 213 · 234 · #251 격리 검증)
@@ -2376,6 +2381,57 @@ MUTANTS = (
             "test_to18_worker_spec_names_the_checks_a_remote_worker_cannot_reach",
             "tests/test_doctor_cli.py::test_to18_doctor_reads_the_real_servers_unreachable_checks",
         ),
+    ),
+    Mutant(
+        # 잘린 XML 의 plist(ExpatError — ValueError 가 아니다)를 잡지 않는다 — 설치 자리에 깨진
+        # plist 하나만 있어도 `--service-file` 없는 doctor 가 traceback 으로 끝난다(P3 1라운드 HIGH)
+        name="doctor-service-file-expat-uncaught",
+        path="src/remote_ci_monitor/doctor.py",
+        old=(
+            "    except (ValueError, plistlib.InvalidFileException, xml.parsers.expat.ExpatError)"
+            " as e:\n"
+        ),
+        new="    except (ValueError, plistlib.InvalidFileException) as e:\n",
+        tests=(
+            "tests/test_doctor_cli.py::"
+            "test_an_unreadable_plist_in_launch_agents_is_named_and_exits_3",
+            "tests/test_doctor_cli.py::"
+            "test_an_unreadable_explicit_service_file_is_unknown_not_a_crash",
+        ),
+    ),
+    Mutant(
+        # `rcm check` · `rcm worker --check` 의 git 행이 shim 규칙 없이 `shutil.which` 를 쓴다 — CLT
+        # 없는 Mac 에서 shim 을 「있음」으로 세고 그것으로 `git ls-remote` 를 돌려 설치 창을 띄운다
+        # (P3 1라운드 MED, 검증자 1 #2)
+        name="check-git-row-skips-shim-rule",
+        path="src/remote_ci_monitor/cli.py",
+        old='    git = runner.find_tool("git", path)\n',
+        new='    git = shutil.which("git", path=path)\n',
+        tests=(
+            "tests/test_doctor_cli.py::test_worker_check_git_row_follows_the_shim_rule",
+            "tests/test_doctor_cli.py::test_rcm_check_git_row_follows_the_shim_rule",
+        ),
+    ),
+    Mutant(
+        # 서버가 재지 않은 로컬 레인 프리셋(`preset_env` 에 없음)을 빈 「빠진 도구」로 읽어 ready 라
+        # 부른다(P3 1라운드 MED, 검증자 1 #3)
+        name="doctor-local-lane-unmeasured-ready",
+        path="src/remote_ci_monitor/doctor.py",
+        old="            if not isinstance(got, dict) and p.requires and row.counts:\n",
+        new="            if False:\n",
+        tests=(
+            "tests/test_doctor_cli.py::"
+            "test_a_local_lane_preset_the_server_did_not_measure_is_unknown",
+        ),
+    ),
+    Mutant(
+        # 워커가 보낸 호스트 사실의 제어문자를 지우지 않는다 — ESC 가 `rcm machines` 의 터미널과
+        # 웹에 그대로 나간다(P3 1라운드 MED, 검증자 2 #3)
+        name="host-facts-control-chars-kept",
+        path="src/remote_ci_monitor/capabilities.py",
+        old='            out[key] = _HOST_CONTROL_RE.sub("", value)[:HOST_FACT_MAX] or None\n',
+        new="            out[key] = value[:HOST_FACT_MAX] or None\n",
+        tests=("tests/test_doctor_cli.py::test_host_facts_lose_control_characters_and_stop_at_64",),
     ),
     Mutant(
         # 후보 함수가 `local_only` 프리셋에서 원격 머신을 빼지 않는다 — 배치 · ETA · 제출 · 점검 ·
