@@ -30,7 +30,8 @@ stdin 으로 받아 판정 JSON 을 stdout 으로 낸다.
 알려진 한계(실수 방지용이지 적대자 방어가 아니다): `bash -c '…'` · `sh -c` · `xargs` ·
 `uv run` · `$(…)` 안의 명령은 보지 않는다. 심링크 별칭(`/tmp` ↔ `/private/tmp`, 운영 data_dir
 로 가는 링크)은 못 본다 — 경로는 `normpath` 로만 비교한다. `$VAR` 은 훅 프로세스의 환경으로
-펼치고, 같은 명령줄 앞 조각의 `VAR=…; …` 정의는 못 본다. `pushd` 는 `cd` 가 아니다.
+펼치고, 같은 명령줄 앞 조각의 `VAR=…; …` 정의는 못 본다. `pushd` 는 `cd` 가 아니다. `rcm setup`
+의 값은 셸이 펼쳤을 때와 setup 이 글자 그대로 받았을 때를 모두 후보로 본다(`_setup_request`).
 
 훅 자체가 터지면 막지 않고 경고만 남긴다. 모든 Bash 를 막는 가드는 가드가 아니라 고장이다.
 """
@@ -115,6 +116,18 @@ _STANDARD_UNITS = {
     "com.remote-ci-monitor.server": "rcm-server",
     "com.remote-ci-monitor.worker": "rcm-worker",
 }
+#: 서비스 관리자가 서비스 파일을 읽는 자리(launchd · systemd, 사용자 · 시스템). `SERVICE_UNITS` 가
+#: 모두 이 안에 있다. `rcm setup --service-file` 이 이 안을 가리키면 거절한다 — 운영 서비스 파일
+#: (`com.remote-ci-monitor.*.plist` · `rcm-*.service`)과 그 drop-in(`<유닛>.d/`)을 라벨과 상관없이
+#: 덮을 수 있고, setup 자신도 이 자리에는 쓰지 않는다(§4.1 「설치 자리에 쓰지 않는다」)
+SETUP_SERVICE_PLACES = (
+    "~/Library/LaunchAgents",
+    "/Library/LaunchAgents",
+    "/Library/LaunchDaemons",
+    "~/.config/systemd/user",
+    "/etc/systemd/user",
+    "/etc/systemd/system",
+)
 #: 서버 데이터 폴더를 고르는 setup 역할(역할 2 · 4). 역할을 안 주면 setup 이 물을 수 있어
 #: 이쪽으로 본다.
 SETUP_SERVER_ROLES = ("coordinator", "coordinator-worker")
@@ -796,63 +809,162 @@ def unit_name(label: str) -> str:
     return f"{_STANDARD_UNITS.get(label, label)}.service"
 
 
-def _home_of(env: SegmentEnv) -> Path:
-    """그 명령이 보는 HOME — 조각 앞의 `HOME=…` 가 세션의 것을 이긴다. 없으면(`env -i`) 이
-    사용자의 홈이다(`Path.home()` 이 passwd 로 찾는 것과 같다)."""
+_VARIABLE = re.compile(r"\$(?:\{([A-Za-z_][A-Za-z0-9_]*)\}|([A-Za-z_][A-Za-z0-9_]*))")
+
+
+def _expand_variables(text: str, lookup: Mapping[str, str]) -> str:
+    """`$NAME` · `${NAME}` 를 펼친다. 모르는 이름은 그대로 둔다(`os.path.expandvars` 와 같다)."""
+
+    def one(match: re.Match[str]) -> str:
+        name = match.group(1) or match.group(2)
+        value = lookup.get(name)
+        return match.group(0) if value is None else value
+
+    return _VARIABLE.sub(one, text)
+
+
+def _shell_words(raw: str, env: SegmentEnv, cwd: Path) -> list[str]:
+    """setup 이 받을 수 있는 값들. shlex 가 따옴표를 이미 떼어 냈으므로 셸이 `$VAR` 를 펼쳤는지
+    모른다 — 펼치지 않은 글자, 셸이 제 변수로 펼친 값(`VAR=` 앞머리는 명령에만 가고 셸이 펼치는
+    인자에는 닿지 않는다. `$PWD` 는 그 조각의 작업 폴더다), 앞머리를 먼저 본 값을 모두 후보로
+    둔다. 하나라도 운영이면 막는 쪽이 훅에게 안전한 방향이다."""
+    shell = {**env.session, "PWD": str(cwd)}
+    segment = {**shell, **env.vars}
+    words = [raw, _expand_variables(raw, shell), _expand_variables(raw, segment)]
+    return list(dict.fromkeys(words))
+
+
+def _command_home(env: SegmentEnv, cwd: Path) -> Path:
+    """그 명령(setup)이 보는 HOME — 조각 앞의 `HOME=…` 가 세션의 것을 이긴다(그 값은 셸이 세션
+    변수로 펼친다). 없으면(`env -i`) 이 사용자의 홈이다(`Path.home()` 이 passwd 로 찾는 것과
+    같다)."""
+    if "HOME" in env.vars:
+        value = _expand_variables(env.vars["HOME"], {**env.session, "PWD": str(cwd)})
+        return Path(value) if value else Path.home()
     home = env.get("HOME")
     return Path(home) if home else Path.home()
 
 
-def _setup_path(raw: str, home: Path, cwd: Path) -> Path | None:
-    """setup 이 경로를 푸는 법 — `~` 는 그 명령의 HOME, 상대 경로는 작업 폴더 기준이다
-    (`os.path.abspath(os.path.expanduser(…))`)."""
-    text = raw.strip().strip("'\"")
-    if not text:
-        return None
-    if text == "~" or text.startswith("~/"):
-        text = str(home) + text[1:]
-    elif text.startswith("~"):
-        text = os.path.expanduser(text)  # ~user
-    path = Path(text)
-    return _norm(path if path.is_absolute() else cwd / path)
+def _shell_home(env: SegmentEnv) -> Path:
+    """셸 자신의 HOME — 인자의 `~` 는 셸이 이것으로 펼친다(앞머리 `HOME=` 는 명령에만 간다)."""
+    home = env.session.get("HOME")
+    return Path(home) if home else Path.home()
 
 
-def _setup_targets(argv: list[str], cwd: Path, env: SegmentEnv) -> list[Path]:
-    """setup 이 쓸 자리 — setup 과 같은 규칙으로 계산한다. `--config` 가 있으면 그 파일과 옆의
-    `service/`, 없으면 설정 폴더(`$XDG_CONFIG_HOME/rcm`, 없으면 `$HOME/.config/rcm`,
-    config.py `user_config_dir`). `--service-file` 도 쓰는 자리다."""
-    home = _home_of(env)
+def _setup_paths(raw: str, env: SegmentEnv, cwd: Path) -> list[Path]:
+    """경로 값 하나가 가리킬 수 있는 자리들. 셸이 펼친 `~` 는 셸의 HOME, 따옴표로 감싸 setup 에
+    그대로 간 `~` 는 그 명령의 HOME(`os.path.expanduser`)으로 푼다. `~user` 는 그 사용자의 홈,
+    상대 경로는 작업 폴더 기준이다(`os.path.abspath`)."""
     out: list[Path] = []
-    config = _option_value(argv, ("--config",))
-    if config is not None:
-        path = _setup_path(config, home, cwd)
-        if path is not None:
-            out += [path, path.parent / "service"]
-    else:
-        xdg = env.get("XDG_CONFIG_HOME")
-        base = _setup_path(xdg, home, cwd) if xdg else None
-        out.append(_norm((base or home / ".config") / "rcm"))
-    service = _option_value(argv, ("--service-file",))
-    if service is not None:
-        path = _setup_path(service, home, cwd)
-        if path is not None:
-            out.append(path)
+    for word in _shell_words(raw.strip(), env, cwd):
+        if not word:
+            continue
+        if word == "~" or word.startswith("~/"):
+            texts = [str(home) + word[1:] for home in (_shell_home(env), _command_home(env, cwd))]
+        elif word.startswith("~"):
+            texts = [os.path.expanduser(word)]
+        else:
+            texts = [word]
+        for text in texts:
+            path = Path(text)
+            out.append(_norm(path if path.is_absolute() else cwd / path))
+    return list(dict.fromkeys(out))
+
+
+def _option_values(argv: list[str], name: str) -> list[str]:
+    """그 옵션의 값 전부(`--name VALUE` · `--name=VALUE`). argparse 는 마지막 것을 쓰지만 훅은
+    모두 본다. 이름은 정확히 같아야 한다 — setup 의 파서는 줄인 옵션을 받지 않는다
+    (`allow_abbrev=False`), 그래서 줄인 이름이 든 명령은 아무것도 쓰지 않고 종료 2 로 끝난다."""
+    out: list[str] = []
+    for index, token in enumerate(argv):
+        if token == name and index + 1 < len(argv):
+            out.append(argv[index + 1])
+        elif token.startswith(name + "="):
+            out.append(token.split("=", 1)[1])
     return out
+
+
+@dataclass(frozen=True)
+class SetupRequest:
+    """`rcm setup` 명령줄을 setup 과 셸이 보는 대로 푼 것. 값마다 후보가 여럿일 수 있다."""
+
+    roles: tuple[str | None, ...]
+    labels: tuple[str, ...]
+    #: 쓰는 자리 — 설정 파일과 옆의 `service/`(또는 설정 폴더), `--service-file`
+    targets: tuple[Path, ...]
+    service_files: tuple[Path, ...]
+    data_dirs: tuple[Path, ...]
+
+
+def _setup_request(argv: list[str], cwd: Path, env: SegmentEnv) -> SetupRequest:
+    """setup 명령줄을 푸는 함수 하나 — 세 규칙이 모두 이것만 읽는다. setup 과 같은 규칙으로
+    계산한다: `--config` 가 있으면 그 파일과 옆의 `service/`, 없으면 설정 폴더
+    (`$XDG_CONFIG_HOME/rcm`, 없으면 `$HOME/.config/rcm`, config.py `user_config_dir`)."""
+    roles: list[str | None] = [None]
+    given = _option_values(argv, "--role")
+    if given:
+        roles = [word for raw in given for word in _shell_words(raw, env, cwd)]
+    labels = [
+        word for raw in _option_values(argv, "--label") for word in _shell_words(raw, env, cwd)
+    ]
+    targets: list[Path] = []
+    configs = _option_values(argv, "--config")
+    for raw in configs:
+        for path in _setup_paths(raw, env, cwd):
+            targets += [path, path.parent / "service"]
+    if not configs:
+        xdg = env.get("XDG_CONFIG_HOME")
+        bases = _setup_paths(xdg, env, cwd) if xdg else []
+        for base in bases or [_command_home(env, cwd) / ".config"]:
+            targets.append(_norm(base / "rcm"))
+    service_files = [
+        path
+        for raw in _option_values(argv, "--service-file")
+        for path in _setup_paths(raw, env, cwd)
+    ]
+    data = _option_values(argv, "--data-dir")
+    if data:
+        data_dirs = [path for raw in data for path in _setup_paths(raw, env, cwd)]
+    else:
+        # 템플릿 기본값은 setup 이 제 HOME 으로 푼다 — 셸은 보지 않는다
+        home = _command_home(env, cwd)
+        data_dirs = [_norm(home / DEFAULT_DATA_DIR.removeprefix("~/"))]
+    return SetupRequest(
+        tuple(dict.fromkeys(roles)),
+        tuple(dict.fromkeys(labels)),
+        tuple(dict.fromkeys(targets + service_files)),
+        tuple(service_files),
+        tuple(dict.fromkeys(data_dirs)),
+    )
+
+
+def _service_place(path: Path, env: SegmentEnv) -> Path | None:
+    """서비스 관리자가 읽는 자리(`SETUP_SERVICE_PLACES`) 안이면 그 자리. `~` 는 이 사용자의 홈
+    (세션의 HOME)이다 — 운영 서비스는 명령 앞의 `HOME=` 으로 옮겨 가지 않는다."""
+    home = str(_shell_home(env))
+    for place in SETUP_SERVICE_PLACES:
+        root = Path(home + place[1:]) if place.startswith("~") else Path(place)
+        if inside(path, root):
+            return _norm(root)
+    return None
 
 
 def _setup_verdict(argv: list[str], cwd: Path, prod: Production, env: SegmentEnv) -> Verdict | None:
     """`rcm setup` 의 세 규칙. setup 은 DB 를 열지 않지만 운영 자리에 설정 · 서비스 파일을 쓰거나
     운영 `data_dir` 을 고른 서버 설정을 만들 수 있다 — 그 서비스는 setup 을 돌린 빌드로 운영 DB 를
-    연다.
+    연다. 명령줄은 `_setup_request` 하나로 푼다(셸 변수 · `~` · 반복한 옵션).
 
-    1. 쓸 자리(설정 파일 · `service/` · `--service-file`)가 운영 설정 폴더 안이면 거절한다.
+    1. 쓸 자리(설정 파일 · `service/` · `--service-file`)가 운영 설정 폴더 안이거나,
+       `--service-file` 이 서비스 관리자가 읽는 자리(`SETUP_SERVICE_PLACES` — 운영 서비스 파일이
+       있는 곳) 안이면 거절한다.
     2. 서비스 라벨이 운영 라벨이면 거절한다. `--label` 이 없으면 역할의 표준 라벨이다. 역할을 안
        주면 setup 이 물을 수 있으니 표준 라벨로 본다. client 는 서비스 파일이 없다.
     3. 역할 2 · 4(또는 역할 없음)의 `data_dir` — `--data-dir`, 없으면 템플릿 기본값을 그 명령의
        HOME 으로 푼 것 — 이 운영 `data_dir` 이거나 그 안이면 거절한다(6-A-L4 · 6-B-V5)."""
     if not prod.known:
         return None
-    for target in _setup_targets(argv, cwd, env):
+    request = _setup_request(argv, cwd, env)
+    for target in request.targets:
         if inside(target, prod.config_dir):
             return Verdict(
                 "deny",
@@ -860,31 +972,39 @@ def _setup_verdict(argv: list[str], cwd: Path, prod: Production, env: SegmentEnv
                 f"({prod.config_dir}). Give it a test HOME or XDG_CONFIG_HOME, or `--config` and "
                 f"`--service-file` paths of its own. See {DOCS}.",
             )
-    role = _option_value(argv, ("--role",))
-    if role != "client":
-        label = _option_value(argv, ("--label",))
-        if label is None:
-            label = SETUP_ROLE_LABELS.get(role or "", SETUP_STANDARD_LABELS[0])
-        units = {unit_name(standard) for standard in SETUP_STANDARD_LABELS}
-        if label in SETUP_STANDARD_LABELS or unit_name(label) in units:
+    for target in request.service_files:
+        place = _service_place(target, env)
+        if place is not None:
             return Verdict(
                 "deny",
-                f"`rcm setup` here would write a service file labelled {label} — the production "
-                "service's label on this machine. Pass `--label` with a test label. See "
-                f"{DOCS}.",
+                f"`rcm setup --service-file {target}` would write inside {place}, where the "
+                "service manager reads service files — the production service's files live "
+                "there. Let setup write under its config folder's `service/` and copy the file "
+                f"yourself. See {DOCS}.",
             )
-    if role is None or role in SETUP_SERVER_ROLES:
-        home = _home_of(env)
-        raw = _option_value(argv, ("--data-dir",))
-        data = _setup_path(raw if raw is not None else DEFAULT_DATA_DIR, home, cwd)
-        if inside(data, prod.data_dir):
-            return Verdict(
-                "deny",
-                f"`rcm setup` here would point a server at {data}, inside the production data "
-                f"directory ({prod.data_dir}) — that server would open the production database "
-                "with the build that ran setup. Pass `--data-dir` with a new folder of its own. "
-                f"See {DOCS}.",
-            )
+    units = {unit_name(standard) for standard in SETUP_STANDARD_LABELS}
+    for role in request.roles:
+        if role == "client":
+            continue
+        labels = request.labels or (SETUP_ROLE_LABELS.get(role or "", SETUP_STANDARD_LABELS[0]),)
+        for label in labels:
+            if label in SETUP_STANDARD_LABELS or unit_name(label) in units:
+                return Verdict(
+                    "deny",
+                    f"`rcm setup` here would write a service file labelled {label} — the "
+                    "production service's label on this machine. Pass `--label` with a test "
+                    f"label. See {DOCS}.",
+                )
+    if any(role is None or role in SETUP_SERVER_ROLES for role in request.roles):
+        for data in request.data_dirs:
+            if inside(data, prod.data_dir):
+                return Verdict(
+                    "deny",
+                    f"`rcm setup` here would point a server at {data}, inside the production "
+                    f"data directory ({prod.data_dir}) — that server would open the production "
+                    "database with the build that ran setup. Pass `--data-dir` with a new folder "
+                    f"of its own. See {DOCS}.",
+                )
     return None
 
 
