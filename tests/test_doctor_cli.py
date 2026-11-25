@@ -3313,9 +3313,12 @@ def test_a_git_ls_remote_that_times_out_or_cannot_run_is_unknown_not_unreachable
     프로브 시한 초과처럼 모름(종료 3)이다. 저장소 행은 FAIL 이 아니다."""
     import subprocess
 
+    from remote_ci_monitor import gitops
+
     monkeypatch.setenv("RCM_WORKER_TOKEN", TOKEN)
     script(svcbin / "git", "echo 'git version 2.45.0'")
-    real = subprocess.run
+    # `git ls-remote` 는 그룹째 거두는 `gitops._run_process` 로 돈다(P6 GAP E2) — 그 자리를 바꾼다
+    real = gitops._run_process
 
     def fake(argv, *a, **kw):
         if len(argv) > 1 and argv[1] == "ls-remote":
@@ -3324,7 +3327,7 @@ def test_a_git_ls_remote_that_times_out_or_cannot_run_is_unknown_not_unreachable
             raise PermissionError(13, "Permission denied")
         return real(argv, *a, **kw)
 
-    monkeypatch.setattr(subprocess, "run", fake)
+    monkeypatch.setattr(gitops, "_run_process", fake)
     sf = plist(env / "svc", f"{svcbin}:/usr/bin:/bin")
     code, doc = run_worker(capsys, env, srv, sf, toml_extra=REPO)
     repos = req(doc, "repos")
@@ -4393,3 +4396,53 @@ def test_the_production_guard_blocks_port_8787_on_any_address(address):
     assert conftest.production_address((address, 8787)), address
     assert conftest.production_address((address, 8787, 0, 0)), address
     assert not conftest.production_address((address, 8788)), address
+
+
+# ── P6 GAP E2: 시한이 지난 git 은 그 손자까지 거둔다 ─────────────────────────────────
+
+
+def lingering_git(tmp_path: Path) -> tuple[Path, Path]:
+    """`git-remote-https` 처럼 손자를 남기는 가짜 git — 손자의 pid 를 파일에 적고 기다린다."""
+    pidfile = tmp_path / "grandchild.pid"
+    git = script(
+        tmp_path / "git",
+        f"/bin/sleep 30 >/dev/null 2>&1 &\necho $! > {pidfile}\nwait",
+    )
+    return git, pidfile
+
+
+def gone(pidfile: Path, seconds: float = 5.0) -> bool:
+    import time
+
+    deadline = time.monotonic() + seconds
+    while not pidfile.exists() or not pidfile.read_text().strip():
+        if time.monotonic() > deadline:
+            return False
+        time.sleep(0.05)
+    pid = int(pidfile.read_text())
+    while time.monotonic() < deadline:
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return True
+        time.sleep(0.05)
+    os.kill(pid, 9)  # 시험이 남기지 않게
+    return False
+
+
+def test_e2_a_timed_out_ls_remote_leaves_no_helper_behind(tmp_path):
+    """`git ls-remote` 가 시한을 넘기면 git 만이 아니라 그 그룹(자격 헬퍼 · `git-remote-https`)을
+    거둔다 — doctor 가 끝난 뒤 남지 않는다(P6 GAP E2)."""
+    git, pidfile = lingering_git(tmp_path)
+    got = cli._ls_remote_problem(
+        "https://example.invalid/app.git", 0.5, git=str(git), env={"PATH": "/usr/bin:/bin"}
+    )
+    assert isinstance(got, doctor_core.Unsure), got
+    assert gone(pidfile), "the helper outlived git ls-remote"
+
+
+def test_e2_a_timed_out_git_version_leaves_no_helper_behind(tmp_path, monkeypatch):
+    git, pidfile = lingering_git(tmp_path)
+    monkeypatch.setattr(doctor, "GIT_VERSION_TIMEOUT", 0.5)
+    assert doctor._git_version(str(git), {"PATH": "/usr/bin:/bin"}) is None
+    assert gone(pidfile), "the helper outlived git --version"

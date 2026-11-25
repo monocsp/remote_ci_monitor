@@ -37,6 +37,8 @@ from remote_ci_monitor.core import jobenv
 PLATFORM = sys.platform
 MIN_PYTHON = (3, 11, 4)
 MIN_GIT_TOKEN_FILE = (2, 31)
+#: `git --version` 의 시한(초) — 시험이 줄인다
+GIT_VERSION_TIMEOUT = 10.0
 MIN_SQLITE = (3, 24, 0)
 FD_WANTED = 4096
 #: 표준 라벨의 설치 자리(launchd · systemd 사용자 유닛)
@@ -185,17 +187,22 @@ def python_requirement(
 
 
 def _git_version(git: str, env: Mapping[str, str]) -> tuple[int, int] | None:
-    """서비스 환경으로 돈다 — 셸의 환경(`GIT_EXEC_PATH` 같은 것)이 다른 답을 주지 않게."""
+    """서비스 환경으로 돈다 — 셸의 환경(`GIT_EXEC_PATH` 같은 것)이 다른 답을 주지 않게. 자기
+    프로세스 그룹에서 돌고 시한을 넘기면 그룹째 거둔다 — 감싼 git 의 손자가 doctor 뒤에 남지
+    않게(P6 GAP E2)."""
     import subprocess
 
+    from remote_ci_monitor.gitops import _run_process
+
     try:
-        proc = subprocess.run(
+        proc = _run_process(
             [git, "--version"],
             capture_output=True,
             text=True,
-            timeout=10,
+            timeout=GIT_VERSION_TIMEOUT,
             stdin=subprocess.DEVNULL,
             env=dict(env),
+            start_new_session=True,
         )
     except (OSError, subprocess.TimeoutExpired):
         return None

@@ -4709,17 +4709,23 @@ def _ls_remote_problem(
     `git` 은 부를 실행 파일, `env` 는 그 환경이다. doctor 는 서비스 PATH 에서 찾은 git 과 서비스
     환경을 넘긴다 — 셸의 git · 셸의 변수로 재면 서비스에서는 다른 답이 나온다. 주지 않으면 이
     프로세스의 것이다(`rcm worker --check`). 부르는 쪽이 shim 을 이미 걸렀다(`runner.find_tool`).
+
+    git 은 자기 프로세스 그룹에서 돈다. 시한을 넘기면 그룹째 거둔다 — `git-remote-https` · 자격
+    헬퍼 같은 손자가 git 만 죽인 뒤에 남지 않게(`gitops._run_process`, P6 GAP E2).
     """
     import subprocess
 
+    from remote_ci_monitor.gitops import _run_process
+
     base = os.environ if env is None else env
     try:
-        proc = subprocess.run(
+        proc = _run_process(
             [git, "ls-remote", "--exit-code", url, "HEAD"],
             stdin=subprocess.DEVNULL,
             capture_output=True,
             timeout=timeout,
             env={**base, "GIT_TERMINAL_PROMPT": "0"},
+            start_new_session=True,
         )
     except subprocess.TimeoutExpired:
         return doctor_core.Unsure(f"git ls-remote timed out after {int(timeout)}s")
