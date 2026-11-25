@@ -39,9 +39,14 @@ of a key bumps that number and is listed here.
   `coordinator-worker`, `coordinator` and `client`; `--json`, `--shell-path`, `--offline`,
   `--service-file`. It sends the server only read requests and opens no database. `--json` always
   carries every key (`null` when unknown) under `doctor_version: 1`. A systemd unit without
-  `PATH` is not guessed (exit 3), a service file it cannot read is named (exit 3), an unreachable `[[repos]]` entry or a `git_ref` preset whose
-  repository is missing from the worker's `[[repos]]` is a failure, and `--role coordinator`
-  lists `local_only` presets as needing a local lane. `rcm doctor` never follows the server's
+  `PATH` is not guessed (exit 3), a service file it cannot read is named (exit 3), a unit line it
+  does not follow (`EnvironmentFile=`, a `%h` specifier) is named (exit 3), a server answer that is
+  not the JSON it expects (an HTML page from the wrong port, an empty body, a field of the wrong
+  type) is named with the route (exit 3), an error it did not expect ends in
+  `could not decide: <kind>: <message>` (exit 3) rather than a traceback, an unreachable
+  `[[repos]]` entry or a `git_ref` preset whose repository is missing from the worker's
+  `[[repos]]` is a failure, and `--role coordinator` lists `local_only` presets as needing a local
+  lane. `rcm doctor` never follows the server's
   version. `GET /worker/spec` now also carries each preset's `pool`, `pools`, `placement`,
   `checks`, `source_modes`, repository name (no URL) and `unreachable_checks` (the checks a remote
   worker cannot run, with a reason code), and the `[[tools]]` table; older workers ignore them.
@@ -54,7 +59,7 @@ of a key bumps that number and is listed here.
 - **Workers report host facts, and `rcm machines --machine ID` shows them.** OS version, real
   arch and Rosetta, container, root, package manager and Python come with registration and every
   capability report, are kept in memory only, and appear in `GET /api/machines` (new `host` key)
-  only for a request with a token. The server keeps only true or false for Rosetta, container
+  only for a request with a client token (a worker token sent with Basic gets none). The server keeps only true or false for Rosetta, container
   and root, and a string of at most 64 characters without control characters for the rest;
   anything else, and what the worker could not tell, is `null`.
   ([#268](https://github.com/monocsp/remote_ci_monitor/pull/268))
@@ -65,6 +70,11 @@ of a key bumps that number and is listed here.
   ([#268](https://github.com/monocsp/remote_ci_monitor/pull/268))
 
 ### Fixed
+- **A config file that is not UTF-8 stops `rcm serve`, `rcm worker` and the other commands with one
+  line naming the file and the byte, instead of a traceback.** An included preset file is read the
+  same way. `rcm doctor` reports it as a usage error (exit 2), as it does a `server.toml` whose
+  `[server]` is not a table; the home folder in that line shows as `~`.
+  ([#268](https://github.com/monocsp/remote_ci_monitor/pull/268))
 - **`rcm recheck` names the checks it skipped, and `rcm eta --job` no longer counts a line for a
   job no machine can take.** A `local_only` check a remote worker cannot run prints
   `<check> skipped on <machine> [local_only]` and is not a failure; a `no capable machine` job

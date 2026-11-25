@@ -130,7 +130,12 @@ the report warns. Two in the same place need `--service-file` (exit 2 without a 
 worker's default service `PATH` is used and the report says so. A launchd plist without `PATH`
 gets launchd's default, `/usr/bin:/bin:/usr/sbin:/sbin`. A systemd unit without
 `Environment=PATH=…` is not guessed — the default differs between distributions — so the report
-shows no `PATH`, measures no tool and exits 3 until the unit sets one. A service file rcm cannot
+shows no `PATH`, measures no tool and exits 3 until the unit sets one. A unit line rcm does not
+follow (`EnvironmentFile=`, `PassEnvironment=`, `UnsetEnvironment=`) and an `Environment=` value with
+a systemd specifier such as `%h` are named by line and key, and the report exits 3; when the line
+can change `PATH` (`EnvironmentFile=` always can), the service `PATH` is unknown and no tool is
+measured. Write `PATH` out in full in an `Environment=` line. A `$` is kept as written: systemd does
+not expand variables in `Environment=`. A service file rcm cannot
 read (XML cut short, a plist whose top level is not a dictionary, a unit line it cannot parse) is
 named with the reason, never its values, and the report exits 3; one found in the standard places
 is left out and the search goes on, one given with `--service-file` leaves the service `PATH`
@@ -149,10 +154,12 @@ machine awake; rcm checks neither.
 |---|---|
 | 0 | every preset that comes to this machine is `ready` or `needs check`, and rcm's own needs are met; warnings allowed |
 | 1 | a tool is missing, rcm's own needs fail (Python 3.11.4+, git 2.31+ for `token_file`, an unreachable or missing repository), or nothing would come to this machine |
-| 2 | usage: a bad flag, a config file that does not exist, several roles or service files to choose from |
-| 3 | could not decide: the server is down or older, a probe timed out, no token or a refused one, a server found on the network that nobody confirmed, a systemd unit without `PATH`, a service file it cannot read |
+| 2 | usage: a bad flag, a config file that does not exist, is not UTF-8 or TOML, or whose `[server]` is not a table, a server URL that does not start with `http://` or `https://`, several roles or service files to choose from |
+| 3 | could not decide: the server is down or older, an answer from it that is not the JSON rcm expects (an HTML page from the wrong port or a proxy, an empty body, a field of the wrong type), a probe timed out, no token or a refused one, a server found on the network that nobody confirmed, a systemd unit without `PATH` or with a line rcm does not follow, a service file it cannot read |
 
-1 wins over 3, and 3 over 0. `rcm check` keeps its own exit codes.
+1 wins over 3, and 3 over 0. `rcm check` keeps its own exit codes. An error rcm did not expect
+ends the report with exit 3 and one line, `could not decide: <kind>: <message>` (home folder as
+`~`), on stderr and in `undecided`, not with a traceback.
 
 What it never does: it sends the server only read requests (no registration, no capability
 report — the server's judgement stays the server's), opens no database, runs no install hint and never uses
@@ -171,7 +178,7 @@ ones you do not know.
 | `doctor_version` · `role` · `exit` | `1`, the role measured, the exit code |
 | `measured_in` | `clean_service_env` (worker), `server_service_env` (coordinator-worker: the server's own measurement), `none` |
 | `host` | `os` `os_release` `os_like` `arch` `machine` `rosetta` `container` `root` `package_manager` `python` `rcm`; `rosetta` and `container` are `null` when rcm could not tell |
-| `server` | `url` `found_by` (`flag`, `config`, `mdns`) `state` (`ok`, `not ok` when the server answers `ok: false`, `unreachable`, `token refused`, `not confirmed`, `—`) `generation` `version` |
+| `server` | `url` `found_by` (`flag`, `config`, `mdns`) `state` (`ok`, `not ok` when the server answers `ok: false`, `unreachable`, `token refused`, `unreadable answer`, `not confirmed`, `—`) `generation` `version` |
 | `service` | `file` `manager` `path` `env_names` (names only); `null` for `client` |
 | `shell` | `{"path"}` with `--shell-path`, else `null` |
 | `rcm_requirements` | rows of `name` `state` (`ok` `warn` `fail` `info`) `detail` `needed_for` `install` |
@@ -194,7 +201,8 @@ A worker sends the same host facts (OS version, real arch and Rosetta, container
 manager, Python) when it registers and with each capability report. The server keeps them in
 memory only, never in the database, so after a server restart they show `—` until the next
 report. `rcm machines --machine ID` prints them on its `host` line. `GET /api/machines` carries
-them only to a request with a token, even when `read_auth = "none"` lets anyone read the rest.
+them only to a request with a client token, even when `read_auth = "none"` lets anyone read the
+rest; a worker token sent with Basic under `read_auth = "basic"` does not get them.
 
 `rcm worker --check` keeps its rows and adds two: `version` (ok when it matches the server; a
 warning when registering will follow the server's version; FAIL when this install cannot follow,
