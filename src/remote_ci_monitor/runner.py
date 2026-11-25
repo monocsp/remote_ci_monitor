@@ -22,7 +22,9 @@ import re
 import shutil
 import signal
 import subprocess
+import sys
 import threading
+import time
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
@@ -126,12 +128,95 @@ class RunSpec:
     mask: Callable[[bytes], bytes] | None = None
 
 
+# ── macOS Command Line Tools shim (M5t-a 결정 246) ─────────────────────────────
+#: shim 이 사는 폴더(바로 아래만 본다). 시험은 이 값과 아래 둘을 가짜로 바꾼다
 SHIM_DIR = "/usr/bin/"
-SHIM_PLATFORM = ""
+#: shim 을 판별하는 플랫폼 — macOS 에서만 뜻이 있다
+SHIM_PLATFORM = sys.platform
+#: CLT 가 깔렸는지 묻는 명령(`xcode-select -p`). 실패하면 shim 은 「없음」이다
 XCODE_SELECT = "/usr/bin/xcode-select"
+#: shim 실행 파일이 링크하는 라이브러리 이름 — 도구 이름 목록 대신 바이트로 판별한다
+SHIM_MARKER = b"libxcselect"
+#: `xcode-select -p` 답을 이만큼 다시 쓴다. CLT 를 깐 뒤 서버를 재시작하지 않아도 1분 안에 바뀐다
+CLT_CACHE_SECONDS = 60.0
+CLT_NOTE = "missing (needs Command Line Tools)"
+_CLT_CACHE: dict[str, tuple[float, bool]] = {}
+_CLT_LOCK = threading.Lock()
+
+
+def is_clt_shim(path: str) -> bool:
+    """`/usr/bin/` 바로 아래이고 바이트에 `libxcselect` 가 든 실행 파일인가(macOS 만).
+
+    이름 목록으로 판별하지 않는다. Apple Silicon Mac 한 대의 실측에서 `git` · `make` · `xcrun`
+    에는 이 바이트가 있었고 `/usr/bin/java` · `ruby` · `perl` 에는 없었다 — Java 스텁은 이 방법으로
+    판별되지 않는다(명세 §4.5). `xcode-select` 자신은 CLT 를 묻는 데 쓰므로 판별에서 뺀다.
+    """
+    if not SHIM_PLATFORM.startswith("darwin"):
+        return False
+    if os.path.basename(path) == "xcode-select":
+        return False
+    folder = SHIM_DIR.rstrip("/") or "/"
+    if os.path.dirname(os.path.abspath(path)) != folder:
+        return False
+    try:
+        with open(path, "rb") as fh:
+            tail = b""
+            while chunk := fh.read(READ_CHUNK):
+                if SHIM_MARKER in tail + chunk:
+                    return True
+                tail = chunk[-len(SHIM_MARKER) :]
+    except OSError:
+        return False
+    return False
+
+
+def clt_installed() -> bool:
+    """`xcode-select -p` 가 성공하나 — 1분 동안 같은 답을 쓴다. 명령이 없거나 멈추면 False."""
+    now = time.monotonic()
+    with _CLT_LOCK:
+        cached = _CLT_CACHE.get(XCODE_SELECT)
+        if cached is not None and now - cached[0] < CLT_CACHE_SECONDS:
+            return cached[1]
+    try:
+        proc = subprocess.run(
+            [XCODE_SELECT, "-p"],
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            timeout=5,
+            env={"PATH": "/usr/bin:/bin"},
+        )
+        ok = proc.returncode == 0 and bool(proc.stdout.strip())
+    except (OSError, subprocess.TimeoutExpired):
+        ok = False
+    with _CLT_LOCK:
+        _CLT_CACHE[XCODE_SELECT] = (now, ok)
+    return ok
+
+
+def tool_blocked(path: str) -> bool:
+    """실행하면 CLT 설치 대화상자를 띄우는 shim 인가 — 판별 함수는 이것 하나다.
+
+    `measure_tools` · `missing_tools`(그래서 서버의 `preset_env` 와 `rcm check` 의 도구 행도) ·
+    워커 프로브(`hostsample.run_probes`) · `rcm doctor` 가 모두 이 함수를 거친다. 헤드리스
+    서비스에서 그 창이 프로브 주기마다 되풀이되지 않게 실행하지 않고 「없음」으로 센다.
+    """
+    return is_clt_shim(path) and not clt_installed()
+
+
+def find_tool(name: str, path: str) -> str | None:
+    """`shutil.which` 에 shim 규칙을 더한 것 — 막힌 shim 이면 None."""
+    found = shutil.which(name, path=path)
+    if found is None or tool_blocked(found):
+        return None
+    return found
 
 
 def missing_note(name: str, env: Mapping[str, str]) -> str | None:
+    """`name` 이 못 쓰는 shim 이라 없는 것이면 그 사연, 아니면 None(사람용 표의 한 칸)."""
+    raw = env.get("PATH", "")
+    found = shutil.which(name, path=raw) if raw or os.path.isabs(name) else None
+    if found is not None and tool_blocked(found):
+        return CLT_NOTE
     return None
 
 
@@ -153,7 +238,7 @@ def missing_tools(
     raw = env.get("PATH", "")
     entries = [os.path.join(base, entry) for entry in raw.split(os.pathsep)] if raw else []
     path = os.pathsep.join(entries)
-    return [name for name in requires if shutil.which(name, path=path) is None]
+    return [name for name in requires if find_tool(name, path) is None]
 
 
 def measure_tools(requires: tuple[str, ...], env: Mapping[str, str]) -> tuple[list[str], list[str]]:
@@ -174,10 +259,10 @@ def measure_tools(requires: tuple[str, ...], env: Mapping[str, str]) -> tuple[li
     workspace: list[str] = []
     for name in requires:
         if os.path.isabs(name):
-            if not (os.path.isfile(name) and os.access(name, os.X_OK)):
+            if not (os.path.isfile(name) and os.access(name, os.X_OK)) or tool_blocked(name):
                 missing.append(name)
             continue
-        if shutil.which(name, path=path) is not None:
+        if find_tool(name, path) is not None:
             continue
         (workspace if has_relative else missing).append(name)
     return missing, workspace

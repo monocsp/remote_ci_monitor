@@ -38,6 +38,7 @@ from remote_ci_monitor.core.hostparse import (
 )
 from remote_ci_monitor.core.model import HostSample
 from remote_ci_monitor.core.status import iso
+from remote_ci_monitor.runner import tool_blocked
 
 COMMAND_TIMEOUT = 8.0
 PROC_STAT_DELTA_SECONDS = 1.0
@@ -165,6 +166,8 @@ def _run_probe(probe: Any, env: dict[str, str]) -> Any:
         return normalize_probe_output(None, None, missing=True)
     if not os.path.isabs(exe):
         argv[0] = shutil.which(exe, path=path) or exe
+    if tool_blocked(argv[0]):  # CLT 없는 macOS 의 shim — 띄우면 설치 대화상자가 뜬다(결정 246)
+        return normalize_probe_output(None, None, missing=True)
     with _LIVE_LOCK:
         if _PROBES_CLOSED:  # 곧 exec 한다 — 띄우지 않는다
             return normalize_probe_output(None, None, timed_out=True)
