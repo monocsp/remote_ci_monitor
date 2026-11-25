@@ -482,7 +482,8 @@ class CapabilitiesMixin:
         """그 프리셋(그 잡)의 후보 머신. 배치 · ETA · 제출 · 점검 · `/worker/spec` · claim ·
         `/api/machines` 가 모두 이 결과를 쓰고 따로 거르지 않는다(docs/m5t-workplan.md §4.3).
 
-        정적인 조건만 본다 — `local_only`, 대상 머신, 풀, `[server] lanes`, `local_accept_any`.
+        정적인 조건만 본다 — `local_only`, 대상 머신, 풀, `local_accept_any`. `[server] lanes`
+        는 설정이 1 이상으로 막으므로 아직 보지 않는다(`lanes = 0` 은 M5t-a PR3 이 더한다).
         살아 있음과 도구 판정은 보지 않는다(그것은 지금처럼 갈래 안에서 본다). `local_only` 가
         아닌 프리셋은 받은 머신을 그대로 돌려준다. `target` · `pool` · `placement` 를 안 주면
         프리셋의 기본값이다(잡이 있으면 그 잡의 값을 준다)."""
@@ -507,8 +508,6 @@ class CapabilitiesMixin:
         받을 수 있으면 None. 판정(도구 · 점검)과 살아 있음은 보지 않는다. 원격 워커를 지정한
         잡은 여기서 보지 않는다 — 원격 제외 한 줄(`machines_for`)이 그 후보를 비운다."""
         head = _local_only_head(preset)
-        if int(self.config.server.lanes) < 1:
-            return f"{head} — this server has no local lanes (lanes = 0)"
         if target is not None:
             return None
         placement = preset.placement if placement is None else placement
@@ -534,9 +533,10 @@ class CapabilitiesMixin:
     ) -> tuple[str, str] | None:
         """`local_only` 제출을 거절할 이유 `(코드, 문장)` — 없으면 None(§4.3, TO16).
 
-        정적인 넷(원격 지정 · `lanes = 0` · `local_accept_any = false` 인데 any-capable · 기본 풀이
-        아닌 풀)과 capable 갈래에서 `@local` 의 `tool_missing` 에만 409 다. 점검 판정 때문에 비는
-        경우는 큐에 든다(`_why_none` 이 이유를 보인다). `local_only` 가 아니면 언제나 None."""
+        정적인 셋(원격 지정 · `local_accept_any = false` 인데 any-capable · 기본 풀이 아닌 풀)과
+        capable 갈래에서 `@local` 의 `tool_missing` 에만 409 다(넷째인 `lanes = 0` 은 PR3). 점검
+        판정 때문에 비거나 `@local` 의 보고가 없거나 낡은 경우는 큐에 든다(`_why_none` 이 이유를
+        보인다). `local_only` 가 아니면 언제나 None."""
         if not preset.local_only:
             return None
         now = self.now_fn()
