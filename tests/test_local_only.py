@@ -966,6 +966,18 @@ def _mark_by_reload(s: M5nServer, text: str = PRESETS) -> None:
     assert status == 200, body
 
 
+def _check_cell(s: M5nServer, worker: str, check: str = "localcheck") -> tuple[Any, ...]:
+    """`/api/machines` 의 그 머신 점검 칸 — (state, job_id, error_code, recheck_needed)."""
+    c = {c["preset"]: c for c in s.machines()[worker]["checks"]}[check]
+    return (c["state"], c["job_id"], c["error_code"], c["recheck_needed"])
+
+
+def _summary_problems(s: M5nServer, worker: str) -> list[dict[str, Any]]:
+    """`/api/status` 의 머신 요약에 실린 그 머신의 문제 — 지문 바뀜은 빼고 본다."""
+    m = {m["id"]: m for m in s.status()["server"]["machines"]}[worker]
+    return [p for p in m["problems"] if p["code"] != "environment_changed"]
+
+
 @pytest.mark.parametrize("case", ["queued", "failed", "running"])
 def test_x1_a_remote_check_record_follows_the_mark_unless_that_machine_is_running_it(
     tmp_path, case
@@ -995,16 +1007,22 @@ def test_x1_a_remote_check_record_follows_the_mark_unless_that_machine_is_runnin
                 "code": "check_running",
                 "detail": {"check": "localcheck", "job_id": check},
             }
+            assert _check_cell(s, OTHER) == ("running", check, "local_only", False)
             assert row["reason"] == "check_pending", row
             assert s.finish(OTHER, check, "succeeded", exit_code=0)[0] == 200
             done = s.machines()[OTHER]["presets"]["qa"]
             assert (done["state"], done["code"]) == ("eligible", "ok")
+            assert _check_cell(s, OTHER) == ("passed", check, "local_only", False)
             return
         assert got == {
             "state": "ineligible",
             "code": "check_local_only",
             "detail": {"check": "localcheck"},
         }
+        # T1 — 점검 칸도 판정과 같은 규칙이다. 그 기록은 이력으로 job_id 만 남고, 「점검 중」 ·
+        # 「실패」로 읽히지 않는다. 그 머신에서 고칠 수 없는 실패는 그 머신의 문제가 아니다
+        assert _check_cell(s, OTHER) == ("needed", check, "local_only", False)
+        assert _summary_problems(s, OTHER) == []
         assert row["reason"] == "no_capable_machine", row  # check_pending · check_failed 가 아니다
         notes = {n["worker"]: n for n in row["placement_detail"]}
         assert notes[OTHER]["code"] == "check_local_only"
