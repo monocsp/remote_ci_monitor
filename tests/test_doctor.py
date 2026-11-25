@@ -479,3 +479,26 @@ def test_a_tool_name_doctor_would_change_refuses_to_start(tmp_path, name):
             _server_toml(tmp_path, f'[[tools]]\nname = "{name}"\n'), check_tools=False
         )
     assert "[[tools]]" in str(e.value) and "name" in str(e.value), e.value
+
+
+# ── P6 GAP X-bidi: 정리 함수 하나(`core/progress.clean_line` 규칙) ───────────────────
+
+BIDI_AND_SEPARATORS = "  ‪‮⁦⁩​﻿"
+
+
+def test_x_bidi_server_text_loses_line_separators_and_bidi_controls():
+    """서버가 보낸 문자열(`dc.clean_text`)도 줄 · 문단 구분자와 bidi 제어 · 폭 없는 글자를 지운다 —
+    같은 PR 의 `capabilities.clean_line` 과 같은 규칙이다(P6 GAP X-bidi)."""
+    assert dc.clean_text(f"brew{BIDI_AND_SEPARATORS} install\x1b[2J td") == "brew install[2J td"
+
+
+@pytest.mark.parametrize("char", list(BIDI_AND_SEPARATORS))
+def test_x_bidi_tools_refuse_line_separators_and_bidi_controls(tmp_path, char):
+    """`[[tools]]` 설정 검증도 같은 글자를 거절한다 — 워커가 그대로 터미널에 찍는 글이다."""
+    from remote_ci_monitor.config import ConfigError, load_server_config
+
+    escaped = f"\\u{ord(char):04x}"
+    tools = f'[[tools]]\nname = "rcm-td-fvm"\n[tools.install]\ndarwin = "brew {escaped}x"\n'
+    with pytest.raises(ConfigError) as e:
+        load_server_config(_server_toml(tmp_path, tools), check_tools=False)
+    assert "[[tools]]" in str(e.value) and "control" in str(e.value), e.value

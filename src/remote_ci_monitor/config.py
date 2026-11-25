@@ -1069,15 +1069,20 @@ _TOOL_KEYS = frozenset({"name", "docs", "install"})
 TOOL_TEXT_MAX = 300
 #: 도구 이름의 길이 상한 — doctor 가 서버가 준 이름을 자르는 길이와 같다
 TOOL_NAME_MAX = 64
-_TOOL_CONTROL_RE = re.compile(r"[\x00-\x1f\x7f-\x9f]")
 
 
 def _tool_text(where: str, value: Any) -> str:
-    """한 줄 문자열, 300자 이하, 제어문자 없음 — 워커가 그대로 터미널에 찍는 글이다."""
+    """한 줄 문자열, 300자 이하, 제어문자 없음 — 워커가 그대로 터미널에 찍는 글이다. 거절하는
+    글자는 doctor 가 찍기 전에 지우는 글자와 같다(`core/progress.clean_line`: C0 · C1 제어문자, 줄 ·
+    문단 구분자, bidi 제어, 폭 없는 글자 — P6 GAP X-bidi)."""
+    from remote_ci_monitor.core.progress import clean_line
+
     if not isinstance(value, str):
         raise ConfigError(f"{where} must be a string")
-    if _TOOL_CONTROL_RE.search(value):
-        raise ConfigError(f"{where} has a control character (one line of text, no escapes)")
+    if clean_line(value) != value.strip():
+        raise ConfigError(
+            f"{where} has a control character (one line of text, no escapes or bidi controls)"
+        )
     if len(value) > TOOL_TEXT_MAX:
         raise ConfigError(f"{where} is longer than {TOOL_TEXT_MAX} characters")
     return value

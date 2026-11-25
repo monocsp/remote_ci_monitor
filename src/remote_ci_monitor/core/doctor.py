@@ -21,6 +21,8 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
+from remote_ci_monitor.core.progress import clean_line
+
 DOCTOR_VERSION = 1
 
 ROLE_CLIENT = "client"
@@ -67,7 +69,6 @@ DEFAULT_PATHS: dict[str, str] = {
 
 #: 서버가 보낸 설치 문구 · 문서 주소의 길이 상한(`[[tools]]` 의 검증과 같은 300자)
 TEXT_MAX = 300
-_CONTROL = re.compile(r"[\x00-\x1f\x7f-\x9f]")
 _SUDO = re.compile(r"(^|&&\s*|;\s*|\|\s*)sudo\s+")
 
 #: 사람용 문구(명세 §4.5 「문구」). CLI 문구라 영어다
@@ -183,10 +184,14 @@ def could_not_decide(error: BaseException, home: str) -> str:
 
 def clean_text(value: Any, limit: int = TEXT_MAX) -> str:
     """서버가 보낸 문자열 — 제어문자를 지우고 자른다. 찍기 전에 한 번 더 정리한다(TD32).
-    None(모름)은 빈 문자열이다 — `"None"` 이라는 글자를 지어내지 않는다(P3 3라운드)."""
+    None(모름)은 빈 문자열이다 — `"None"` 이라는 글자를 지어내지 않는다(P3 3라운드).
+
+    규칙은 `core/progress.clean_line` 하나다 — C0 · C1 제어문자에 더해 줄 · 문단 구분자, bidi
+    제어, 폭 없는 글자도 지운다. 호스트 사실(`capabilities.clean_host_facts`)과 같다(P6 GAP
+    X-bidi)."""
     if value is None:
         return ""
-    return _CONTROL.sub("", str(value)).strip()[:limit]
+    return clean_line(str(value))[:limit]
 
 
 def without_sudo(text: str) -> str:
