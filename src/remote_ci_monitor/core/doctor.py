@@ -53,11 +53,12 @@ MANAGER_DEFAULTS: dict[str, tuple[str, ...]] = {
     LAUNCHD: ("HOME", "USER", "LOGNAME", "SHELL", "TMPDIR", "PATH"),
     SYSTEMD: ("HOME", "USER", "LOGNAME", "SHELL", "XDG_RUNTIME_DIR", "PATH"),
 }
-#: 서비스 파일이 PATH 를 주지 않을 때 관리자가 쓰는 PATH. systemd 는 systemd.exec(5)의 값이다.
-#: launchd 의 정확한 기본값은 명세가 확인하지 못했다(§4.5 툴체인 표) — 최소 집합을 쓴다
+#: 서비스 파일이 PATH 를 주지 않을 때 관리자가 쓰는 PATH. launchd 는 `_PATH_STDPATH`(paths.h)이고
+#: `launchctl print gui/<uid>/<service>` 의 `default environment` 가 같은 값을 보인다(2026-11-25,
+#: macOS 27.2 에서 확인). systemd 는 배포판과 빌드마다 달라 추정하지 않는다 — 없으면 PATH 를
+#: 모르는 것으로 둔다(위임 결정 5)
 DEFAULT_PATHS: dict[str, str] = {
     LAUNCHD: "/usr/bin:/bin:/usr/sbin:/sbin",
-    SYSTEMD: "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin",
 }
 
 #: 서버가 보낸 설치 문구 · 문서 주소의 길이 상한(`[[tools]]` 의 검증과 같은 300자)
@@ -95,11 +96,14 @@ def clean_env(
 ) -> dict[str, str]:
     """`env -i` + 관리자의 기본 변수(값은 이 사용자의 것) + 서비스 파일의 환경 변수.
 
-    PATH 는 셸의 것이 아니다. 서비스 파일이 주면 그것, 아니면 관리자의 기본 PATH 다.
+    PATH 는 셸의 것이 아니다. 서비스 파일이 주면 그것, 아니면 관리자의 기본 PATH 다. 기본값을
+    모르는 관리자(systemd)면 PATH 키가 없다 — 지어내지 않는다.
     """
     keys = MANAGER_DEFAULTS[manager]
     env = {k: base[k] for k in keys if k != "PATH" and k in base}
-    env["PATH"] = default_path if default_path is not None else DEFAULT_PATHS[manager]
+    path = default_path if default_path is not None else DEFAULT_PATHS.get(manager)
+    if path is not None:
+        env["PATH"] = path
     env.update({str(k): str(v) for k, v in service_env.items()})
     return env
 

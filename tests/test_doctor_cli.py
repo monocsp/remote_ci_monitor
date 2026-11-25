@@ -1009,3 +1009,114 @@ def test_e1_an_explicit_service_file_for_another_role_is_used_with_a_warning(wor
     assert doc["service"]["file"] is not None and doc["service"]["path"].startswith("~/svcbin")
     assert any("rcm serve" in w and "rcm worker" in w for w in doc["warnings"]), doc["warnings"]
     assert code == 0, doc
+
+
+# ── rcm 자신의 요구 (위임 결정 4 · 5 · 6 · E4) ─────────────────────────────────
+
+REPO = '[[repos]]\nname = "app"\nurl = "https://example.invalid/app.git"\n'
+
+
+def git_preset(name: str, repo: str = "app", **kw: Any) -> dict[str, Any]:
+    return {**preset(name, **kw), "source_modes": ["git_ref"], "repo": repo}
+
+
+def req(doc: dict[str, Any], name: str) -> dict[str, Any] | None:
+    return next((r for r in doc["rcm_requirements"] if r["name"] == name), None)
+
+
+def run_worker(capsys, env: Path, srv: FakeRcm, sf: Path, *extra: str, toml_extra: str = ""):
+    cfg = worker_toml(env, srv.url, extra=toml_extra)
+    return run_json(
+        capsys, "--role", "worker", "--config", str(cfg), "--service-file", str(sf), *extra
+    )
+
+
+def test_d4_an_unreachable_repo_fails_and_exits_1_but_offline_is_info(
+    worker, env, srv, svcbin, monkeypatch, capsys
+):
+    """위임 결정 4: `[[repos]]` 에 닿지 못하면 git_ref 일을 못 받는다 — FAIL, 종료 1.
+    `--offline` 이면 `git ls-remote` 를 돌리지 않고 info 다."""
+    monkeypatch.setattr(cli, "_ls_remote_problem", lambda url, timeout=10.0: "unreachable: nope")
+    sf = plist(env / "svc", f"{svcbin}:/usr/bin:/bin")
+    code, doc = run_worker(capsys, env, srv, sf, toml_extra=REPO)
+    assert req(doc, "repos")["state"] == "fail", doc["rcm_requirements"]
+    assert code == 1, doc
+    code, doc = run_worker(capsys, env, srv, sf, "--offline", toml_extra=REPO)
+    assert req(doc, "repos")["state"] == "info", doc["rcm_requirements"]
+    assert code == 0, doc
+
+
+def test_d5_a_systemd_unit_without_path_is_not_guessed_and_exits_3(worker, env, srv, capsys):
+    """위임 결정 5: systemd 의 기본 PATH 는 배포판마다 달라 추정하지 않는다. 서비스 PATH 칸은
+    null, 안내는 「Environment=PATH=… 를 넣어라」, 판정 못 함(종료 3)이다."""
+    (env / "svc").mkdir()
+    sf = env / "svc" / "rcm-worker.service"
+    sf.write_text("[Service]\nExecStart=/x/rcm worker\nEnvironment=TD_EXTRA=1\n")
+    srv.route("GET", "/worker/spec", spec_doc(preset("lint", requires=(LACK,))))
+    code, doc = run_worker(capsys, env, srv, sf)
+    assert doc["service"]["manager"] == "systemd" and doc["service"]["path"] is None, doc
+    assert any("Environment=PATH=" in u for u in doc["undecided"]), doc["undecided"]
+    assert code == 3, doc  # 모르는 PATH 로 재서 「빠짐」(종료 1)을 지어내지 않는다
+    assert doc["presets"] == [], doc["presets"]
+
+
+def test_d5_a_launchd_plist_without_path_gets_launchds_default(worker, env, srv, capsys):
+    """launchd 의 기본 PATH 는 `/usr/bin:/bin:/usr/sbin:/sbin` 이다(`_PATH_STDPATH`,
+    `launchctl print gui/<uid>/<service>` 의 `default environment` 로 이 Mac 에서 확인)."""
+    (env / "svc").mkdir()
+    sf = env / "svc" / "com.remote-ci-monitor.worker.plist"
+    sf.write_bytes(plistlib.dumps({"Label": "x", "ProgramArguments": ["/x/rcm", "worker"]}))
+    code, doc = run_worker(capsys, env, srv, sf)
+    assert doc["service"]["path"] == "/usr/bin:/bin:/usr/sbin:/sbin", doc["service"]
+
+
+def test_d6_git_is_measured_for_git_ref_presets_and_a_missing_repo_fails(
+    worker, env, srv, svcbin, monkeypatch, capsys
+):
+    """위임 결정 6 · E4: git 은 `[[repos]]` 유무가 아니라 이 머신에 오는 git_ref 프리셋이 있으면
+    잰다. 그 프리셋의 저장소가 이 워커의 `[[repos]]` 에 없으면 `repo_missing` 으로 FAIL 이다 —
+    넣어야 할 저장소 이름을 알려 줄 뿐 채우지는 않는다(§3.6 D8)."""
+    monkeypatch.setattr(cli, "_ls_remote_problem", lambda url, timeout=10.0: None)
+    sf = plist(env / "svc", f"{svcbin}:/usr/bin:/bin")
+    srv.route("GET", "/worker/spec", spec_doc(git_preset("deploy")))
+    code, doc = run_worker(capsys, env, srv, sf)
+    assert req(doc, "git") is not None, doc["rcm_requirements"]
+    assert any("repo_missing" in p and "app" in p and "deploy" in p for p in doc["problems"]), doc
+    assert code == 1, doc
+    code, doc = run_worker(capsys, env, srv, sf, toml_extra=REPO)
+    assert not any("repo_missing" in p for p in doc["problems"]), doc["problems"]
+    assert code == 0, doc
+    # git_ref 프리셋이 이 머신에 오지 않으면 git 을 재지 않는다 — [[repos]] 가 있어도
+    srv.route("GET", "/worker/spec", spec_doc(preset("build"), git_preset("deploy", pool="linux")))
+    code, doc = run_worker(capsys, env, srv, sf, toml_extra=REPO)
+    assert req(doc, "git") is None, doc["rcm_requirements"]
+    assert not any("repo_missing" in p for p in doc["problems"]), doc["problems"]
+
+
+def test_d6_the_rcm_venv_on_the_service_path_is_a_warning(worker, env, srv, svcbin, capsys):
+    """docs/operating.md 「The service PATH is what your presets run with」: rcm 이 든 venv 의
+    bin 이 서비스 PATH 에 있으면 프리셋의 `python3` 이 그 venv 의 것이 된다 — warn."""
+    venv_bin = env / "home" / "rcm-venv" / "bin"
+    venv_bin.mkdir(parents=True)
+    (env / "svc").mkdir()
+    sf = env / "svc" / "com.remote-ci-monitor.worker.plist"
+    sf.write_bytes(
+        plistlib.dumps(
+            {
+                "Label": "x",
+                "ProgramArguments": [str(venv_bin / "rcm"), "worker"],
+                "EnvironmentVariables": {"PATH": f"{venv_bin}:{svcbin}:/usr/bin:/bin"},
+            }
+        )
+    )
+    code, doc = run_worker(capsys, env, srv, sf)
+    assert any("~/rcm-venv/bin" in w and "PATH" in w for w in doc["warnings"]), doc["warnings"]
+    assert str(env / "home") not in json.dumps(doc)
+    assert code == 0, doc
+
+
+def test_d6_sleep_is_guidance_only_on_macos(worker, monkeypatch, capsys):
+    monkeypatch.setattr(doctor, "PLATFORM", "darwin")
+    code, doc = worker(capsys)
+    row_ = req(doc, "sleep")
+    assert row_ is not None and row_["state"] == "info" and "pmset" in row_["detail"], row_

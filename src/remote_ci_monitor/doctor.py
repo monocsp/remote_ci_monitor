@@ -212,6 +212,22 @@ def local_network_requirement() -> dict[str, Any]:
     )
 
 
+def sleep_requirement() -> dict[str, Any]:
+    """잠자는 Mac 은 잡을 받지 않는다 — rcm 은 전원 설정을 재지 않고 안내만 한다(위임 결정 6)."""
+    return requirement(
+        "sleep",
+        "info",
+        "keep the machine awake (pmset -a sleep 0); rcm does not check it",
+        "jobs that run while nobody is at the machine",
+    )
+
+
+def unknown_path_requirement(name: str, needed_for: str) -> dict[str, Any]:
+    """서비스 PATH 를 모르면 PATH 로 찾는 도구는 재지 않는다 — 지어낸 PATH 로 「빠짐」을 내지
+    않는다(위임 결정 5)."""
+    return requirement(name, "info", "not checked — the service PATH is unknown", needed_for)
+
+
 def fd_requirement(service: ServiceFile | None) -> dict[str, Any]:
     needed = "the coordinator service"
     if service is None:
@@ -256,6 +272,7 @@ class ServiceFile:
     command: str | None = None
     env: dict[str, str] = field(default_factory=dict)
     nofile: int | None = None
+    program: str | None = None  # 띄우는 실행 파일(argv[0]) — venv 의 bin 이 PATH 에 있는지 본다
 
     @property
     def env_names(self) -> list[str]:
@@ -282,13 +299,19 @@ def read_service_file(path: str | os.PathLike[str]) -> ServiceFile:
             limits = doc.get("SoftResourceLimits") or {}
             nofile = limits.get("NumberOfFiles")
             return ServiceFile(
-                p, dc.LAUNCHD, _rcm_command(args), env, int(nofile) if nofile else None
+                p,
+                dc.LAUNCHD,
+                _rcm_command(args),
+                env,
+                int(nofile) if nofile else None,
+                str(doc.get("Program") or (args[0] if args else "")) or None,
             )
         text = p.read_text(encoding="utf-8")
     except (OSError, ValueError, plistlib.InvalidFileException) as e:
         raise DoctorUsage(f"cannot read the service file {p.name}: {type(e).__name__}") from e
     env: dict[str, str] = {}
     command: str | None = None
+    program: str | None = None
     nofile_unit: int | None = None
     for raw in text.splitlines():
         line = raw.strip()
@@ -300,13 +323,15 @@ def read_service_file(path: str | os.PathLike[str]) -> ServiceFile:
                     if sep:
                         env[k] = v
             elif key == "ExecStart":
-                command = _rcm_command(shlex.split(value))
+                argv = shlex.split(value)
+                command = _rcm_command(argv)
+                program = argv[0].lstrip("@-:+!") if argv else None
             elif key == "LimitNOFILE":
                 first = value.split(":", 1)[0].strip()
                 nofile_unit = 1 << 20 if first == "infinity" else int(first)
         except ValueError:
             continue
-    return ServiceFile(p, dc.SYSTEMD, command, env, nofile_unit)
+    return ServiceFile(p, dc.SYSTEMD, command, env, nofile_unit, program)
 
 
 def _matching(paths: list[Path], role: str) -> list[ServiceFile]:
@@ -394,6 +419,23 @@ def infer_roles(environ: Mapping[str, str]) -> list[str]:
     return roles
 
 
+def git_ref_presets(entries: list[Mapping[str, Any]], rows: list[dc.PresetRow]) -> dict[str, str]:
+    """이 머신에 오는 git_ref 프리셋 → 저장소 이름. 오는 프리셋의 `checks` 에 이름이 오른 점검
+    프리셋도 든다 — 점검은 그 머신을 지정한 git_ref 잡이다(결정 94)."""
+    by_name = {str(p["name"]): p for p in entries}
+    coming = {r.name for r in rows if r.counts}
+    names = set(coming)
+    for r in rows:
+        if r.name in coming:
+            names.update(c for c in r.checks if c in by_name)
+    out: dict[str, str] = {}
+    for name in names:
+        p = by_name.get(name) or {}
+        if "git_ref" in [str(m) for m in p.get("source_modes") or ()]:
+            out[name] = dc.clean_text(p.get("repo") or "", 64)
+    return out
+
+
 # ── 실행 ─────────────────────────────────────────────────────────────────────
 
 
@@ -441,6 +483,9 @@ class _Run:
         self.judged = False  # 프리셋 판정까지 갔나 — 못 갔으면 「올 프리셋 0개」 규칙을 걸지 않는다
         self.pool = dc.DEFAULT_POOL
         self._service_file: ServiceFile | None = None
+        self.path_known = True  # 서비스 PATH 를 아나 — 모르면 PATH 로 찾는 것은 재지 않는다
+        #: 이 머신에 오는 git_ref 프리셋 → 저장소 이름(명세가 `source_modes` 를 실을 때만 안다)
+        self.git_presets: dict[str, str] | None = None
 
     # ── 공통 ──
 
@@ -573,13 +618,28 @@ class _Run:
             env = dc.clean_env(
                 manager, self.ctx.environ, {}, default_path=self.ctx.worker_service_path
             )
+        self.path_known = "PATH" in env
         self.service = {
             "file": self.mask(str(sf.path)) if sf and sf.path else None,
             "manager": manager,
-            "path": self.mask(env.get("PATH", "")),
+            "path": self.mask(env["PATH"]) if self.path_known else None,
             "env_names": sf.env_names if sf else [],
         }
         self._service_file = sf
+        if not self.path_known:
+            # systemd 의 기본 PATH 는 배포판마다 다르다 — 추정해서 재면 없는 「빠짐」을 지어낸다
+            self.undecided.append(
+                "the service file sets no PATH and systemd's default differs between "
+                "distributions — add Environment=PATH=… to the service file"
+            )
+        elif sf is not None and sf.program and os.path.isabs(sf.program):
+            own_bin = os.path.dirname(sf.program)
+            if own_bin in env["PATH"].split(":"):
+                self.warnings.append(
+                    f"{self.mask(own_bin)} (where the service's rcm lives) is on the service "
+                    "PATH — a preset's python3 becomes that venv's; keep the absolute path to "
+                    "rcm in the service file and drop it from PATH (docs/operating.md)"
+                )
         want = ROLE_COMMANDS.get(self.role)
         if self.opts.service_file and sf is not None and want and sf.command != want:
             # 사람이 고른 파일이라 거르지 않는다 — 그 파일로 재되 다른 역할의 파일이라고 알린다(E1)
@@ -594,7 +654,6 @@ class _Run:
     # ── 역할: worker ──
 
     def worker(self) -> None:
-        from remote_ci_monitor.client import WorkerClient
         from remote_ci_monitor.config import ConfigError, load_worker_config, user_config_dir
 
         path: Path | str | None = self.opts.config
@@ -611,6 +670,13 @@ class _Run:
         self.host_facts(env.get("PATH"))
         self.base_requirements()
         self.worker_requirements(cfg, env)
+        self.worker_server(cfg, env)
+        # 명세를 받았든 못 받았든 git 행은 그 뒤에 정한다(오는 git_ref 프리셋을 알아야 한다)
+        self.git_requirements(cfg, env)
+
+    def worker_server(self, cfg: Any, env: dict[str, str]) -> None:
+        from remote_ci_monitor.client import WorkerClient
+
         if cfg.wants_discovery and cfg.path is not None and not self.opts.server:
             self.warnings.append(
                 'server = "auto" in worker.toml: the worker takes whichever rcm server answers '
@@ -650,32 +716,59 @@ class _Run:
         self.server["generation"] = dc.clean_text(spec.get("generation"), 64) or None
         self.measure(spec, env, pool=cfg.pool, accept_any=bool(cfg.accept_any))
 
-    def worker_requirements(self, cfg: Any, env: Mapping[str, str]) -> None:
-        pm, root = self.host.get("package_manager"), bool(self.host.get("root"))
-        if cfg.repos:
-            token_file = any(r.token_file for r in cfg.repos)
-            self.requirements.append(
-                git_requirement(
-                    env, token_file=token_file, platform=PLATFORM, package_manager=pm, root=root
+    def git_requirements(self, cfg: Any, env: Mapping[str, str]) -> None:
+        """git 은 이 머신에 오는 git_ref 프리셋이 있으면 잰다(위임 결정 6). 명세가 `source_modes`
+        를 싣지 않으면(옛 서버, 명세를 못 받음) 지금처럼 `[[repos]]` 가 있을 때 잰다. 오는
+        git_ref 프리셋의 저장소가 이 워커의 `[[repos]]` 에 없으면 `repo_missing` 이다(E4, §3.6
+        D8) — 넣어야 할 이름을 알려 줄 뿐 채우지 않는다."""
+        needed = bool(cfg.repos) if self.git_presets is None else bool(self.git_presets)
+        if needed:
+            self.requirements.append(self.git_row(env, cfg.repos))
+        have = {r.name for r in cfg.repos}
+        for name, repo in sorted((self.git_presets or {}).items()):
+            if repo and repo not in have:
+                self.problems.append(
+                    f"{name}: repository {repo!r} is not in this worker's [[repos]] — its "
+                    "git_ref jobs fail with repo_missing (add it to worker.toml)"
                 )
-            )
+
+    def git_row(self, env: Mapping[str, str], repos: Any) -> dict[str, Any]:
+        if not self.path_known:
+            return unknown_path_requirement("git", "git_ref presets")
+        return git_requirement(
+            env,
+            token_file=any(r.token_file for r in repos),
+            platform=PLATFORM,
+            package_manager=self.host.get("package_manager"),
+            root=bool(self.host.get("root")),
+        )
+
+    def worker_requirements(self, cfg: Any, env: Mapping[str, str]) -> None:
+        if cfg.repos:
             if self.opts.offline:
                 self.requirements.append(
                     requirement("repos", "info", "not checked (--offline)", "git_ref presets")
                 )
             else:
+                # 닿지 못하는 저장소의 git_ref 일은 받을 수 없다 — FAIL, 종료 1(위임 결정 4)
                 details, bad = [], False
                 for r in cfg.repos:
                     problem = self.ctx.ls_remote(r.url)
                     bad = bad or problem is not None
                     details.append(f"{r.name} ({'ok' if problem is None else problem})")
-                state = "warn" if bad else "ok"
+                state = "fail" if bad else "ok"
                 self.requirements.append(
                     requirement("repos", state, " · ".join(details), "git_ref presets")
                 )
-        self.requirements.append(sampler_requirement(env, PLATFORM))
+        if self.path_known:
+            self.requirements.append(sampler_requirement(env, PLATFORM))
+        else:
+            self.requirements.append(
+                unknown_path_requirement("host sampler", "host load and admission")
+            )
         if PLATFORM.startswith("darwin"):
             self.requirements.append(local_network_requirement())
+            self.requirements.append(sleep_requirement())
         elif self._service_file is not None and self._service_file.manager == dc.SYSTEMD:
             linger = linger_requirement(self.ctx.environ.get("USER"))
             if linger is not None:
@@ -705,6 +798,8 @@ class _Run:
                 self.undecided.append(f"probe {name} timed out")
         hints = dc.tool_hints(spec.get("tools"))
         entries = [p for p in spec.get("presets") or [] if isinstance(p, dict) and p.get("name")]
+        if not self.path_known:
+            return  # 모르는 PATH 로 재지 않는다 — 판정 못 함은 service_env 가 이미 적었다
         if entries and not all("placement" in p for p in entries):
             self.undecided.append(
                 "the server does not say which pool each preset runs in (older rcm) — presets "
@@ -744,6 +839,8 @@ class _Run:
                 )
             self.rows.append(row)
         self.judged = True
+        if any("source_modes" in p for p in entries):
+            self.git_presets = git_ref_presets(entries, self.rows)
 
     # ── 역할: coordinator · coordinator-worker ──
 
@@ -768,17 +865,20 @@ class _Run:
         self.base_requirements()
         self.requirements.append(sqlite_requirement())
         self.requirements.append(fd_requirement(self._service_file))
-        pm, root = self.host.get("package_manager"), bool(self.host.get("root"))
-        if cfg.repos:
-            token_file = any(r.token_file for r in cfg.repos)
+        # 서버는 git_ref 제출의 ref 를 풀고 점검을 건다 — git_ref 프리셋이 있으면 git 을 잰다(위임
+        # 결정 6). 프리셋의 저장소가 `[[repos]]` 에 있는지는 설정 검증이 이미 본다
+        if any("git_ref" in p.source_modes for p in cfg.presets):
+            self.requirements.append(self.git_row(env, cfg.repos))
+        if self.path_known:
+            self.requirements.append(sampler_requirement(env, PLATFORM))
+        else:
             self.requirements.append(
-                git_requirement(
-                    env, token_file=token_file, platform=PLATFORM, package_manager=pm, root=root
-                )
+                unknown_path_requirement("host sampler", "host load and admission")
             )
-        self.requirements.append(sampler_requirement(env, PLATFORM))
         if PLATFORM.startswith("darwin") and advertise_enabled(cfg.server):
             self.requirements.append(local_network_requirement())
+        if PLATFORM.startswith("darwin"):
+            self.requirements.append(sleep_requirement())
         bind = cfg.server.bind
         host = "127.0.0.1" if bind in ("0.0.0.0", "::", "") else bind
         host = f"[{host}]" if ":" in host else host

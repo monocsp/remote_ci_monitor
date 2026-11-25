@@ -89,10 +89,12 @@ def test_td37_launchd_clean_env_has_only_its_defaults_and_the_service_env():
 
 
 def test_td37_systemd_clean_env_has_xdg_runtime_dir_and_no_tmpdir():
-    env = dc.clean_env("systemd", SHELL_ENV, {})
+    env = dc.clean_env("systemd", SHELL_ENV, {"PATH": "/svc/bin"})
     assert set(env) == {"HOME", "USER", "LOGNAME", "SHELL", "XDG_RUNTIME_DIR", "PATH"}
-    # 서비스 파일에 PATH 가 없으면 셸의 PATH 가 아니라 관리자의 기본 PATH 다
-    assert env["PATH"] == dc.DEFAULT_PATHS["systemd"] != SHELL_ENV["PATH"]
+    assert env["PATH"] == "/svc/bin"
+    # 서비스 파일에 PATH 가 없으면 셸의 PATH 도 지어낸 기본값도 아니다 — 모른다(위임 결정 5)
+    assert "PATH" not in dc.clean_env("systemd", SHELL_ENV, {})
+    assert dc.clean_env("launchd", SHELL_ENV, {})["PATH"] == "/usr/bin:/bin:/usr/sbin:/sbin"
 
 
 def test_td29_clean_env_never_carries_the_shells_java_home():
