@@ -45,6 +45,7 @@ from remote_ci_monitor.core.model import (
     PlacementNote,
     Preset,
 )
+from remote_ci_monitor.core.progress import clean_line
 from remote_ci_monitor.store import Claimant, MachineRow
 
 LOCAL = cap.LOCAL_WORKER
@@ -125,13 +126,13 @@ HOST_FACT_KEYS = (
 HOST_FACT_MAX = 64
 #: 참 · 거짓 · null 만 받는 칸 — 나머지는 문자열 · null 이다. 문자열 "false" 를 참으로 읽지 않게
 HOST_FACT_BOOLS = frozenset({"rosetta", "container", "root"})
-_HOST_CONTROL_RE = re.compile(r"[\x00-\x1f\x7f-\x9f]")
 
 
 def clean_host_facts(raw: Any) -> dict[str, Any] | None:
     """워커가 보낸 `host` → 허용 키만. `rosetta` · `container` · `root` 는 참 · 거짓만, 나머지는
-    문자열만 받고 제어문자를 지워 64자로 자른다. 모양이 틀린 값은 None(모름)이다. 객체가 아니면
-    None. 값은 `rcm machines` 의 터미널과 웹에 그대로 나간다."""
+    문자열만 받고 `core/progress.clean_line` 의 규칙으로 제어문자 · bidi 제어를 지워 64자로
+    자른다. 모양이 틀린 값은 None(모름)이다. 객체가 아니면 None. 값은 `rcm machines` 의 터미널과
+    웹에 그대로 나간다."""
     if not isinstance(raw, dict):
         return None
     out: dict[str, Any] = {}
@@ -140,7 +141,9 @@ def clean_host_facts(raw: Any) -> dict[str, Any] | None:
         if key in HOST_FACT_BOOLS:
             out[key] = value if isinstance(value, bool) else None
         elif isinstance(value, str):
-            out[key] = _HOST_CONTROL_RE.sub("", value)[:HOST_FACT_MAX] or None
+            # 제어문자에 더해 줄 · 문단 구분자와 bidi 제어도 지운다 — `rcm machines` 의 터미널과
+            # 웹에서 줄을 나누거나 글자 순서를 뒤집는다(검증 사이클 2 의 1라운드 LOW)
+            out[key] = clean_line(value)[:HOST_FACT_MAX] or None
         else:
             out[key] = None
     return out

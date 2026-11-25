@@ -2430,9 +2430,12 @@ MUTANTS = (
         # 웹에 그대로 나간다(P3 1라운드 MED, 검증자 2 #3)
         name="host-facts-control-chars-kept",
         path="src/remote_ci_monitor/capabilities.py",
-        old='            out[key] = _HOST_CONTROL_RE.sub("", value)[:HOST_FACT_MAX] or None\n',
+        old="            out[key] = clean_line(value)[:HOST_FACT_MAX] or None\n",
         new="            out[key] = value[:HOST_FACT_MAX] or None\n",
-        tests=("tests/test_doctor_cli.py::test_host_facts_lose_control_characters_and_stop_at_64",),
+        tests=(
+            "tests/test_doctor_cli.py::test_host_facts_lose_control_characters_and_stop_at_64",
+            "tests/test_doctor_cli.py::test_host_facts_lose_line_separators_and_bidi_controls",
+        ),
     ),
     Mutant(
         # doctor 의 맨 바깥 경계가 없다 — 읽는 자리가 모르는 예외가 「판정 못 함」(종료 3)이 아니라
