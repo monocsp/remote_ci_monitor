@@ -130,7 +130,7 @@ file is a usage error, and nothing is asked.
 `--config PATH`. The service file goes next to them, in `<config dir>/service/<label>.plist` on
 macOS or `<config dir>/service/<unit>` on Linux, or to `--service-file PATH`. It does not go to
 `~/Library/LaunchAgents`: launchd would start anything there at the next login. A `--service-file`
-inside a folder the service manager reads (`~/Library/LaunchAgents`, `/Library/LaunchAgents`,
+or `--config` inside a folder the service manager reads (`~/Library/LaunchAgents`, `/Library/LaunchAgents`,
 `/Library/LaunchDaemons`, `~/.config/systemd/user`, `/etc/systemd/user`, `/etc/systemd/system`)
 is refused with exit 2; on macOS the match ignores case, as the disk does
 (`~/library/launchagents` is the same folder). The label is
@@ -196,9 +196,11 @@ worker token in `worker.toml` as `token = "…"`, because a service does not see
 **At the end** it runs the checks that need no server (Python, SQLite, the open-files limit of the
 service file it wrote, whether the config file reads, and the host) as advice that does not change
 the exit code, then says to start the service, add the token and run `rcm doctor --role <role>`.
-Exit codes: 0 written (also when the closing report fails after every file is written: the last
-line is `files written; the report failed: …`), 1 not written (an unexpected error is one line,
-without a traceback, that says what is on disk), 2 usage, 130 interrupted. `rcm setup` does not follow the server's version.
+Exit codes: 0 written (also when the closing report fails or is interrupted after every file is
+written: the last line is `files written; the report failed: …` or `files written; report
+interrupted`), 1 not written (an unexpected error is one line, without a traceback, that says what
+is on disk), 2 usage, 130 interrupted before every file is written. `rcm setup` does not follow
+the server's version.
 
 ## Check a machine before you use it: `rcm doctor`
 
@@ -616,9 +618,16 @@ serve`, `rcm worker` — a different build migrates the database on open), and a
 deploy. `rcm gc --dry-run --config` is allowed: it plans on a temporary copy. A machine with no
 such install sees nothing. For `rcm setup` the hook expands the command line the way the shell
 does (quotes, `$VAR`, `~`) and then asks setup's own resolver where it would write; it refuses a
-setup that would write into the server's config folder or a folder the service manager reads, use
-a production label, or point a server at the production `data_dir`. A value it cannot expand (an
-unset variable, `${VAR:-x}`, `$(…)`) or a command line setup would reject is refused too.
+setup that would write its config or service file anywhere an edit is refused (the production
+checkout, the service virtualenv, the server's config folder or data directory) or into a folder
+the service manager reads, use a production label, or point a server at the production
+`data_dir`. A value it cannot expand (an unset variable, `${VAR:-x}`, `$(…)`), a relative path
+after a `cd` it cannot follow (`cd -P`, `cd -`, `cd $UNSET`, `pushd`), a command line setup would
+reject, or a failure of the hook itself is refused too. When a command names rcm and the word
+`setup` but the hook cannot read that part as a plain `rcm setup …` call (`sudo -u`, `env -C`,
+`if …; then`, a lone `&`), it is refused with "write it as a plain `rcm setup …` command"; that
+includes text that only mentions it, such as `git commit -m "… rcm setup …"` — use
+`git commit -F <file>`.
 
 The *service virtualenv* is the one whose editable install (`direct_url.json`) points at the
 primary checkout — not whatever `rcm` is first on `PATH`, which in a shell with a worktree's

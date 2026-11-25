@@ -29,8 +29,9 @@ of a key bumps that number and is listed here.
   under a `--label` of your own. It takes options by their whole name only, refuses a
   `--service-file` inside a folder the service manager reads (on macOS whatever the case), and
   writes systemd unit paths with spaces, `%` or `$` the way systemd reads them. An empty
-  `--config`, `--service-file`, `--data-dir` or `--label` is a usage error, and a run whose files
-  are all written exits 0 even when the closing report fails.
+  `--config`, `--service-file`, `--data-dir` or `--label` is a usage error, a `--config` inside a
+  folder the service manager reads is refused like a `--service-file` there, and a run whose files
+  are all written exits 0 even when the closing report fails or is interrupted.
   ([#272](https://github.com/monocsp/remote_ci_monitor/pull/272))
 - **`lanes = 0` runs a server that only hands jobs out.** It runs no job itself: `@local` is not
   alive and never a candidate, its probes do not run, `--machine @local`, `rcm recheck @local`
