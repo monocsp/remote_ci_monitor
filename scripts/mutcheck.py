@@ -9,6 +9,8 @@
   M5t-a PR1 — `m5t-local-only-remote-kept`: 후보 함수가 `local_only` 프리셋의 원격 머신을 안 뺌
      (`capabilities.py`, `docs/m5t-workplan.md` §4.3 · TO15 — 진입점 17 경우가 모두 빨개진다)
      + `m5t-cli-local-only-refusal-is-unknown`: `rcm run` 이 원격 금지 409 를 3 으로 끝냄(`cli.py`)
+     + `m5t-check-local-only-needed-only`: 원격에서 못 도는 점검의 대기 · 실패 기록이 판정에 남음
+     (`capabilities.py`, P6 GAP X1)
   M5s C — `action-*` 다섯: 도는 행의 표식을 이유가 무시 · code 어휘 검사 제거 · note 제어문자를
      안 지움 · 플래그 없이 4 · 취소 중에도 4 + `clean-line-keeps-bidi`(note · 실패 이름이 bidi 를
      남김) (`docs/m5s-workplan.md` §4.3 · 결정 213 · 234 · #251 격리 검증)
@@ -2348,6 +2350,19 @@ MUTANTS = (
         old='_REFUSED_CODES += ("no_capable_machine", "tool_missing")',
         new="_REFUSED_CODES += ()",
         tests=("tests/test_local_only.py::test_to10_to16_rcm_run_exits_2_on_a_local_only_refusal",),
+    ),
+    Mutant(
+        # 원격에서 다시 못 도는 점검(`local_only`)의 재매핑이 `check_needed` 에만 걸린다 — 표식을 단
+        # 순간 그 머신을 겨눈 대기 점검 잡은 「점검 중」으로 끝없이 기다리고, 실패 기록은 409 로
+        # 끝나는 다시 점검을 권한다(M5t-a P6 GAP X1)
+        name="m5t-check-local-only-needed-only",
+        path="src/remote_ci_monitor/capabilities.py",
+        old="        if v.code not in _CHECK_CODES_GATED or report is None:",
+        new="        if v.code != cap.CODE_CHECK_NEEDED or report is None:",
+        tests=(
+            "tests/test_local_only.py::"
+            "test_x1_a_remote_check_record_follows_the_mark_unless_that_machine_is_running_it",
+        ),
     ),
 )
 
