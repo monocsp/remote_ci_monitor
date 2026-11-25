@@ -2657,6 +2657,65 @@ MUTANTS = (
             "test_to15_the_claim_sql_drops_excluded_presets_on_every_branch",
         ),
     ),
+    # ── #268 검증 사이클 2 의 1라운드 — 확정을 모름으로 · 셸이 서비스를 대신한다 ──
+    Mutant(
+        # rcm 의 서비스가 아님이 확실한 파일(ci-watch plist)도 「못 읽음」으로 적는다 — 모든 입력을
+        # 읽은 실행이 종료 3 이 된다(HIGH 1)
+        name="doctor-foreign-service-file-unreadable",
+        path="src/remote_ci_monitor/doctor.py",
+        old="        if sf.launch is None and not looks_like_rcm(sf):\n",
+        new="        if False:\n",
+        tests=(
+            "tests/test_doctor_cli.py::"
+            "test_the_ci_watch_plist_next_to_the_service_is_not_a_candidate",
+            "tests/test_doctor_cli.py::test_only_files_that_look_like_rcm_are_named_unreadable",
+        ),
+    ),
+    Mutant(
+        # 서비스 인자에 --config 가 없으면 doctor 셸의 RCM_CONFIG 를 읽는다(HIGH 2)
+        name="doctor-shell-rcm-config-leaks",
+        path="src/remote_ci_monitor/doctor.py",
+        old='        raw = launch.get("config") or env.get("RCM_CONFIG")\n',
+        new='        raw = launch.get("config") or os.environ.get("RCM_CONFIG")\n',
+        tests=(
+            "tests/test_doctor_cli.py::"
+            "test_the_doctor_shells_rcm_config_and_folder_never_choose_the_servers_config",
+        ),
+    ),
+    Mutant(
+        # 작업 폴더가 적혀 있지 않은 launchd 서비스의 `./rcm.toml` 을 doctor 가 선 폴더에서 찾는다
+        # (HIGH 2)
+        name="doctor-cwd-is-the-services-folder",
+        path="src/remote_ci_monitor/doctor.py",
+        old="            return [LAUNCHD_DEFAULT_WORKDIR]\n",
+        new="            return [os.getcwd()]\n",
+        tests=(
+            "tests/test_doctor_cli.py::"
+            "test_the_doctor_shells_rcm_config_and_folder_never_choose_the_servers_config",
+        ),
+    ),
+    Mutant(
+        # 사람이 준 서비스 파일의 명령을 풀지 못해도 그 파일의 PATH 로 잰다(MED 3)
+        name="doctor-explicit-unresolved-path-trusted",
+        path="src/remote_ci_monitor/doctor.py",
+        old=(
+            "        unresolved = bool(self.opts.service_file) and sf is not None "
+            "and sf.launch is None\n"
+        ),
+        new="        unresolved = False\n",
+        tests=(
+            "tests/test_doctor_cli.py::"
+            "test_an_explicit_service_file_whose_command_rcm_cannot_resolve_is_unknown",
+        ),
+    ),
+    Mutant(
+        # 사용자 유닛 자리의 `%h` 를 풀지 않는다 — rcm 이 아는 홈을 모름으로 만든다(MED 4)
+        name="doctor-user-unit-home-unexpanded",
+        path="src/remote_ci_monitor/doctor.py",
+        old="        found = _matching(stage, role, skipped, user_home)\n",
+        new="        found = _matching(stage, role, skipped, None)\n",
+        tests=("tests/test_doctor_cli.py::test_h_in_a_user_unit_is_the_home_doctor_knows",),
+    ),
 )
 
 
