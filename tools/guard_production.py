@@ -37,6 +37,8 @@ stdin 으로 받아 판정 JSON 을 stdout 으로 낸다.
 macOS 에서는 경로를 대소문자 구분 없이 견준다(`FOLD_CASE`).
 
 훅 자체가 터지면 막지 않고 경고만 남긴다. 모든 Bash 를 막는 가드는 가드가 아니라 고장이다.
+다만 `rcm setup` 을 말하는 명령(`mentions_setup`)의 판정 중에 터지면 막는다 — setup 이 어디에
+쓸지 모르기 때문이다(P3 3라운드).
 """
 
 from __future__ import annotations
@@ -1540,7 +1542,18 @@ def find_production() -> Production:
 # ── 훅 진입점 ────────────────────────────────────────────────────────────────
 
 
+def _about_setup(payload: Any) -> bool:
+    """훅 입력이 `rcm setup` 을 말하는 Bash 명령인가(`mentions_setup`). 무엇이 터져도 답한다."""
+    try:
+        tool_input = payload.get("tool_input") or {}
+        command = tool_input.get("command")
+        return payload.get("tool_name") == "Bash" and mentions_setup(str(command or ""))
+    except Exception:  # noqa: BLE001 — 모양이 이상한 입력은 setup 이 아니다
+        return False
+
+
 def main() -> int:
+    payload: Any = {}
     try:
         payload = json.loads(sys.stdin.read() or "{}")
         cwd = Path(str(payload.get("cwd") or os.getcwd()))
@@ -1552,9 +1565,18 @@ def main() -> int:
             local_config=(cwd / "rcm.toml").exists(),
             environ=os.environ,
         )
-    except Exception as error:  # 가드가 터져도 작업은 막지 않는다 — 대신 눈에 보이게 알린다
-        print(json.dumps({"systemMessage": f"guard_production.py failed: {error!r}"}))
-        return 0
+    except Exception as error:
+        if not _about_setup(payload):
+            # 가드가 터져도 작업은 막지 않는다 — 대신 눈에 보이게 알린다
+            print(json.dumps({"systemMessage": f"guard_production.py failed: {error!r}"}))
+            return 0
+        # setup 판정 중 터지면 막는다 — setup 이 어디에 쓸지 모른다(P3 3라운드, fail closed)
+        verdict = Verdict(
+            "deny",
+            f"The hook failed while judging this `rcm setup` command ({error!r}), so it cannot "
+            "tell where setup would write; it refuses it. Write it as a plain `rcm setup …` "
+            f"command, or fix tools/guard_production.py. See {DOCS}.",
+        )
     if verdict is None:
         return 0
     print(
