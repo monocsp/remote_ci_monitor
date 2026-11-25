@@ -1147,6 +1147,54 @@ class CapabilitiesMixin:
             blocked.append({"worker": view.id, "code": note.code, "detail": dict(note.detail)})
         return {"mode": mode, "eligible_now": eligible, "blocked": blocked}
 
+    # ── 갈 수 있는 머신 (M5t-a 결정 243) ────────────────────────────────────
+
+    def reachable_machines(
+        self,
+        preset: Preset,
+        views: list[_MachineView],
+        now: datetime,
+        memo: dict[Any, Any] | None = None,
+    ) -> list[str]:
+        """그 프리셋의 잡이 **지금** 갈 수 있는 머신 — 후보 함수(`machines_for`) 결과 가운데 살아
+        있는 머신이다. any-capable 이면 eligible 이고 any-capable 을 받는 머신, pool 이면 그
+        풀의 머신이다. `checks` 가 없는 pool 프리셋은 판정을 보지 않고 그 풀의 살아 있는 레인을
+        센다 — `placement_for` 의 pool 갈래가 그렇게 고른다. 판정을 보지 않는 것은 후보 함수
+        결과 안에서만이다(6-A-L2 · 6-B-V14): `local_only` 프리셋에 원격 머신은 세지 않는다."""
+        live = [v for v in self.machines_for(preset, views) if v.alive]
+        if preset.placement == PLACEMENT_CAPABLE:
+            return [
+                view.id
+                for view, v in self._placement_notes(preset, live, now, memo)
+                if v.state == cap.ELIGIBLE and self._accepts_any(view)
+            ]
+        in_pool = [v for v in live if v.pool == preset.pool]
+        if not preset.checks:
+            return [v.id for v in in_pool]
+        return [
+            view.id
+            for view, v in self._placement_notes(preset, in_pool, now, memo)
+            if v.state == cap.ELIGIBLE or v.code in _TOOL_CODES
+        ]
+
+    def _accepts_any(self, view: _MachineView) -> bool:
+        if view.kind == "local":
+            return bool(self.config.server.local_accept_any)
+        return view.report.accept_any if view.report is not None else True
+
+    def capacity(self) -> dict[str, Any]:
+        """`/api/health` 의 `capacity` — 「지금 갈 수 있는 머신이 하나라도 있는 프리셋 수 / 전체
+        프리셋 수」와 갈 곳이 없는 프리셋 이름(설정 순서). 정보일 뿐 HTTP 상태를 바꾸지 않는다
+        (결정 243, ⛔ Q5). 프리셋이 0개면 0/0 이고 `rcm check` 는 행을 그리지 않는다."""
+        now = self.now_fn()
+        views = self.machine_views(now)
+        memo: dict[Any, Any] = {}
+        none = [
+            p.name for p in self.config.presets if not self.reachable_machines(p, views, now, memo)
+        ]
+        total = len(self.config.presets)
+        return {"total": total, "reachable": total - len(none), "unreachable": none}
+
     # ── 자동 점검 (§4.4) ────────────────────────────────────────────────────
 
     def sweep_checks(self) -> list[int]:

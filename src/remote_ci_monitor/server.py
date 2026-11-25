@@ -955,6 +955,17 @@ class App(RemoteWorkersMixin, CapabilitiesMixin, ShelfAppMixin):
         """로컬 레인 먼저, 원격은 워커 이름순(`server.workers[]`)."""
         return [*self.worker_infos(), *self.remote_worker_infos(None, now)]
 
+    def pools_without_workers(self, now: datetime) -> list[str]:
+        """등록된 워커가 있는데 전부 down 인 풀. 기본 풀은 로컬 레인이 있을 때만 뺀다 — 분배 전용
+        (`lanes = 0`)이면 기본 풀도 원격 워커뿐이라 다른 풀처럼 센다(M5t-a §3 C12, TL13)."""
+        pools = super().pools_without_workers(now)
+        if self._has_local_lanes():
+            return pools
+        rows = [r for r in self._workers() if r.pool == DEFAULT_POOL]
+        if rows and not any(self.worker_alive(r, now) for r in rows):
+            pools = sorted({*pools, DEFAULT_POOL})
+        return pools
+
     def pool_lanes(self, pool: str, now: datetime) -> int:
         local = self.config.server.lanes if pool == DEFAULT_POOL else 0
         return local + self.remote_lanes(pool, now)
@@ -5429,6 +5440,10 @@ class App(RemoteWorkersMixin, CapabilitiesMixin, ShelfAppMixin):
             idle_pools = self.pools_without_workers(self.now_fn())
         except Exception:  # noqa: BLE001
             idle_pools = []
+        try:
+            capacity: dict[str, Any] | None = self.capacity()
+        except Exception:  # noqa: BLE001 — 정보 칸이다. 못 세면 null(모름)이지 0 이 아니다
+            capacity = None
         strict_cancel = bool(self.config.server.cancel_requires_submission_token)
         body = {
             "ok": ok,
@@ -5439,6 +5454,9 @@ class App(RemoteWorkersMixin, CapabilitiesMixin, ShelfAppMixin):
             "version": self.version,
             "storage": self._health_storage(),  # 부피 회계(M5g, 정보 — 503 조건은 아니다)
             "pools_without_workers": idle_pools,  # 등록된 원격 워커가 전부 down 인 풀(정보)
+            # 갈 수 있는 머신이 있는 프리셋 수 / 전체 프리셋 수(M5t-a 결정 243, 정보 — 503 조건은
+            # 아니다, ⛔ Q5). `rcm check` 가 0 이면 FAIL, 일부면 warn 으로 그린다
+            "capacity": capacity,
             "advertise": self._advertise_json(),  # mDNS 광고 상태(M5c, 정보)
             # 클라이언트가 서버 버전을 따라오는 길(M5i I8 · 결정 81·83, 정보 — 503 조건은 아니다)
             "client_wheel": self.client_wheel(),

@@ -43,6 +43,7 @@ LANES_ZERO = "lanes = 0\n"
 
 def zero(tmp_path: Path, *, lanes: int = 0, presets: str = PRESETS, **kw: Any) -> M5nServer:
     """`[server] lanes` 만 바꾼 `M5nServer`. 머리는 모듈 상수라 띄우는 동안만 바꿔 둔다."""
+    tmp_path.mkdir(parents=True, exist_ok=True)
     head = test_server_m5n.HEAD
     assert LANES_ONE in head
     test_server_m5n.HEAD = head.replace(LANES_ONE, f"lanes = {lanes}\n")
@@ -54,17 +55,22 @@ def zero(tmp_path: Path, *, lanes: int = 0, presets: str = PRESETS, **kw: Any) -
     return s
 
 
-def report_all(s: M5nServer, worker: str, *, host_key: str = HOST_B) -> None:
-    """등록 + 설정의 **모든** 프리셋에 「전부 있음」 보고(`test_local_only.report` 는 그 파일의
-    프리셋 이름만 싣는다)."""
+def report_all(s: M5nServer, worker: str, missing: dict[str, list[str]] | None = None) -> None:
+    """등록 + 설정의 **모든** 프리셋 보고(`test_local_only.report` 는 그 파일의 프리셋 이름만
+    싣는다). `missing` 에 든 프리셋만 그 도구가 빠졌다고 보낸다."""
+    missing = missing or {}
     gen = s.registered(worker, pool=s.pools_of[worker])["generation"]
     body = {
         "generation": gen,
-        "host_key": host_key,
+        "host_key": HOST_B,
         "accept_any": True,
         "fingerprint": {"xc": ok_probe("Xc 1")},
         "presets": {
-            p.name: {"missing_tools": [], "workspace_tools": [], "missing_passthrough": []}
+            p.name: {
+                "missing_tools": missing.get(p.name, []),
+                "workspace_tools": [],
+                "missing_passthrough": [],
+            }
             for p in s.app.config.presets
         },
     }
@@ -96,7 +102,6 @@ def test_tl1_lanes_zero_loads_and_the_server_starts(tmp_path):
     with pytest.raises(ConfigError) as e:
         load_server_config(bad, environ={}, check_tools=False)
     assert "lanes" in str(e.value)
-    (tmp_path / "srv").mkdir()
     s = zero(tmp_path / "srv", workers=True)
     try:
         assert s.app.workers == []  # 로컬 레인 스레드가 없다
@@ -286,3 +291,78 @@ def test_to12_a_local_only_check_has_nowhere_to_go_and_no_check_job_is_made(lz, 
     assert row["estimate"]["wait_seconds"] is None, row
     verdict = lz.machines()[REMOTE]["presets"]["qadef"]
     assert verdict["code"] == "check_local_only", verdict
+
+
+# ── TL3 · TL13 · TL17 · TO15 `/api/health` 의 `capacity` ─────────────────────
+
+
+def health(s: M5nServer) -> tuple[int, dict[str, Any]]:
+    status, body = s.req("GET", "/api/health")
+    return status, body
+
+
+def capacity(s: M5nServer) -> dict[str, Any]:
+    body = health(s)[1]
+    assert "capacity" in body, sorted(body)
+    return body["capacity"]
+
+
+def test_tl3_health_capacity_is_zero_without_workers_and_the_status_stays_200(lz):
+    status, body = health(lz)
+    assert status == 200 and body["ok"] is True, body  # HTTP 상태는 그대로다(⛔ Q5)
+    names = [p.name for p in lz.app.config.presets]
+    assert capacity(lz) == {"total": len(names), "reachable": 0, "unreachable": names}
+
+
+def test_tl13_pools_without_workers_counts_the_default_pool_only_without_local_lanes(tmp_path):
+    for lanes, expected in ((0, ["default"]), (1, [])):
+        s = zero(tmp_path / f"lanes{lanes}", lanes=lanes)
+        try:
+            report(s, REMOTE)  # 기본 풀의 원격 워커 하나
+            assert health(s)[1]["pools_without_workers"] == []  # 살아 있는 동안은 없다
+            s.clock.advance(s.app.config.server.worker_timeout_seconds + 5)
+            assert health(s)[1]["pools_without_workers"] == expected, lanes
+        finally:
+            s.close()
+
+
+#: 도구가 빠진 원격 판정 — pool 프리셋은 판정을 보지 않고, any-capable 은 본다
+GATED = PRESETS + block("gatechk", 'checks = ["simcheck"]')
+
+
+def test_tl17_capacity_counts_live_candidates_and_pool_presets_ignore_the_verdict(tmp_path):
+    s = zero(tmp_path, presets=GATED)
+    try:
+        report_all(s, REMOTE, {"gate": ["nope"], "gateany": ["nope"]})
+        cap = capacity(s)
+        # gate(pool · checks 없음)는 도구가 빠져도 그 풀의 살아 있는 레인을 센다
+        assert "gate" not in cap["unreachable"], cap
+        # gateany(any-capable)는 판정을 본다 — 도구가 빠진 머신은 갈 곳이 아니다
+        assert "gateany" in cap["unreachable"], cap
+        # 다른 풀 전용(qa · mac2)은 기본 풀 워커로 셀 수 없다
+        assert "qa" in cap["unreachable"], cap
+        assert cap["reachable"] == cap["total"] - len(cap["unreachable"])
+        # 죽은 워커는 세지 않는다
+        s.clock.advance(s.app.config.server.worker_timeout_seconds + 5)
+        cap = capacity(s)
+        assert cap["reachable"] == 0 and "gate" in cap["unreachable"], cap
+    finally:
+        s.close()
+    # 프리셋이 0개면 0/0 이다(`rcm check` 는 행을 그리지 않는다, TL17 의 나머지는 cli 시험)
+    s = zero(tmp_path / "none", presets="")
+    try:
+        assert capacity(s) == {"total": 0, "reachable": 0, "unreachable": []}
+    finally:
+        s.close()
+
+
+def test_to15_capacity_never_counts_a_remote_machine_for_a_local_only_preset(lz):
+    # TO15 의 `capacity` 진입점(PR3). 「pool 프리셋은 판정을 보지 않는다」는 후보 함수 결과
+    # 안에서만이다(6-A-L2 · 6-B-V14) — 표식 없는 gate 와 같은 풀 · 같은 판정인 rel 이 원격으로
+    # 세지면 안 된다
+    report(lz, REMOTE)
+    cap = capacity(lz)
+    assert "gate" not in cap["unreachable"], cap  # 비교 행: 원격이 받는다
+    assert "gateany" not in cap["unreachable"], cap
+    for name in ("rel", "relany", "relq", "relgated", "localcheck"):
+        assert name in cap["unreachable"], (name, cap)
