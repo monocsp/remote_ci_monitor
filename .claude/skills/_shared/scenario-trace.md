@@ -42,8 +42,8 @@ Only workplans that carry the marker are traced. A document passed to the tool w
 ./.venv/bin/python tools/scenario_trace.py docs/m5x-workplan.md [more.md …] [--tests tests/] [--json]
 # problems: format · empty (a table with no IDs) · duplicate · missing (a row with no test) ·
 #   orphan (a tag the table lacks) · clash (two documents, one prefix) · nothing (a document with no marker)
-#   skipped (a tagged test carries skip) · unreadable (a test file or folder it could not read)
-#   format also covers a marker that is not exactly `<!-- scenario-prefix: X -->`, an interrupted table, an unclosed fence
+#   skipped (a tagged test carries skip or xfail) · unreadable (a test file or folder it could not read)
+#   format also covers a marker that is not exactly `<!-- scenario-prefix: X -->`, an interrupted table, a line GFM reads as a row, an unclosed fence
 # exit 0 ok · 1 problems (listed) · 2 usage
 ```
 
@@ -91,5 +91,7 @@ the owner: the row is probably too vague to test, which is a workplan question. 
   review is invisible to both, so a big change to a tagged test asks for the review again.
 - Text of a row beyond its line. Write each row as one line.
 - Whether a `(live)` row was actually run. `live-verify` lists them; a live verifier raises a missing one.
-- A tag in a skipped test or in a comment of the wrong test; the verifier calls that `WEAK`.
+- A tag in a test that a runtime `pytest.skip()` or `pytest.importorskip()` inside its body skips
+  (decorators, `pytestmark` and `xfail` are seen), or in a comment of the wrong test; the verifier
+  calls that `WEAK`.
 - A row that was never written. That is plan verification's and the owner's job.

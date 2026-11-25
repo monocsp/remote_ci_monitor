@@ -11,8 +11,9 @@
 표지만 있어야 한다(본문 속에 인용한 표지는 세지 않는다). 표지처럼 보이는데 꼴이 다른 줄
 (`scenario_prefix` · 쌍점이나 띄어쓰기 빠짐 · 대문자)은 format 이다 — 건너뛰면 그 표는 대조되지
 않는다. 표의 첫 칸이 ID(`X1`, `X2` …). 표는 빈 줄 · 본문 줄에서 끝난다. 다음 제목 · 표지 전에 같은
-표지 아래 `|` 줄이 또 나오면 끊긴 표라서 format 이다(뒤의 행을 읽지 않았다). 표 바로 다음 줄에
-`|` 가 있으면(앞 `|` 없는 행 — GFM 은 행으로 그린다) 그것도 format 이다. 어느 칸이
+표지 아래 `|` 줄이 또 나오면 끊긴 표라서 format 이다(뒤의 행을 읽지 않았다). 표 바로 다음 줄이
+빈 줄 · 제목 · 가로줄 · 목록 · 인용 · 펜스 · 표지가 아니면(앞 `|` 가 없거나 `|` 가 아예 없어도
+GFM 은 행으로 그린다) 그것도 format 이다. 어느 칸이
 `(live)` 이거나 ` (live)` 로 끝나면(시나리오 칸 끝에 붙이는 꼴, `docs/m5t-workplan.md`) pytest 가
 아니라 실기(live run)로 증명하는 행이라 누락으로 세지 않는다. 설명 가운데의 `(live)` 는 아니다.
 펜스 코드 블록(```` ``` ```` · `~~~`)과 4칸 들여쓴 코드 블록 안의 표지와 표는 예시라서 읽지 않는다.
@@ -21,15 +22,18 @@
 BOM 은 떼고 읽는다. 같은 문서를 두 번 주면(다른 철자라도) 한 번만 읽는다.
 시험 쪽: 이름 `test_x3_…`(앞에서부터 `test_x1_x2_…` 처럼 여럿) 또는 시험 함수 **안**의 주석 `# X3`.
 pytest 가 모으는 시험만 센다 — `test_*.py` · `*_test.py` 파일의 모듈 맨 위 `test_*` 함수와 `Test*`
-클래스(`__init__` 없는 것, 안의 `Test*` 클래스까지)의 `test_*` 메서드. 함수 안 · 다른 클래스 · 시험
-파일이 아닌 모듈의 것은 아니다. 주석의 주인은 그 줄을 품은 가장 안쪽 함수다 — 시험 안에 둔 도우미
-함수의 주석은 태그가 아니다. `skip*` 를 단 시험(함수 · 클래스 데코레이터, 모듈의 `pytestmark`)의
-태그는 `skipped` 문제다 — 돌지 않는 시험은 행을 증명하지 않는다.
+클래스(`__init__` 없고 `__test__ = False` 가 아닌 것, 안의 `Test*` 클래스까지)의 `test_*` 메서드.
+함수 안 · 다른 클래스 · 시험 파일이 아닌 모듈 · pytest 가 안 들어가는 폴더(기본 `norecursedirs`:
+`.*` · `build` · `venv` …)의 것은 아니다. 주석의 주인은 그 줄을 품은 가장 안쪽 함수다 — 시험 안에
+둔 도우미 함수의 주석은 태그가 아니다. `skip*` · `xfail` 을 단 시험(함수 · 클래스 데코레이터, 모듈 ·
+클래스의 `pytestmark`)의 태그는 `skipped` 문제다 — 돌지 않거나 실패해도 초록인 시험은 행을 증명하지
+않는다. 조건부는 조건이 없거나 참 상수일 때만이다 — 식이 조건이면 어딘가에서는 돈다.
 
 문제의 종류: format(표지 · 표 · ID 꼴, 안 닫힌 펜스, 끊긴 표) · empty(ID 가 하나도 없는 표 — 검사한
 것이 없다) · duplicate · missing(시험이 없는 행) · orphan(명세에 없는 ID 를 단 시험) · clash(두
 문서가 같은 접두어) · nothing(표지가 하나도 없는 문서 — 문서마다 적는다. 검사하지 않은 것을 통과로
-세지 않는다) · skipped(건너뛰는 시험의 태그) · unreadable(시험 파일 · 하위 폴더를 못 읽음).
+세지 않는다) · skipped(건너뛰거나 xfail 인 시험의 태그) · unreadable(시험 파일 · 하위 폴더를 못
+읽음).
 UTF-8 이 아닌 명세는 format 이다.
 
 접두어는 새 명세마다 **아무 시험도 쓰지 않는 것**을 고른다(`--prefix-usage`). 기존 시험이 이미
@@ -45,6 +49,7 @@ from __future__ import annotations
 
 import argparse
 import ast
+import fnmatch
 import io
 import json
 import os
@@ -68,6 +73,10 @@ FENCE_RE = re.compile(r"^ {0,3}(`{3,}|~{3,})(.*)$")
 CLOSE_RE = re.compile(r"^ {0,3}(`{3,}|~{3,})[ \t]*$")  # 닫는 펜스 — 정보 문자열이 없다
 #: 표 아래에서 표지의 영역을 끝내는 줄 — ATX 제목, setext 밑줄 · 가로줄
 SECTION_RE = re.compile(r"^ {0,3}(#{1,6}(\s|$)|=+[ \t]*$|-{3,}[ \t]*$)")
+#: 표를 끝내는 블록의 첫 줄 — 목록 · 인용 · 펜스(제목 · 가로줄은 SECTION_RE, 표지는 MARKER_RE)
+BLOCK_RE = re.compile(r"^ {0,3}([-+*]|\d{1,9}[.)])([ \t]|$)|^ {0,3}(>|`{3,}|~{3,})")
+#: pytest 의 기본 norecursedirs — 이 아래의 시험은 모이지 않는다
+NORECURSE = (".*", "build", "dist", "venv", "*.egg", "node_modules", "_darcs", "CVS", "{arch}")
 LIVE = "(live)"
 SHOWN = 5  # --prefix-usage 가 보여 주는 자리 수
 
@@ -143,9 +152,11 @@ def parse_doc(path: Path, problems: list[dict[str, str]]) -> dict[str, dict[str,
             problems.append(_problem("format", where, "the marker is not right above a table"))
             continue
         after = index + 1 + len(table)
-        if after < len(lines) and after not in code and "|" in lines[after]:
-            # GFM 은 앞 `|` 없는 줄도 표의 행으로 그린다 — 여기서 끝난 줄 알면 그 행을 안 읽는다
-            message = "a row without a leading | right after the table — GFM shows it as a row"
+        if after < len(lines) and after not in code and _row_like(lines[after]):
+            # GFM 은 표 바로 뒤의 줄을 빈 줄 · 다른 블록이 아니면 행으로 그린다(앞 `|` 가 없어도,
+            # `|` 가 아예 없어도) — 여기서 끝난 줄 알면 그 행을 안 읽는다
+            message = "a line right after the table that GFM shows as a row — start it with | or "
+            message += "leave a blank line"
             problems.append(_problem("format", f"{path}:{after + 1}", message))
         _interrupted(lines, code, after, index + 1, path, problems)
         id_re = re.compile(rf"^{prefix}([1-9]\d*)$")
@@ -172,6 +183,15 @@ def parse_doc(path: Path, problems: list[dict[str, str]]) -> dict[str, dict[str,
         )
         problems.append(_problem("nothing", str(path), message))
     return groups
+
+
+def _row_like(line: str) -> bool:
+    """표 바로 뒤의 이 줄을 GFM 이 표의 행으로 그리는지 — 빈 줄 · 제목 · 가로줄 · 목록 · 인용 ·
+    펜스 · 표지가 아니면 그린다."""
+    text = line.strip()
+    if not text or SECTION_RE.match(line) or BLOCK_RE.match(line):
+        return False
+    return not (MARKER_RE.fullmatch(text) or LOOKALIKE_RE.search(text))
 
 
 def _interrupted(
@@ -216,33 +236,74 @@ def _owner(funcs: list[Any], line: int) -> Any:
     return max(around, key=lambda f: f.lineno, default=None)
 
 
-def _skips(node: Any) -> bool:
-    """`skip` · `skipif`(pytest · unittest 의 `skip*`)를 단 표현 — 데코레이터나 `pytestmark` 값."""
+def _not_run(node: Any) -> str:
+    """돌지 않거나 실패해도 초록인 시험의 표 — `skip` · `xfail`(pytest · unittest 의 `skip*` ·
+    `expectedFailure`)을 단 데코레이터나 `pytestmark` 값이면 그 이름, 아니면 "". 조건부
+    (`skipif` · `skipIf` · `xfail`)는 조건이 없거나 참 상수일 때만, `skipUnless` 는 거짓 상수일 때만
+    — 식이 조건이면 어딘가에서는 돈다."""
     if isinstance(node, ast.List | ast.Tuple):
-        return any(_skips(item) for item in node.elts)
-    node = node.func if isinstance(node, ast.Call) else node
-    name = node.attr if isinstance(node, ast.Attribute) else getattr(node, "id", "")
-    return name.lower().startswith("skip")
+        return next(filter(None, map(_not_run, node.elts)), "")
+    call = node if isinstance(node, ast.Call) else None
+    node = node.func if call else node
+    name = (node.attr if isinstance(node, ast.Attribute) else getattr(node, "id", "")).lower()
+    kind = "skip" if name.startswith("skip") else ""
+    kind = "xfail" if name in ("xfail", "expectedfailure") else kind
+    if not kind or call is None or name in ("skip", "skiptest", "expectedfailure"):
+        return kind
+    cond = call.args[0] if call.args else next(
+        (k.value for k in call.keywords if k.arg == "condition"), None)  # fmt: skip
+    if cond is None:  # 조건 없는 xfail(reason=…) · skipif() — 늘 그렇다
+        return kind
+    if not isinstance(cond, ast.Constant) or isinstance(cond.value, str):
+        return ""  # 식 · 문자열 조건은 돌리는 곳에서 정해진다
+    if name == "xfail" and cond.value is None:
+        return kind
+    return kind if bool(cond.value) != (name == "skipunless") else ""
 
 
-def _collected(tree: ast.Module) -> list[tuple[Any, bool]]:
-    """pytest 가 모으는 시험 함수와 건너뛰는지 — 모듈 맨 위의 `test_*` 와 `Test*` 클래스(안의
-    `Test*` 클래스까지, `__init__` 이 없는 것)의 `test_*` 메서드. 함수 안 · 다른 클래스의 것은
-    아니다."""
-    marks = [n.value for n in tree.body if isinstance(n, ast.Assign)
-             and any(getattr(t, "id", "") == "pytestmark" for t in n.targets)]  # fmt: skip
-    out: list[tuple[Any, bool]] = []
+def _marks(body: list[Any]) -> list[Any]:
+    """`pytestmark = …` · `pytestmark: list = …` 의 값 — 모듈 · 클래스 몸통."""
+    out = []
+    for n in body:
+        targets = n.targets if isinstance(n, ast.Assign) else []
+        if isinstance(n, ast.AnnAssign) and n.value is not None:
+            targets = [n.target]
+        if any(getattr(t, "id", "") == "pytestmark" for t in targets):
+            out.append(n.value)
+    return out
 
-    def walk(body: list[Any], skipped: bool) -> None:
+
+def _flag(body: list[Any], name: str) -> Any:
+    """몸통의 `name = <상수>` 값(없으면 None) — 클래스의 `__test__ = False`."""
+    for n in body:
+        if isinstance(n, ast.Assign) and any(getattr(t, "id", "") == name for t in n.targets):
+            return n.value.value if isinstance(n.value, ast.Constant) else None
+    return None
+
+
+def _collected(tree: ast.Module) -> list[tuple[Any, str]]:
+    """pytest 가 모으는 시험 함수와 그 돌지 않는 표(`_not_run`) — 모듈 맨 위의 `test_*` 와 `Test*`
+    클래스(안의 `Test*` 클래스까지, `__init__` 이 없고 `__test__ = False` 가 아닌 것)의 `test_*`
+    메서드. 함수 안 · 다른 클래스의 것은 아니다."""
+    out: list[tuple[Any, str]] = []
+
+    def first(*kinds: str) -> str:
+        return next(filter(None, kinds), "")
+
+    def walk(body: list[Any], kind: str) -> None:
         for node in body:
             if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef):
                 if node.name.startswith("test_"):
-                    out.append((node, skipped or any(map(_skips, node.decorator_list))))
+                    out.append((node, first(kind, *map(_not_run, node.decorator_list))))
             elif isinstance(node, ast.ClassDef) and node.name.startswith("Test"):
-                if not any(getattr(n, "name", "") == "__init__" for n in node.body):
-                    walk(node.body, skipped or any(map(_skips, node.decorator_list)))
+                if any(getattr(n, "name", "") == "__init__" for n in node.body):
+                    continue
+                if _flag(node.body, "__test__") is False:
+                    continue
+                marks = [*node.decorator_list, *_marks(node.body)]
+                walk(node.body, first(kind, *map(_not_run, marks)))
 
-    walk(tree.body, any(map(_skips, marks)))
+    walk(tree.body, first(*map(_not_run, _marks(tree.body))))
     return out
 
 
@@ -256,7 +317,9 @@ def _test_files(tests_dir: Path, every: bool, problems: list[dict[str, str]]) ->
 
     found: list[Path] = []
     for folder, dirs, names in os.walk(tests_dir, onerror=unreadable):
-        dirs[:] = sorted(d for d in dirs if d != "__pycache__")
+        # pytest 가 들어가지 않는 폴더는 대조에서 뺀다 — --prefix-usage(`every`)는 그래도 본다
+        skip = ("__pycache__",) if every else ("__pycache__", *NORECURSE)
+        dirs[:] = sorted(d for d in dirs if not any(fnmatch.fnmatchcase(d, p) for p in skip))
         for name in names:
             wanted = name.startswith("test_") or name.endswith("_test.py")
             if name.endswith(".py") and (every or wanted):
@@ -286,8 +349,8 @@ def scan_tests(
             continue
         funcs = [n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef | ast.AsyncFunctionDef)]
         owners = {line: _owner(funcs, line) for line, _ in comments}
-        tests = [(n, False) for n in funcs if n.name.startswith("test_")]
-        for node, skipped in tests if anywhere else _collected(tree):
+        tests = [(n, "") for n in funcs if n.name.startswith("test_")]
+        for node, not_run in tests if anywhere else _collected(tree):
             found: set[str] = set()
             for token in node.name[5:].split("_"):
                 m = NAME_TOKEN_RE.match(token)
@@ -300,8 +363,9 @@ def scan_tests(
             for ident in sorted(found):
                 place = f"{path}:{node.lineno} {node.name}"
                 tags.setdefault(ident, []).append(place)
-                if skipped:  # 태그는 있지만 그 시험은 돌지 않는다 — 행을 증명하지 않는다
-                    message = f"{ident} is tagged on a test marked skip — it never runs"
+                if not_run:  # 태그는 있지만 돌지 않거나 실패해도 초록 — 행을 증명하지 않는다
+                    why = "it never runs" if not_run == "skip" else "it passes even when it fails"
+                    message = f"{ident} is tagged on a test marked {not_run} — {why}"
                     problems.append(_problem("skipped", place, message, ident))
         if anywhere:  # 시험 함수 밖의 주석 — 대조에서는 태그가 아니지만 접두어는 쓴 것이다
             for line, comment in comments:
@@ -394,10 +458,12 @@ def main(argv: list[str] | None = None) -> int:
         "allowed and --prefix-usage counts a tag anywhere under the test folder (module or helper "
         "comments too). The marker must be alone on its line and written exactly as "
         "<!-- scenario-prefix: X -->; a line that looks like one but differs is a format problem, "
-        "as are a table broken by a blank or text line, a row without a leading | right after "
-        "the table and a fence that never closes. Only tests pytest collects tag rows (top-level "
-        "test_* functions and test_* methods of Test* classes in test_*.py or *_test.py); a tag "
-        "on a test marked skip is a skipped problem. "
+        "as are a table broken by a blank or text line, a line right after the table that is not "
+        "blank or another block (GFM shows it as a row) and a fence that never closes. Only tests "
+        "pytest collects tag rows (top-level test_* functions and test_* methods of Test* classes "
+        "in test_*.py or *_test.py, outside pytest's default norecursedirs); a tag on a test "
+        "marked skip or xfail without a condition, or with a true constant one, is a skipped "
+        "problem. "
         "A row is live (proved by a live run, "
         "never counted missing) when one of its cells is (live) or ends with (live) after a "
         "space, as at the end of the scenario cell; (live) in the middle of a cell does not "

@@ -27,7 +27,8 @@ than one question, or a question about a screen, goes on a [decision page](../_s
 
 ## 1. The request card
 
-Kept as a working note, then pasted into the PR body under `## 요청 카드`, right after `## 한 줄`.
+Kept as a working note, then pasted into the PR body under `## 요청 카드`, where the `pr` skill «Body»
+orders it.
 It lives **only in the PR body**: a commit would move the head and send `rcm/ci` round again.
 
 - the owner's request and decisions, verbatim;

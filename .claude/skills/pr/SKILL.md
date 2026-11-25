@@ -41,10 +41,10 @@ CHANGELOG [Unreleased] · docs/… · README 미러 — 또는 「사용자에�
 Refs: #80
 ```
 
-More sections when the development loop produced them (`.claude/skills/dev-loop/SKILL.md`):
-`## 요청 카드` right after `## 한 줄` (`dev-lite`), `## Differs from the spec`
-(`.claude/skills/_shared/workplan-diff.md`), `## Edge audit` (the confirmed GAP table, `edge-audit`)
-and `## Remaining findings` (the MED/LOW the final triage reported rather than fixed,
+More sections when the development loop produced them (`.claude/skills/dev-loop/SKILL.md`), in this
+order right after `## 한 줄`: `## 요청 카드` (`dev-lite`), `## Differs from the spec`
+(`.claude/skills/_shared/workplan-diff.md`), `## Edge audit` (the confirmed GAP table, `edge-audit`),
+`## Remaining findings` (the MED/LOW the final triage reported rather than fixed,
 `.claude/agents/isolated-verifier.md`).
 
 End the body with the attribution block given at session start.
@@ -77,10 +77,8 @@ documents that stay in the repository are written in 평어체.
    export GH_TOKEN=$(gh auth token --user monocsp)
    git push -u origin <branch>
    python3 tools/guard_naming.py pr "<title>"
-   gh pr create --base dev --title "<title>" --body "$(cat <<'EOF'
-   …
-   EOF
-   )"
+   gh pr create --base dev --title "<title>" \
+     --body-file <abs worktree>/.verify/handoff/<branch with / as ->/pr-body-<branch with / as ->.md
    ```
 2. After every push, wait for the commit status `rcm/ci` — the ruleset's required check on `dev`
    and `main` (`main` also needs `main-from-dev-only`). The build machine's watcher submits the

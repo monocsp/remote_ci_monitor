@@ -11,7 +11,9 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import subprocess
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -639,3 +641,54 @@ def test_add_refuses_a_folder_inside_the_worktree(batch, capsys):
     (wt / "docs").mkdir()
     assert batch.add("A", A_BRANCH, wt / "docs", "docs/a.md") == 1
     assert "top level" in capsys.readouterr().err and batch.read()["bundles"] == {}
+
+
+DRIVER = """import importlib.util, pathlib, sys, time
+spec = importlib.util.spec_from_file_location("dev_batch", sys.argv[1])
+db = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(db)
+real = db._load
+gate = pathlib.Path(sys.argv[2])  # 모두 import 를 마친 뒤 한꺼번에 출발한다
+(gate / f"ready-{sys.argv[3]}").touch()
+while not (gate / "go").exists():
+    time.sleep(0.01)
+
+
+def slow(path):  # 읽고 나서 쓰기 전까지를 늘린다 — 잠금이 없으면 서로의 쓰기를 덮는다
+    state = real(path)
+    time.sleep(0.3)
+    return state
+
+
+db._load = slow
+sys.exit(db.main(sys.argv[4:]))
+"""
+
+
+def test_concurrent_adds_keep_every_bundle(batch, tmp_path):
+    # 여러 세션이 동시에 add 해도 묶음이 모두 남는다 — 읽고-고치고-쓰기가 잠금 안이다(5라운드 M4)
+    driver = tmp_path / "driver.py"
+    driver.write_text(DRIVER)
+    gate = tmp_path / "gate"
+    gate.mkdir()
+    names = "abcd"
+    worktrees = {n: batch.worktree(f"wt-{n}", f"feat/queue-add-retry-limit-{n}") for n in names}
+    procs = []
+    for order, n in enumerate(names, 1):
+        argv = ["--batch", str(batch.state), "add", "--bundle", n.upper(), "--branch"]
+        argv += [f"feat/queue-add-retry-limit-{n}", "--worktree", str(worktrees[n])]
+        argv += ["--owns", f"docs/{n}.md", "--merge-order", str(order)]
+        cmd = [sys.executable, str(driver), str(ROOT / "tools" / "dev_batch.py"), str(gate), n]
+        procs.append(
+            subprocess.Popen([*cmd, *argv], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        )
+    deadline = time.monotonic() + 30
+    while len(list(gate.glob("ready-*"))) < len(names) and time.monotonic() < deadline:
+        time.sleep(0.01)
+    (gate / "go").touch()
+    results = [(p.wait(timeout=60), p.stderr.read().decode()) for p in procs]
+    for p in procs:
+        p.stdout.close()
+        p.stderr.close()
+    assert [code for code, _ in results] == [0] * len(names), results
+    assert set(batch.read()["bundles"]) == set(names.upper())

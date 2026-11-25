@@ -41,7 +41,8 @@ a lead that stopped is saved and taken out of the tree first, as stage-lead «Wh
    [`_shared/scenario-trace.md`](../_shared/scenario-trace.md). `(live)` rows are not pytest's: the
    lead writes `scripts/acceptance/<topic>_live.sh` for them in the shape of
    [`live-verify`](../live-verify/SKILL.md) §1 and commits it — never run against production, at
-   most dry-run on the in-file's test server. The main session writes no code; P4 runs the script.
+   most dry-run on the in-file's test server. The main session does not write the live script; P4
+   runs it.
 2. **Prove them red** before writing the code. The evidence is the command and the failure it
    printed, and the failure is in the assertion, not in collecting or importing the test file — an
    import error proves only that a name is missing; when that is the point (a new module), say so.

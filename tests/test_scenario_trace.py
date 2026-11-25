@@ -482,3 +482,105 @@ def test_a_test_folder_that_cannot_be_listed_is_unreadable_not_empty(tmp_path, c
             assert code == 1 and _kinds(report) == [("unreadable", "")]
     finally:
         (tdir / "locked").chmod(0o755)
+
+
+# ── 5라운드: xfail · 조건부 skip · pytest 가 안 들어가는 폴더 · 표 바로 뒤 본문 줄 ──
+
+FN = "\n\n\ndef test_x1_a():\n    pass\n"
+METHOD = "\nclass TestA:\n    def test_x1_a(self):\n        pass\n"
+XFAIL_CASES = [
+    "import pytest\n\n\n@pytest.mark.xfail" + FN[2:],
+    "import pytest\n\n\n@pytest.mark.xfail(reason='later', strict=False)" + FN[2:],
+    "import pytest\n\n\n@pytest.mark.xfail(True, reason='x')" + FN[2:],
+    "import pytest\n\n\n@pytest.mark.xfail" + METHOD,
+    "import pytest\n\npytestmark = pytest.mark.xfail" + FN,
+    "import pytest\n\npytestmark: list = [pytest.mark.xfail(reason='x')]" + FN,
+    "import pytest\n\n\nclass TestA:\n    pytestmark = pytest.mark.xfail\n\n"
+    "    def test_x1_a(self):\n        pass\n",
+]
+
+
+@pytest.mark.parametrize("tests", XFAIL_CASES)
+def test_a_tag_on_an_xfail_test_is_reported_like_a_skipped_one(tmp_path, capsys, tests):
+    # xfail 시험은 실패해도 초록이다 — 행을 증명하지 않는다(5라운드 H1)
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "tests" / "test_other.py").write_text("def test_x2_b():\n    pass\n")
+    code, report = _run(tmp_path, capsys, tests=tests)
+    assert code == 1 and _kinds(report) == [("skipped", "X1")], report
+    assert "xfail" in report["problems"][0]["message"]
+
+
+def test_a_module_pytestmark_written_with_an_annotation_still_skips(tmp_path, capsys):
+    # `pytestmark: list = [...]` 도 pytest 는 읽는다 — Assign 만 보면 놓친다(5라운드 L1)
+    tests = "import pytest\n\npytestmark: list = [pytest.mark.skip]" + FN
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "tests" / "test_other.py").write_text("def test_x2_b():\n    pass\n")
+    code, report = _run(tmp_path, capsys, tests=tests)
+    assert code == 1 and _kinds(report) == [("skipped", "X1")], report
+    assert "skip" in report["problems"][0]["message"]
+
+
+@pytest.mark.parametrize(
+    "mark",
+    ["skipif(sys.platform == 'win32', reason='x')", "skipif(False, reason='x')",
+     "xfail(sys.version_info < (3, 12), reason='x')", "skipif('sys.platform == \"x\"')",
+     "xfail(condition=False, reason='x')"],
+)  # fmt: skip
+def test_a_skip_or_xfail_on_a_condition_that_may_be_false_is_not_a_problem(tmp_path, capsys, mark):
+    # 식이 조건인 skipif · xfail 은 어딘가에서는 돈다 — 상수 참 · 조건 없음만 skipped(5라운드 M3)
+    tests = f"import sys\n\nimport pytest\n\n\n@pytest.mark.{mark}\ndef test_x1_a():\n    pass\n"
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "tests" / "test_other.py").write_text("def test_x2_b():\n    pass\n")
+    code, report = _run(tmp_path, capsys, tests=tests)
+    assert code == 0, report
+
+
+@pytest.mark.parametrize(
+    "folder", [".hidden", "build", "dist", "venv", "pkg.egg", "node_modules", "_darcs", "CVS",
+               "{arch}", "sub/build"],
+)  # fmt: skip
+def test_tags_under_folders_pytest_does_not_enter_are_not_counted(tmp_path, capsys, folder):
+    # pytest 기본 norecursedirs 아래의 시험은 모이지 않는다 — 그 태그는 행을 증명하지 않는다(M1).
+    # --prefix-usage 는 그래도 센다(쓴 접두어를 「free」라고 하지 않게)
+    tdir = tmp_path / "tests"
+    (tdir / folder).mkdir(parents=True)
+    (tdir / folder / "test_hidden.py").write_text("def test_x9_b():\n    pass\n")
+    code, report = _run(tmp_path, capsys)
+    assert code == 0, report  # 모였다면 X9 는 고아다
+    assert st.main(["--prefix-usage", "X", "--tests", str(tdir), "--json"]) == 1
+    places = json.loads(capsys.readouterr().out)["places"]
+    assert any("test_hidden.py" in place for place in places), places
+
+
+@pytest.mark.parametrize("line", ["메모 한 줄", "X4 다시 돌린다", "*강조한 줄*"])
+def test_a_text_line_right_after_the_table_is_a_format_problem(tmp_path, capsys, line):
+    # `|` 가 없어도 GFM 은 표 바로 뒤의 본문 줄을 한 칸짜리 행으로 그린다(5라운드 M2)
+    plan = "<!-- scenario-prefix: X -->\n| ID | a |\n|---|---|\n| X1 | a |\n" + line + "\n"
+    code, report = _run(tmp_path, capsys, plan=plan, tests="def test_x1_a():\n    pass\n")
+    assert code == 1 and _kinds(report) == [("format", "")], report
+    assert report["problems"][0]["where"].endswith("plan.md:5")
+
+
+@pytest.mark.parametrize(
+    "after", ["", "## 다음 절", "- 목록 한 줄", "1. 번호 목록", "> 인용", "---",
+              "<!-- scenario-prefix: Y -->\n| ID | a |\n|---|---|\n| Y1 | a |", "```\nx\n```"],
+)  # fmt: skip
+def test_a_block_that_ends_a_table_is_not_a_row(tmp_path, capsys, after):
+    plan = "<!-- scenario-prefix: X -->\n| ID | a |\n|---|---|\n| X1 | a |\n" + after + "\n"
+    tests = "def test_x1_a():\n    pass\n\n\ndef test_y1_a():\n    pass\n"
+    code, report = _run(tmp_path, capsys, plan=plan, tests=tests)
+    assert code == 0, report
+
+
+def test_a_test_class_pytest_does_not_collect_tags_nothing(tmp_path, capsys):
+    # `__init__` 이 있는 Test* 클래스와 `__test__ = False` 인 클래스는 pytest 가 모으지 않는다(L2)
+    tests = (
+        "class TestWithInit:\n    def __init__(self):\n        pass\n\n"
+        "    def test_x1_a(self):\n        pass\n\n\n"
+        "class TestOff:\n    __test__ = False\n\n    def test_x2_b(self):\n        pass\n"
+    )
+    code, report = _run(tmp_path, capsys, tests=tests)
+    assert code == 1 and _kinds(report) == [("missing", "X1"), ("missing", "X2")], report
+    on = tests.replace("__test__ = False", "__test__ = True")
+    code, report = _run(tmp_path, capsys, tests=on)
+    assert code == 1 and _kinds(report) == [("missing", "X1")], report

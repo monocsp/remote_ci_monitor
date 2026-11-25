@@ -79,7 +79,7 @@ Take the first row that matches, per PR in §5 order.
 | lead's out.json `blocked` | `RESOLVED` → answer from the repo; `EXTERNAL` → a fact the main session can establish (a command, a doc) goes into a new in-file, one only the owner or a third party has → **stop** (decision page); `POLICY` → **stop** (owner) |
 | `rcm/ci` pending on the head | wait (§4) |
 | `rcm/ci` failed on the head | P2 (P6 if P6 moved it) again with a new lead and the failing log — a red gate is not a stop |
-| green on a head P6 moved; no `verify-round: … stage=P6` for it | P6 re-check ([`build-pr`](../build-pr/SKILL.md) §4), not P3 |
+| green on a head P6 moved; no `verify-round: … stage=P6` for it | P6 re-check ([`build-pr`](../build-pr/SKILL.md) §4) |
 | green; no `verify-round:` for this head | P3 |
 | P3 closed; lane full; live required and no report | P4 |
 | lane full; no P5 round | P5 |
@@ -88,9 +88,10 @@ Take the first row that matches, per PR in §5 order.
 | triage done, `rcm/ci` green on the final head | P7 |
 | merged | tick the §6 row (next PR that touches the workplan), next PR |
 
-A head that moves after P3–P5 closed: triage code fixes get the one-verifier look of
+A head that moves after P3–P5 closed: one P6 moved is reviewed by the P6 re-check (row above) — that
+is the review of that head, and it does not reopen P3; triage code fixes get the one-verifier look of
 [`isolated-verifier`](../../agents/isolated-verifier.md) «Rounds» 7 before `verified:`; any other code
-change reopens review on the new head as the next round.
+change, except P6 and triage, reopens review on the new head as the next round.
 
 ## 3. Stop points — the owner decides, never the loop
 

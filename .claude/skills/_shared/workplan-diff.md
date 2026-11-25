@@ -59,7 +59,7 @@ writes §13 (`workplan` §1); a lead returns lines in `out.json` and never edits
 
 ## The PR section
 
-The PR body carries this section after `## 한 줄`, with the heading exactly as below:
+The PR body carries this section where the `pr` skill «Body» orders it, with the heading exactly as below:
 
 ```markdown
 ## Differs from the spec

@@ -635,3 +635,22 @@ def test_a_parameter_id_with_spaces_is_read_whole(repo, capsys):
     code, receipt = repo.run(capsys, fix, node, extra=["--json"])
     assert code == 0 and receipt["verdict"] == "red-then-green", receipt
     assert receipt["green"]["passed"] == [node]
+
+
+@pytest.mark.parametrize(
+    ("body", "ok"),
+    [("version_tuple = (8, 2, 9)\n", False), ("version_tuple = (8, 3, 0)\n", True),
+     ("version_tuple = (9, 0, 0, 'dev')\n", True), ("raise ImportError('broken pytest')\n", False)],
+)  # fmt: skip
+def test_the_pytest_version_gate_reads_the_interpreter_and_stays_quiet(
+    tmp_path, monkeypatch, capfd, body, ok
+):
+    # 8.3 앞의 pytest 는 `--no-fold-skipped` 가 없다 — 가짜 pytest 로 판정을 본다. 못 여는 pytest 의
+    # 트레이스백은 사용법 안내 앞에 찍히지 않는다(5라운드 L3)
+    fake = tmp_path / "fake" / "pytest"
+    fake.mkdir(parents=True)
+    (fake / "__init__.py").write_text(body)
+    monkeypatch.setenv("PYTHONPATH", str(fake.parent))
+    assert rg.has_pytest() is ok
+    out, err = capfd.readouterr()
+    assert (out, err) == ("", "")

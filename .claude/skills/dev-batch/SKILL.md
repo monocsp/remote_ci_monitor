@@ -125,14 +125,14 @@ Only a `complete` head is pushed — each `rcm-ci` run holds the build machine's
 a new push to the same branch supersedes the old job.
 
 ```sh
-cd <wt> && F=$(git diff --name-only --diff-filter=d <base sha>...HEAD -- '*.py') && if [ -n "$F" ];
-  then ./.venv/bin/ruff check $F && ./.venv/bin/ruff format --check $F; fi   # changed files only
+cd <wt> && set -o pipefail && git diff -z --name-only --diff-filter=d <base sha>...HEAD -- '*.py' |
+  xargs -0 -r ./.venv/bin/ruff check && git diff -z --name-only --diff-filter=d <base sha>...HEAD \
+  -- '*.py' | xargs -0 -r ./.venv/bin/ruff format --check   # changed files only (stage-lead rule 7)
 ```
 
-Ruff on the changed files only, as everywhere in the loop. Then push with the pinned account and open
-the PR exactly as the `pr` skill says (`commit`-style title, Korean via `korean-writing`, body file
-`pr-body-<branch with / as ->.md` in that worktree's handoff folder, where `pr` puts it). The body
-carries `## Differs from the spec` ([workplan-diff.md](../_shared/workplan-diff.md)) from `workplan_diff`.
+Then push with the pinned account and open the PR as the `pr` skill says (`commit`-style title, Korean
+via `korean-writing`, body file `pr-body-<branch with / as ->.md` where `pr` puts it). The body carries
+`## Differs from the spec` ([workplan-diff.md](../_shared/workplan-diff.md)) from `workplan_diff`.
 
 The watcher posts `rcm/ci` `queued · #<N>` within a minute. Wait for job `N` with `rcm wait --job <N>` as a
 background Bash call. No status after two minutes: submit by hand as the `pr` skill does,

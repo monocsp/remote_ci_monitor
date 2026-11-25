@@ -168,6 +168,8 @@
      통과로 · PR diff 를 안 봄(`merge -s ours`)(`tools/dev_batch.py`) · xfail 을 돈 시험으로 셈 ·
      건너뛴 시험의 요약 줄을 안 읽음(`tools/redgreen.py`) · 앞 `|` 없는 행을 안 봄
      (`tools/scenario_trace.py`)
+     + 5라운드 둘: xfail 시험의 태그를 증명으로 셈(`tools/scenario_trace.py`) · add 의 잠금을 뺌
+     (`tools/dev_batch.py`)
   #246 격리 검증 — 넷: 새 커밋으로 풀린 제출을 닫힌 PR 잡으로 취소함 · 다시 열린 PR 을 건너뜀 · PR
      목록의 첫 쪽만 읽음 · `guard_merge` 가 저장소 옵션을 한 번만 봄
 
@@ -2292,12 +2294,33 @@ MUTANTS = (
         # 통과한다(4라운드 H1)
         name="scenario-trace-unpiped-row-ignored",
         path="tools/scenario_trace.py",
-        old='        if after < len(lines) and after not in code and "|" in lines[after]:\n',
+        old="        if after < len(lines) and after not in code and _row_like(lines[after]):\n",
         new="        if False:\n",
         tests=(
             "tests/test_scenario_trace.py::"
             "test_a_row_without_a_leading_pipe_right_after_the_table_is_a_format_problem",
         ),
+    ),
+    Mutant(
+        # xfail 을 단 시험의 태그를 행의 증명으로 센다 — 실패해도 초록인 시험이 행을 채운다
+        # (5라운드 H1)
+        name="scenario-trace-xfail-counts-as-proof",
+        path="tools/scenario_trace.py",
+        old='    kind = "xfail" if name in ("xfail", "expectedfailure") else kind\n',
+        new="    kind = kind\n",
+        tests=(
+            "tests/test_scenario_trace.py::"
+            "test_a_tag_on_an_xfail_test_is_reported_like_a_skipped_one",
+        ),
+    ),
+    Mutant(
+        # add 의 잠금을 뺀다 — 동시에 add 한 세션들이 서로의 묶음을 덮어 하나만 남는다
+        # (5라운드 M4)
+        name="dev-batch-no-lock",
+        path="tools/dev_batch.py",
+        old="        fcntl.flock(handle, fcntl.LOCK_EX)\n",
+        new="        pass\n",
+        tests=("tests/test_dev_batch.py::test_concurrent_adds_keep_every_bundle",),
     ),
 )
 

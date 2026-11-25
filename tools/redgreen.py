@@ -149,10 +149,12 @@ def interpreter() -> str:
 
 
 def has_pytest() -> bool:
-    # 8.3 부터 `--no-fold-skipped` 가 있다 — 없으면 건너뛴 시험의 nodeid 를 못 읽는다
+    # 8.3 부터 `--no-fold-skipped` 가 있다 — 없으면 건너뛴 시험의 nodeid 를 못 읽는다. 못 여는
+    # pytest 의 트레이스백은 버린다 — 답은 사용법 안내(종료 2) 하나다
     probe = "import sys, pytest; sys.exit(tuple(pytest.version_tuple[:2]) < (8, 3))"
+    quiet = {"stdout": subprocess.DEVNULL, "stderr": subprocess.DEVNULL}
     try:
-        return subprocess.run([sys.executable, "-c", probe], timeout=60).returncode == 0
+        return subprocess.run([sys.executable, "-c", probe], timeout=60, **quiet).returncode == 0
     except (OSError, subprocess.SubprocessError):
         return False
 

@@ -18,10 +18,10 @@ The rules for every lead (handoff files, the out.json contract, what leads never
    command is `cd <wt> && …` in one Bash call.
 2. Read the in file and what it points to (table below). Do not reread what an earlier lead already
    read unless you need a specific line. If the in file names a stopped lead's patch and tar, apply
-   them first (`git apply <patch>`, then `tar -xf <tar>` in the worktree) and say so in `notes`. To
-   drop a change of yours: `git restore <file>` or `git apply -R <patch>`; an untracked file you do
-   not keep is named in `notes`, not deleted. The git commands you may use are the whole list of
-   `.claude/skills/_shared/stage-lead.md` «Rules for every lead» 5; nothing else, no `rm -rf`.
+   them first (`git apply --allow-empty <patch>`, then `tar -xf <tar>` in the worktree) and say so in
+   `notes`. To drop a change of yours: `git restore <file>` or `git apply -R <patch>`; an untracked
+   file you do not keep is named in `notes`, not deleted. The git commands you may use are the whole
+   list of `.claude/skills/_shared/stage-lead.md` «Rules for every lead» 5; nothing else, no `rm -rf`.
 3. **Scope.** Write only inside the in file's `owns`; touch `shared` paths add-only (your own
    CHANGELOG line, your own mutant, your own doc-lock assertion; never reorder or edit others'). If you
    must write elsewhere, stop and return it in `scope_corrections` with the reason. A defect you see
@@ -50,16 +50,17 @@ The rules for every lead (handoff files, the out.json contract, what leads never
    after its red test's commit (or one commit holding both): the receipt names it
    (`.claude/skills/_shared/stage-lead.md` «The red-then-green receipt»). No high-entropy literals
    (gitleaks reads every commit of the branch).
-9. **Return.** `git status --porcelain` empty (or every leftover named in `notes`), then
-   `<stage>-<n>-out.json` in the handoff folder and the same JSON as your final text. Shas are 40
-   characters; what you do not know is `—`. Anything that differs from the workplan goes into
-   `workplan_diff` (`.claude/skills/_shared/workplan-diff.md`).
+9. **Return.** `git status --porcelain` empty (or every leftover named in `notes`: the main session
+   moves those into `<h>/<stage>-<n>-untracked/` before its next step), then `<stage>-<n>-out.json`
+   in the handoff folder and the same JSON as your final text. Shas are 40 characters; what you do
+   not know is `—`. Anything that differs from the workplan goes into `workplan_diff`
+   (`.claude/skills/_shared/workplan-diff.md`).
 
 ## Modes
 
 | mode | read first | does | extra in the result |
 |---|---|---|---|
-| `implement` (P2) | the frozen workplan's sections for this PR, its test table, the decision answers | rows to RED tests, then code; `./.venv/bin/python tools/scenario_trace.py <workplan> --tests tests/` exits 0 before returning. If the PR owns `(live)` rows, you also write `scripts/acceptance/<topic>_live.sh` in the shape of `.claude/skills/live-verify/SKILL.md` §1 (the main session writes no code); never run it against production; at most a dry run on the test server the in file names (step 6) | the trace command in `tests`; the script and any dry run in `notes` |
+| `implement` (P2) | the frozen workplan's sections for this PR, its test table, the decision answers | rows to RED tests, then code; `./.venv/bin/python tools/scenario_trace.py <workplan> --tests tests/` exits 0 before returning. If the PR owns `(live)` rows, you also write `scripts/acceptance/<topic>_live.sh` in the shape of `.claude/skills/live-verify/SKILL.md` §1 (the main session does not write the live script); never run it against production; at most a dry run on the test server the in file names (step 6) | the trace command in `tests`; the script and any dry run in `notes` |
 | `gap-fix` (P6) | the confirmed GAP table (`file:line`), the redesign target, the edge-audit JSON | one regression test per GAP, red first; one GAP per commit; a mutant entry per GAP for `scripts/mutcheck.py`, run once with `./.venv/bin/python scripts/mutcheck.py --only <name>` | per GAP in `notes`: commit, test `file:line`, mutant name |
 | `batch` | the dev-batch spec in the in file (bundle, branch, base sha, `owns`, `shared`, workplan section, merge order) | as `implement` for this PR only; keep every commit inside `owns` and `shared` (`git diff --name-only <base>..HEAD` before returning). The batch state file lives outside the worktree, so the main session runs `./.venv/bin/python tools/dev_batch.py scope` on your result, not you | the changed-path list in `notes` |
 | `qa-fix` | the finding verbatim, its reproduction and observed output, the expected behaviour with its source, the cause (`file:line`, proven or marked hypothesis) | a hypothesis is proven first: undo the suspected line, the symptom goes; keep it, it stays. If a red test from `regression-test-author` is named, confirm it is red and keep it as is; otherwise write it. Then fix and commit. Add one mutant entry for the defect — the one named in the in file if `regression-test-author` already proposed it, otherwise your own; a mutant it proposes later comes as a new `qa-fix` round | proof of cause in `notes`; `red` from before the fix (the `tools/redgreen.py` receipt is the main session's) |
