@@ -1446,10 +1446,14 @@ each job to a worker that can take it. What changes:
 - `@local` is not alive and is never a candidate: no placement, no `eligible_now` entry in the
   submission answer, no automatic check on it. The server does not run its own `[[probes]]`.
 - A submission with `--machine @local` is refused with 409 (`this server has no local lanes`).
-  A [`local_only`](#keeping-a-preset-on-the-server-local_only) preset is refused the same way,
-  since only the server's lanes may run it. Jobs already waiting when the server restarts with
-  `lanes = 0`, or when a reload marks their preset `local_only`, wait with `no capable machine`
-  and no ETA; they are not failed.
+  `rcm recheck @local` gets the same 409, and the web machines table draws no Recheck button on
+  that row. A [`local_only`](#keeping-a-preset-on-the-server-local_only) preset is refused the
+  same way, since only the server's lanes may run it. Jobs already waiting when the server
+  restarts with `lanes = 0`, or when a reload marks their preset `local_only`, wait with
+  `no capable machine` and no ETA, and the reason names `no local lanes (lanes = 0)` on `@local`;
+  they are not failed. Cancelling one cancels it at once. The next attempt of a retried job
+  pinned to `@local` waits the same way, and a newer submission of the same branch does not
+  supersede a job pinned to a machine.
 - Without a worker a job waits (`worker down`, ETA `—`); a worker that attaches to its pool takes
   it at once, and the queue survives a restart.
 - `/api/health` keeps answering 200 and carries `capacity`: `total` presets, how many have a live
@@ -1457,13 +1461,17 @@ each job to a worker that can take it. What changes:
   counts when the preset's candidates include it and it is alive; a `pool` preset without `checks`
   counts every live lane of its pool whatever the verdict, as placement does. `rcm check` draws a
   `capacity` row: FAIL when no preset has a machine, warn with the names when some have none
-  (a deploy preset no machine runs can be normal), no row without presets.
+  (a deploy preset no machine runs can be normal), no row without presets. When the server
+  could not count (`capacity: null`, the reason is in the server log) the row says
+  `server could not count capacity`: FAIL on a `lanes = 0` server, warn on one with lanes. An
+  older server that does not send the key gets no row.
 - `pools_without_workers` in `/api/health` now lists the default pool too when all its workers
   are down, as the server has no lane of its own there.
 - `rcm check` shows `local preset tools` and `service preset tools` as `this machine runs no
-  jobs`, not as FAIL. `rcm top` says `no local lanes` instead of `lanes 0/0 busy`, the host line
-  of the server says `runs no jobs` (the host sampler keeps running), and `rcm machines` and the
-  web machines table show `@local` as `runs no jobs` / `no lanes` instead of `down`.
+  jobs`, not as FAIL, and its `machines` row does not count `@local`. `rcm top` says
+  `no local lanes` instead of `lanes 0/0 busy`, the host line of the server says `runs no jobs`
+  (the host sampler keeps running), and `rcm machines` and the web machines table show `@local`
+  as `runs no jobs` / `no lanes` instead of `down`.
 - The mDNS record says `lanes=0`.
 
 `rcm doctor --role coordinator` (the role a `lanes = 0` config names) ends on `capacity`
