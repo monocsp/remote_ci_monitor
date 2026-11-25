@@ -2062,3 +2062,19 @@ def test_td54_the_servers_local_probes_use_the_shared_run_probes_without_lang_c(
         assert (probe["state"], probe["value"]) == ("ok", "lang="), probe
     finally:
         srv.close()
+
+
+# ── 싸게 고친 LOW (P3 1라운드) ────────────────────────────────────────────────
+
+
+def test_a_503_not_ok_health_is_not_shown_as_server_ok(worker, srv, env, coordinator, capsys):
+    """서버가 503 `ok: false` 로 답하면(janitor 멈춤 · 워커 down) 본문은 오지만 서버가 성한 것은
+    아니다 — `server.state` 를 ok 로 적지 않고 그 이유를 경고로 보인다(검증자 1 #4)."""
+    sick = {"ok": False, "error": "janitor stalled", "version": __version__}
+    srv.route("GET", "/api/health", sick, status=503)
+    code, doc = worker(capsys)
+    assert doc["server"]["state"] == "not ok", doc["server"]
+    assert any("janitor stalled" in w for w in doc["warnings"]), doc["warnings"]
+    coordinator.route("GET", "/api/health", sick, status=503)
+    code, doc = run_json(capsys, "--role", "client", "--server", coordinator.url)
+    assert doc["server"]["state"] == "not ok", doc["server"]

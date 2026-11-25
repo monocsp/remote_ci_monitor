@@ -612,6 +612,19 @@ class _Run:
         }
         return self.server
 
+    def answered(self, health: Mapping[str, Any]) -> None:
+        """`/api/health` 가 왔다. 503 `ok: false`(janitor 멈춤 · 워커 down)에도 본문은 오지만
+        서버가 성한 것은 아니다 — `state` 를 ok 로 적지 않고 이유를 경고로 보인다. 이 머신의
+        판정은 그대로다."""
+        assert self.server is not None
+        version = dc.clean_text(health.get("version"), 64)
+        if health.get("ok") is False:
+            self.server.update(state="not ok", version=version)
+            why = dc.clean_text(health.get("error") or "no reason given", 120)
+            self.warnings.append(f"the server answers but reports a problem: {why}")
+        else:
+            self.server.update(state="ok", version=version)
+
     def reach(self, call: Callable[[], Any], route: str, token_hint: str) -> tuple[bool, Any]:
         """GET 하나. 닿지 않거나 401 · 옛 서버면 판정 못 함(종료 3)으로 적고 (False, None)."""
         from remote_ci_monitor.client import ClientError
@@ -794,7 +807,7 @@ class _Run:
         ok, health = self.reach(client.health, "/api/health", WORKER_TOKEN_HINT)
         if not ok:
             return
-        self.server.update(state="ok", version=dc.clean_text(health.get("version"), 64))
+        self.answered(health)
         ok, me = self.reach(client.whoami, "/api/whoami", WORKER_TOKEN_HINT)
         if not ok:
             return
@@ -1016,7 +1029,7 @@ class _Run:
         ok, _me = self.reach(client.whoami, "/api/whoami", CLIENT_TOKEN_HINT)
         if not ok:
             return
-        self.server.update(state="ok", version=dc.clean_text(health.get("version"), 64))
+        self.answered(health)
         ok, machines = self.reach(
             lambda: client.get_json("/api/machines"), "/api/machines", CLIENT_TOKEN_HINT
         )
@@ -1148,8 +1161,8 @@ class _Run:
         ok, health = self.reach(client.health, "/api/health", CLIENT_TOKEN_HINT)
         if not ok:
             return
-        version = dc.clean_text(health.get("version"), 64)
-        self.server.update(state="ok", version=version)
+        self.answered(health)
+        version = self.server["version"]
         if version and version != __version__:
             self.warnings.append(
                 f"this client runs v{__version__} and the server v{version} — rcm follows the "
