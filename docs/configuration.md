@@ -1656,6 +1656,9 @@ server does not know the key and does not start.
 **Checks.** A `local_only` check preset runs only on `@local`. On a remote worker, a preset that
 needs it shows `check_local_only`, the check's row in `rcm machines` shows `local_only` and asks
 for no recheck, the sweeper does not submit it there, and `rcm recheck <remote> <check>` is 409.
+Its state follows the same rule as the verdict: unless the check passed there or that machine is
+running it, the row shows `needed` with the last job's number, so a check job nobody can take does
+not read as running, and a failure there is not counted among that machine's problems.
 `rcm recheck <remote>` without names submits the other checks and answers 200; the skipped one is
 listed apart from `jobs`, as `skipped: [{"preset": "<check>", "code": "local_only"}]`, and is not a
 failure. A check that already passed on a remote worker before the mark was added keeps counting

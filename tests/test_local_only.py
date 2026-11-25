@@ -1360,3 +1360,18 @@ def test_t7_plan_says_rcm_eta_ahead_is_null_without_a_local_lane():
     text = (Path(__file__).resolve().parents[1] / "PLAN.md").read_text()
     row = next(ln for ln in text.splitlines() if ln.startswith("| `POST /api/eta` |"))
     assert "갈 로컬 레인이 없는 `local_only` 프리셋은 null" in row, row
+
+
+def test_t1_the_configuration_guide_says_the_check_row_follows_the_verdict():
+    """# T1 — 「Checks」 문단이 점검 칸도 판정과 같은 규칙이라고 적는다: 통과했거나 그 머신이
+    돌리는 점검이 아니면 칸은 `needed` 이고, 그 실패는 그 머신의 문제로 세지 않는다
+    (`capabilities.py` 의 `_record_holds`)."""
+    from test_docs_m5 import CONFIGURATION, read
+
+    flat = " ".join(read(CONFIGURATION).split())
+    assert (
+        "Its state follows the same rule as the verdict: unless the check passed there or that "
+        "machine is running it, the row shows `needed` with the last job's number, so a check job "
+        "nobody can take does not read as running, and a failure there is not counted among that "
+        "machine's problems."
+    ) in flat
