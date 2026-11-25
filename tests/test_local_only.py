@@ -849,4 +849,10 @@ def test_to1_the_configuration_guide_and_the_changelog_name_local_only():
     assert "| `[[presets]]` | `local_only` | `false` |" in text
     for code in ("`local_only`", "`check_local_only`", "409"):
         assert code in text, code
+    # 판정 표 밑의 문장은 코드대로다 — local_only 는 표보다 먼저, check_local_only 는
+    # check_needed 자리에만 선다(`capabilities.py` 의 `_verdict`, P3 1라운드 검증자 2)
+    flat = " ".join(text.split())
+    assert "`local_only` (ineligible) is shown first, before any row of this table" in flat
+    assert "replaces `check_needed` on a remote worker" in flat
+    assert "shown before any of these" not in flat
     assert "local_only = true" in unreleased(read(CHANGELOG))
