@@ -26,6 +26,7 @@ of a key bumps that number and is listed here.
   pool could take. `pools_without_workers` counts the default pool on such a server. `rcm top`,
   `rcm machines` and the web page say `no local lanes` / `runs no jobs` instead of `lanes 0/0 busy`
   and `down`.
+  ([#271](https://github.com/monocsp/remote_ci_monitor/pull/271))
 - **`local_only = true` keeps a preset on the server's own lanes.** A remote worker never gets it:
   it is left out of `GET /worker/spec`, no remote claim hands it out, and `rcm machines` shows it
   as `local_only` on every remote worker. A submission the server's lanes cannot take — pinned to
