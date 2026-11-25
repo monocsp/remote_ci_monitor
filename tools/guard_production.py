@@ -461,25 +461,17 @@ def _bash_verdict(
 ) -> Verdict | None:
     """조각마다 판정한다. `cd <dir>` 은 뒤 조각의 cwd 를 바꾸고, 그러면 `./rcm.toml` 이 있는지도
     그 폴더에서 다시 본다(`(cd …)` 서브셸의 `cd` 도 뒤로 새지만 그쪽이 안전한 방향이다).
-    따라가지 못한 `cd`(`_cd_target` 이 None)는 예전처럼 짐작한다.
 
     `rcm setup` 은 조각으로 나누지 않는다. 운영 설치가 있고 명령이 setup 에 닿을 수 있으면
     (`_setup_net`) 명령 글 전체가 평범한 setup 명령 하나여야 한다(`_setup_verdict`, P3 4라운드)."""
     if prod.known and _setup_net(command):
         return _setup_verdict(command, cwd, prod, session)
-    cwd_known = True
     for segment in _split_segments(command):
         argv = _argv(segment)
         if not argv:
             continue
-        if argv[0] in ("cd", "pushd", "popd"):
-            target = _cd_target(segment, cwd, session, known=cwd_known)
-            if target is None:
-                cwd_known = False
-                if argv[0] == "cd":  # 짐작한다
-                    target = _as_path(argv[1], cwd) if len(argv) > 1 else _as_path("~", cwd)
-            else:
-                cwd_known = True
+        if argv[0] == "cd":
+            target = _as_path(argv[1], cwd) if len(argv) > 1 else _as_path("~", cwd)
             if target is not None:
                 cwd = target
                 local_config = (cwd / "rcm.toml").exists()
@@ -489,44 +481,6 @@ def _bash_verdict(
         if verdict is not None:
             return verdict
     return None
-
-
-def _cd_target(segment: str, cwd: Path, session: Mapping[str, str], *, known: bool) -> Path | None:
-    """셸이 갈 폴더를 훅이 확실히 아는 `cd` 면 그 폴더, 아니면 None(모름). 셸 단계는
-    `_lex` · `_expand_word` 다(P3 3라운드에 setup 용으로 만들었고, 4라운드부터 setup 은 쓰지
-    않는다 — `cd` 를 따라가는 다른 규칙만 쓴다). 모르는 것: 플래그(`cd -P` · `cd --`),
-    `cd -`, 펼칠 수 없는 값(`$D` 가 훅의 환경에 없다), `CDPATH` 를 탈 수 있는 상대 경로, cwd 를
-    모를 때의 상대 경로, `pushd` · `popd`."""
-    try:
-        words = _lex(_group_trimmed(segment))
-    except _Unreadable:
-        return None
-    plain = [_plain(word) for word in words]
-    if not plain or plain[0] != "cd" or len(plain) > 2:
-        return None
-    home = Path(session["HOME"]) if session.get("HOME") else Path.home()
-    if len(plain) == 1:
-        return _norm(home)
-    if plain[1].startswith("-"):
-        return None
-    lookup = {**session, "PWD": str(cwd)} if known else _without_pwd(session)
-    try:
-        text = _expand_word(words[1], lookup, home)
-    except _Unreadable:
-        return None
-    if not text:
-        return None
-    if text.startswith("/"):
-        return _norm(Path(text))
-    relative_ok = text in (".", "..") or text.startswith(("./", "../"))
-    if not known or (session.get("CDPATH") and not relative_ok):
-        return None
-    return _norm(cwd / text)
-
-
-def _without_pwd(session: Mapping[str, str]) -> dict[str, str]:
-    """cwd 를 모를 때의 셸 환경 — `$PWD` · `$OLDPWD` 는 모르는 값이다."""
-    return {k: v for k, v in session.items() if k not in ("PWD", "OLDPWD")}
 
 
 def _segment_verdict(
@@ -887,8 +841,8 @@ def _server_verdict(
 # 그것을 들여와 부른다. P3 1 · 2라운드의 HIGH 는 모두 훅이 setup 의 계산을 따로 다시 하다
 # 어긋난 것이었다(빈 값 · `${VAR:-x}` · 대소문자 · 줄인 옵션 · `--service-file`). 3라운드까지는
 # 훅이 셸 단계(따옴표 · 변수 · `~` · 리다이렉션)를 했고, 4라운드부터는 셸 단계가 따옴표 벗기기와
-# 맨 앞 `~` 뿐인 명령(`_plain_setup`)만 받는다. 아래 `_lex` · `_expand_word` 는 `cd` 를 따라가는
-# 다른 규칙이 쓴다.
+# 맨 앞 `~` 뿐인 명령(`_plain_setup`)만 받는다. P3 5라운드에 셸 단계(`_lex` · `_expand_word` ·
+# `cd` 따라가기)를 지웠다 — setup 이 아닌 규칙의 `cd` 는 PR 전처럼 `_as_path` 로 짐작한다.
 
 
 def unit_name(label: str) -> str:
@@ -905,172 +859,8 @@ def _setup_core() -> ModuleType:
     return importlib.import_module("remote_ci_monitor.core.setup")
 
 
-class _Unreadable(Exception):
-    """셸 단계를 다 해도 셸이 받을 글자를 모른다(`_cd_target` 은 그 `cd` 를 모르는 것으로 본다)."""
-
-
-#: 리다이렉션 — `2>&1` · `>>log` · `&>x` · `<in`. 단어의 맨 앞에서만 본다
-_REDIRECT = re.compile(r"(\d*|&)(>>|>&|<&|<<<|<<-|<<|<>|>\||>|<)")
-#: 훅이 펼칠 수 있는 변수 참조 — `$NAME` · `${NAME}` 뿐이다. 나머지 `$` 는 모른다
-_REF = re.compile(r"\$(?:\{([A-Za-z_][A-Za-z0-9_]*)\}|([A-Za-z_][A-Za-z0-9_]*))")
+#: 앞머리 할당 `NAME=` — 그물과 허용 모양이 본다
 _ASSIGNMENT = re.compile(r"[A-Za-z_][A-Za-z0-9_]*=")
-#: 따옴표 밖에서 셸이 단어를 바꾸는 글자 — 글롭과 중괄호 펼치기
-_GLOB = frozenset("*?[{")
-
-#: 단어 하나 — (종류, 글자) 조각들. 종류는 `bare`(따옴표 밖), `dq`(큰따옴표 안), `lit`(작은따옴표
-#: 안이나 백슬래시로 escape 한 글자 — 펼치지 않는다)
-_Word = list[tuple[str, str]]
-
-
-def _group_trimmed(segment: str) -> str:
-    """조각을 감싼 `(` · `{` 와 짝 `)` · `}`, 끝의 `&`(백그라운드)를 뗀다."""
-    text = segment.strip()
-    while text[:1] in ("(", "{"):
-        text = text[1:].strip()
-    while True:
-        bare = text.rstrip(" \t;")
-        if bare.endswith("&") and not bare.endswith(("&&", ">&", "<&")):
-            text = bare[:-1]
-        elif bare.endswith(")") and bare.count("(") < bare.count(")"):
-            text = bare[:-1]
-        elif bare.endswith("}") and bare[-2:-1] in ("", " ", "\t", ";"):
-            text = bare[:-1]
-        else:
-            return bare
-
-
-def _lex(text: str) -> list[_Word]:
-    """셸이 나누는 대로 단어를 나눈다. 리다이렉션과 그 대상, `#` 주석은 뺀다. 명령 치환
-    (`$(…)` · 백틱), `$'…'`, 단어 속의 `<` · `>` · `(` · `|` · `&` 처럼 훅이 읽지 못하는 것은
-    `_Unreadable` 이다."""
-    words: list[_Word] = []
-    parts: _Word = []
-    started = False
-    target = False  # 다음 단어는 리다이렉션의 대상이다
-    i, n = 0, len(text)
-
-    def push(kind: str, chunk: str) -> None:
-        if parts and parts[-1][0] == kind:
-            parts[-1] = (kind, parts[-1][1] + chunk)
-        else:
-            parts.append((kind, chunk))
-
-    def end() -> None:
-        nonlocal parts, started, target
-        if started:
-            if target:
-                target = False
-            else:
-                words.append(parts)
-        parts, started = [], False
-
-    while i < n:
-        c = text[i]
-        if c in " \t\n":
-            end()
-            i += 1
-            continue
-        if not started:
-            if c == "#":
-                break
-            m = _REDIRECT.match(text, i)
-            if m:
-                i = m.end()
-                if m.group(2) in (">&", "<&"):
-                    j = i
-                    while j < n and (text[j].isdigit() or text[j] == "-"):
-                        j += 1
-                    if j > i:  # `2>&1` · `>&-` — 대상이 파일이 아니다
-                        i = j
-                        continue
-                target = True
-                continue
-        started = True
-        if c == "\\":
-            push("lit", text[i + 1 : i + 2])
-            i += 2
-        elif c == "'":
-            j = text.find("'", i + 1)
-            if j < 0:
-                raise _Unreadable("an unclosed single quote")
-            push("lit", text[i + 1 : j])
-            i = j + 1
-        elif c == '"':
-            i += 1
-            while True:
-                if i >= n:
-                    raise _Unreadable("an unclosed double quote")
-                c = text[i]
-                if c == '"':
-                    i += 1
-                    break
-                if c == "\\" and text[i + 1 : i + 2] in ("$", "`", '"', "\\"):
-                    push("lit", text[i + 1])
-                    i += 2
-                    continue
-                push("dq", c)
-                i += 1
-        elif c == "$" and text[i + 1 : i + 2] in ("'", '"'):
-            raise _Unreadable("$'…' or $\"…\" quoting")
-        elif c in "`|&;<>()":
-            raise _Unreadable(f"{c!r} inside a word")
-        else:
-            push("bare", c)
-            i += 1
-    end()
-    return words
-
-
-def _plain(word: _Word) -> str:
-    """따옴표만 푼 글자(shlex 와 같다) — 명령 이름과 감싸기를 찾을 때 쓴다."""
-    return "".join(chunk for _, chunk in word)
-
-
-def _expand(chunk: str, kind: str, lookup: Mapping[str, str]) -> str:
-    """조각 하나의 `$NAME` · `${NAME}` 를 펼친다. 그 밖의 `$`(`${X:-y}` · `${X%y}` · `$1` · `$$`
-    · `$(…)`), 백틱, 훅의 환경에 없는 변수, 따옴표 밖의 글롭 · 중괄호와 단어를 쪼갤 값은
-    모른다(`_Unreadable`)."""
-    if kind == "lit":
-        return chunk
-    out: list[str] = []
-    pos = 0
-    for m in _REF.finditer(chunk):
-        out.append(chunk[pos : m.start()])
-        name = m.group(1) or m.group(2)
-        value = lookup.get(name)
-        if value is None:
-            raise _Unreadable(f"${name} is not set in the hook's environment")
-        if kind == "bare" and (any(c.isspace() for c in value) or _GLOB & set(value)):
-            raise _Unreadable(f"${name} would be split or globbed by the shell")
-        out.append(value)
-        pos = m.end()
-    out.append(chunk[pos:])
-    rest = _REF.sub("", chunk)
-    if "$" in rest or "`" in rest:
-        raise _Unreadable(f"{chunk!r} needs the shell to expand it")
-    if kind == "bare" and _GLOB & set(rest):
-        raise _Unreadable(f"{chunk!r} would be globbed or brace-expanded by the shell")
-    return "".join(out)
-
-
-def _expand_word(word: _Word, lookup: Mapping[str, str], home: Path, *, start: int = 0) -> str:
-    """단어 하나를 셸처럼 펼친다. `start` 는 할당(`NAME=value`)의 값이 시작하는 자리다 — 값의
-    맨 앞 `~` 도 펼친다. `~` · `~/…` 는 `home`, `~user` 는 그 사용자의 홈이다."""
-    parts = list(word)
-    if start:
-        kind, chunk = parts[0]
-        parts[0] = (kind, chunk[start:])
-    kind, chunk = parts[0] if parts else ("lit", "")
-    if kind == "bare" and chunk.startswith("~"):
-        prefix, slash, rest = chunk.partition("/")
-        if not slash and len(parts) > 1:
-            raise _Unreadable(f"{_plain(word)!r} mixes a ~ prefix with quotes")
-        if prefix in ("~+", "~-"):
-            raise _Unreadable(f"{prefix} needs the shell's directory stack")
-        head = str(home) if prefix == "~" else os.path.expanduser(prefix)
-        parts[0:1] = [("lit", head), ("bare", slash + rest)]
-    return "".join(_expand(chunk, kind, lookup) for kind, chunk in parts)
-
 
 #: `core.where` 가 읽는 환경 — 앞머리 할당의 값을 모르면 setup 이 쓸 자리도 모른다
 _WHERE_ENV = ("HOME", "XDG_CONFIG_HOME")
