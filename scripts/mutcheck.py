@@ -2716,6 +2716,18 @@ MUTANTS = (
         new="        found = _matching(stage, role, skipped, None)\n",
         tests=("tests/test_doctor_cli.py::test_h_in_a_user_unit_is_the_home_doctor_knows",),
     ),
+    Mutant(
+        # 출력 뒤 stdout 을 flush 하지 않는다 — 닫힌 파이프를 파이썬 종료 때 알아 종료 120 과
+        # `Exception ignored … BrokenPipeError` 가 난다(P6 GAP E3)
+        name="doctor-closed-pipe-at-exit",
+        path="src/remote_ci_monitor/doctor.py",
+        old="        sys.stdout.flush()\n",
+        new="        pass\n",
+        tests=(
+            "tests/test_doctor_cli.py::"
+            "test_e3_a_closed_pipe_keeps_the_verdict_and_prints_no_traceback",
+        ),
+    ),
 )
 
 

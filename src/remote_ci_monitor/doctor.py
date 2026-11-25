@@ -2114,11 +2114,42 @@ NO_HOME = (
 
 
 def _emit(opts: Options, ctx: Context, doc: dict[str, Any]) -> None:
+    """문서를 낸다. 글자를 못 찍는 stdout(UTF-8 이 아닌 로캘)이면 JSON 은 `\\uXXXX` 로 다시 적고
+    글은 못 찍는 글자만 바꾼다 — 판정을 잃지 않는다(P6 GAP E3)."""
     if opts.json:
-        ctx.out(json.dumps(doc, ensure_ascii=False, indent=2))
-    else:
-        for line in dc.render(doc):
+        try:
+            ctx.out(json.dumps(doc, ensure_ascii=False, indent=2))
+        except UnicodeEncodeError:
+            ctx.out(json.dumps(doc, ensure_ascii=True, indent=2))
+        return
+    for line in dc.render(doc):
+        try:
             ctx.out(line)
+        except UnicodeEncodeError as e:
+            ctx.out(line.encode(e.encoding, "replace").decode(e.encoding))
+
+
+def _silence_stdout() -> None:
+    """읽는 쪽이 닫은 파이프(`rcm doctor | head`) — 남은 출력은 버린다. 파이썬이 끝날 때 다시
+    flush 하다 `Exception ignored … BrokenPipeError` 와 종료 120 을 내지 않게 stdout 을 devnull 로
+    돌린다(파이썬 문서 「Note on SIGPIPE」의 방법)."""
+    try:
+        devnull = os.open(os.devnull, os.O_WRONLY)
+        os.dup2(devnull, sys.stdout.fileno())
+        os.close(devnull)
+    except (OSError, ValueError, AttributeError):  # 파일이 아닌 stdout(시험의 capsys)
+        pass
+
+
+def _deliver(opts: Options, ctx: Context, doc: dict[str, Any]) -> None:
+    """출력도 경계 안이다 — 닫힌 파이프는 traceback 없이 조용히, 종료 코드는 판정 그대로(P6 GAP
+    E3). stdout 은 여기서 flush 한다: 블록 버퍼라 파이프가 닫힌 것을 종료 때가 아니라 여기서
+    안다."""
+    try:
+        _emit(opts, ctx, doc)
+        sys.stdout.flush()
+    except BrokenPipeError:
+        _silence_stdout()
 
 
 def run(opts: Options, ctx: Context) -> tuple[int, dict[str, Any] | None]:
@@ -2135,7 +2166,7 @@ def run(opts: Options, ctx: Context) -> tuple[int, dict[str, Any] | None]:
         blind = _Run(opts, ctx, role or "unknown", "")
         blind.undecided.append(NO_HOME)
         doc = blind.document()
-        _emit(opts, ctx, doc)
+        _deliver(opts, ctx, doc)
         return dc.EXIT_UNKNOWN, doc
     try:
         if role is None:
@@ -2168,9 +2199,9 @@ def run(opts: Options, ctx: Context) -> tuple[int, dict[str, Any] | None]:
         crashed.undecided.append(line)
         doc = crashed.document()
         if opts.json:
-            ctx.out(json.dumps(doc, ensure_ascii=False, indent=2))
+            _deliver(opts, ctx, doc)
         return dc.EXIT_UNKNOWN, doc
-    _emit(opts, ctx, doc)
+    _deliver(opts, ctx, doc)
     return int(doc["exit"]), doc
 
 

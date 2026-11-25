@@ -9,8 +9,11 @@ HOME 도 임시 폴더다. 운영 설정(`~/.config/rcm`)과 운영 데이터는
 from __future__ import annotations
 
 import json
+import os
 import plistlib
 import stat
+import subprocess
+import sys
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
@@ -4000,3 +4003,77 @@ def test_td35_a_refused_token_says_a_token_is_needed(worker, srv, capsys):
     srv.route("GET", "/api/whoami", {"error": "unauthorized"}, status=401)
     code, out, err = worker.text(capsys)
     assert code == 3 and "needed" in (out + err), out + err
+
+
+# ── P6 gap-fix 1 ─────────────────────────────────────────────────────────────
+
+
+def doctor_child(env: Path, **extra: str) -> dict[str, str]:
+    """자식 프로세스로 띄우는 `rcm doctor` 의 환경 — 임시 HOME, 셸의 rcm 변수 없음. 이 시험이 읽은
+    `remote_ci_monitor` 를 그대로 쓴다(`PYTHONPATH`) — 변이를 넣은 사본에서도 같은 코드가 돈다."""
+    return {
+        "PYTHONPATH": str(Path(doctor.__file__).resolve().parents[1]),
+        "HOME": str(env / "home"),
+        "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
+        "TMPDIR": str(env),
+        **extra,
+    }
+
+
+def doctor_argv(*argv: str) -> list[str]:
+    return [sys.executable, "-m", "remote_ci_monitor.cli", "doctor", *argv]
+
+
+def test_e3_a_closed_pipe_keeps_the_verdict_and_prints_no_traceback(env):
+    """`rcm doctor | true` — 읽는 쪽이 닫힌 파이프에 써도 traceback 이 없고 종료 코드는 판정
+    그대로다(P6 GAP E3). 파이썬이 끝날 때의 flush 오류(`Exception ignored … BrokenPipeError`,
+    종료 120)도 없다."""
+    url = f"http://127.0.0.1:{free_port()}"
+    proc = subprocess.Popen(
+        doctor_argv("--role", "client", "--server", url),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        stdin=subprocess.DEVNULL,
+        env=doctor_child(env),
+        cwd=env,
+    )
+    assert proc.stdout is not None
+    proc.stdout.close()  # `| true` — 읽는 쪽이 먼저 끝났다
+    proc.stdout = None
+    _out, err = proc.communicate(timeout=60)
+    text = err.decode("utf-8", "replace")
+    assert "Traceback" not in text and "BrokenPipe" not in text, text
+    assert proc.returncode == 3, (proc.returncode, text)
+
+
+@pytest.mark.parametrize("as_json", [False, True], ids=["text", "json"])
+def test_e3_a_stdout_that_is_not_utf8_keeps_the_verdict(env, as_json):
+    """UTF-8 이 아닌 stdout(`PYTHONIOENCODING=ascii`)에서도 판정을 잃지 않는다(P6 GAP E3).
+    글은 못 찍는 글자만 바꾸고, JSON 은 `\\uXXXX` 로 적어 그대로 읽힌다."""
+    url = f"http://127.0.0.1:{free_port()}"
+    argv = doctor_argv("--role", "client", "--server", url, *(["--json"] if as_json else []))
+    utf8 = subprocess.run(
+        argv,
+        capture_output=True,
+        env=doctor_child(env, PYTHONIOENCODING="utf-8"),
+        cwd=env,
+        stdin=subprocess.DEVNULL,
+        timeout=60,
+    )
+    plain = subprocess.run(
+        argv,
+        capture_output=True,
+        env=doctor_child(env, PYTHONIOENCODING="ascii"),
+        cwd=env,
+        stdin=subprocess.DEVNULL,
+        timeout=60,
+    )
+    err = plain.stderr.decode("utf-8", "replace")
+    assert utf8.returncode == 3 and not utf8.stdout.isascii(), utf8  # 바꿀 글자가 있는 출력이다
+    assert "Traceback" not in err, err
+    assert plain.returncode == 3, (plain.returncode, err)
+    assert plain.stdout.isascii(), plain.stdout
+    if as_json:
+        assert json.loads(plain.stdout) == json.loads(utf8.stdout)
+    else:
+        assert "cannot reach" in plain.stdout.decode() and "exit 3" in plain.stdout.decode()
