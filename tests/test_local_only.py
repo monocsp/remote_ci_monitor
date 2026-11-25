@@ -517,6 +517,12 @@ ENTRIES: dict[str, Callable[..., None]] = {
 def test_to15_no_entry_point_offers_a_local_only_preset_to_a_remote_machine(
     lo_ready, monkeypatch, entry
 ):
+    # 명세가 이 시험 하나로 묶은 행들(§7 TO 표 「TO15 로 묶었다」)
+    # TO2
+    # TO5
+    # TO8
+    # TO11
+    # TO14
     fn = ENTRIES[entry]
     if fn in (_auto_check, _recheck):
         fn(lo_ready, monkeypatch)
