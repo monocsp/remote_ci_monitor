@@ -15,7 +15,8 @@ of a key bumps that number and is listed here.
   a required tool there — is refused with 409 before it joins or supersedes anything. Jobs already
   waiting when the mark is added show `no capable machine` with no ETA instead of being failed. A
   `local_only` pool preset must use the default pool, or the server does not start; an older
-  server does not know the key, so upgrade every server that reads the preset first.
+  server does not know the key, so upgrade every server that reads the preset first, and remove
+  the `local_only` lines before rolling back below 0.11.0.
   `POST /machines/{id}/recheck` without names lists a check a remote worker cannot run under a
   new `skipped` key instead of as a failed job. `rcm run` exits 2 on these refusals, as no job
   was made. For a `local_only` preset no local lane can take, `POST /api/eta` now answers

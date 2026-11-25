@@ -1650,7 +1650,8 @@ stopped: it finishes and reports its result as usual. Its retry (`[presets.retry
 attempt and follows the mark: one pinned to that worker waits with `no capable machine` and no
 ETA, one in the default pool goes to the server's lanes. An older server does not know the key
 and refuses to start, so upgrade every server that reads the preset first, `include` files
-included.
+included. Before rolling back below 0.11.0, remove the presets' `local_only` lines first: an older
+server does not know the key and does not start.
 
 **Checks.** A `local_only` check preset runs only on `@local`. On a remote worker, a preset that
 needs it shows `check_local_only`, the check's row in `rcm machines` shows `local_only` and asks

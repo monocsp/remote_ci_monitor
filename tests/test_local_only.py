@@ -1257,6 +1257,20 @@ def test_e1_adding_the_mark_later_says_what_happens_to_a_running_remote_job():
     ) in flat
 
 
+def test_r5_the_guide_and_the_changelog_say_to_drop_the_mark_before_rolling_back():
+    """# R5 — 되돌리기 방향의 함정. v0.11.0 아래의 서버는 `local_only` 를 몰라 기동하지 않으므로
+    되돌리기 전에 프리셋의 그 줄을 먼저 뺀다(`docs/m5t-workplan.md` §9 의 남는 위험)."""
+    from test_docs_m5 import CHANGELOG, CONFIGURATION, read, unreleased
+
+    flat = " ".join(read(CONFIGURATION).split())
+    assert (
+        "Before rolling back below 0.11.0, remove the presets' `local_only` lines first: an older "
+        "server does not know the key and does not start."
+    ) in flat
+    changelog = " ".join(unreleased(read(CHANGELOG)).split())
+    assert "remove the `local_only` lines before rolling back below 0.11.0" in changelog
+
+
 def test_to10_to16_the_readme_exit_code_paragraph_names_the_local_only_409s():
     """README 두 판의 종료 코드 문단이 `rcm run` 의 2 를 고르는 409 를 다 적는다. `local_only`
     거절의 `no_capable_machine` · `tool_missing` 은 `cli.py` 의 `_REFUSED_CODES` 에 있어 2 다(P3
