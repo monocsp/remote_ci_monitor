@@ -1047,7 +1047,7 @@ class CapabilitiesMixin:
             judged = self._placement_notes(preset, views, now, memo)
             stalled = self._stalled_checks(judged, memo)
             workers: set[str | None] = set()
-            notes: list[PlacementNote] = []
+            judged_notes: list[PlacementNote] = []
             for view, v in judged:
                 accepts = (
                     bool(self.config.server.local_accept_any)
@@ -1056,11 +1056,11 @@ class CapabilitiesMixin:
                 )
                 if v.state == cap.ELIGIBLE and accepts:
                     workers.add(key(view))
-                notes.append(self._note(view, v, accepts=accepts))
+                judged_notes.append(self._note(view, v, accepts=accepts))
             return Placement(
                 workers=frozenset(workers),
-                reason=None if workers else self._why_none(notes, stalled),
-                notes=tuple(notes),
+                reason=None if workers else self._why_none(judged_notes, stalled),
+                notes=tuple(judged_notes),
             )
         # pool 배치 — 그 풀의 워커. checks 로 막힌 워커는 빠진다(도구 문제는 막지 않는다)
         in_pool = [v for v in views if v.pool == job.pool]
