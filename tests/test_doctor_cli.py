@@ -17,7 +17,7 @@ from typing import Any
 
 import pytest
 
-from fake_rcm_http import FakeRcm, free_port
+from fake_rcm_http import FakeRcm, RawReply, free_port
 from remote_ci_monitor import __version__, cli, doctor, follow
 from test_cli_discover import FakeDiscover, found
 
@@ -2091,3 +2091,281 @@ def test_d5_probes_are_not_run_when_the_service_path_is_unknown(worker, env, srv
     code, doc = run_worker(capsys, env, srv, sf)
     assert doc["probes"]["td-ver"]["state"] == "unknown", doc["probes"]
     assert code == 3, doc
+
+
+# ── 망가진 입력 표 (P3 2라운드 HIGH · MED) ────────────────────────────────────
+#
+# 같은 결함 부류(남이 준 값의 모양을 가정한다)가 두 라운드 이어졌다. 입력 하나씩 막지 않고 표로
+# 잠근다: 서버의 네 라우트 · 설정 파일 · 서비스 파일의 두 관리자에 망가진 입력을 주면 traceback
+# 없이 종료 2(사용법) 나 3(판정 못 함)이다. 그리고 그 이유가 읽는 자리의 사람용 문장이어야 한다 —
+# 맨 바깥 경계의 `could not decide: <예외 종류>` 가 보이면 읽는 자리의 모양 검사가 빠진 것이다.
+
+BOUNDARY = "could not decide:"
+HTML_200 = RawReply(b"<!doctype html><title>proxy</title>", {"Content-Type": "text/html"})
+EMPTY_200 = RawReply(b"")
+#: 라우트마다 doctor 가 쓰는 칸의 타입만 틀린 dict
+WRONG_TYPES: dict[str, Any] = {
+    "/api/health": {"ok": "yes", "version": ["9"], "preset_env": {"unit": {"missing_tools": "j"}}},
+    "/api/whoami": {"name": "mbp", "kind": ["worker"]},
+    "/worker/spec": {
+        "generation": "1:0",
+        "probes": [{"name": "p", "argv": ["true"], "timeout_seconds": "soon"}],
+        "presets": [{"name": "build", "requires": [HAVE], "env": ["A=1"], "pool": "mbp"}],
+    },
+    "/api/machines": {
+        "generation": "1:0",
+        "machines": [{"id": "mbp", "kind": "remote", "pool": "default", "presets": ["unit"]}],
+    },
+}
+BAD_KINDS = ("html", "empty", "list", "null", "wrong-types")
+ROLE_ROUTES = {
+    "worker": ("/api/health", "/api/whoami", "/worker/spec"),
+    "coordinator-worker": ("/api/health", "/api/whoami", "/api/machines"),
+    "client": ("/api/health",),
+}
+SERVER_CASES = [
+    pytest.param(role, route, kind, id=f"{role}{route.replace('/', '-')}-{kind}")
+    for role, routes in ROLE_ROUTES.items()
+    for route in routes
+    for kind in BAD_KINDS
+]
+
+
+def run_guarded(capsys, *argv: str) -> tuple[int | None, str, str]:
+    """`rcm doctor` 를 부르되 새어 나온 예외를 traceback 문자열로 바꾼다 — 시험이 「traceback
+    없음」 단언에서 빨개지게(수집 · 호출 오류가 아니라)."""
+    import traceback
+
+    tb = ""
+    try:
+        code: int | None = cli.main(["doctor", *argv])
+    except Exception:  # noqa: BLE001 — 바로 그것을 잡아 단언으로 보인다
+        code, tb = None, traceback.format_exc()
+    cap = capsys.readouterr()
+    return code, cap.out, cap.err + tb
+
+
+def said_lines(out: str, err: str) -> list[str]:
+    """사람이 받은 「판정 못 함」 · 사용법 줄 — `--json` 의 undecided 와 stderr."""
+    lines = err.splitlines()
+    if out.strip():
+        lines += json.loads(out)["undecided"]
+    return lines
+
+
+def assert_handled(code, out, err, want: str, codes=(2, 3)) -> None:
+    assert "Traceback" not in err, err
+    assert code in codes, (code, out, err)
+    lines = said_lines(out, err)
+    # 경계에 닿았다 = 읽는 자리가 이 모양을 몰랐다
+    assert not any(BOUNDARY in ln for ln in lines), lines
+    assert any(want in ln for ln in lines), (want, lines)
+
+
+def broken_server(role: str) -> FakeRcm:
+    s = FakeRcm()
+    s.route(
+        "GET",
+        "/api/health",
+        {"ok": True, "version": __version__, "preset_env": {"unit": {"missing_tools": []}}},
+    )
+    kind = "worker" if role == "worker" else "client"
+    s.route("GET", "/api/whoami", {"name": "mbp", "admin": False, "kind": kind})
+    s.route("GET", "/worker/spec", spec_doc(preset("build")))
+    s.route("GET", "/api/machines", machines_doc())
+    return s
+
+
+@pytest.mark.parametrize("role,route,kind", SERVER_CASES)
+def test_a_server_answer_of_the_wrong_shape_is_named_and_exits_3(
+    env, svcbin, monkeypatch, capsys, role, route, kind
+):
+    """HTML 200(틀린 포트 · 프록시) · 빈 200 · `[]` · `null` · 칸 타입이 틀린 dict 는 「서버가
+    알아볼 수 없는 답을 줬다」이고 종료 3 이다 — 그 라우트 이름을 보인다."""
+    srv = broken_server(role)
+    try:
+        body = {
+            "html": HTML_200,
+            "empty": EMPTY_200,
+            "list": [],
+            "null": None,
+            "wrong-types": WRONG_TYPES[route],
+        }[kind]
+        srv.route("GET", route, body)
+        if role == "worker":
+            monkeypatch.setenv("RCM_WORKER_TOKEN", TOKEN)
+            cfg = worker_toml(env, srv.url)
+            sf = plist(env / "svc", f"{svcbin}:/usr/bin:/bin")
+            argv = ["--role", role, "--config", str(cfg), "--service-file", str(sf)]
+        elif role == "client":
+            monkeypatch.setenv("RCM_TOKEN", CLIENT_TOKEN)
+            argv = ["--role", role, "--server", srv.url]
+        else:
+            monkeypatch.setenv("RCM_TOKEN", CLIENT_TOKEN)
+            argv = ["--role", role, "--config", str(server_toml(env, srv.port))]
+        code, out, err = run_guarded(capsys, *argv, "--json")
+        assert srv.calls("GET", route), "the broken route was never asked"
+        assert_handled(code, out, err, route, codes=(3,))
+    finally:
+        srv.close()
+
+
+NOT_UTF8 = b"\xff\xfe[server]\nlanes = 0\n"
+SERVER_STRING = b'server = "x"\n'
+SERVER_ARRAY = b"[[server]]\nlanes = 0\n"
+#: (--role, 파일 이름, 내용) — 역할이 없으면 설정에서 역할을 읽는 길(`./rcm.toml`)이다
+CONFIG_CASES = {
+    "infer-not-utf8": (None, "rcm.toml", NOT_UTF8),
+    "infer-server-string": (None, "rcm.toml", SERVER_STRING),
+    "infer-server-array": (None, "rcm.toml", SERVER_ARRAY),
+    "coordinator-not-utf8": ("coordinator", "server.toml", NOT_UTF8),
+    "coordinator-server-string": ("coordinator", "server.toml", SERVER_STRING),
+    "coordinator-server-array": ("coordinator", "server.toml", SERVER_ARRAY),
+    "worker-not-utf8": ("worker", "worker.toml", NOT_UTF8),
+    "worker-server-string": ("worker", "worker.toml", SERVER_STRING),
+    "worker-server-array": ("worker", "worker.toml", b'[[server]]\nurl = "x"\n'),
+    "client-not-utf8": ("client", "client.toml", NOT_UTF8),
+    "client-server-string": ("client", "client.toml", SERVER_STRING),
+    "client-server-array": ("client", "client.toml", b'[[server]]\nurl = "x"\n'),
+}
+
+
+@pytest.mark.parametrize("case", list(CONFIG_CASES))
+def test_a_config_file_of_the_wrong_shape_is_a_usage_error(env, monkeypatch, capsys, case):
+    """UTF-8 이 아닌 설정 · 표가 아닌 `server` 는 사용법 오류(종료 2)다 — 파일 이름과 이유를
+    보이고 홈 폴더는 `~` 로 가린다."""
+    role, name, body = CONFIG_CASES[case]
+    proj = env / "home" / "proj"
+    proj.mkdir()
+    monkeypatch.chdir(proj)
+    monkeypatch.setenv("RCM_WORKER_TOKEN", TOKEN)
+    monkeypatch.setenv("RCM_TOKEN", CLIENT_TOKEN)
+    cfg = proj / name
+    cfg.write_bytes(body)
+    cfg.chmod(stat.S_IRUSR | stat.S_IWUSR)
+    argv = ["--json"] if role is None else ["--role", role, "--config", str(cfg), "--json"]
+    code, out, err = run_guarded(capsys, *argv)
+    assert_handled(code, out, err, name, codes=(2,))
+    assert str(env / "home") not in out + err, err
+
+
+SVC_ENV_FILE = "[Service]\nExecStart=/x/rcm worker\nEnvironment=PATH={bin}:/usr/bin:/bin\n" + (
+    "EnvironmentFile=/etc/rcm/worker.env\n"
+)
+SVC_SPECIFIER = "[Service]\nExecStart=/x/rcm worker\nEnvironment=PATH=%h/svcbin:/usr/bin:/bin\n"
+#: (파일 이름, 내용, 판정 못 함 줄에 보일 것)
+SERVICE_CASES = {
+    "launchd-garbage": ("com.remote-ci-monitor.worker.plist", b"not a plist", "cannot read"),
+    "launchd-array": ("com.remote-ci-monitor.worker.plist", NOT_A_DICT_PLIST, "cannot read"),
+    "systemd-not-utf8": (
+        "rcm-worker.service",
+        b"[Service]\nExecStart=/x/rcm worker\nEnvironment=PATH=\xff\n",
+        "not UTF-8",
+    ),
+    "systemd-environment-file": ("rcm-worker.service", SVC_ENV_FILE, "EnvironmentFile="),
+    "systemd-specifier": ("rcm-worker.service", SVC_SPECIFIER, "line 3 (Environment=)"),
+}
+
+
+@pytest.mark.parametrize("case", list(SERVICE_CASES))
+def test_a_service_file_rcm_cannot_fully_read_is_named_and_exits_3(
+    env, srv, svcbin, monkeypatch, capsys, case
+):
+    """두 관리자의 깨진 서비스 파일, 그리고 rcm 이 읽지 않는 systemd 줄(`EnvironmentFile=`)과
+    풀지 않는 지정자(`%h`)는 그 줄 · 파일 이름을 보이고 종료 3 이다 — 지정자를 글자 그대로 PATH 에
+    넣어 없는 「빠짐」(종료 1)을 지어내지 않는다(P3 2라운드 MED)."""
+    name, body, want = SERVICE_CASES[case]
+    monkeypatch.setenv("RCM_WORKER_TOKEN", TOKEN)
+    (env / "svc").mkdir()
+    sf = env / "svc" / name
+    if isinstance(body, str):
+        sf.write_text(body.format(bin=svcbin))
+    else:
+        sf.write_bytes(body)
+    cfg = worker_toml(env, srv.url)
+    argv = ["--role", "worker", "--config", str(cfg), "--service-file", str(sf), "--json"]
+    code, out, err = run_guarded(capsys, *argv)
+    assert_handled(code, out, err, want, codes=(3,))
+    assert str(env / "home") not in out + err
+
+
+def test_an_unexpected_error_is_could_not_decide_not_a_traceback(worker, env, monkeypatch, capsys):
+    """읽는 자리가 모르는 예외는 맨 바깥 경계가 「판정 못 함」으로 바꾼다 — 종료 3, stderr 와
+    `--json` 의 undecided 에 `could not decide: <예외 종류>: <정리된 한 줄>`. 홈은 가리고
+    제어문자와 둘째 줄은 뺀다. 모름을 모름으로 적을 뿐 성공으로 적지 않는다."""
+
+    def boom(*_a: Any, **_k: Any) -> None:
+        raise RuntimeError(f"td-boom\x07 in {env / 'home' / 'x'}\nsecond line")
+
+    monkeypatch.setattr(doctor._Run, "measure", boom)
+    line = "could not decide: RuntimeError: td-boom in ~/x"
+    code, out, err = run_guarded(capsys, *worker.argv(None, None, "mbp"), "--json")
+    assert "Traceback" not in err, err
+    assert code == 3, (code, out, err)
+    doc = json.loads(out)
+    assert doc["undecided"] == [line] and doc["exit"] == 3, doc
+    assert doc["role"] == "worker" and doc["problems"] == [], doc
+    assert line in err.splitlines(), err
+    code, out, err = run_guarded(capsys, *worker.argv(None, None, "mbp"))
+    assert code == 3 and "Traceback" not in err, err
+    assert line in err.splitlines() and "second line" not in out + err, err
+    assert str(env / "home") not in out + err
+
+
+# ── 싸게 고친 LOW (P3 2라운드) ────────────────────────────────────────────────
+
+
+def test_git_version_is_read_in_the_service_env(env, monkeypatch):
+    """`token_file` 의 git 버전은 서비스 환경으로 잰다 — 셸 환경의 값으로 다른 git 을 보지
+    않는다(검증자 1 #4)."""
+    d = env / "gitbin"
+    d.mkdir()
+    script(
+        d / "git",
+        'if [ "$TD_SVC" = 1 ]; then echo "git version 2.40.0"; else echo "git version 2.20.0"; fi',
+    )
+    monkeypatch.delenv("TD_SVC", raising=False)
+    got = doctor.git_requirement(
+        {"PATH": str(d), "TD_SVC": "1"},
+        token_file=True,
+        platform="linux",
+        package_manager=None,
+        root=False,
+    )
+    assert got["state"] == "ok", got
+
+
+def test_server_given_names_are_cleaned_before_printing(worker, srv, svcbin, capsys):
+    """서버가 준 프리셋 · 점검 · 도구 · 프로브 이름의 제어문자는 찍기 전에 지운다(검증자 1 #7)."""
+    probe = {"name": "td\x1b[2Jver", "argv": ["rcm-td-version"], "timeout_seconds": 5}
+    evil = preset("bu\x1b[2Jild", requires=("rcm-td\x07-lack",), checks=("ch\x1b]0;k",))
+    srv.route("GET", "/worker/spec", spec_doc(evil, probes=[probe]))
+    _code, out, err = worker.text(capsys)
+    for bad in ("\x1b", "\x07"):
+        assert bad not in out + err, (out, err)
+    assert "build" in out.replace("[2J", ""), out
+
+
+def test_basic_read_with_a_worker_token_gets_no_host_facts(tmp_path):
+    """`read_auth = "basic"` 에서 워커 토큰을 Basic 으로 보내도 호스트 사실은 오지 않는다 — 호스트
+    사실은 사람(클라이언트 토큰)의 읽기에만 싣는다(검증자 2 #2)."""
+    import base64
+
+    srv = m5n(tmp_path, extra='read_auth = "basic"')
+    try:
+        srv.reported("build-02", pool="mac2", extra={"host": HOST})
+        basic = base64.b64encode(f"build-02:{srv.tokens['build-02']}".encode()).decode()
+        status, doc = srv.req("GET", "/api/machines", headers={"Authorization": f"Basic {basic}"})
+        if status == 200:
+            got = {m["id"]: m for m in doc["machines"]}["build-02"]
+            assert "host" not in got, got
+    finally:
+        srv.close()
+
+
+def test_the_worker_and_the_server_agree_on_the_host_fact_keys():
+    """워커가 싣는 키와 서버가 받는 키는 한 벌이다(검증자 2 #4) — 한쪽만 늘면 그 칸은 조용히
+    버려진다."""
+    from remote_ci_monitor import capabilities, remote_worker
+
+    assert remote_worker.HOST_KEYS == capabilities.HOST_FACT_KEYS
