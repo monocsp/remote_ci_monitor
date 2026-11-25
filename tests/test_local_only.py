@@ -106,9 +106,14 @@ def report(
     host_key: str = HOST_B,
     accept_any: bool = True,
     xcode: str = "Xc 1",
+    again: bool = False,
 ):
-    """등록한 워커의 보고 — 모든 프리셋에 「전부 있음」(옛 워커가 보내던 꼴)."""
-    gen = s.registered(worker, pool=s.pools_of[worker])["generation"]
+    """등록한 워커의 보고 — 모든 프리셋에 「전부 있음」(옛 워커가 보내던 꼴). `again` 이면 다시
+    등록하지 않고 서버의 지금 세대로만 보낸다 — 다시 등록하면 그 워커가 돌던 잡을 잃는다."""
+    if again:
+        gen = s.app.generation
+    else:
+        gen = s.registered(worker, pool=s.pools_of[worker])["generation"]
     body = {
         "generation": gen,
         "host_key": host_key,
@@ -867,6 +872,68 @@ def test_to18_a_local_only_check_that_passed_on_a_remote_machine_holds_for_that_
             "code": "check_local_only",
             "detail": {"check": "localcheck"},
         }
+    finally:
+        s.close()
+
+
+#: `localcheck` 에서 표식을 뺀 설정 — 표식을 달기 전의 원격 점검 기록을 만들 때 쓴다
+_LOCALCHECK_HEAD = 'name = "localcheck"\nargv = ["sh", "-c", "echo localcheck"]\n'
+UNMARKED_CHECK = PRESETS.replace(_LOCALCHECK_HEAD + "local_only = true\n", _LOCALCHECK_HEAD)
+
+
+def _mark_by_reload(s: M5nServer, text: str = PRESETS) -> None:
+    s.write(PROBES + text)
+    status, body = s.req("POST", "/reload", token="admin", json_body={})
+    assert status == 200, body
+
+
+@pytest.mark.parametrize("case", ["queued", "failed", "running"])
+def test_x1_a_remote_check_record_follows_the_mark_unless_that_machine_is_running_it(
+    tmp_path, case
+):
+    """# X1 — 표식을 단 순간 원격 머신에 남은 그 점검의 기록. 그 머신에서는 점검을 다시 돌릴 수
+    없으니 판정이 그 기록을 따르는 것은 통과(지문이 같은 동안)와 그 머신이 **실제로 집어 돌리는**
+    잡뿐이다. 대기 중인 점검 잡은 아무도 못 집어(`no_capable_machine`, TO17) 「점검 중」이 영영
+    안 끝나고, 실패는 다시 점검하라는 말이 409 로 끝난다 — 둘 다 `check_local_only` 다."""
+    s = server(tmp_path, presets=UNMARKED_CHECK)
+    try:
+        report(s, OTHER, host_key=HOST_C)
+        check = queued(s, "localcheck", machine=OTHER)
+        if case != "queued":
+            assert s.claimed(OTHER) == check
+        if case == "failed":
+            assert s.finish(OTHER, check, "failed", exit_code=1)[0] == 200
+        _mark_by_reload(s)
+        assert s.app.config.preset("localcheck").local_only is True
+        report(s, OTHER, host_key=HOST_C, again=True)  # 새 세대에 같은 지문
+        qa = queued(s, "qa")
+        got = s.machines()[OTHER]["presets"]["qa"]
+        row = s.row(qa)
+        if case == "running":
+            # 그 머신이 집은 점검은 끝까지 돌고 그 결과를 센다 — 그때까지는 「점검 중」이다
+            assert got == {
+                "state": "unknown",
+                "code": "check_running",
+                "detail": {"check": "localcheck", "job_id": check},
+            }
+            assert row["reason"] == "check_pending", row
+            assert s.finish(OTHER, check, "succeeded", exit_code=0)[0] == 200
+            done = s.machines()[OTHER]["presets"]["qa"]
+            assert (done["state"], done["code"]) == ("eligible", "ok")
+            return
+        assert got == {
+            "state": "ineligible",
+            "code": "check_local_only",
+            "detail": {"check": "localcheck"},
+        }
+        assert row["reason"] == "no_capable_machine", row  # check_pending · check_failed 가 아니다
+        notes = {n["worker"]: n for n in row["placement_detail"]}
+        assert notes[OTHER]["code"] == "check_local_only"
+        if case == "queued":
+            # 대기 중인 그 점검 잡은 TO17 규칙대로 갈 곳이 없다 — 실패로 닫지 않는다
+            assert s.row(check)["reason"] == "no_capable_machine"
+            assert s.store.get_job(check).state == QUEUED
+        assert s.claim(OTHER)[0] == 204
     finally:
         s.close()
 
