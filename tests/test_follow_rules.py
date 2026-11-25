@@ -193,10 +193,18 @@ def test_follows_table(argv, expect):  # A18 · §2.3 · 결정 160
     assert follow.follows(follow.prescan(argv)) is expect
 
 
-def test_no_follow_commands_constant():  # §5.1
+def test_no_follow_commands_constant():  # §5.1 · M5t-a TR17 이 doctor 를 더했다
     assert follow.NO_FOLLOW_COMMANDS == frozenset(
-        {"serve", "worker", "token", "init", "discover", "version", "skills"}
+        {"serve", "worker", "token", "init", "discover", "version", "skills", "doctor"}
     )
+
+
+def test_tr17_doctor_does_not_follow_the_server_version():
+    """`rcm doctor` 는 이 설치본이 무엇을 할 수 있는지 잰다 — 서버 버전으로 갈아타면 잴 대상이
+    바뀐다(docs/m5t-workplan.md §4.7 결정 171 행 · TR17)."""
+    for argv in (["doctor"], ["doctor", "--role", "worker", "--json"]):
+        assert follow.follows(follow.prescan(argv, options=OPTS)) is False, argv
+        assert follow.follows(follow.prescan(argv)) is False, argv
 
 
 # ── 설정 ─────────────────────────────────────────────────────────────────────
