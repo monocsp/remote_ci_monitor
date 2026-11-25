@@ -841,7 +841,12 @@ ANSWER_SHAPES: dict[str, Shape] = {
                 (dict,),
                 values=Shape(
                     (dict,),
-                    {"missing_tools": _req(_STRS), "missing_passthrough": _req(_STRS)},
+                    {
+                        "missing_tools": _req(_STRS),
+                        "missing_passthrough": _req(_STRS),
+                        # 어느 정의를 쟀는지 — 없으면(이 키를 모르는 서버) 그 프리셋은 모름이다
+                        "digest": _STR,
+                    },
                 ),
             ),
         },
@@ -928,6 +933,8 @@ class Health:
 class PresetEnv:
     missing_tools: tuple[str, ...]
     missing_passthrough: tuple[str, ...]
+    #: 서버가 잰 프리셋 정의의 지문(`dc.preset_env_digest`). None 이면 서버가 말하지 않았다
+    digest: str | None = None
 
 
 @dataclass(frozen=True)
@@ -1004,7 +1011,9 @@ def parse_health(answer: dict[str, Any]) -> Health:
         None
         if raw is None
         else {
-            name: PresetEnv(tuple(v["missing_tools"]), tuple(v["missing_passthrough"]))
+            name: PresetEnv(
+                tuple(v["missing_tools"]), tuple(v["missing_passthrough"]), v.get("digest")
+            )
             for name, v in raw.items()
         }
     )
@@ -1995,6 +2004,11 @@ class _Run:
         서버가 그 프리셋을 재지 않았으면(키가 없는 옛 서버, 항목이 없음) `requires` 가 있는
         프리셋은 「모름」이다 — 빈 「빠진 도구」로 읽어 ready 라 부르지 않는다. 서버는 `requires` 와
         `env_passthrough` 가 둘 다 없는 프리셋은 재지 않으므로 그 프리셋은 항목이 없어도 된다.
+
+        프리셋은 디스크의 설정에서, 측정은 서버의 메모리에서 온다. 둘은 이름으로만 이어지므로
+        서버가 아직 그 설정을 reload 하지 않았으면 옛 정의의 측정을 읽게 된다. 그래서 항목의
+        `digest` 를 디스크의 정의로 만든 지문과 견준다. 다르거나 항목이 지문을 싣지 않았으면 그
+        프리셋은 모름이다(P6 GAP E4).
         """
         measured = health.preset_env
         # 서버의 판정 코드는 표시만 한다 — 없으면 doctor 가 정한 코드를 둔다
@@ -2006,6 +2020,8 @@ class _Run:
         )
         for p in cfg.presets:
             got = None if measured is None else measured.get(p.name)
+            mine = dc.preset_env_digest(p.requires, p.env_passthrough, p.env)
+            stale = got is not None and got.digest != mine
             entry = {
                 "name": p.name,
                 "requires": list(p.requires),
@@ -2034,7 +2050,21 @@ class _Run:
                 why = "older rcm" if measured is None else "no preset_env entry"
                 row.state, row.code = dc.UNKNOWN, "tools_unknown"
                 row.note = f"the server did not report its own tool measurements ({why})"
-            unset = [] if got is None else [dc.clean_text(v, 64) for v in got.missing_passthrough]
+            if stale and row.counts:
+                # 서버의 측정이 이 정의의 것이 아니다 — 빠진 도구도 판정 코드도 읽지 않는다
+                row.state, row.code = dc.UNKNOWN, "not_reloaded"
+                row.note = (
+                    "the server measured another definition of this preset — it has not "
+                    "reloaded this config yet (rcm reload)"
+                    if got is not None and got.digest is not None
+                    else "the server does not say which definition it measured (older rcm)"
+                )
+                row.missing = []
+            unset = (
+                []
+                if got is None or stale
+                else [dc.clean_text(v, 64) for v in got.missing_passthrough]
+            )
             if unset and row.applies != dc.APPLIES_OTHER_POOL:
                 self.warnings.append(
                     f"{p.name}: {', '.join(unset)} not set in the server's service environment"

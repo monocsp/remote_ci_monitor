@@ -13,6 +13,8 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 import os
 import re
 from collections.abc import Mapping, Sequence
@@ -124,6 +126,26 @@ def clean_env(
         env["PATH"] = path
     env.update({str(k): str(v) for k, v in service_env.items()})
     return env
+
+
+def preset_env_digest(
+    requires: Sequence[str], env_passthrough: Sequence[str], env: Mapping[str, str]
+) -> str:
+    """서버가 `preset_env` 로 잰 프리셋 정의의 지문 — 그 측정이 기대는 것만 넣는다: `requires`,
+    `env_passthrough`, 프리셋 env 의 이름들과 PATH 값. 서버(`/api/health` 의
+    `preset_env.<이름>.digest`)와 doctor 가 이 함수 하나로 만든다. doctor 는 디스크의 설정과 서버가
+    들고 있는 설정이 같은 정의인지 이것으로 본다(P6 GAP E4). PATH 밖의 env 값은 넣지 않는다 —
+    토큰 없이 읽히는 답이다."""
+    raw = json.dumps(
+        {
+            "requires": list(requires),
+            "env_passthrough": list(env_passthrough),
+            "env": sorted(env),
+            "path": env.get("PATH"),
+        },
+        sort_keys=True,
+    )
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:16]
 
 
 def mask_home(text: str, home: str) -> str:

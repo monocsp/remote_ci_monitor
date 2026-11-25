@@ -22,6 +22,7 @@ import pytest
 
 from fake_rcm_http import FakeRcm, RawReply, free_port
 from remote_ci_monitor import __version__, cli, doctor, follow
+from remote_ci_monitor.core import doctor as doctor_core
 from test_cli_discover import FakeDiscover, found
 
 TOKEN = "rcm-td-worker-token"
@@ -113,6 +114,20 @@ LACK_HINT = {
     "docs": "https://example.invalid/td-lack",
     "install": {"darwin": "brew install td-lack", "linux": "apt-get install td-lack"},
 }
+
+
+def lane(
+    requires: tuple[str, ...],
+    missing: tuple[str, ...] = (),
+    passthrough: tuple[str, ...] = ("PATH",),
+) -> dict[str, Any]:
+    """서버가 `/api/health` 의 `preset_env` 에 싣는 항목 하나. 진짜 서버처럼 그 정의(`requires` ·
+    `env_passthrough`, env 없음)의 지문 `digest` 도 싣는다(P6 GAP E4)."""
+    return {
+        "missing_tools": list(missing),
+        "missing_passthrough": [],
+        "digest": doctor_core.preset_env_digest(requires, passthrough, {}),
+    }
 
 
 @pytest.fixture
@@ -747,8 +762,8 @@ def coordinator(env, monkeypatch) -> Iterator[FakeRcm]:
             "ok": True,
             "version": __version__,
             "preset_env": {
-                "unit": {"missing_tools": [], "missing_passthrough": []},
-                "lint": {"missing_tools": [LACK], "missing_passthrough": []},
+                "unit": lane((HAVE,)),
+                "lint": lane((LACK,), missing=(LACK,)),
             },
         },
     )
@@ -1789,7 +1804,7 @@ def test_rcm_check_git_row_follows_the_shim_rule(env, clt_shim, monkeypatch, cap
 
 @pytest.mark.parametrize(
     "measured",
-    [None, {"unit": {"missing_tools": [], "missing_passthrough": []}}],
+    [None, {"unit": lane((HAVE,))}],
     ids=["no-key", "no-entry"],
 )
 def test_a_local_lane_preset_the_server_did_not_measure_is_unknown(
@@ -2566,10 +2581,7 @@ GEN_SPEC_RULES: dict[str, dict[str, Any]] = {
 }
 GEN_HEALTH = {"ok": True, "version": __version__}
 GEN_HEALTH_RULES = {"ok": REQUIRED, "version": REQUIRED}
-GEN_LANE_HEALTH = {
-    **GEN_HEALTH,
-    "preset_env": {"unit": {"missing_tools": [], "missing_passthrough": []}},
-}
+GEN_LANE_HEALTH = {**GEN_HEALTH, "preset_env": {"unit": lane((HAVE,))}}
 #: coordinator-worker 는 로컬 레인을 `preset_env` 로 판정한다 — 없으면 모름
 GEN_LANE_HEALTH_RULES = {
     **GEN_HEALTH_RULES,
@@ -2577,6 +2589,8 @@ GEN_LANE_HEALTH_RULES = {
     "preset_env.unit": {**REQUIRED, "empty": 3},
     "preset_env.unit.missing_tools": REQUIRED,
     "preset_env.unit.missing_passthrough": REQUIRED,
+    # 어느 정의를 쟀는지 — 없거나 다르면(빈 문자열 포함) 그 프리셋은 모름이다(P6 GAP E4)
+    "preset_env.unit.digest": REQUIRED,
 }
 #: coordinator 는 `preset_env` 를 읽지 않는다 — 그래도 있는 칸의 모양은 본다
 GEN_COORD_HEALTH_RULES = {
@@ -2585,6 +2599,7 @@ GEN_COORD_HEALTH_RULES = {
     "preset_env.unit": {**ENTRY, "empty": 3},
     "preset_env.unit.missing_tools": REQUIRED,
     "preset_env.unit.missing_passthrough": REQUIRED,
+    "preset_env.unit.digest": {**OPTIONAL, "blank": B},
 }
 GEN_WORKER_ME = {"name": "mbp", "admin": False, "kind": "worker"}
 GEN_CLIENT_ME = {"name": "alice", "admin": False, "kind": "client"}
@@ -3149,7 +3164,7 @@ def input_setup(
 
 def input_server() -> FakeRcm:
     s = FakeRcm()
-    unit = {"missing_tools": [], "missing_passthrough": []}
+    unit = lane(("sh",))
     s.route(
         "GET", "/api/health", {"ok": True, "version": __version__, "preset_env": {"unit": unit}}
     )
@@ -4077,3 +4092,78 @@ def test_e3_a_stdout_that_is_not_utf8_keeps_the_verdict(env, as_json):
         assert json.loads(plain.stdout) == json.loads(utf8.stdout)
     else:
         assert "cannot reach" in plain.stdout.decode() and "exit 3" in plain.stdout.decode()
+
+
+def served_preset_env(config: Path, path: str) -> dict[str, Any]:
+    """진짜 서버의 측정(`App.measure_preset_env`)이 그 설정으로 만드는 `preset_env` — 서버가 들고
+    있는 설정이 `config` 일 때 `/api/health` 에 싣는 값이다."""
+    from types import SimpleNamespace
+
+    from remote_ci_monitor.config import load_server_config
+    from remote_ci_monitor.server import App
+
+    fake = SimpleNamespace(config=load_server_config(config, check_tools=False))
+    App.measure_preset_env(fake, environ={"PATH": path})
+    return fake.preset_env
+
+
+def test_e4_the_server_measured_this_config_so_doctor_reads_it(
+    env, coordinator, svcbin, monkeypatch, capsys
+):
+    """과잉 교정 막기: 서버가 디스크와 같은 설정을 들고 있으면 그 측정을 그대로 읽는다 — 진짜
+    생산자(`measure_preset_env`)의 답을 진짜 소비자(doctor)에 넣는다(P6 GAP E4)."""
+    monkeypatch.setenv("RCM_TOKEN", CLIENT_TOKEN)
+    cfg = server_toml(env, coordinator.port)
+    measured = served_preset_env(cfg, f"{svcbin}:/usr/bin:/bin")
+    coordinator.route(
+        "GET", "/api/health", {"ok": True, "version": __version__, "preset_env": measured}
+    )
+    code, doc = run_json(capsys, "--role", "coordinator-worker", "--config", str(cfg))
+    assert row(doc, "unit")["state"] == "ready", row(doc, "unit")
+    assert row(doc, "lint")["state"] == "missing", row(doc, "lint")
+    assert code == 1, doc
+
+
+def test_e4_a_server_that_has_not_reloaded_the_config_is_unknown(
+    env, coordinator, svcbin, monkeypatch, capsys
+):
+    """디스크의 설정은 `lint` 에 `rcm-td-lack` 을 요구하는데 서버는 그 줄이 없던 설정을 들고 있다
+    (reload 전). 서버의 측정은 옛 정의의 것이다 — 그 프리셋은 ready 가 아니라 모름(종료 3)이고
+    「서버가 아직 이 설정을 reload 하지 않았다」고 말한다(P6 GAP E4)."""
+    monkeypatch.setenv("RCM_TOKEN", CLIENT_TOKEN)
+    old = env / "old.toml"
+    old.write_text(
+        f'[server]\ndata_dir = "{env / "data"}"\n\n'
+        f'[[presets]]\nname = "unit"\nargv = ["true"]\nrequires = ["{HAVE}"]\n'
+        'env_passthrough = ["PATH"]\n\n'
+        '[[presets]]\nname = "lint"\nargv = ["true"]\nenv_passthrough = ["PATH"]\n'
+    )
+    measured = served_preset_env(old, f"{svcbin}:/usr/bin:/bin")
+    assert measured["lint"]["missing_tools"] == []  # 옛 정의로는 빠진 것이 없다
+    coordinator.route(
+        "GET", "/api/health", {"ok": True, "version": __version__, "preset_env": measured}
+    )
+    cfg = server_toml(env, coordinator.port)
+    code, doc = run_json(capsys, "--role", "coordinator-worker", "--config", str(cfg))
+    lint = row(doc, "lint")
+    assert lint["state"] == "unknown", lint
+    assert any("lint" in u and "reload" in u for u in doc["undecided"]), doc["undecided"]
+    assert row(doc, "unit")["state"] == "ready", row(doc, "unit")  # 같은 정의는 그대로 읽는다
+    assert code == 3, doc
+
+
+def test_e4_an_entry_that_cannot_say_which_config_it_measured_is_unknown(
+    env, coordinator, monkeypatch, capsys
+):
+    """`digest` 가 없는 항목(이 키를 모르는 서버)은 어느 설정을 쟀는지 모른다 — 모름(P6 GAP E4)."""
+    monkeypatch.setenv("RCM_TOKEN", CLIENT_TOKEN)
+    entry = {"missing_tools": [], "missing_passthrough": []}
+    coordinator.route(
+        "GET",
+        "/api/health",
+        {"ok": True, "version": __version__, "preset_env": {"unit": entry, "lint": entry}},
+    )
+    cfg = server_toml(env, coordinator.port)
+    code, doc = run_json(capsys, "--role", "coordinator-worker", "--config", str(cfg))
+    assert row(doc, "unit")["state"] == "unknown" and row(doc, "lint")["state"] == "unknown", doc
+    assert code == 3, doc

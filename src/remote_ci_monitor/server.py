@@ -611,7 +611,7 @@ class App(RemoteWorkersMixin, CapabilitiesMixin, ShelfAppMixin):
         self._driver_status_guard = threading.Lock()
         # 잡이 보게 될 환경을 **서버의 `os.environ` 으로** 잰 것(core/jobenv.py). 기동 때 한 번
         # 재고 health 가 그대로 싣는다 — `shutil.which` 를 요청마다 돌리지는 않는다.
-        self.preset_env: dict[str, dict[str, list[str]]] = {}
+        self.preset_env: dict[str, dict[str, Any]] = {}
         self._remote_init()
         self._capabilities_init()
         self._shelf_init()  # 보관함(M5p) — 전용 전송 슬롯 · zip hold · manifest 캐시
@@ -5345,10 +5345,11 @@ class App(RemoteWorkersMixin, CapabilitiesMixin, ShelfAppMixin):
         """
         import os
 
+        from remote_ci_monitor.core.doctor import preset_env_digest
         from remote_ci_monitor.runner import missing_tools, public_tool_name
 
         env_source = os.environ if environ is None else environ
-        measured: dict[str, dict[str, list[str]]] = {}
+        measured: dict[str, dict[str, Any]] = {}
         for preset in self.config.presets:
             if not preset.requires and not preset.env_passthrough:
                 continue
@@ -5363,6 +5364,9 @@ class App(RemoteWorkersMixin, CapabilitiesMixin, ShelfAppMixin):
                 "missing_tools": [
                     public_tool_name(name) for name in missing_tools(tuple(preset.requires), env)
                 ],
+                # 어느 정의를 쟀는지(M5t-a, P6 GAP E4) — `rcm doctor` 가 디스크의 설정과 견준다.
+                # 지문만 싣는다: 선언 경로 · env 값은 나가지 않는다
+                "digest": preset_env_digest(preset.requires, preset.env_passthrough, preset.env),
             }
         self.preset_env = measured
 

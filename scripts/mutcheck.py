@@ -2738,6 +2738,17 @@ MUTANTS = (
         new="    return False\n",
         tests=("tests/test_tool_shim.py::test_r2_git_ref_jobs_never_run_a_blocked_git_shim",),
     ),
+    Mutant(
+        # 서버가 잰 정의와 디스크의 정의를 견주지 않는다 — reload 전 서버의 옛 측정으로 ready 를
+        # 낸다(P6 GAP E4)
+        name="doctor-lane-generation-unchecked",
+        path="src/remote_ci_monitor/doctor.py",
+        old="            stale = got is not None and got.digest != mine\n",
+        new="            stale = False\n",
+        tests=(
+            "tests/test_doctor_cli.py::test_e4_a_server_that_has_not_reloaded_the_config_is_unknown",
+        ),
+    ),
 )
 
 
