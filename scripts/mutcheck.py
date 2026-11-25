@@ -164,6 +164,10 @@
      + 3라운드 넷: 댓글을 읽기 전에 verified 를 "no" 로 둠(`tools/dev_batch.py`) · 안 닫힌 펜스를
      문제로 안 셈(`tools/scenario_trace.py`) · pytest 만 죽이고 그 그룹은 남김 · 잠긴 워크트리를
      `--force` 하나로 지우려 함(`tools/redgreen.py`)
+     + 4라운드 여섯: 404 아닌 브랜치 읽기 실패를 「not pushed」로 · 끝난 check-run 의 모르는 결론을
+     통과로 · PR diff 를 안 봄(`merge -s ours`)(`tools/dev_batch.py`) · xfail 을 돈 시험으로 셈 ·
+     건너뛴 시험의 요약 줄을 안 읽음(`tools/redgreen.py`) · 앞 `|` 없는 행을 안 봄
+     (`tools/scenario_trace.py`)
   #246 격리 검증 — 넷: 새 커밋으로 풀린 제출을 닫힌 PR 잡으로 취소함 · 다시 열린 PR 을 건너뜀 · PR
      목록의 첫 쪽만 읽음 · `guard_merge` 가 저장소 옵션을 한 번만 봄
 
@@ -2229,6 +2233,71 @@ MUTANTS = (
         old='_git(root, "worktree", "remove", "-f", "-f", str(path))',
         new='_git(root, "worktree", "remove", "--force", str(path))',
         tests=("tests/test_redgreen.py::test_a_locked_worktree_left_by_a_cut_add_is_removed",),
+    ),
+    Mutant(
+        # 404 가 아닌 브랜치 읽기 실패(502 …)도 「not pushed」로 읽는다 — 못 읽은 것을 「없다」로
+        # 센다(4라운드 M4)
+        name="dev-batch-branch-error-not-pushed",
+        path="tools/dev_batch.py",
+        old="            if error.status != 404:\n                raise\n",
+        new="            if False:\n                raise\n",
+        tests=(
+            "tests/test_dev_batch.py::"
+            "test_a_read_that_did_not_answer_leaves_a_dash_never_a_known_value",
+        ),
+    ),
+    Mutant(
+        # 끝난 check-run 의 모르는 결론(`weird`)을 거르지 않는다 — merge_pr 는 그것을 「ok」로
+        # 센다(4라운드 M4)
+        name="dev-batch-unknown-conclusion-ok",
+        path="tools/dev_batch.py",
+        old='                _need(done, path, f"unknown check-run conclusion {end!r}")\n',
+        new='                _need(True, path, f"unknown check-run conclusion {end!r}")\n',
+        tests=(
+            "tests/test_dev_batch.py::"
+            "test_a_read_that_did_not_answer_leaves_a_dash_never_a_known_value",
+        ),
+    ),
+    Mutant(
+        # scope 가 PR 의 diff 를 안 본다 — `merge -s ours` 가 dev 의 변경을 버려도 `--cc` 에는
+        # 아무것도 없어 「scope ok」(4라운드 H2)
+        name="dev-batch-scope-skips-pr-diff",
+        path="tools/dev_batch.py",
+        old='    touched += [("merge-result", name)',
+        new='    touched += [] and [("merge-result", name)',
+        tests=(
+            "tests/test_dev_batch.py::"
+            "test_scope_sees_paths_a_merge_that_kept_only_our_side_carries",
+        ),
+    ),
+    Mutant(
+        # xfail 을 돈 시험으로 센다 — 통과 하나와 xfail 하나인 파일 nodeid 가 「passed」(4라운드 M4)
+        name="redgreen-xfail-counts-as-run",
+        path="tools/redgreen.py",
+        old='NOT_RUN = frozenset({"SKIPPED", "XFAIL", "XPASS"})',
+        new='NOT_RUN = frozenset({"SKIPPED", "XPASS"})',
+        tests=("tests/test_redgreen.py::test_an_xfail_next_to_a_passing_test_is_not_passed",),
+    ),
+    Mutant(
+        # 건너뛴 시험의 요약 줄을 읽지 않는다 — 파일 · 클래스 · 매개변수 nodeid 의 건너뛴 시험이
+        # 안 보여 영수증이 red-then-green(4라운드 H3)
+        name="redgreen-skipped-lines-unread",
+        path="tools/redgreen.py",
+        old="(PASSED|FAILED|ERROR|XPASS|XFAIL|SKIPPED)",
+        new="(PASSED|FAILED|ERROR|XPASS|XFAIL)",
+        tests=("tests/test_redgreen.py::test_a_skipped_test_inside_a_requested_node_is_undecided",),
+    ),
+    Mutant(
+        # 표 바로 뒤의 앞 `|` 없는 행을 보지 않는다 — GFM 은 행으로 그리는데 대조하지 않고
+        # 통과한다(4라운드 H1)
+        name="scenario-trace-unpiped-row-ignored",
+        path="tools/scenario_trace.py",
+        old='        if after < len(lines) and after not in code and "|" in lines[after]:\n',
+        new="        if False:\n",
+        tests=(
+            "tests/test_scenario_trace.py::"
+            "test_a_row_without_a_leading_pipe_right_after_the_table_is_a_format_problem",
+        ),
     ),
 )
 

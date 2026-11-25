@@ -11,6 +11,15 @@
 목록으로 세므로 `_Strict` 가 감싸 걸러 낸다). scope 는 병합 커밋이 스스로 바꾼 경로(충돌 해결 ·
 악한 병합)도 보고, 워크트리가 묶음의 브랜치에 있지 않으면 답하지 않는다(종료 3).
 
+4라운드. scope 는 PR 이 실제로 바꾸는 것(`git diff <merge-base(base_ref, HEAD)> HEAD`)도
+본다 — 한쪽을 버린 병합(`merge -s ours` · `checkout --ours`)은 `--cc` 에 없지만 dev 의 변경을
+되돌린다. 커밋에서 못 본 그 경로는 `merge-result` 로 적는다. status 는 새로 안 머지 sha 가 있을
+때만, fcntl 잠금 안에서 상태 파일을 다시 읽어 그 칸만 고친다(add · init 도 같은 잠금) — 그동안의
+add 를 덮지 않는다. 열린 PR 의 head 가 로컬 head 와 다르면 next 는 「wait for PR head」이고 옛
+head 의 rcm/ci · verified: 는 쓰지 않는다(`old head`). 본문 없는 댓글 · context 없는 상태 · 이름
+없는 check-run · 문자열이 아닌 merged_at 은 모름이다. `add --worktree` 는 워크트리의 맨 위 폴더여야
+한다.
+
 종료 코드: 0 정상 · 1 거부(이름 · 경로 · 겹침 · 범위 밖 경로, 이미 있는 상태 파일) · 2 사용법(없는
 `--base`, 상태 파일을 못 씀) · 3 모름(git · GitHub 이 답하지 않음 — 그 칸은 `—`, 상태 파일이 깨짐,
 워크트리가 다른 브랜치에 있음).
@@ -20,12 +29,14 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import fcntl
 import json
 import os
 import posixpath
 import re
 import subprocess
 import sys
+from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
@@ -120,7 +131,26 @@ def _save(path: Path, state: dict[str, Any]) -> None:
         raise Stop(EXIT_USAGE, f"cannot write {path}: {error}") from None
 
 
+@contextlib.contextmanager
+def _locked(path: Path) -> Iterator[None]:
+    """상태 파일의 읽고-고치고-쓰기를 곁 파일(`<이름>.lock`)의 fcntl 잠금 안에서 한다 — 두 세션의
+    add · status 가 서로의 쓰기를 덮지 않게."""
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        handle = open(path.with_name(path.name + ".lock"), "a")
+    except OSError as error:
+        raise Stop(EXIT_USAGE, f"cannot write {path}: {error}") from None
+    with handle:
+        fcntl.flock(handle, fcntl.LOCK_EX)
+        yield
+
+
 def cmd_init(path: Path, args: argparse.Namespace) -> int:
+    with _locked(path):
+        return _init(path, args)
+
+
+def _init(path: Path, args: argparse.Namespace) -> int:
     if path.exists():
         raise Stop(EXIT_REFUSED, f"{path} already exists — a batch is never overwritten")
     remote = args.base.split("/", 1)[0]
@@ -163,6 +193,11 @@ def _within(path: str, claim: str, fold: bool = False) -> bool:
 
 
 def cmd_add(path: Path, args: argparse.Namespace) -> int:
+    with _locked(path):
+        return _add(path, args)
+
+
+def _add(path: Path, args: argparse.Namespace) -> int:
     state = _load(path)
     bundles = state["bundles"]
     if args.bundle in bundles:
@@ -174,6 +209,9 @@ def cmd_add(path: Path, args: argparse.Namespace) -> int:
         raise Stop(EXIT_USAGE, f"--worktree must be an absolute path (got {args.worktree})")
     if not wt.is_dir():
         raise Stop(EXIT_REFUSED, f"no worktree at {wt}")
+    if Path(_git("rev-parse", "--show-toplevel", cwd=wt)).resolve() != wt.resolve():
+        # 하위 폴더도 git 은 그 워크트리로 읽지만 scope · status 는 이 경로를 워크트리로 쓴다
+        raise Stop(EXIT_REFUSED, f"{wt} is not the top level of a worktree")
     if (on := _git("rev-parse", "--abbrev-ref", "HEAD", cwd=wt)) != args.branch:
         raise Stop(EXIT_REFUSED, f"{wt} is on {on}, not {args.branch}")
     if _git("merge-base", state["base"], "HEAD", cwd=wt) != state["base"]:
@@ -241,6 +279,12 @@ def cmd_scope(path: Path, args: argparse.Namespace) -> int:
         names = _git(*how, sha, cwd=wt, strip=False).split("\0")
         touched += [(sha[:12], name) for name in names if name]
     commits = len(shas)
+    # PR 이 실제로 바꾸는 것 — `merge -s ours` · `checkout --ours` 처럼 한쪽을 버린 병합은 `--cc` 에
+    # 아무것도 없지만 diff 는 dev 의 변경을 되돌린다. 커밋에서 못 본 경로는 merge-result 로 적는다
+    fork = _git("merge-base", tip, "HEAD", cwd=wt)
+    seen = {name for _, name in touched}
+    diff = _git("diff", "-z", "--name-only", "--no-renames", fork, "HEAD", cwd=wt, strip=False)
+    touched += [("merge-result", name) for name in diff.split("\0") if name and name not in seen]
     status = ("status", "--porcelain", "-z", "--untracked-files=all", "--no-renames")
     for entry in _git(*status, cwd=wt, strip=False).split("\0"):
         if entry:  # `XY path` — 앞 두 칸은 상태(공백일 수 있다), 셋째는 띄어쓰기
@@ -274,6 +318,7 @@ class _Strict:
             _need(_dicts(runs), path, "check_runs is not a list of objects")
             for run in runs:
                 status, end = run.get("status"), run.get("conclusion")
+                _need(isinstance(run.get("name"), str), path, "a check-run has no name")
                 _need(status in RUN_STATUSES, path, f"unknown check-run status {status!r}")
                 done = status != "completed" or end in RUN_CONCLUSIONS
                 _need(done, path, f"unknown check-run conclusion {end!r}")
@@ -285,6 +330,9 @@ class _Strict:
             for status in body:
                 state = status.get("state")
                 _need(state in STATUS_STATES, path, f"unknown commit status state {state!r}")
+                _need(isinstance(status.get("context"), str), path, "a status has no context")
+        if rest.startswith("issues/"):  # 본문 없는 댓글을 빈 글로 읽으면 「표식 없음」이 된다
+            _need(all(isinstance(c.get("body"), str) for c in body), path, "a comment has no body")
         return body
 
 
@@ -302,7 +350,8 @@ def _pr_ok(pr: Any) -> dict[str, Any]:
     _need(isinstance(pr, dict), "pulls", "a PR is not an object")
     _need(type(pr.get("number")) is int, "pulls", "a PR has no number")
     _need(pr.get("state") in ("open", "closed"), "pulls", f"PR state {pr.get('state')!r}")
-    _need("merged_at" in pr, "pulls", "a PR has no merged_at")
+    merged_at = pr.get("merged_at", 0)  # 빠진 칸도 None 이 아니다
+    _need(merged_at is None or isinstance(merged_at, str), "pulls", f"merged_at {merged_at!r}")
     sha = (pr.get("head") or {}).get("sha")
     _need(isinstance(sha, str) and SHA_RE.match(sha), "pulls", "a PR has no 40-hex head sha")
     return pr
@@ -310,7 +359,7 @@ def _pr_ok(pr: Any) -> dict[str, Any]:
 
 def _row(name: str, b: dict[str, Any], state: dict[str, Any], api: merge_pr.Api) -> dict[str, Any]:
     row = dict(bundle=name, branch=b["branch"], order=b["merge_order"], local=UNKNOWN)
-    row.update(remote=UNKNOWN, pr=UNKNOWN, rcm_ci=UNKNOWN, verified=UNKNOWN)
+    row.update(remote=UNKNOWN, pr=UNKNOWN, pr_head=UNKNOWN, rcm_ci=UNKNOWN, verified=UNKNOWN)
     row["merged"] = b.get("merged") or UNKNOWN
     # 워크트리의 HEAD 가 아니라 묶음 브랜치의 끝 — 워크트리를 다른 브랜치로 옮겨도 이 브랜치다
     with contextlib.suppress(Stop):
@@ -336,6 +385,7 @@ def _row(name: str, b: dict[str, Any], state: dict[str, Any], api: merge_pr.Api)
         prs = sorted((_pr_ok(p) for p in merge_pr._pages(api, query)), key=lambda p: p["number"])
         pr = prs[-1] if prs else None
         cells["pr"] = f"#{pr['number']}" if pr else "none"
+        cells["pr_head"] = pr["head"]["sha"] if pr else "none"
         merged = None
         if pr and pr["merged_at"]:
             merged = pr.get("merge_commit_sha")
@@ -346,8 +396,12 @@ def _row(name: str, b: dict[str, Any], state: dict[str, Any], api: merge_pr.Api)
             if pr and pr["state"] != "open":
                 cells["pr"] += " (closed)"  # 머지 없이 닫힌 PR — 머지할 것이 없다
         sha = pr["head"]["sha"] if pr else head
-        cells["rcm_ci"] = "none" if sha is None else _rcm_ci(api, repo, sha)
-        cells["verified"] = _verified(api, repo, pr, sha)
+        if pr and pr["state"] == "open" and sha != row["local"]:
+            # PR 이 아직 옛 head 다 — 그 sha 의 rcm/ci · verified: 는 지금 브랜치의 것이 아니다
+            cells["rcm_ci"] = cells["verified"] = "old head"
+        else:
+            cells["rcm_ci"] = "none" if sha is None else _rcm_ci(api, repo, sha)
+            cells["verified"] = _verified(api, repo, pr, sha)
         row.update(cells)
         if merged:
             b["merged"] = merged  # 새로 안 머지 sha 만 장부에 남긴다
@@ -363,7 +417,7 @@ def _verified(api: merge_pr.Api, repo: str, pr: dict[str, Any] | None, sha: str 
     if not pr:
         return "no"
     path = f"repos/{repo}/issues/{pr['number']}/comments"
-    bodies = (str(c.get("body") or "") for c in merge_pr._pages(api, path))
+    bodies = (c["body"] for c in merge_pr._pages(api, path))  # _Strict 가 str 임을 봤다
     marks = [m for body in bodies for m in merge_pr.VERIFIED_RE.findall(body)]
     return "yes" if sha in marks else "stale" if marks else "no"
 
@@ -380,7 +434,8 @@ def _next(row: dict[str, Any], b: dict[str, Any], state: dict[str, Any]) -> str:
     """다음에 할 일 한 마디. 모르는 칸이 있으면 `—`."""
     if b.get("merged"):
         return "done"
-    if UNKNOWN in (row["local"], row["remote"], row["pr"], row["rcm_ci"], row["verified"]):
+    if UNKNOWN in (row["local"], row["remote"], row["pr"], row["pr_head"], row["rcm_ci"],
+                   row["verified"]):  # fmt: skip
         return UNKNOWN
     if row["remote"] != row["local"]:
         return "push"
@@ -388,6 +443,8 @@ def _next(row: dict[str, Any], b: dict[str, Any], state: dict[str, Any]) -> str:
         return "open PR"
     if row["pr"].endswith("(closed)"):
         return "reopen or open a new PR"
+    if row["pr_head"] != row["local"]:
+        return "wait for PR head"  # push 는 됐는데 PR 이 아직 옛 head 를 가리킨다
     if row["rcm_ci"] in ("pending", "not reported"):
         return "wait for rcm/ci"
     if row["rcm_ci"] != "success":
@@ -402,8 +459,17 @@ def cmd_status(path: Path, args: argparse.Namespace, api: merge_pr.Api) -> int:
     state = _load(path)
     names = [args.bundle] if args.bundle else list(state["bundles"])
     names.sort(key=lambda n: _bundle(state, n)["merge_order"])  # 없는 이름은 사용법 오류
+    before = {name: state["bundles"][name]["merged"] for name in names}
     rows = [_row(name, state["bundles"][name], state, api) for name in names]
-    _save(path, state)  # 새로 안 머지 sha 를 남긴다 — 겹침 검사가 머지된 묶음을 뺀다
+    learned = {n: state["bundles"][n]["merged"] for n in names if state["bundles"][n]["merged"]}
+    learned = {n: sha for n, sha in learned.items() if before[n] != sha}
+    if learned:  # 새로 안 머지 sha 만 남긴다 — 겹침 검사가 머지된 묶음을 뺀다
+        with _locked(path):  # 읽는 동안 다른 세션이 add 했을 수 있다 — 다시 읽고 그 칸만 고친다
+            fresh = _load(path)
+            for name, sha in learned.items():
+                if name in fresh["bundles"] and fresh["bundles"][name]["merged"] is None:
+                    fresh["bundles"][name]["merged"] = sha
+            _save(path, fresh)
     if args.json:
         print(json.dumps({"id": state["id"], "base": state["base"], "bundles": rows}, indent=2))
     else:

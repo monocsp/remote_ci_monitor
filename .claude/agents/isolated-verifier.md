@@ -75,18 +75,18 @@ HIGH is any of the four below; all else is MED or LOW. Design-review grades: P0 
 
 1. Two verifiers per round, one after another, head frozen (P5's run in parallel: they only read); a
    finding from either counts, a tie is a defect. A round closes the stage only with HIGH 0 **and**
-   unknown 0 — unknown is not a pass; QA B5 also needs `core: yes` from both (`unsure` is no).
+   unknown 0 (P5: rule 6) — unknown is no pass; QA B5 also needs `core: yes` from both (`unsure` is no).
 2. During rounds fix HIGH only. A MED/LOW not fixed is counted again each later round until resolved
    with a reason (fixed, withdrawn, moved to a new finding); written as 0 it vanishes.
 3. Round 3 still HIGH: one fresh verifier writes why it recurs as a sentence with `file:line`; a policy
    conflict (owner decision vs workplan vs contract) goes to the owner as ⛔, otherwise fix and run
    round 4. Round 4 still HIGH: report what happened, why it matters, what was tried. No round 5.
-4. Rounds count across head changes. More than three verify-fix cycles that moved the head since the
-   owner last looked: stop and ask.
+4. Rounds count across head changes; over three verify-fix cycles that moved it since the owner looked: ask.
 5. The same root cause in two rounds: redesign at the cause — the cause as a sentence, a generative or
    ordering test red first, the fix at the cause; new LOWs from that cause are deferred.
-6. P5 GAPs are closed by P6 whatever their severity; RARE is not. P6 re-verification fixes HIGH only.
-   A GAP not closed after three attempts, or plan-to-test UNSOUND three times, goes to the owner.
+6. P5 closes with unknown 0 once its confirmed GAPs, whatever their severity (RARE is none), are handed
+   to P6: a HIGH GAP is closed by the P6 re-check, not by "HIGH 0" in P5. P6 re-verification fixes HIGH
+   only. A GAP not closed after three attempts, or plan-to-test UNSOUND three times, goes to the owner.
 7. A head moved by triage code fixes gets one fresh isolated verifier, who reviews only the diff since
    the last verified head, before `verified:` names it; only a diff of documents or a report alone is
    exempt, and then the main session states that in the PR. Input: `git diff <verified>..<new>` as a

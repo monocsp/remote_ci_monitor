@@ -77,9 +77,9 @@ measure it. A production number comes only from the main session, with the owner
 read-only route of [`_shared/test-server.md`](../_shared/test-server.md); `plan-lead` gets it through
 its in file and never reads production itself.
 
-After the merge the plan is frozen. Implementation that departs from it is recorded as
-[`_shared/workplan-diff.md`](../_shared/workplan-diff.md) says, in §13 only, never by editing §4–§7.
-Only the main session writes §13, in the PR that departs; a `build-lead` never edits the workplan.
+After the merge the plan is frozen: a departure goes in §13 only, as [`_shared/workplan-diff.md`](../_shared/workplan-diff.md)
+says, never into §4–§7 — except §6's state column, which the main session ticks as PRs merge. Only the
+main session writes §13, in the PR that departs; a `build-lead` never edits the workplan.
 
 ## 2. Scenario table
 

@@ -4,8 +4,9 @@
   ./.venv/bin/python tools/redgreen.py --fix <sha> --test <pytest nodeid>... [--repo .]
                                        [--json] [--import-red-ok]
 
-pytest 는 이 도구를 돌린 인터프리터(`sys.executable`)로 돈다 — 그 인터프리터가 pytest 를 못 들이면
-곧바로 종료 2 다. 워크트리의 `.venv` python 으로 돌린다.
+pytest 는 이 도구를 돌린 인터프리터(`sys.executable`)로 돈다 — 그 인터프리터가 pytest 8.3 이상을
+못 들이면 곧바로 종료 2 다(`--no-fold-skipped` 가 8.3 부터다). 워크트리의 `.venv` python 으로
+돌린다.
 
 왜 있나(2026-11-25): AGENTS.md 「Tests first」 — 고침은 고치기 전에 빨갛던 시험과 함께 온다.
 말로만 적은 빨강은 확인할 길이 없다. `<sha>^` 트리에 `<sha>` 의 시험 파일만 얹어 돌리고(실패해야
@@ -14,9 +15,13 @@ pytest 는 이 도구를 돌린 인터프리터(`sys.executable`)로 돈다 — 
 
 빨강은 시험 **안**의 실패(FAILED)여야 한다. 수집 · import 실패와 픽스처 오류는 시험이 아직 못 도는
 것이라 기본은 빨강이 아니다 — 없는 이름을 들여오는 것이 요점이면 `--import-red-ok`. 어느 쪽인지는
-`kinds` 에 적는다. 건너뛴(skip) 시험은 통과가 아니다 — 모르는 값을 성공으로 세지 않는다. 파일
-하나처럼 여러 시험으로 펼쳐지는 nodeid 에서 고치기 전에 통과한 것이 섞이면 `mixed` 이고 빨강이
-아니다(어느 것이 통과했는지 `note` 에 적는다). 영수증에는 임시 경로 대신 `<red>` · `<green>` 을,
+`kinds` 에 적는다. 건너뛴(skip) · xfail 시험은 통과도 실패도 아니다 — 파일 · 클래스 · 매개변수
+nodeid 안에 하나라도 있으면 그 nodeid 는 `none`, 판정은 모름(종료 3)이고 어느 것인지 `note` 에
+적는다(pytest 를 `--no-fold-skipped` 로 돌려 건너뛴 시험도 nodeid 로 읽는다). 빨강 쪽이 모두
+건너뛰어 pytest 가 0 으로 끝나도 모름이다. 파일 하나처럼 여러 시험으로 펼쳐지는 nodeid 에서 고치기
+전에 통과한 것이 섞이면 `mixed` 이고 빨강이 아니다(어느 것이 통과했는지 `note` 에 적는다).
+요약 줄의 nodeid 는 ` - ` 나 줄 끝까지 읽는다(매개변수 `[…]` 안의 빈칸 · ` - ` 는 nodeid 다).
+영수증에는 임시 경로 대신 `<red>` · `<green>` 을,
 pytest 의 `--basetemp`(임시 트리 곁의 `<red-tmp>` · `<green-tmp>` — 기본 `pytest-of-<사용자>` 를
 쓰지 않는다) · 임시 폴더는 `<tmp>`, 집은 `~`, 사용자 이름은 `<user>` 로 적고, 인터프리터는
 이름(`python3`)이나 `.venv/bin/python` 만 적는다. 경로 치환은 긴 것부터 한다(풀린 경로
@@ -26,7 +31,9 @@ pytest 의 `--basetemp`(임시 트리 곁의 `<red-tmp>` · `<green-tmp>` — �
 SIGTERM · SIGINT 를 받아도 임시 워크트리와 임시 폴더를 치우고 끝난다(종료 143 · 130). 임시 폴더를
 만드는 동안과 `git worktree add` 동안은 두 신호를 미뤘다가(pthread_sigmask) 끝난 뒤 받는다 — add
 가 도중에 끊기면 잠긴(initializing) 등록이 남는다. 치울 때는 `git worktree remove -f -f`(잠긴 것도)
-뒤에 남은 등록을 prune 하고, 그래도 남으면 stderr 에 적고 종료 4 다. 치우는 동안의 신호는 무시한다.
+뒤에 남은 **자기** 등록의 관리 폴더만 지우고(전역 `git worktree prune` 은 남의 등록도 지운다),
+그래도 남거나 못 지우면 stderr 에 적고 종료 4 다. 치우는 동안의 신호는 무시한다. `worktree add`
+가 실패한 stderr 도 임시 경로를 `<red>` · `<green>` 으로 바꿔 적는다.
 pytest 는 자기 세션에서 돌고, 끊기면 그 프로세스 그룹째 죽인다 — 시험이 띄운 자식이 남지 않게.
 
 종료 코드: 0 빨강→초록 · 1 아님(not red · not green · mixed) · 2 사용법(sha · 부모 · 시험 파일
@@ -58,8 +65,15 @@ EXIT_RED_GREEN, EXIT_NOT, EXIT_USAGE, EXIT_UNKNOWN, EXIT_CLEANUP = 0, 1, 2, 3, 4
 HELD = (signal.SIGTERM, signal.SIGINT)
 PYTEST_TIMEOUT = 900
 TAIL = 15
-#: `-rA` 의 짧은 요약 줄 — `FAILED tests/x.py::test_a - assert …`
-SUMMARY_RE = re.compile(r"^(PASSED|FAILED|ERROR|XPASS|XFAIL) (\S+)")
+#: `-rA --no-fold-skipped` 의 짧은 요약 줄 — `FAILED tests/x.py::test_a[a - b] - assert …`.
+#: nodeid 는 ` - ` 나 줄 끝까지다. 매개변수 `[…]` 안의 빈칸 · ` - ` 는 nodeid 의 일부다
+SUMMARY_RE = re.compile(
+    r"^(PASSED|FAILED|ERROR|XPASS|XFAIL|SKIPPED) ([^\s\[]+(?:\[.*?\])?)(?= - |$)"
+)
+#: 접힌 건너뜀 줄(`SKIPPED [2] tests/x.py:12: …`) — nodeid 가 없어 어느 시험인지 모른다
+FOLDED_SKIP_RE = re.compile(r"^SKIPPED \[\d+\] ")
+#: 돌지 않았거나(건너뜀) 기대대로 실패한(xfail · xpass) 시험 — 어느 쪽도 증명하지 않는다
+NOT_RUN = frozenset({"SKIPPED", "XFAIL", "XPASS"})
 
 
 class Usage(Exception):
@@ -135,32 +149,51 @@ def interpreter() -> str:
 
 
 def has_pytest() -> bool:
-    probe = "import importlib.util, sys; sys.exit(importlib.util.find_spec('pytest') is None)"
+    # 8.3 부터 `--no-fold-skipped` 가 있다 — 없으면 건너뛴 시험의 nodeid 를 못 읽는다
+    probe = "import sys, pytest; sys.exit(tuple(pytest.version_tuple[:2]) < (8, 3))"
     try:
         return subprocess.run([sys.executable, "-c", probe], timeout=60).returncode == 0
     except (OSError, subprocess.SubprocessError):
         return False
 
 
+def summary(output: str) -> list[tuple[str, str]]:
+    """`-rA` 요약의 (결과, nodeid) 들."""
+    return [m.groups() for m in map(SUMMARY_RE.match, output.splitlines()) if m]
+
+
+def _inside(nid: str, node: str) -> bool:
+    """nid 가 요청한 node 그 자신이거나 그 안(펼쳐진 시험)인지."""
+    return nid == node or nid.startswith((node + "::", node + "["))
+
+
 def kinds(output: str, tests: list[str]) -> dict[str, str]:
-    """요청한 nodeid 마다 결과 하나: collection · mixed · failed · error · passed · none."""
-    seen = [m.groups() for m in map(SUMMARY_RE.match, output.splitlines()) if m]
+    """요청한 nodeid 마다 결과 하나: collection · mixed · failed · error · passed · none.
+
+    건너뛴 · xfail 시험이 하나라도 그 node 안(또는 그 node 를 품은 파일 · 클래스 자체)에 있으면
+    none 이다. 접힌 건너뜀 줄은 어느 시험인지 모르므로 모든 node 가 none 이다."""
+    seen = summary(output)
+    folded = any(map(FOLDED_SKIP_RE.match, output.splitlines()))
     out: dict[str, str] = {}
     for node in tests:
         file = node.split("::", 1)[0]
-        mine = [s for s, nid in seen if nid == node or nid.startswith((node + "::", node + "["))]
+        mine = {s for s, nid in seen if _inside(nid, node)}
+        # 품은 파일 · 클래스가 통째로 건너뛰면(모듈의 skip) 요약에는 그 위 nodeid 만 찍힌다
+        mine |= {s for s, nid in seen if s in NOT_RUN and _inside(node, nid)}
         if any(s == "ERROR" and nid == file for s, nid in seen):
             out[node] = "collection"  # 시험 파일 자체가 수집 · import 단계에서 실패
-        elif "PASSED" in mine and {"FAILED", "ERROR"} & set(mine):
+        elif "PASSED" in mine and {"FAILED", "ERROR"} & mine:
             out[node] = "mixed"  # 펼쳐진 시험 가운데 통과한 것이 섞였다
+        elif folded or mine & NOT_RUN:
+            out[node] = "none"  # 건너뜀 · xfail — 그 시험은 어느 쪽도 증명하지 않는다
         elif "FAILED" in mine:
             out[node] = "failed"
         elif "ERROR" in mine:
             out[node] = "error"
-        elif mine and set(mine) == {"PASSED"}:
+        elif "PASSED" in mine:
             out[node] = "passed"
         else:
-            out[node] = "none"  # 건너뜀 · xfail · 못 찾음 — 어느 쪽도 증명하지 않는다
+            out[node] = "none"  # 못 찾음 · 결과 줄 없음
     return out
 
 
@@ -192,7 +225,8 @@ def redact(text: str, tree: Path, label: str) -> str:
 def run_side(tree: Path, tests: list[str], label: str) -> dict[str, Any]:
     # basetemp 를 임시 트리 곁에 둔다 — 기본 `<임시>/pytest-of-<사용자>` 는 이름을 영수증에 남긴다
     basetemp = tree.parent / f"{label}-tmp"
-    flags = ["-q", "-rA", "-p", "no:cacheprovider"]
+    # --no-fold-skipped: 건너뛴 시험을 nodeid 로 찍는다(접으면 `파일:줄` 뿐이다)
+    flags = ["-q", "-rA", "--no-fold-skipped", "-p", "no:cacheprovider"]
     cmd = [sys.executable, "-m", "pytest", *flags, f"--basetemp={basetemp}", *tests]
     env = {**os.environ, "PYTHONDONTWRITEBYTECODE": "1", "TMPDIR": tempfile.gettempdir()}
     src = [str(tree / "src")] if (tree / "src").is_dir() else []  # editable 설치의 src 를 이긴다
@@ -204,7 +238,7 @@ def run_side(tree: Path, tests: list[str], label: str) -> dict[str, Any]:
     try:
         out, err = proc.communicate(timeout=PYTEST_TIMEOUT)
     except subprocess.TimeoutExpired:
-        return {"tree": f"<{label}>", "cmd": shown, "exit": None, "passed": [],
+        return {"tree": f"<{label}>", "cmd": shown, "exit": None, "passed": [], "skipped": [],
                 "kinds": dict.fromkeys(tests, "none"), "tail": ["timed out"]}  # fmt: skip
     finally:
         if proc.returncode is None:  # 다 돌지 못했다 — 거두기 전이라 그룹 번호가 아직 그의 것
@@ -213,10 +247,13 @@ def run_side(tree: Path, tests: list[str], label: str) -> dict[str, Any]:
             proc.communicate()
     text = redact(out + err, tree, label)  # 영수증에 개인 경로 · 이름을 남기지 않는다
     tail = text.strip().splitlines()[-TAIL:]
-    passed = [nid for s, nid in (m.groups() for m in map(SUMMARY_RE.match, text.splitlines()) if m)
-              if s == "PASSED"]  # fmt: skip
+    seen = summary(text)
+    passed = [nid for s, nid in seen if s == "PASSED"]
+    skipped = [f"{nid} ({s.lower()})" for s, nid in seen if s in NOT_RUN]
+    if any(map(FOLDED_SKIP_RE.match, text.splitlines())):
+        skipped.append("a skipped test pytest did not name")
     return {"tree": f"<{label}>", "cmd": shown, "exit": proc.returncode, "passed": passed,
-            "kinds": kinds(text, tests), "tail": tail}  # fmt: skip
+            "skipped": skipped, "kinds": kinds(text, tests), "tail": tail}  # fmt: skip
 
 
 def verdict(red: dict[str, Any], green: dict[str, Any], import_ok: bool) -> tuple[str, int]:
@@ -225,9 +262,10 @@ def verdict(red: dict[str, Any], green: dict[str, Any], import_ok: bool) -> tupl
     # pytest 3 내부 오류 · 4 못 찾음 · 5 시험 없음 · 시간 초과. 수집 실패도 nodeid 를 주면 4 다
     if red["exit"] not in (0, 1, 2) and "collection" not in rk:
         return "unknown", EXIT_UNKNOWN
-    if red["exit"] == 0 or "passed" in rk or not rk <= red_ok | {"none"}:
+    if "passed" in rk or not rk <= red_ok | {"none"}:
         return "not red", EXIT_NOT
-    if "none" in rk:
+    # 모두 건너뛰면 pytest 는 0 으로 끝난다 — 통과한 것이 없으니 「not red」가 아니라 모름이다
+    if "none" in rk or red["exit"] == 0:
         return "unknown", EXIT_UNKNOWN
     if green["exit"] not in (0, 1, 2) and "collection" not in gk:
         return "unknown", EXIT_UNKNOWN
@@ -267,11 +305,33 @@ def _registered(root: Path) -> set[str] | None:
     }
 
 
+def _unregister(root: Path, paths: list[Path]) -> list[str]:
+    """폴더가 없어진 **자기** 워크트리의 등록(관리 폴더 `<common>/worktrees/<이름>`)만 지운다 —
+    전역 `git worktree prune` 은 남의 (폴더가 잠시 없는) 등록까지 지운다. 못 지운 것을 돌려준다."""
+    common = _git(root, "rev-parse", "--git-common-dir")
+    if common.returncode != 0:
+        return ["git rev-parse --git-common-dir failed"]
+    admin = (root / common.stdout.strip()).resolve() / "worktrees"
+    mine = {str(p / ".git") for p in paths} | {str(p.resolve() / ".git") for p in paths}
+    errors: list[str] = []
+    for entry in sorted(admin.iterdir()) if admin.is_dir() else []:
+        try:
+            gitdir = (entry / "gitdir").read_text().strip()
+        except OSError:
+            continue  # gitdir 이 없는 관리 폴더는 우리 것이라고 말할 수 없다 — 남의 것으로 둔다
+        if gitdir in mine and not Path(gitdir).parent.exists():
+            try:
+                shutil.rmtree(entry)
+            except OSError as error:
+                errors.append(f"<{Path(gitdir).parent.name}>: {error.strerror}")
+    return errors
+
+
 def _cleanup(root: Path, tmp: Path | None, created: list[Path]) -> bool:
     """자기가 만든(만들려던) 워크트리와 임시 폴더만 치운다. 다 치웠으면 True — 못 치운 것은 stderr.
 
     `remove -f -f` 는 끊긴 add 가 남긴 잠긴 등록도 지운다(`--force` 하나는 못 지운다). 그래도 남은
-    등록은 prune 하고(폴더 없는 등록만 지운다 — 잠긴 것은 못 지운다) 다시 세어 본다."""
+    자기 등록은 `_unregister` 로 지우고(전역 prune 은 남의 등록도 지운다) 다시 세어 본다."""
     names = {path: {str(path), str(path.resolve())} for path in created}
     hide = [str(tmp.resolve()), str(tmp)] if tmp is not None else []
 
@@ -295,10 +355,10 @@ def _cleanup(root: Path, tmp: Path | None, created: list[Path]) -> bool:
     if not created:
         return ok
     listed = _registered(root)
+    stuck: list[str] = []  # 반쯤 지운 관리 폴더는 목록에서 빠진다 — 오류 자체를 실패로 센다
     if listed is not None and any(names[p] & listed for p in created):
-        pruned = _git(root, "worktree", "prune")  # 폴더는 지웠는데 등록이 남은 것
-        if pruned.returncode != 0:
-            tell("git worktree prune failed", pruned.stderr.strip())
+        for why in (stuck := _unregister(root, created)):  # 폴더는 지웠는데 등록이 남은 것
+            tell("could not unregister a worktree", why)
         listed = _registered(root)
     if listed is None:
         tell("could not list worktrees", "git worktree list failed — cannot tell what is left")
@@ -306,7 +366,9 @@ def _cleanup(root: Path, tmp: Path | None, created: list[Path]) -> bool:
     if left := [p for p in created if names[p] & listed]:
         tell("cleanup failed", f"still registered: {', '.join(f'<{p.name}>' for p in left)}")
         return False
-    return ok
+    if stuck:
+        tell("cleanup failed", "a worktree registration could not be removed")
+    return ok and not stuck
 
 
 def _terminated(signum: int, _frame: object) -> None:
@@ -339,8 +401,8 @@ def main(argv: list[str] | None = None) -> int:
         print(f"usage: {why}", file=sys.stderr)
         return EXIT_USAGE
     if not has_pytest():
-        print(f"usage: {sys.executable} cannot import pytest — run it with the worktree's .venv "
-              "python (./.venv/bin/python tools/redgreen.py …)", file=sys.stderr)  # fmt: skip
+        print(f"usage: {sys.executable} cannot import pytest 8.3+ — run it with the worktree's "
+              ".venv python (./.venv/bin/python tools/redgreen.py …)", file=sys.stderr)  # fmt: skip
         return EXIT_USAGE
     previous = {signum: signal.signal(signum, _terminated) for signum in HELD}
     tmp: Path | None = None
@@ -355,8 +417,9 @@ def main(argv: list[str] | None = None) -> int:
             with _held():  # add 도중에 끊기면 잠긴 등록이 남는다 — 끝난 뒤 신호를 받는다
                 created.append(tmp / side)  # add 보다 먼저 적는다 — 중간에 끊겨도 치운다
                 made = _git(root, "worktree", "add", "--quiet", "--detach", str(tmp / side), at)
-            if made.returncode != 0:
-                raise OSError(f"git worktree add failed: {made.stderr.strip()}")
+            if made.returncode != 0:  # stderr 에는 임시 경로가 찍힌다
+                why = redact(made.stderr.strip(), tmp / side, side)
+                raise OSError(f"git worktree add failed: {why}")
         red_root = (tmp / "red").resolve()
         for rel in files:  # 고친 커밋의 시험 파일을 부모 트리 위에 얹는다
             target = tmp / "red" / rel
@@ -371,9 +434,15 @@ def main(argv: list[str] | None = None) -> int:
         receipt["red"] = run_side(tmp / "red", args.test, "red")
         receipt["green"] = run_side(tmp / "green", args.test, "green")
         receipt["verdict"], code = verdict(receipt["red"], receipt["green"], args.import_red_ok)
+        notes = []
         if mixed := [n for n, k in receipt["red"]["kinds"].items() if k == "mixed"]:
             passed = ", ".join(receipt["red"]["passed"])
-            receipt["note"] = f"{', '.join(mixed)} expands to tests that passed before: {passed}"
+            notes.append(f"{', '.join(mixed)} expands to tests that passed before: {passed}")
+        for side in ("red", "green"):
+            if skipped := receipt[side]["skipped"]:
+                notes.append(f"{side} skipped (proves nothing): {', '.join(skipped)}")
+        if notes:
+            receipt["note"] = " · ".join(notes)
     except (OSError, subprocess.SubprocessError) as error:
         print(f"unknown: {error}", file=sys.stderr)
     finally:

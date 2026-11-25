@@ -1,7 +1,8 @@
 """`.claude/` 의 스킬 · 에이전트 문서가 서로를 가리키는 고리가 끊기지 않았는지 잠근다(2026-11-25).
 
-개발 루프 · dev-batch · QA 스킬은 규칙 하나를 한 파일에만 두고 나머지는 한 줄로 가리킨다(정본 표는
-개발 루프 이식 설계 §2). 그래서 가리키는 이름이 틀리면 세션은 규칙을 못 읽고 지나간다. 지키는 것:
+개발 루프 · dev-batch · QA 스킬은 규칙 하나를 한 파일에만 두고 나머지는 한 줄로 가리킨다(정본
+목록은 `dev-loop` 스킬의 「Canon」 표). 그래서 가리키는 이름이 틀리면 세션은 규칙을 못 읽고
+지나간다. 지키는 것:
 
 - 스킬 · 에이전트 문서가 적은 `.claude/agents/<x>.md` · `.claude/skills/<x>/SKILL.md` ·
   `.claude/skills/_shared/<x>.md` 경로, 상대 링크, `tools/` · `scripts/` 경로가 실제로 있다.
@@ -39,7 +40,7 @@ SKILLS = CLAUDE / "skills"
 SEVERITY_CANON = AGENTS / "isolated-verifier.md"
 TEST_SERVER_CANON = SKILLS / "_shared" / "test-server.md"
 
-#: 설계 §2 의 표 — 이 이식이 만드는 파일. 하나라도 빠지면 다른 문서의 링크가 허공을 가리킨다.
+#: 개발 루프 이식이 만든 파일. 하나라도 빠지면 다른 문서의 링크가 허공을 가리킨다.
 EXPECTED = (
     "agents/isolated-verifier.md",
     "agents/live-verifier.md",

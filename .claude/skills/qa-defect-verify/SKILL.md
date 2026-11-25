@@ -51,6 +51,8 @@ Read:
 - the diff: <abs path of `git diff <base>...<head>` output> (files: <list>)
 - the head as files: <abs worktree>/.verify/handoff/<branch with / as ->/snap-<n>/ (you are not asked to run git)
 - the B2 recipe and the control: <abs paths>
+- the red-then-green receipt: <abs worktree>/.verify/handoff/<branch with / as ->/qa-fix-<n>-redgreen.json
+- regression-test-author's prove answer: <same folder>/qa-fix-<n>-prove.md
 - severity and output shape: <abs snap-<n>>/.claude/agents/isolated-verifier.md
 
 Run (live-verifier only): your test server per <abs snap-<n>>/.claude/skills/_shared/test-server.md, port <port>,
@@ -61,8 +63,8 @@ Do:
 1. Core: is the reported symptom gone? Judge from what you ran or read, never from "the code looks fixed".
 2. Every scenario row: action → observed → PASS / FAIL / UNKNOWN, with evidence.
 3. Non-regression: the other paths that use the changed code still behave as before.
-4. The regression test: would it go red if the defect came back? A test that stays green when its target is
-   removed is FAIL.
+4. The regression test: would it go red if the defect came back? Read the receipt (red on the parent, green
+   on the fix) and the prove answer's mutations. A test that stays green when its target is removed is FAIL.
 5. New defects in the diff on the three review axes of isolated-verifier.md.
 
 Output: env-before and env-after as your agent file says (live-verifier), the table

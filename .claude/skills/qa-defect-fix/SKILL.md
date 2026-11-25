@@ -68,7 +68,8 @@ returns `out.json` with the proof in `notes` and `red` from before the fix.
 contract and stands in the way is a POLICY question.
 
 **4 Shake the green.** After the lead's commit, spawn `regression-test-author` stage `prove` on the fix's
-40-character sha: an equivalent rewrite stays green, the defect put back into that rewritten form goes red,
+40-character sha and save its answer as `qa-fix-<n>-prove.md` in the handoff folder (B5's verifiers read
+it): an equivalent rewrite stays green, the defect put back into that rewritten form goes red,
 deleting what is checked goes red — "found nothing" and "found it fine" must not look the same: a test that
 matches only the old shape of the code lets the defect back in a new shape. Any test change `prove` left
 uncommitted is committed by the main session as it is, before the next lead (as in step 2). Its proposed

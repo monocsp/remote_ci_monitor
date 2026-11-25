@@ -42,6 +42,7 @@ Only workplans that carry the marker are traced. A document passed to the tool w
 ./.venv/bin/python tools/scenario_trace.py docs/m5x-workplan.md [more.md …] [--tests tests/] [--json]
 # problems: format · empty (a table with no IDs) · duplicate · missing (a row with no test) ·
 #   orphan (a tag the table lacks) · clash (two documents, one prefix) · nothing (a document with no marker)
+#   skipped (a tagged test carries skip) · unreadable (a test file or folder it could not read)
 #   format also covers a marker that is not exactly `<!-- scenario-prefix: X -->`, an interrupted table, an unclosed fence
 # exit 0 ok · 1 problems (listed) · 2 usage
 ```

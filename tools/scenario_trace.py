@@ -11,7 +11,8 @@
 표지만 있어야 한다(본문 속에 인용한 표지는 세지 않는다). 표지처럼 보이는데 꼴이 다른 줄
 (`scenario_prefix` · 쌍점이나 띄어쓰기 빠짐 · 대문자)은 format 이다 — 건너뛰면 그 표는 대조되지
 않는다. 표의 첫 칸이 ID(`X1`, `X2` …). 표는 빈 줄 · 본문 줄에서 끝난다. 다음 제목 · 표지 전에 같은
-표지 아래 `|` 줄이 또 나오면 끊긴 표라서 format 이다(뒤의 행을 읽지 않았다). 어느 칸이
+표지 아래 `|` 줄이 또 나오면 끊긴 표라서 format 이다(뒤의 행을 읽지 않았다). 표 바로 다음 줄에
+`|` 가 있으면(앞 `|` 없는 행 — GFM 은 행으로 그린다) 그것도 format 이다. 어느 칸이
 `(live)` 이거나 ` (live)` 로 끝나면(시나리오 칸 끝에 붙이는 꼴, `docs/m5t-workplan.md`) pytest 가
 아니라 실기(live run)로 증명하는 행이라 누락으로 세지 않는다. 설명 가운데의 `(live)` 는 아니다.
 펜스 코드 블록(```` ``` ```` · `~~~`)과 4칸 들여쓴 코드 블록 안의 표지와 표는 예시라서 읽지 않는다.
@@ -19,17 +20,23 @@
 그 줄은 펜스가 아니다(CommonMark). 문서 끝까지 안 닫힌 펜스는 연 줄을 적은 format 이다. 맨 앞의
 BOM 은 떼고 읽는다. 같은 문서를 두 번 주면(다른 철자라도) 한 번만 읽는다.
 시험 쪽: 이름 `test_x3_…`(앞에서부터 `test_x1_x2_…` 처럼 여럿) 또는 시험 함수 **안**의 주석 `# X3`.
-주석의 주인은 그 줄을 품은 가장 안쪽 함수다 — 시험 안에 둔 도우미 함수의 주석은 태그가 아니다.
+pytest 가 모으는 시험만 센다 — `test_*.py` · `*_test.py` 파일의 모듈 맨 위 `test_*` 함수와 `Test*`
+클래스(`__init__` 없는 것, 안의 `Test*` 클래스까지)의 `test_*` 메서드. 함수 안 · 다른 클래스 · 시험
+파일이 아닌 모듈의 것은 아니다. 주석의 주인은 그 줄을 품은 가장 안쪽 함수다 — 시험 안에 둔 도우미
+함수의 주석은 태그가 아니다. `skip*` 를 단 시험(함수 · 클래스 데코레이터, 모듈의 `pytestmark`)의
+태그는 `skipped` 문제다 — 돌지 않는 시험은 행을 증명하지 않는다.
 
 문제의 종류: format(표지 · 표 · ID 꼴, 안 닫힌 펜스, 끊긴 표) · empty(ID 가 하나도 없는 표 — 검사한
 것이 없다) · duplicate · missing(시험이 없는 행) · orphan(명세에 없는 ID 를 단 시험) · clash(두
 문서가 같은 접두어) · nothing(표지가 하나도 없는 문서 — 문서마다 적는다. 검사하지 않은 것을 통과로
-세지 않는다) · unreadable(시험 파일을 못 읽음). UTF-8 이 아닌 명세는 format 이다.
+세지 않는다) · skipped(건너뛰는 시험의 태그) · unreadable(시험 파일 · 하위 폴더를 못 읽음).
+UTF-8 이 아닌 명세는 format 이다.
 
 접두어는 새 명세마다 **아무 시험도 쓰지 않는 것**을 고른다(`--prefix-usage`). 기존 시험이 이미
 `test_s1_` · `test_a10_` · `# P2` 꼴을 쓰므로 흔한 한 글자는 고아로 쏟아진다. `TR` 같은 여러 글자도
-된다. `--prefix-usage` 는 대조보다 넓게 센다 — 시험 밖(모듈 · 도우미)의 `# P2` 주석과 어디에 있든
-`test_p2_…` 이름도 쓴 것이다. 쓰는 접두어를 「free」라고 하지 않으려고.
+된다. `--prefix-usage` 는 대조보다 넓게 센다 — 시험 파일이 아닌 모듈까지 모든 `*.py` 에서
+시험 밖(모듈 · 도우미)의 `# P2` 주석과 어디에 있든 `test_p2_…` 이름도 쓴 것이다. 쓰는 접두어를
+「free」라고 하지 않으려고.
 
 종료 코드: 0 문제 없음 · 1 문제 있음 · 2 사용법(파일 · 폴더 없음, `--prefix-usage` 에 문서를 줌).
 """
@@ -40,6 +47,7 @@ import argparse
 import ast
 import io
 import json
+import os
 import re
 import sys
 import tokenize
@@ -134,7 +142,12 @@ def parse_doc(path: Path, problems: list[dict[str, str]]) -> dict[str, dict[str,
         if len(table) < 2 or not SEPARATOR_RE.match(table[1][1]):
             problems.append(_problem("format", where, "the marker is not right above a table"))
             continue
-        _interrupted(lines, code, index + 1 + len(table), index + 1, path, problems)
+        after = index + 1 + len(table)
+        if after < len(lines) and after not in code and "|" in lines[after]:
+            # GFM 은 앞 `|` 없는 줄도 표의 행으로 그린다 — 여기서 끝난 줄 알면 그 행을 안 읽는다
+            message = "a row without a leading | right after the table — GFM shows it as a row"
+            problems.append(_problem("format", f"{path}:{after + 1}", message))
+        _interrupted(lines, code, after, index + 1, path, problems)
         id_re = re.compile(rf"^{prefix}([1-9]\d*)$")
         for number, row in table[2:]:
             cell = row.strip("|").split("|", 1)[0].strip().strip("*`")
@@ -203,20 +216,67 @@ def _owner(funcs: list[Any], line: int) -> Any:
     return max(around, key=lambda f: f.lineno, default=None)
 
 
+def _skips(node: Any) -> bool:
+    """`skip` · `skipif`(pytest · unittest 의 `skip*`)를 단 표현 — 데코레이터나 `pytestmark` 값."""
+    if isinstance(node, ast.List | ast.Tuple):
+        return any(_skips(item) for item in node.elts)
+    node = node.func if isinstance(node, ast.Call) else node
+    name = node.attr if isinstance(node, ast.Attribute) else getattr(node, "id", "")
+    return name.lower().startswith("skip")
+
+
+def _collected(tree: ast.Module) -> list[tuple[Any, bool]]:
+    """pytest 가 모으는 시험 함수와 건너뛰는지 — 모듈 맨 위의 `test_*` 와 `Test*` 클래스(안의
+    `Test*` 클래스까지, `__init__` 이 없는 것)의 `test_*` 메서드. 함수 안 · 다른 클래스의 것은
+    아니다."""
+    marks = [n.value for n in tree.body if isinstance(n, ast.Assign)
+             and any(getattr(t, "id", "") == "pytestmark" for t in n.targets)]  # fmt: skip
+    out: list[tuple[Any, bool]] = []
+
+    def walk(body: list[Any], skipped: bool) -> None:
+        for node in body:
+            if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef):
+                if node.name.startswith("test_"):
+                    out.append((node, skipped or any(map(_skips, node.decorator_list))))
+            elif isinstance(node, ast.ClassDef) and node.name.startswith("Test"):
+                if not any(getattr(n, "name", "") == "__init__" for n in node.body):
+                    walk(node.body, skipped or any(map(_skips, node.decorator_list)))
+
+    walk(tree.body, any(map(_skips, marks)))
+    return out
+
+
+def _test_files(tests_dir: Path, every: bool, problems: list[dict[str, str]]) -> list[Path]:
+    """시험 폴더의 `*.py`(`every` 가 아니면 pytest 가 모으는 `test_*.py` · `*_test.py` 만).
+    못 연 하위 폴더는 unreadable — rglob 처럼 조용히 건너뛰면 그 안의 태그를 「없다」고 센다."""
+
+    def unreadable(error: OSError) -> None:
+        where = str(error.filename or tests_dir)
+        problems.append(_problem("unreadable", where, f"cannot list: {error.strerror}"))
+
+    found: list[Path] = []
+    for folder, dirs, names in os.walk(tests_dir, onerror=unreadable):
+        dirs[:] = sorted(d for d in dirs if d != "__pycache__")
+        for name in names:
+            wanted = name.startswith("test_") or name.endswith("_test.py")
+            if name.endswith(".py") and (every or wanted):
+                found.append(Path(folder) / name)
+    return sorted(found)
+
+
 def scan_tests(
     tests_dir: Path, prefixes: set[str], problems: list[dict[str, str]], anywhere: bool = False
 ) -> dict[str, list[str]]:
-    """시험 폴더의 `*.py` → {ID: [「파일:줄 함수」 …]}. 주석은 그 줄을 품은 가장 안쪽 함수가 시험
-    함수일 때만 센다. `anywhere`(--prefix-usage)는 어디에 있는 주석이든 센다 — 「안 쓴다」고 말하기
-    전에 그 접두어의 흔적을 모두 본다."""
+    """시험 파일 → {ID: [「파일:줄 함수」 …]}. pytest 가 모으는 시험(`_collected`)의 이름과, 그 줄을
+    품은 가장 안쪽 함수가 그 시험인 주석만 센다. 건너뛰는 시험의 태그는 `skipped` 문제다.
+    `anywhere`(--prefix-usage)는 모든 `*.py` 의 어디에 있는 `test_*` 이름 · 주석이든 센다 —
+    「안 쓴다」고 말하기 전에 그 접두어의 흔적을 모두 본다."""
     tags: dict[str, list[str]] = {}
     if not prefixes:
         return tags
     alternation = "|".join(sorted(prefixes, key=len, reverse=True))
     comment_re = re.compile(rf"(?<![A-Za-z0-9_])({alternation})([1-9]\d*)(?![A-Za-z0-9_])")
-    for path in sorted(tests_dir.rglob("*.py")):
-        if "__pycache__" in path.parts:
-            continue
+    for path in _test_files(tests_dir, anywhere, problems):
         try:
             text = path.read_text(encoding="utf-8")
             tree = ast.parse(text)
@@ -226,9 +286,8 @@ def scan_tests(
             continue
         funcs = [n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef | ast.AsyncFunctionDef)]
         owners = {line: _owner(funcs, line) for line, _ in comments}
-        for node in funcs:
-            if not node.name.startswith("test_"):
-                continue
+        tests = [(n, False) for n in funcs if n.name.startswith("test_")]
+        for node, skipped in tests if anywhere else _collected(tree):
             found: set[str] = set()
             for token in node.name[5:].split("_"):
                 m = NAME_TOKEN_RE.match(token)
@@ -238,8 +297,12 @@ def scan_tests(
             for line, comment in comments:
                 if owners[line] is node:
                     found.update(a + b for a, b in comment_re.findall(comment))
-            for ident in found:
-                tags.setdefault(ident, []).append(f"{path}:{node.lineno} {node.name}")
+            for ident in sorted(found):
+                place = f"{path}:{node.lineno} {node.name}"
+                tags.setdefault(ident, []).append(place)
+                if skipped:  # 태그는 있지만 그 시험은 돌지 않는다 — 행을 증명하지 않는다
+                    message = f"{ident} is tagged on a test marked skip — it never runs"
+                    problems.append(_problem("skipped", place, message, ident))
         if anywhere:  # 시험 함수 밖의 주석 — 대조에서는 태그가 아니지만 접두어는 쓴 것이다
             for line, comment in comments:
                 if owners[line] is None or not owners[line].name.startswith("test_"):
@@ -314,8 +377,8 @@ def prefix_usage(prefix: str, tests_dir: Path, as_json: bool) -> int:
             print(f"  … {len(places) - SHOWN} more")
     elif not problems:
         print(f"prefix {prefix}: no test uses it — free for a new workplan")
-    for p in problems:  # 못 읽은 파일이 있으면 0 이라고 말할 수 없다
-        print(f"{p['where']}: {p['kind']}: {p['message']}")
+    for p in [] if as_json else problems:  # 못 읽은 파일이 있으면 0 이라고 말할 수 없다
+        print(f"{p['where']}: {p['kind']}: {p['message']}")  # JSON 에는 problems 로 들었다
     return EXIT_PROBLEMS if places or problems else EXIT_OK
 
 
@@ -331,7 +394,10 @@ def main(argv: list[str] | None = None) -> int:
         "allowed and --prefix-usage counts a tag anywhere under the test folder (module or helper "
         "comments too). The marker must be alone on its line and written exactly as "
         "<!-- scenario-prefix: X -->; a line that looks like one but differs is a format problem, "
-        "as are a table broken by a blank or text line and a fence that never closes. "
+        "as are a table broken by a blank or text line, a row without a leading | right after "
+        "the table and a fence that never closes. Only tests pytest collects tag rows (top-level "
+        "test_* functions and test_* methods of Test* classes in test_*.py or *_test.py); a tag "
+        "on a test marked skip is a skipped problem. "
         "A row is live (proved by a live run, "
         "never counted missing) when one of its cells is (live) or ends with (live) after a "
         "space, as at the end of the scenario cell; (live) in the middle of a cell does not "

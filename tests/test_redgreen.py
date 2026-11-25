@@ -14,6 +14,7 @@ import getpass
 import importlib.util
 import json
 import os
+import shutil
 import signal
 import subprocess
 import sys
@@ -425,6 +426,8 @@ def test_a_locked_worktree_left_by_a_cut_add_is_removed(repo, capsys, monkeypatc
             repo.run(capsys, fix, ADD)
         assert _worktrees(repo) == 1
         assert list((repo.path.parent / "scratch").iterdir()) == []
+        # remove 자체가 지워야 한다 — 남은 등록 지우기(_unregister)는 마지막 그물이다
+        assert "could not remove" not in capsys.readouterr().err
     finally:
         listed = git("worktree", "list", "--porcelain", cwd=repo.path)
         for line in listed.splitlines()[1:]:
@@ -437,8 +440,11 @@ def test_a_cleanup_that_fails_is_a_non_zero_exit(repo, capsys, monkeypatch):
     fix = repo.commit("fix", {"calc.py": FIXED, "tests/test_calc.py": NEW_TESTS})
     real = rg._git
 
+    admin = repo.path / ".git" / "worktrees"
+
     def stuck(root, *args, **kw):
-        if args[:2] in (("worktree", "remove"), ("worktree", "prune")):
+        if args[:2] == ("worktree", "remove"):
+            admin.chmod(0o555)  # 남은 등록(관리 폴더)도 못 지운다
             return rg.subprocess.CompletedProcess(args, 1, "", "fatal: busy")
         return real(root, *args, **kw)
 
@@ -450,6 +456,7 @@ def test_a_cleanup_that_fails_is_a_non_zero_exit(repo, capsys, monkeypatch):
         assert json.loads(out)["verdict"] == "red-then-green"  # 판정은 그대로 찍는다
         assert "cleanup failed" in err and "<red>" in err and "<green>" in err
     finally:
+        admin.chmod(0o755)
         git("worktree", "prune", cwd=repo.path)
 
 
@@ -511,3 +518,120 @@ def test_a_test_path_with_empty_or_dot_segments_is_normalised(repo, capsys, raw)
     code, receipt = repo.run(capsys, fix, raw, extra=["--json"])
     assert code == 0 and receipt["verdict"] == "red-then-green", (receipt, repo.err)
     assert receipt["tests"] == [ADD] and receipt["files"] == ["tests/test_calc.py"]
+
+
+# ── 4라운드: 건너뛴 시험 · 남의 등록 · 띄어쓴 매개변수 ──
+
+MORE = """import pytest
+from calc import add
+
+
+def test_add():
+    assert add(1, 2) == 3
+
+
+@pytest.mark.skip(reason="later")
+def test_skipped():
+    pass
+
+
+class TestK:
+    def test_add(self):
+        assert add(2, 2) == 4
+
+    @pytest.mark.skip(reason="later")
+    def test_skipped(self):
+        pass
+
+
+@pytest.mark.parametrize("v", [1, 2])
+def test_p(v):
+    if v == 2:
+        pytest.skip("later")
+    assert add(v, 1) == v + 1
+"""
+
+
+@pytest.mark.parametrize(
+    "node, skipped",
+    [("tests/test_more.py", "tests/test_more.py::test_skipped"),
+     ("tests/test_more.py::TestK", "tests/test_more.py::TestK::test_skipped"),
+     ("tests/test_more.py::test_p", "tests/test_more.py::test_p[2]")],
+)  # fmt: skip
+def test_a_skipped_test_inside_a_requested_node_is_undecided(repo, capsys, node, skipped):
+    # `-rA` 는 건너뛴 시험을 `SKIPPED [1] 파일:줄` 로 접어 찍어 nodeid 가 없다 — 안 읽혀서 파일 ·
+    # 클래스 · 매개변수 nodeid 의 건너뛴 시험이 안 보였고 영수증은 red-then-green 이었다(H3)
+    fix = repo.commit("fix", {"calc.py": FIXED, "tests/test_more.py": MORE})
+    code, receipt = repo.run(capsys, fix, node, extra=["--json"])
+    assert code == 3 and receipt["verdict"] == "unknown", receipt
+    assert receipt["red"]["kinds"] == receipt["green"]["kinds"] == {node: "none"}
+    assert skipped in receipt["note"] and "skipped" in receipt["note"]
+
+
+def test_an_xfail_next_to_a_passing_test_is_not_passed(repo, capsys):
+    # 통과 하나와 xfail 하나가 섞인 파일은 「통과」가 아니다 — xfail 은 기대대로 실패한 것이다(M4)
+    tests = "import pytest\nfrom calc import add\n\n\ndef test_add():\n    assert add(1, 2) == 3\n"
+    tests += "\n\n@pytest.mark.xfail(strict=False)\ndef test_later():\n    assert False\n"
+    fix = repo.commit("fix", {"calc.py": FIXED, "tests/test_more.py": tests})
+    code, receipt = repo.run(capsys, fix, "tests/test_more.py", extra=["--json"])
+    assert code == 3 and receipt["green"]["kinds"] == {"tests/test_more.py": "none"}, receipt
+    assert "tests/test_more.py::test_later" in receipt["note"]
+
+
+def test_a_test_skipped_on_the_red_side_alone_is_undecided(repo, capsys):
+    # 빨강 쪽이 모두 건너뛰면 pytest 는 0 으로 끝난다 — 「not red」가 아니라 모름이다(L2)
+    tests = "import pytest\nfrom calc import add\n\n\n@pytest.mark.skipif(add(1, 2) != 3, "
+    tests += "reason='x')\ndef test_add():\n    assert add(1, 2) == 3\n"
+    fix = repo.commit("fix", {"calc.py": FIXED, "tests/test_more.py": tests})
+    code, receipt = repo.run(capsys, fix, "tests/test_more.py::test_add", extra=["--json"])
+    assert code == 3 and receipt["verdict"] == "unknown", receipt
+
+
+def test_cleanup_never_prunes_a_worktree_it_did_not_make(repo, capsys, monkeypatch):
+    # 전역 `git worktree prune` 은 남의 (폴더가 잠시 없는) 등록까지 지운다(L1)
+    other = repo.path.parent / "someone-elses"
+    git("worktree", "add", "-q", "--detach", str(other), "HEAD", cwd=repo.path)
+    shutil.rmtree(other)  # 다른 세션이 외장 디스크를 뺐다 — 등록은 그 세션의 것이다
+    fix = repo.commit("fix", {"calc.py": FIXED, "tests/test_calc.py": NEW_TESTS})
+    real = rg._git
+
+    def stuck(root, *args, **kw):
+        if args[:2] == ("worktree", "remove"):
+            return rg.subprocess.CompletedProcess(args, 1, "", "fatal: busy")
+        assert args[:2] != ("worktree", "prune"), args
+        return real(root, *args, **kw)
+
+    monkeypatch.setattr(rg, "_git", stuck)
+    code = rg.main(["--fix", fix, "--repo", str(repo.path), "--test", ADD])
+    capsys.readouterr()
+    listed = git("worktree", "list", "--porcelain", cwd=repo.path)
+    assert code == 0 and str(other) in listed and listed.count("worktree ") == 2, listed
+
+
+def test_a_failed_worktree_add_does_not_print_the_temporary_path(repo, capsys, monkeypatch):
+    fix = repo.commit("fix", {"calc.py": FIXED, "tests/test_calc.py": NEW_TESTS})
+    real, seen = rg._git, []
+
+    def refused(root, *args, **kw):
+        if args[:2] == ("worktree", "add"):
+            seen.append(args[-2])
+            why = f"fatal: could not create leading directories of '{args[-2]}/.git'"
+            return rg.subprocess.CompletedProcess(args, 128, "", why)
+        return real(root, *args, **kw)
+
+    monkeypatch.setattr(rg, "_git", refused)
+    code, _ = repo.run(capsys, fix, ADD)
+    assert code == 3 and "worktree add failed" in repo.err and "<red>/.git" in repo.err
+    assert seen and seen[0] not in repo.err and str(Path(seen[0]).parent) not in repo.err  # L3
+
+
+def test_a_parameter_id_with_spaces_is_read_whole(repo, capsys):
+    # `FAILED tests/x.py::test_p[one two] - …` 를 첫 빈칸에서 잘라 그 nodeid 를 못 찾았다(L4)
+    tests = NEW_TESTS.replace("from calc import add", "import pytest\nfrom calc import add")
+    tests += "\n\n@pytest.mark.parametrize('v', [1], ids=['one - two'])\ndef test_p(v):\n"
+    tests += "    assert add(v, 1) == 2\n"
+    fix = repo.commit("fix", {"calc.py": FIXED, "tests/test_calc.py": tests})
+    node = "tests/test_calc.py::test_p[one - two]"
+    code, receipt = repo.run(capsys, fix, node, extra=["--json"])
+    assert code == 0 and receipt["verdict"] == "red-then-green", receipt
+    assert receipt["green"]["passed"] == [node]

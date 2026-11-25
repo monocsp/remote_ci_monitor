@@ -25,7 +25,7 @@ PRs this way by hand; the tool below adds what that run had to check by eye.
 | who | does | never |
 |---|---|---|
 | main session | batch state, worktrees, in files, dispatch, `scope`, push, PR, `rcm/ci`, spawning verifiers, `verify-round:` / `verified:` comments, merges, re-syncs, the report | implements a bundle or fixes a lead's scope by hand |
-| `build-lead` in `batch` mode ([agent](../../agents/build-lead.md)) | red tests from the spec's scenario rows, implementation, docs, commits on its own branch, `out.json` | everything in the lead rules of [stage-lead.md](../_shared/stage-lead.md) (push, `gh pr`, `rcm run`, merges, other worktrees) |
+| `build-lead` in `batch` mode ([agent](../../agents/build-lead.md)) | red tests from the spec's scenario rows, implementation, docs, commits on its own branch, `out.json` | everything in the lead rules of [stage-lead.md](../_shared/stage-lead.md) (push, `gh pr`, `rcm run` for `rcm-ci`, merges, other worktrees) |
 | `isolated-verifier`, `live-verifier` | one verdict each on a frozen head ([isolated-verifier.md](../../agents/isolated-verifier.md)) | edit, see another verifier's verdict |
 | owner | answers the one decision page; approves anything that changes the spec | — |
 
@@ -105,7 +105,7 @@ git -C <wt> status --porcelain        # empty
 ```
 
 `scope` lists each path a commit since the base (or since the last merge of `origin/dev`) touched outside
-`owns ∪ shared`, with the commit sha. Any path it lists is a scope violation (see "When things go wrong").
+`owns ∪ shared`, with the commit sha (`merge-result` when only the PR diff shows it). Any listed path is a scope violation ("When things go wrong").
 
 | status | next |
 |---|---|
@@ -125,13 +125,14 @@ Only a `complete` head is pushed — each `rcm-ci` run holds the build machine's
 a new push to the same branch supersedes the old job.
 
 ```sh
-cd <wt> && ./.venv/bin/ruff check . && ./.venv/bin/ruff format --check .
+cd <wt> && F=$(git diff --name-only --diff-filter=d <base sha>...HEAD -- '*.py') && if [ -n "$F" ];
+  then ./.venv/bin/ruff check $F && ./.venv/bin/ruff format --check $F; fi   # changed files only
 ```
 
-Then push with the pinned account and open the PR exactly as the `pr` skill says (title via `commit`-style
-naming, Korean via `korean-writing`, body file `pr-body-<branch with / as ->.md` — parallel sessions
-overwrote a shared name, #220 and #233). The body carries the `## Differs from the spec` section of
-[workplan-diff.md](../_shared/workplan-diff.md) from `out.json`'s `workplan_diff`.
+Ruff on the changed files only, as everywhere in the loop. Then push with the pinned account and open
+the PR exactly as the `pr` skill says (`commit`-style title, Korean via `korean-writing`, body file
+`pr-body-<branch with / as ->.md` in that worktree's handoff folder, where `pr` puts it). The body
+carries `## Differs from the spec` ([workplan-diff.md](../_shared/workplan-diff.md)) from `workplan_diff`.
 
 The watcher posts `rcm/ci` `queued · #<N>` within a minute. Wait for job `N` with `rcm wait --job <N>` as a
 background Bash call. No status after two minutes: submit by hand as the `pr` skill does,
@@ -157,9 +158,8 @@ calls for them. Severity, rounds, convergence, escalation and triage are
 - Post one `verify-round:` comment per round and `verified: <40-char head>` when it passes, in the formats
   of isolated-verifier.md. A HIGH goes back to the lead as a new round with the finding verbatim; the new
   head needs `rcm/ci` and the next round.
-- Triage fixes (what the canon's triage fixes now) are a new lead round `n+1` of the same bundle, never a hand fix;
-  the moved head then gets `rcm/ci` and the one-verifier look of isolated-verifier.md «Rounds» 7 before
-  `verified:`.
+- Triage fixes (what the canon's triage fixes now) are a new lead round `n+1` of the same bundle, never a
+  hand fix; the moved head gets `rcm/ci` and isolated-verifier.md «Rounds» 7's look before `verified:`.
 
 ## 5 Merge in order
 
@@ -199,10 +199,10 @@ extra `rcm-ci` runs caused by re-syncs, scope violations. A number you did not m
 
 ## When things go wrong
 
-- **A lead stopped without `out.json`** (died, cut off, session restarted). Before anything else, keep its
-  uncommitted work as `batch-<n>-stopped.patch` and `batch-<n>-untracked.tar` in its handoff folder, with
-  the commands of [stage-lead.md](../_shared/stage-lead.md) "When a lead stops". Then a new lead, round
-  `n+1`, gets the commits that exist and both paths.
+- **A lead stopped without `out.json`** (died, cut off, session restarted). Before anything else, save
+  its work as `batch-<n>-stopped.patch` and `-untracked.tar` and restore the tree, with the block of
+  [stage-lead.md](../_shared/stage-lead.md) «When a lead stops». A new lead, round `n+1`, gets the
+  commits that exist and both paths, and applies them first.
 - **Scope violation.** A new round for the same lead to revert or move the change; never hand-fix it, and
   never re-cut the branch. If the path really belongs to the bundle, it is a scope correction (step 2).
 - **No `rcm/ci` after two minutes.** Submit by hand (step 3); on every push, read the watcher log (`pr` skill).

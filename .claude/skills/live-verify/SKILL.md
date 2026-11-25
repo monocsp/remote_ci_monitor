@@ -26,10 +26,11 @@ change. A `(live)` row that is not run is `UNKNOWN` with the reason, never PASS.
 
 ## 1. The script
 
-Before the run, the PR has `scripts/acceptance/<topic>_live.sh` — written by a build-lead (or the
-main session), reviewed like code, never edited by a verifier. `scripts/acceptance/m5s_live.sh` is the
-model for its shape, except that it starts by deleting its base folder; a new script never `rm -rf`s
-an existing folder and picks a new name instead ([`_shared/test-server.md`](../_shared/test-server.md)):
+Before the run, the PR has `scripts/acceptance/<topic>_live.sh` — written and committed by the P2
+build-lead ([`build-pr`](../build-pr/SKILL.md) §2), not by the main session; reviewed like code; run
+by a verifier only on its own test server, never edited by one. `scripts/acceptance/m5s_live.sh` is
+the model for its shape, except that it starts by deleting its base folder; a new script never
+`rm -rf`s an existing folder and picks a new name instead ([`_shared/test-server.md`](../_shared/test-server.md)):
 
 - it uses only the worktree's `.venv/bin/rcm` and builds its server exactly as
   [`_shared/test-server.md`](../_shared/test-server.md) says (the only place for those rules — port,
@@ -79,9 +80,11 @@ read-only, with the owner's OK; a verifier gets the numbers as a file
 ## 3. Rounds and fixes
 
 Rounds, escalation and the `verify-round:` record are the canon's. A HIGH is fixed (small: the main
-session; otherwise a new lead through [`build-pr`](../build-pr/SKILL.md)), `rcm/ci` goes green on the
-new head, and the next round **starts the script from the beginning** on fresh servers for both
-verifiers — the fix changed the code the earlier steps ran on. MED/LOW wait for triage.
+session, red test first and a receipt as [`_shared/stage-lead.md`](../_shared/stage-lead.md) «The
+red-then-green receipt» says; otherwise a new lead through [`build-pr`](../build-pr/SKILL.md)),
+`rcm/ci` goes green on the new head, and the next round **starts the script from the beginning** on
+fresh servers for both verifiers — the fix changed the code the earlier steps ran on. MED/LOW wait
+for triage.
 
 ## 4. Report
 

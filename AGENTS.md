@@ -108,7 +108,8 @@ Every user-visible change updates the docs in the same pull request. The rules a
 
 ## Development loop
 
-Work larger than a one-file fix goes through the loop in `.claude/skills/dev-loop/SKILL.md`:
+Work that `dev-lite` does not admit (one of the five lane conditions applies, or more than about
+five files under `src/` change) goes through the loop in `.claude/skills/dev-loop/SKILL.md`:
 a workplan with traced scenario IDs (`workplan`), test-first PRs by a fresh lead per stage
 (`build-pr`), two isolated verifiers per round (`.claude/agents/isolated-verifier.md` holds the
 severity, round and triage rules), a live run on a test server when the change is visible or crosses

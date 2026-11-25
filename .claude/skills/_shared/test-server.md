@@ -81,6 +81,7 @@ gets `--by acceptance` so the requester names no person or host.
 
 - Tokens: `rcm token … add` prints the secret once; it goes straight into a file in `$D` and reaches
   commands only as `RCM_TOKEN` or `RCM_WORKER_TOKEN`. Never into a log, evidence, a report or the chat.
+  `rcm run --no-wait` prints a `cancel_token` (in `submission`): cut it from any evidence file.
 - `--config` is always explicit. Without it `rcm serve` reads `$RCM_CONFIG` or a `./rcm.toml` in the
   worktree, which is how a worktree build once migrated a v7 dev database to v24 (AGENTS.md).
 - `HOME=<data_dir>/home` on every **rcm** command, so the client never reads the production
@@ -98,7 +99,8 @@ gets `--by acceptance` so the requester names no person or host.
 - **CLI:** `--json` output and exit codes. `rcm wait` exit 3 is unknown, never a failure.
 - **Web:** the CDP `Chrome` helper in `tests/test_web_browser.py`, page opened with `?poll=1`, and
   `page_errors()` must return `[]` (a missing collector raises: `UNKNOWN`, never an empty list).
-- **Two processes:** `E2EServer`, `WorkerProc` and `Stack` of `tests/test_e2e_worker.py`, not new ones.
+- **Two processes:** pytest uses `E2EServer`, `WorkerProc`, `Stack` of `tests/test_e2e_worker.py` (own free
+  port, pytest's `tmp_path`), not new ones; a live run uses this file's shell blocks, port and `data_dir`.
 - **Repeatable runs:** `scripts/acceptance/<topic>_live.sh`: an allow-listed base folder, fake presets and
   hooks, every server stopped on exit (failure too), verdicts in `out/summary.txt`, exit 1 on any FAIL.
   `scripts/acceptance/m5s_live.sh` has that shape but its opening `rm -rf`; a new script picks a new name.

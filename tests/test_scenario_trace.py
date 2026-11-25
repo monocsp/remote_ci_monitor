@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -399,3 +400,85 @@ def test_prefix_usage_with_documents_is_a_usage_error(tmp_path, capsys):
     argv = [str(tmp_path / "plan.md"), "--prefix-usage", "Q", "--tests", str(tmp_path / "tests")]
     assert st.main(argv) == 2
     assert "--prefix-usage" in capsys.readouterr().err
+
+
+# ── 4라운드: GFM 이 행으로 그리는 줄 · pytest 가 모으지 않는 시험 · 못 연 폴더 ──
+
+
+@pytest.mark.parametrize("row", ["X2 | b |", "X2 | b", "`X2` | b |"])
+def test_a_row_without_a_leading_pipe_right_after_the_table_is_a_format_problem(
+    tmp_path, capsys, row
+):
+    # GFM 은 앞 `|` 없는 줄도 표의 행으로 그린다 — 표가 거기서 끝난 줄 알고 그 행을 안 읽었다(H1)
+    plan = "<!-- scenario-prefix: X -->\n| ID | a |\n|---|---|\n| X1 | a |\n" + row + "\n"
+    code, report = _run(tmp_path, capsys, plan=plan, tests="def test_x1_a():\n    pass\n")
+    assert code == 1 and _kinds(report) == [("format", "")], report
+    assert report["problems"][0]["where"].endswith("plan.md:5")
+
+
+def test_only_tests_pytest_would_collect_tag_rows(tmp_path, capsys):
+    # 도우미 안 · 시험 안의 `test_*` 함수, Test 가 아닌 클래스의 메서드, 시험 파일이 아닌 모듈은
+    # pytest 가 돌리지 않는다 — 그 이름 · 주석을 태그로 세면 안 도는 시험이 행을 채운다(M5)
+    tests = (
+        "def helper():\n    def test_x1_nested():\n        pass\n\n\n"
+        "class Helper:\n    def test_x2_method(self):\n        # X1\n        pass\n\n\n"
+        "def test_outer():\n    def test_x2_inner():\n        # X1\n        pass\n"
+    )
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "tests" / "helpers.py").write_text("def test_x1_a():\n    # X2\n    pass\n")
+    code, report = _run(tmp_path, capsys, tests=tests)
+    assert code == 1 and _kinds(report) == [("missing", "X1"), ("missing", "X2")], report
+    nested = "class TestOuter:\n    class TestInner:\n        def test_x1_a(self):\n"
+    nested += "            pass\n\n    def test_b(self):\n        # X2\n        pass\n"
+    code, report = _run(tmp_path, capsys, tests=nested)
+    assert code == 0, report  # 시험 클래스 안의 시험 클래스는 pytest 가 모은다
+    (tmp_path / "tests" / "feature_test.py").write_text("def test_x9_a():\n    pass\n")
+    code, report = _run(tmp_path, capsys, tests=nested)
+    assert code == 1 and _kinds(report) == [("orphan", "X9")]  # `*_test.py` 도 시험 파일이다
+
+
+@pytest.mark.parametrize(
+    "tests",
+    ["import pytest\n\n\n@pytest.mark.skip(reason='later')\ndef test_x1_a():\n    pass\n",
+     "import pytest\n\n\n@pytest.mark.skipif(True, reason='x')\ndef test_x1_a():\n    pass\n",
+     "import pytest\n\n\n@pytest.mark.skip\nclass TestA:\n    def test_x1_a(self):\n        pass\n",
+     "import pytest\n\npytestmark = pytest.mark.skip\n\n\ndef test_x1_a():\n    pass\n",
+     "import pytest\n\npytestmark = [pytest.mark.skip('x')]\n\n\ndef test_x1_a():\n    pass\n"],
+)  # fmt: skip
+def test_a_tag_on_a_skipped_test_is_a_problem(tmp_path, capsys, tests):
+    # 건너뛰는 시험은 그 행을 증명하지 않는다 — 태그가 있어도 「시험 있음」이 아니다(M5)
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "tests" / "test_other.py").write_text("def test_x2_b():\n    pass\n")
+    code, report = _run(tmp_path, capsys, tests=tests)
+    assert code == 1 and _kinds(report) == [("skipped", "X1")], report
+
+
+def test_prefix_usage_still_counts_tags_pytest_would_not_collect(tmp_path, capsys):
+    tdir = tmp_path / "tests"
+    tdir.mkdir()
+    (tdir / "helpers.py").write_text("def helper():\n    def test_q1_nested():\n        pass\n")
+    assert st.main(["--prefix-usage", "Q", "--tests", str(tdir), "--json"]) == 1
+    assert json.loads(capsys.readouterr().out)["count"] == 1
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root reads any folder")
+@pytest.mark.parametrize("usage", [True, False])
+def test_a_test_folder_that_cannot_be_listed_is_unreadable_not_empty(tmp_path, capsys, usage):
+    # rglob 은 못 연 폴더를 조용히 건너뛴다 — 그 안의 태그를 「없다」고 셌다
+    tdir = tmp_path / "tests"
+    (tdir / "locked").mkdir(parents=True)
+    (tdir / "locked" / "test_q.py").write_text("def test_q1_a():\n    pass\n")
+    (tdir / "locked").chmod(0)
+    try:
+        if usage:
+            code = st.main(["--prefix-usage", "Q", "--tests", str(tdir), "--json"])
+            report = json.loads(capsys.readouterr().out)
+            assert code == 1 and [p["kind"] for p in report["problems"]] == ["unreadable"]
+        else:
+            (tmp_path / "plan.md").write_text(PLAN, encoding="utf-8")
+            (tdir / "test_feature.py").write_text(TESTS, encoding="utf-8")
+            code = st.main([str(tmp_path / "plan.md"), "--tests", str(tdir), "--json"])
+            report = json.loads(capsys.readouterr().out)
+            assert code == 1 and _kinds(report) == [("unreadable", "")]
+    finally:
+        (tdir / "locked").chmod(0o755)

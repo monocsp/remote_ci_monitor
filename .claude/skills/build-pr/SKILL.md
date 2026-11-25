@@ -17,7 +17,8 @@ opens the PR, waits for `rcm/ci`, and makes the red-then-green receipt. The lead
 or §4, committed on its own branch. The handoff format, location
 (`.verify/handoff/<branch with / as ->/`, stage `P2` or `P6`), the out.json contract, the receipt and
 the rules a lead keeps are [`_shared/stage-lead.md`](../_shared/stage-lead.md). A lead is new for
-every stage and every retry — a red gate or an UNSOUND check goes into a new in-file for a new lead.
+every stage and every retry — a red gate or an UNSOUND check goes into a new in-file for a new lead;
+a lead that stopped is saved and taken out of the tree first, as stage-lead «When a lead stops» says.
 
 ## 1. Before the lead starts (main session)
 
@@ -26,7 +27,8 @@ every stage and every retry — a red gate or an UNSOUND check goes into a new i
 3. The worktree is clean; the in-file names: the workplan path and the sections this PR implements,
    the scenario rows (IDs) it owns, the files it owns and the shared ones (`CHANGELOG.md`,
    `scripts/mutcheck.py`, `tests/test_docs_<code>.py` — add your own entries only), the frozen
-   contracts it must not change, and in P6 the GAP table and the redesign targets.
+   contracts it must not change, in P6 the GAP table and the redesign targets, and for `(live)` rows
+   a test server's port and `data_dir` for the script's dry run.
 4. A defect whose red test is hard to pin down (a race, a restart) may first go to
    [`regression-test-author`](../../agents/regression-test-author.md) stage `red`, which returns a red
    test; the main session commits it as it is and names it in the in-file. The mutant proposal comes
@@ -36,8 +38,10 @@ every stage and every retry — a red gate or an UNSOUND check goes into a new i
 
 1. **Rows → red tests.** Each scenario row this PR owns becomes one or more tests named with its ID
    (`test_xs3_…`) or tagged `# XS3` inside the test — format in
-   [`_shared/scenario-trace.md`](../_shared/scenario-trace.md). `(live)` rows are not pytest's; they
-   go to [`live-verify`](../live-verify/SKILL.md).
+   [`_shared/scenario-trace.md`](../_shared/scenario-trace.md). `(live)` rows are not pytest's: the
+   lead writes `scripts/acceptance/<topic>_live.sh` for them in the shape of
+   [`live-verify`](../live-verify/SKILL.md) §1 and commits it — never run against production, at
+   most dry-run on the in-file's test server. The main session writes no code; P4 runs the script.
 2. **Prove them red** before writing the code. The evidence is the command and the failure it
    printed, and the failure is in the assertion, not in collecting or importing the test file — an
    import error proves only that a name is missing; when that is the point (a new module), say so.
@@ -69,19 +73,16 @@ Never weaken, skip or `xfail` a test, and never `# noqa` a rule, to get green.
 1. `git -C <worktree> status --porcelain` is empty and its HEAD is out.json `head`. Tell the owner
    each `workplan_diff` row in one chat line as it comes in, and add it to the workplan's §13.
    Make the receipt, `<stage>-<n>-redgreen.json`, as [`_shared/stage-lead.md`](../_shared/stage-lead.md)
-   «The red-then-green receipt» gives it; exit 1 or 3 sends the work back to a new lead. For a defect
-   test from `regression-test-author`, its `prove` stage runs now on the fix's sha; the main session
-   commits any test change it leaves, and its mutant proposal goes to a new lead's in-file.
-2. **Plan↔test check, without the code.** Snapshot what the verifier may see — the workplan and
-   the tests, not `src/`:
-   ```sh
-   S=<abs worktree>/.verify/handoff/<branch with / as ->/snap-<n>; mkdir -p "$S"
-   git -C <worktree> archive <head> docs/<code>-workplan.md tests/ | tar -x -C "$S"
-   ```
-   One [`isolated-verifier`](../../agents/isolated-verifier.md) gets only that folder and the prompt
-   in [`_shared/scenario-trace.md`](../_shared/scenario-trace.md). SOUND → push. UNSOUND → a new lead
-   with the findings. UNSOUND a third time → stop and ask the owner: the plan or the tests may be
-   wrong, not the code.
+   «The red-then-green receipt» gives it with each exit's meaning: only exit 1 sends the work to a
+   new lead; exit 3 is "could not decide" — find why (a node id typo, a timeout, a skipped test) and
+   rerun. For a defect test from `regression-test-author`, its `prove` stage runs now on the fix's
+   sha, its answer saved as `<stage>-<n>-prove.md`; the main session commits any test change it
+   leaves, and its mutant proposal goes to a new lead's in-file.
+2. **Plan↔test check, without the code.** The snapshot (the workplan and the tagged tests with their
+   helpers, never `src/`) and the prompt are [`_shared/scenario-trace.md`](../_shared/scenario-trace.md)
+   «The plan-to-test verifier»; one [`isolated-verifier`](../../agents/isolated-verifier.md) gets only
+   that folder. SOUND → push. UNSOUND → a new lead with the findings. UNSOUND a third time → stop and
+   ask the owner: the plan or the tests may be wrong, not the code.
 3. Push and open the PR with the `pr` skill. In `## 검사` keep two lists apart: the lead's feedback
    checks (which tests, ruff, node — run in the worktree) and the authoritative result, `rcm/ci` on
    the head sha with its job number. A feedback pass is never written as the gate.

@@ -451,7 +451,17 @@ def _one_green_bundle(batch) -> tuple[str, dict]:
      ({"statuses": None}, "rcm_ci"), ({"statuses": {"state": "success"}}, "rcm_ci"),
      ({"statuses": [{"context": "rcm/ci", "state": "weird"}]}, "rcm_ci"),
      ({"check-runs": None}, "rcm_ci"), ({"check-runs": {"check_runs": None}}, "rcm_ci"),
-     ({"branches/": {"commit": {"sha": "nope"}}}, "remote")],
+     ({"branches/": {"commit": {"sha": "nope"}}}, "remote"),
+     # 4라운드: 404 가 아닌 브랜치 읽기 실패는 「not pushed」가 아니다 · 끝난 check-run 의 모르는
+     # 결론 · 본문 없는 댓글 · context 없는 상태 · 이름 없는 check-run 은 모름이다(M2 · M4)
+     ({"branches/": ApiError("HTTP 502", 502)}, "remote"),
+     ({"check-runs": {"check_runs": [
+         {"name": "rcm/ci", "status": "completed", "conclusion": "weird"}]}}, "rcm_ci"),
+     ({"issues/": [{"user": {"login": "x"}}]}, "verified"),
+     ({"issues/": [{"body": 5}]}, "verified"),
+     ({"statuses": [{"state": "success"}]}, "rcm_ci"),
+     ({"check-runs": {"check_runs": [
+         {"status": "completed", "conclusion": "success"}]}}, "rcm_ci")],
 )  # fmt: skip
 def test_a_read_that_did_not_answer_leaves_a_dash_never_a_known_value(batch, capsys, broken, cell):
     # 표식을 읽기 전에 verified 를 "no" 로 두어, 댓글 읽기가 실패해도 「no · verify · 종료 0」
@@ -546,3 +556,86 @@ def test_init_with_an_unknown_base_is_a_usage_error(tmp_path, monkeypatch, capsy
     b = Batch(tmp_path, monkeypatch)
     assert b.run("init", "--id", "m5x", "--repo", "o/r", "--base", base) == 2
     assert base in capsys.readouterr().err and not b.state.exists()
+
+
+# ── 4라운드: 버린 쪽도 PR 의 변경이다 · 남의 쓰기를 덮지 않는다 · 옛 head 의 표식을 쓰지 않는다 ──
+
+
+def test_scope_sees_paths_a_merge_that_kept_only_our_side_carries(batch, capsys):
+    # `merge -s ours` 는 dev 의 변경을 버린다 — 병합 커밋은 첫 부모와 같아 `--cc` 에 아무것도 없지만
+    # PR 의 diff 는 dev 의 web/app.js 를 되돌린다(H2)
+    wt = batch.worktree("wt-a", A_BRANCH)
+    assert batch.add("A", A_BRANCH, wt, "docs/a.md") == 0
+    _commit(wt, "docs/a.md")
+    git("checkout", "-q", "dev", cwd=batch.remote.work)
+    git("pull", "-q", "origin", "dev", cwd=batch.remote.work)
+    _commit(batch.remote.work, "web/app.js")
+    git("push", "-q", "origin", "dev", cwd=batch.remote.work)
+    git("fetch", "-q", "origin", cwd=wt)
+    git("merge", "-q", "--no-edit", "-s", "ours", "origin/dev", cwd=wt)
+    capsys.readouterr()
+    assert batch.run("scope", "--bundle", "A") == 1
+    out = capsys.readouterr().out
+    assert "merge-result  web/app.js  (outside" in out and "docs/a.md" not in out
+
+
+@pytest.mark.parametrize("learned", [True, False])
+def test_status_keeps_a_bundle_added_while_it_was_reading(batch, capsys, learned):
+    # status 는 상태 파일을 통째로 다시 써서 그동안의 add 를 지웠다(M1). 새로 안 머지 sha 가 있을
+    # 때만, 잠근 채 다시 읽어 그 칸만 고친다
+    head, pr = _one_green_bundle(batch)
+    if learned:
+        pr.update(merged_at="2026-11-25T00:00:00Z", state="closed", merge_commit_sha="d" * 40)
+    b = batch.worktree("wt-b", B_BRANCH)
+
+    class Racing(FakeGitHub):
+        def request(self, method, path, fields=None):
+            if "/branches/" in path and "B" not in batch.read()["bundles"]:
+                state = batch.read()  # 다른 세션의 add 가 그 사이에 쓴다
+                state["bundles"]["B"] = dict(
+                    state["bundles"]["A"],
+                    branch=B_BRANCH,
+                    worktree=str(b),
+                    owns=["docs/b.md"],
+                    merge_order=2,
+                )
+                batch.state.write_text(json.dumps(state))
+            return super().request(method, path, fields)
+
+    api = Racing({A_BRANCH: head}, [pr], {head: [{"context": "rcm/ci", "state": "success"}]},
+                 {41: [{"body": f"verified: {head}"}]})  # fmt: skip
+    capsys.readouterr()
+    assert batch.run("status", "--bundle", "A", api=api) == 0
+    bundles = batch.read()["bundles"]
+    assert set(bundles) == {"A", "B"}
+    assert bundles["A"]["merged"] == ("d" * 40 if learned else None)
+
+
+def test_an_open_pr_behind_the_pushed_head_waits_and_ignores_the_old_marks(batch, capsys):
+    # PR 의 head 가 아직 옛 sha 면 그 sha 의 rcm/ci · verified: 는 지금 브랜치의 것이 아니다(M3)
+    head, pr = _one_green_bundle(batch)
+    new = _commit(batch.tmp / "wt-a", "docs/a.md", "two\n")
+    api = FakeGitHub({A_BRANCH: new}, [pr], {head: [{"context": "rcm/ci", "state": "success"}]},
+                     {41: [{"body": f"verified: {head}"}]})  # fmt: skip
+    code, row = _status_row(batch, capsys, api)
+    assert code == 0 and row["next"] == "wait for PR head", row
+    assert row["rcm_ci"] != "success" and row["verified"] != "yes"
+
+
+@pytest.mark.parametrize("merged_at", [0, 1, ["2026-11-25"]])
+def test_a_merged_at_that_is_not_a_string_is_unknown(batch, capsys, merged_at):
+    head, pr = _one_green_bundle(batch)
+    pr.update(merged_at=merged_at, state="closed", merge_commit_sha="d" * 40)
+    api = FakeGitHub({A_BRANCH: head}, [pr], {head: [{"context": "rcm/ci", "state": "success"}]},
+                     {41: [{"body": f"verified: {head}"}]})  # fmt: skip
+    code, row = _status_row(batch, capsys, api)
+    assert code == 3 and row["pr"] == "—", row
+    assert batch.read()["bundles"]["A"]["merged"] is None
+
+
+def test_add_refuses_a_folder_inside_the_worktree(batch, capsys):
+    # 하위 폴더도 git 은 그 워크트리로 읽지만, scope · status 는 이 경로를 워크트리로 쓴다(L6)
+    wt = batch.worktree("wt-a", A_BRANCH)
+    (wt / "docs").mkdir()
+    assert batch.add("A", A_BRANCH, wt / "docs", "docs/a.md") == 1
+    assert "top level" in capsys.readouterr().err and batch.read()["bundles"] == {}

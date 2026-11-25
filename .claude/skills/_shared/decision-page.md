@@ -42,8 +42,10 @@ a second group without a picture.
 
 ## Publishing
 
-When the Artifact tool is available, the page is an Artifact: load the `artifact-design` skill, and
-the `artifact-capabilities` skill for the `db` capability, before writing it. Answers are stored as
+When the Artifact tool is available, the page is an Artifact. For a new page, call that tool's
+`quickstart` action first (`intent: "other"`) and follow what it returns; then load the
+`artifact-capabilities` skill for the `db` capability (and the `artifact-design` skill if the
+quickstart did not cover it) before writing the page. Answers are stored as
 documents `decisions/<QID>` = `{choice?, note?, at}` (choice and note in one document, rewritten
 together so changing one does not drop the other) and `decisions/_note` for the bottom field. A
 failed save is shown on the page and in its status line, never swallowed. Read the answers back with

@@ -21,8 +21,8 @@ and P6 itself; why is in [`_shared/stage-lead.md`](../_shared/stage-lead.md).
 | P2 build | [`build-pr`](../build-pr/SKILL.md) (implement) | lead's out.json `complete`, plan↔test check SOUND, `rcm/ci` green on the head |
 | P3 review | this file, «P3 review» | a round that closes the stage (HIGH 0 and unknown 0, canon «Rounds» 1) on the head |
 | P4 live | [`live-verify`](../live-verify/SKILL.md) | only when required; a round that closes the stage (HIGH 0 and unknown 0, canon «Rounds» 1) and the report committed |
-| P5 edges | [`edge-audit`](../edge-audit/SKILL.md) | a round that closes the stage (HIGH 0 and unknown 0, canon «Rounds» 1); confirmed GAPs handed to P6 |
-| P6 gap fix | [`build-pr`](../build-pr/SKILL.md) (gap-fix) | every confirmed GAP closed (HANDLED + a test that locks the path) |
+| P5 edges | [`edge-audit`](../edge-audit/SKILL.md) | a round with unknown 0 whose confirmed GAPs are handed to P6 (canon «Rounds» 6: a HIGH GAP is closed by the P6 re-check, not by HIGH 0 here) |
+| P6 gap fix | [`build-pr`](../build-pr/SKILL.md) (gap-fix) | every confirmed GAP closed (HANDLED by the P6 re-check + a test that locks the path) |
 | triage | [`isolated-verifier`](../../agents/isolated-verifier.md) «Triage» | the canon's scoring done, `triage:` posted, a moved head looked at as «Rounds» 7 says |
 | P7 merge | [`pr`](../pr/SKILL.md) | `verified: <head sha>` posted, `tools/merge_pr.py` merged, worktree removed |
 
@@ -76,9 +76,10 @@ Take the first row that matches, per PR in §5 order.
 | no workplan | P1 |
 | spec PR open; plan rounds not closed, or a ⛔ row in §11 without an answer | P1 (rounds) or **stop** (owner) |
 | spec merged; the PR's §6 row not started | P2, or `dev-batch` when its wave has two PRs or more |
-| lead's out.json `blocked` | answer `RESOLVED` questions from the repo; `POLICY` → **stop** (owner) |
+| lead's out.json `blocked` | `RESOLVED` → answer from the repo; `EXTERNAL` → a fact the main session can establish (a command, a doc) goes into a new in-file, one only the owner or a third party has → **stop** (decision page); `POLICY` → **stop** (owner) |
 | `rcm/ci` pending on the head | wait (§4) |
-| `rcm/ci` failed on the head | P2 again with a new lead and the failing log — a red gate is not a stop |
+| `rcm/ci` failed on the head | P2 (P6 if P6 moved it) again with a new lead and the failing log — a red gate is not a stop |
+| green on a head P6 moved; no `verify-round: … stage=P6` for it | P6 re-check ([`build-pr`](../build-pr/SKILL.md) §4), not P3 |
 | green; no `verify-round:` for this head | P3 |
 | P3 closed; lane full; live required and no report | P4 |
 | lane full; no P5 round | P5 |
@@ -112,7 +113,7 @@ Verifier counts are the canon's «Quorum»; this table says only who.
 |---|---|---|---|
 | P1 | [`plan-lead`](../../agents/plan-lead.md): the plan's material, no Korean text, no commit | [`isolated-verifier`](../../agents/isolated-verifier.md) on the plan | [`scenario-author`](../../agents/scenario-author.md)'s table first, in-file with the owner's words verbatim, [`korean-writer`](../../agents/korean-writer.md) for the text, commit, draft spec PR, rounds, decision page, merge after the owner — in the order of [`workplan`](../workplan/SKILL.md) «Order» |
 | P2 | [`build-lead`](../../agents/build-lead.md), new | `isolated-verifier`, plan↔tests without the code | worktree, in-file, push, PR, wait for `rcm/ci` |
-| P3 | — | `isolated-verifier` on the diff | spawn, tally, fix HIGH (small) or a new lead |
+| P3 | — | `isolated-verifier` on the diff | spawn, tally, fix HIGH (small: red test first and a receipt, [`stage-lead`](../_shared/stage-lead.md) «The red-then-green receipt») or a new lead |
 | P4 | — | [`live-verifier`](../../agents/live-verifier.md), each on its own test server | spawn, tally, report |
 | P5 | — | `isolated-verifier`, in parallel | merge verdicts, open single-verifier findings |
 | P6 | `build-lead`, new (not P2's) | `isolated-verifier` re-check | in-file with the GAP table, push, `rcm/ci` |
@@ -140,9 +141,11 @@ always names its model.
 
 ### The main session does the long waits
 
-Leads and verifiers never wait for `rcm/ci`, never run `rcm run` and never poll. The main session
-pushes, then waits once in the background — `rcm wait --job <N>` or a single `Monitor` until the
-status leaves `pending` — and acts on the notification. `rcm wait` exit 3 means *unknown*: look at
+Leads and verifiers never wait for `rcm/ci` and never `rcm run` or `rcm wait` against production or
+for `rcm-ci`; on their own test server they may, with `--no-wait` and a `--timeout`
+([`stage-lead`](../_shared/stage-lead.md) rule 2). The main session pushes, then waits once in the
+background — `rcm wait --job <N>` or a single `Monitor` until the status leaves `pending` — and acts
+on the notification. `rcm wait` exit 3 means *unknown*: look at
 the job (`rcm jobs`, `rcm logs <N>`), never treat it as red. While a lead works in a worktree, the
 main session does not touch that worktree's git state.
 

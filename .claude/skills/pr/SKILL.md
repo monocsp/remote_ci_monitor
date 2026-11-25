@@ -51,9 +51,11 @@ End the body with the attribution block given at session start.
 
 Write a body that goes through a file into a file named after the branch,
 `pr-body-<branch with / as ->.md` (`pr-body-feat-guard-merge.md`), never `pr.md`, `pr_body.md` or
-`body.md`: parallel sessions share a scratchpad and overwrote each other's body there (#220 and
-#233 went up with another PR's body). `tools/guard_naming.py` refuses `--body-file` with a shared
-name.
+`body.md`, kept in `<abs worktree>/.verify/handoff/<branch with / as ->/` (git-ignored, so
+`tools/dev_batch.py scope` and `git status --porcelain` stay clean) and passed as
+`--body-file <that path>`; never the scratchpad: parallel sessions share it and overwrote each
+other's body there (#220 and #233 went up with another PR's body). `tools/guard_naming.py` refuses
+`--body-file` with a shared name.
 
 The Korean in the title's summary and in the body is written with the `korean-writing` skill
 (`.claude/skills/korean-writing/SKILL.md`). Load it before you write them. The template's headings,
