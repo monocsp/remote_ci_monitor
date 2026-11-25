@@ -89,6 +89,13 @@ NO_JOBS = "no jobs will come to this machine"
 BOUNDARY = "could not decide"
 
 
+class Unsure(str):
+    """재지 못한 이유 — 문제(「닿지 않음」)가 아니라 모름이다(`git ls-remote` 의 시한 초과 · 실행
+    실패, P3 4라운드 MED). `str` 이라 문제 문장만 찍는 쪽(`rcm worker --check`)은 그대로 쓴다."""
+
+    __slots__ = ()
+
+
 def decide_exit(problems: Sequence[str], undecided: Sequence[str]) -> int:
     """우선순위 1 > 3 > 0. 빠진 것과 판정 못 함이 함께 있으면 1 이다(TD34)."""
     if problems:

@@ -61,6 +61,7 @@ from remote_ci_monitor.config import (
     user_config_dir,
 )
 from remote_ci_monitor.core import artifacts as art_core
+from remote_ci_monitor.core import doctor as doctor_core
 from remote_ci_monitor.core import shelf as shelf_rules
 from remote_ci_monitor.core.artifacts import BundleFile
 from remote_ci_monitor.core.gitref import validate_ref
@@ -4701,7 +4702,9 @@ def _ls_remote_problem(
     git: str = "git",
     env: Mapping[str, str] | None = None,
 ) -> str | None:
-    """`git ls-remote` 가 닿는지. 문제면 짧은 사유(경로·URL 없이), 아니면 None.
+    """`git ls-remote` 가 닿는지. 문제면 짧은 사유(경로·URL 없이), 아니면 None. 시한을 넘기거나
+    git 을 실행하지 못한 것은 저장소에 닿지 않는다는 사실이 아니다 — `core.doctor.Unsure` 로
+    돌려준다(doctor 는 모름으로, `rcm worker --check` 는 지금처럼 문제 줄로 찍는다).
 
     `git` 은 부를 실행 파일, `env` 는 그 환경이다. doctor 는 서비스 PATH 에서 찾은 git 과 서비스
     환경을 넘긴다 — 셸의 git · 셸의 변수로 재면 서비스에서는 다른 답이 나온다. 주지 않으면 이
@@ -4719,9 +4722,9 @@ def _ls_remote_problem(
             env={**base, "GIT_TERMINAL_PROMPT": "0"},
         )
     except subprocess.TimeoutExpired:
-        return f"unreachable: timed out after {int(timeout)}s"
+        return doctor_core.Unsure(f"git ls-remote timed out after {int(timeout)}s")
     except OSError as e:
-        return f"cannot run git: {type(e).__name__}"
+        return doctor_core.Unsure(f"cannot run git: {type(e).__name__}")
     if proc.returncode == 0:
         return None
     lines = [ln.strip() for ln in proc.stderr.decode("utf-8", errors="replace").splitlines()]
@@ -4750,8 +4753,11 @@ def _worker_check(cfg: Any, client: Any) -> int:
             rows.append(("server", False, f"{client.server} · {not_rcm}"))
         else:
             # 서버가 보낸 문자열 — 제어 문자를 지우고 64자로 자른다(M5q §14.5, `rcm check` 와 같다)
-            server_v = follow.clean(health.get("version"))
-            rows.append(("server", bool(health.get("ok")), f"{client.server} · v{server_v}"))
+            raw_v = health.get("version")
+            # 서버가 버전을 말하지 않으면 `vNone` 이 아니다(P3 4라운드 검증자 2 #3)
+            known = isinstance(raw_v, str) and raw_v
+            shown_v = f"v{follow.clean(raw_v)}" if known else "version unknown"
+            rows.append(("server", bool(health.get("ok")), f"{client.server} · {shown_v}"))
     except ClientError as e:
         rows.append(("server", False, e.message if e.status else f"cannot reach {client.server}"))
     try:
@@ -4760,12 +4766,13 @@ def _worker_check(cfg: Any, client: Any) -> int:
             raise TypeError(not_rcm)
         kind = me.get("kind") or ("admin" if me.get("admin") else "client")
         ok = kind == "worker"
+        name = me.get("name")
+        who = f"{follow.clean(name)} ({kind})" if isinstance(name, str) and name else f"({kind})"
         rows.append(
             (
                 "token",
                 ok,
-                f"{me.get('name')} ({kind})"
-                + ("" if ok else " — worker token required: rcm token add NAME --worker"),
+                who + ("" if ok else " — worker token required: rcm token add NAME --worker"),
             )
         )
     except TypeError as e:
@@ -4848,6 +4855,7 @@ def _worker_capability_rows(
     아니다 — 두 행은 FAIL 이 되지 않는다. 둘째 값은 빠진 도구 수(서로 다른 이름) — 명세를 못
     받았으면 None.
     """
+    from remote_ci_monitor import doctor
     from remote_ci_monitor.client import ClientError
     from remote_ci_monitor.remote_worker import RemoteWorker
 
@@ -4856,6 +4864,20 @@ def _worker_capability_rows(
     except ClientError as e:
         why = "server has no /worker/spec (older rcm)" if e.status == 404 else e.message
         return [("fingerprint", None, f"— {why}"), ("presets", None, f"— {why}")], None
+    except ValueError:  # JSON 이 아니다(틀린 포트의 HTML)
+        problem: str | None = "not JSON"
+    else:
+        # doctor 와 같은 모양 검사 — 목록 · 문자열 · 숫자가 아닌 시한을 재다가 터지지 않게
+        # health · whoami 처럼 FAIL 줄로 둔다(P3 4라운드 검증자 2 #1)
+        problem = doctor.shape_problem(spec, doctor.ANSWER_SHAPES["/worker/spec"])
+        if problem is None:
+            try:
+                doctor.parse_spec(spec)
+            except doctor.AnswerUnreadable as e:
+                problem = str(e)
+    if problem is not None:
+        detail = f"/worker/spec: the answer is not rcm's ({problem}) — check the URL and port"
+        return [("fingerprint", None, "— see the presets row"), ("presets", False, detail)], None
     body = RemoteWorker(cfg, client=client, log=lambda _m: None).measure(spec)
     fp = " · ".join(
         _probe_summary(n, p.get("state", ""), p.get("value"))

@@ -969,9 +969,9 @@ class Context:
 class _Run:
     """한 번의 진단 — 줄을 모으고 마지막에 문서 하나로 낸다."""
 
-    def __init__(self, opts: Options, ctx: Context, role: str):
+    def __init__(self, opts: Options, ctx: Context, role: str, home: str):
         self.opts, self.ctx, self.role = opts, ctx, role
-        self.home = str(ctx.environ.get("HOME") or Path.home())
+        self.home = home  # 모르면 "" — 가리지 못할 뿐이다(`run` 이 그때는 재지 않는다)
         self.problems: list[str] = []
         self.undecided: list[str] = []
         self.warnings: list[str] = []
@@ -1531,7 +1531,7 @@ class _Run:
             return "git missing", None
         credential = repo.credential
         if credential is None:
-            return self.ctx.ls_remote(repo.url, git, env), None
+            return _reached(self.ctx.ls_remote(repo.url, git, env))
         if not os.access(credential, os.R_OK):
             return None, (
                 "not checked — this user cannot read its token_file (run rcm doctor as the "
@@ -1540,7 +1540,9 @@ class _Run:
         version = _git_version(git, env)
         if version is None or version < MIN_GIT_TOKEN_FILE:
             return None, "not checked — token_file needs git 2.31+ (see the git row)"
-        return self.ctx.ls_remote(repo.url, git, gitops.git_env(env, credential=credential)), None
+        return _reached(
+            self.ctx.ls_remote(repo.url, git, gitops.git_env(env, credential=credential))
+        )
 
     def measure(self, spec: Spec, env: dict[str, str], *, pool: str, accept_any: bool) -> None:
         """명세대로 깨끗한 환경에서 잰다 — 잰 것을 서버에 보내지 않는다(TD12)."""
@@ -1810,14 +1812,57 @@ class _Run:
         self.reach(client.whoami, "/api/whoami", CLIENT_TOKEN_HINT)
 
 
+def _reached(result: str | None) -> tuple[str | None, str | None]:
+    """`ls_remote` 의 답 → (문제, 모름의 이유). 시한 초과 · 실행 실패(`dc.Unsure`)는 저장소에
+    닿지 않는다는 사실이 아니다 — 모름이다(P3 4라운드 MED)."""
+    if isinstance(result, dc.Unsure):
+        return None, f"not checked — {result}"
+    return result, None
+
+
+def known_home(environ: Mapping[str, str]) -> str | None:
+    """홈 폴더. HOME 이 없고 이 uid 에 passwd 항목도 없으면 None — `Path.home()` 의
+    `RuntimeError` 가 경계 밖에서 traceback 이 되지 않게(P3 4라운드 MED)."""
+    home = environ.get("HOME")
+    if home:
+        return home
+    try:
+        return str(Path.home())
+    except (RuntimeError, KeyError, OSError):
+        return None
+
+
+#: 홈 폴더를 모를 때의 판정 못 함 줄
+NO_HOME = (
+    "HOME is not set and this user has no home folder — rcm cannot find its config and service "
+    "files (set HOME)"
+)
+
+
+def _emit(opts: Options, ctx: Context, doc: dict[str, Any]) -> None:
+    if opts.json:
+        ctx.out(json.dumps(doc, ensure_ascii=False, indent=2))
+    else:
+        for line in dc.render(doc):
+            ctx.out(line)
+
+
 def run(opts: Options, ctx: Context) -> tuple[int, dict[str, Any] | None]:
     """(종료 코드, 문서). 사용법 오류면 (2, None) — 이유는 ctx.err 로 이미 나갔다.
 
     맨 바깥 경계: 읽는 자리가 모르는 예외는 traceback 이 아니라 「판정 못 함」(종료 3)이다. 모름을
     성공으로 적지 않고 모름으로 적을 뿐이다. 경계는 마지막 그물이다 — 읽는 자리마다 모양을 먼저
     보고, 망가진 입력 표 시험(tests/test_doctor_cli.py)은 이 줄이 보이면 빨개진다."""
-    home = str(ctx.environ.get("HOME") or Path.home())
+    home = known_home(ctx.environ)
     role = opts.role
+    if home is None:
+        # 설정과 서비스 파일의 표준 자리가 모두 홈 아래다 — 재지 않고 판정 못 함이다
+        ctx.err(f"rcm: {NO_HOME}")
+        blind = _Run(opts, ctx, role or "unknown", "")
+        blind.undecided.append(NO_HOME)
+        doc = blind.document()
+        _emit(opts, ctx, doc)
+        return dc.EXIT_UNKNOWN, doc
     try:
         if role is None:
             roles = infer_roles(ctx.environ)
@@ -1830,7 +1875,7 @@ def run(opts: Options, ctx: Context) -> tuple[int, dict[str, Any] | None]:
                     f"this machine has several roles ({', '.join(roles)}) — pass --role ROLE"
                 )
             role = roles[0]
-        r = _Run(opts, ctx, role)
+        r = _Run(opts, ctx, role, home)
         if role == dc.ROLE_WORKER:
             r.worker()
         elif role in (dc.ROLE_COORDINATOR, dc.ROLE_COORDINATOR_WORKER):
@@ -1845,17 +1890,13 @@ def run(opts: Options, ctx: Context) -> tuple[int, dict[str, Any] | None]:
     except Exception as e:  # noqa: BLE001 — doctor 의 맨 바깥 경계
         line = dc.could_not_decide(e, home)
         ctx.err(line)
-        crashed = _Run(opts, ctx, role or "unknown")
+        crashed = _Run(opts, ctx, role or "unknown", home)
         crashed.undecided.append(line)
         doc = crashed.document()
         if opts.json:
             ctx.out(json.dumps(doc, ensure_ascii=False, indent=2))
         return dc.EXIT_UNKNOWN, doc
-    if opts.json:
-        ctx.out(json.dumps(doc, ensure_ascii=False, indent=2))
-    else:
-        for line in dc.render(doc):
-            ctx.out(line)
+    _emit(opts, ctx, doc)
     return int(doc["exit"]), doc
 
 
