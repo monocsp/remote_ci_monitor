@@ -195,8 +195,12 @@ def git_requirement(
         return requirement("git", "fail", f"{note} on the service PATH", needed, hint)
     if token_file:
         version = _git_version(git, env)
-        if version is None or version < MIN_GIT_TOKEN_FILE:
-            shown = ".".join(map(str, version)) if version else "unknown version"
+        if version is None:
+            # 버전을 읽지 못한 것은 「낮다」가 아니다 — 모름이다(P3 3라운드)
+            detail = "cannot read its version — token_file needs git 2.31+"
+            return requirement("git", "unknown", detail, needed)
+        if version < MIN_GIT_TOKEN_FILE:
+            shown = ".".join(map(str, version))
             return requirement("git", "fail", f"{shown} — token_file needs git 2.31+", needed, hint)
     return requirement("git", "ok", "on the service PATH", needed)
 
@@ -1315,17 +1319,15 @@ class _Run:
                 # 닿지 못하는 저장소의 git_ref 일은 받을 수 없다 — FAIL, 종료 1(위임 결정 4).
                 # 서비스 PATH 의 git 을 서비스 환경으로 돌린다. 막힌 shim 이면 돌리지 않는다
                 # (실행하면 CLT 설치 창이 뜬다) — git 행이 그 사연을 보인다
-                git = runner.find_tool("git", env.get("PATH", "")) if self.path_known else None
-                details, bad = [], False
+                git = runner.find_tool("git", env["PATH"]) if self.path_known else None
+                details: list[str] = []
+                bad = unsure = False
                 for r in cfg.repos:
-                    if git is None:
-                        why = "git missing" if self.path_known else "the service PATH is unknown"
-                        problem: str | None = why
-                    else:
-                        problem = self.ctx.ls_remote(r.url, git, env)
+                    problem, doubt = self.repo_reach(r, git, env)
                     bad = bad or problem is not None
-                    details.append(f"{r.name} ({'ok' if problem is None else problem})")
-                state = "fail" if bad else "ok"
+                    unsure = unsure or doubt is not None
+                    details.append(f"{r.name} ({problem or doubt or 'ok'})")
+                state = "fail" if bad else "unknown" if unsure else "ok"
                 self.requirements.append(
                     requirement("repos", state, " · ".join(details), "git_ref presets")
                 )
@@ -1342,6 +1344,33 @@ class _Run:
             linger = linger_requirement(self.ctx.environ.get("USER"))
             if linger is not None:
                 self.requirements.append(linger)
+
+    def repo_reach(
+        self, repo: Any, git: str | None, env: Mapping[str, str]
+    ) -> tuple[str | None, str | None]:
+        """(문제, 모름의 이유) — 둘 다 None 이면 닿는다. 모르는 것을 「닿지 않음」으로 적지 않는다.
+
+        `token_file` 저장소는 워커가 git 을 부를 때처럼(`gitops._run_git`) 그 파일을 읽는 자격
+        헬퍼 하나(`gitops.git_env`)로 부른다 — URL 만 넘겨 전역 자격으로 재면 워커가 닿는 저장소를
+        「닿지 않음」으로 단정한다(P3 3라운드 MED). 그 헬퍼는 git 2.31+ 에서만 먹는다."""
+        from remote_ci_monitor import gitops
+
+        if not self.path_known:
+            return None, "not checked — the service PATH is unknown"
+        if git is None:
+            return "git missing", None
+        credential = repo.credential
+        if credential is None:
+            return self.ctx.ls_remote(repo.url, git, env), None
+        if not os.access(credential, os.R_OK):
+            return None, (
+                "not checked — this user cannot read its token_file (run rcm doctor as the "
+                "service's user)"
+            )
+        version = _git_version(git, env)
+        if version is None or version < MIN_GIT_TOKEN_FILE:
+            return None, "not checked — token_file needs git 2.31+ (see the git row)"
+        return self.ctx.ls_remote(repo.url, git, gitops.git_env(env, credential=credential)), None
 
     def measure(self, spec: Spec, env: dict[str, str], *, pool: str, accept_any: bool) -> None:
         """명세대로 깨끗한 환경에서 잰다 — 잰 것을 서버에 보내지 않는다(TD12)."""
