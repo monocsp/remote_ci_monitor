@@ -99,14 +99,21 @@ LOCAL_ONLY = {"rel", "relany", "relneed", "relq", "relgated", "localcheck"}
 # ── 도우미 ───────────────────────────────────────────────────────────────────
 
 
-def report(s: M5nServer, worker: str, *, host_key: str = HOST_B, accept_any: bool = True):
+def report(
+    s: M5nServer,
+    worker: str,
+    *,
+    host_key: str = HOST_B,
+    accept_any: bool = True,
+    xcode: str = "Xc 1",
+):
     """등록한 워커의 보고 — 모든 프리셋에 「전부 있음」(옛 워커가 보내던 꼴)."""
     gen = s.registered(worker, pool=s.pools_of[worker])["generation"]
     body = {
         "generation": gen,
         "host_key": host_key,
         "accept_any": accept_any,
-        "fingerprint": {"xc": ok_probe("Xc 1")},
+        "fingerprint": {"xc": ok_probe(xcode)},
         "presets": {
             n: {"missing_tools": [], "workspace_tools": [], "missing_passthrough": []}
             for n in NAMES
@@ -794,6 +801,41 @@ def test_to18_a_remote_machine_does_not_wait_for_a_check_that_runs_only_locally(
     assert lo.claim(OTHER)[0] == 204
 
 
+def test_to18_a_local_only_check_that_passed_on_a_remote_machine_holds_for_that_fingerprint(
+    tmp_path,
+):
+    """표식을 달기 전에 원격 워커에서 통과한 점검은 지문이 같은 동안 그대로 유효하다 — 그
+    머신의 `qa` 는 계속 eligible 이다. 지문이 바뀌면 다시 걸 수 없으니 `check_local_only` 다
+    (위임 결정 4 의 추가 문장, `docs/configuration.md` 의 local_only 절)."""
+    head = 'name = "localcheck"\nargv = ["sh", "-c", "echo localcheck"]\n'
+    unmarked = PRESETS.replace(head + "local_only = true\n", head)
+    assert unmarked != PRESETS
+    s = server(tmp_path, presets=unmarked)
+    try:
+        report(s, OTHER, host_key=HOST_C)
+        check = queued(s, "localcheck", machine=OTHER)
+        assert s.claimed(OTHER) == check
+        assert s.finish(OTHER, check, "succeeded", exit_code=0)[0] == 200
+        assert s.machines()[OTHER]["presets"]["qa"]["code"] == "ok"
+        s.write(PROBES + PRESETS)  # 표식을 단다
+        status, body = s.req("POST", "/reload", token="admin", json_body={})
+        assert status == 200, body
+        assert s.app.config.preset("localcheck").local_only is True
+        report(s, OTHER, host_key=HOST_C)  # 같은 지문
+        m = s.machines()[OTHER]
+        assert (m["presets"]["qa"]["state"], m["presets"]["qa"]["code"]) == ("eligible", "ok")
+        row = {c["preset"]: c for c in m["checks"]}["localcheck"]
+        assert (row["state"], row["job_id"]) == ("passed", check), row
+        report(s, OTHER, host_key=HOST_C, xcode="Xc 2")  # 지문이 바뀌었다
+        assert s.machines()[OTHER]["presets"]["qa"] == {
+            "state": "ineligible",
+            "code": "check_local_only",
+            "detail": {"check": "localcheck"},
+        }
+    finally:
+        s.close()
+
+
 def test_to19_rechecking_a_local_only_check_on_a_remote_machine_is_409(lo, monkeypatch):
     report(lo, OTHER, host_key=HOST_C)
     calls = record_checks(lo, monkeypatch)
@@ -897,4 +939,6 @@ def test_to1_the_configuration_guide_and_the_changelog_name_local_only():
     assert "`local_only` (ineligible) is shown first, before any row of this table" in flat
     assert "replaces `check_needed` on a remote worker" in flat
     assert "shown before any of these" not in flat
+    # 원격에서 이미 통과한 로컬 전용 점검은 지문이 같은 동안 유효하다(위임 결정 4 의 추가)
+    assert "keeps counting there until that machine's fingerprint changes" in flat
     assert "local_only = true" in unreleased(read(CHANGELOG))
