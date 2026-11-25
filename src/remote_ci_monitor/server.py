@@ -48,10 +48,12 @@ from remote_ci_monitor import __version__
 from remote_ci_monitor.capabilities import (
     CHECK_LABEL,
     CHECK_REQUESTER,
+    NO_LOCAL_LANES_MESSAGE,
     AmbiguousMachine,
     CapabilitiesMixin,
     CapabilityError,
     MachineDown,
+    NoLocalLanes,
     NotACandidate,
 )
 from remote_ci_monitor.clientwheel import (
@@ -101,6 +103,7 @@ from remote_ci_monitor.core.model import (
     PRIORITY_HIGH,
     QUEUED,
     REASON_NEEDS_ACTION,
+    REASON_NO_CAPABLE_MACHINE,
     SCHEDULED,
     SUCCEEDED,
     TIMED_OUT,
@@ -535,6 +538,8 @@ class App(RemoteWorkersMixin, CapabilitiesMixin, ShelfAppMixin):
         self.stop = threading.Event()
         self.workers: list[Worker] = []
         self._last_error: str | None = None
+        #: `/api/health` 의 capacity 예외 중 마지막으로 남긴 것 — 같은 예외는 다시 안 남긴다
+        self._capacity_error: tuple[str, str] | None = None
         self._lock = threading.Lock()
         self._janitor: threading.Thread | None = None
         self.retention: Janitor | None = None
@@ -4325,6 +4330,14 @@ class App(RemoteWorkersMixin, CapabilitiesMixin, ShelfAppMixin):
                 raise ApiError(400, f"unknown machine {machine!r} — see rcm machines") from e
             except AmbiguousMachine as e:
                 raise ApiError(400, str(e)) from e
+            if view.id == LOCAL_WORKER and not self._has_local_lanes():
+                # 분배 전용(`lanes = 0`) — 「down」이 아니다. 기다려도 오지 않는다(결정 243)
+                raise ApiError(
+                    409,
+                    f"{NO_LOCAL_LANES_MESSAGE}; send it to a worker or leave --machine out",
+                    error_code=REASON_NO_CAPABLE_MACHINE,
+                    machine=view.id,
+                )
             if not view.alive:
                 raise ApiError(
                     409,
@@ -4383,6 +4396,14 @@ class App(RemoteWorkersMixin, CapabilitiesMixin, ShelfAppMixin):
             answer = self.recheck(machine, names)
         except KeyError as e:
             raise ApiError(404, f"no such machine {machine!r}") from e
+        except NoLocalLanes as e:
+            # 분배 전용 서버의 `@local` — 제출(`--machine @local`)과 같은 409 다(결정 243)
+            raise ApiError(
+                409,
+                f"{NO_LOCAL_LANES_MESSAGE}; there is nothing to recheck on it",
+                error_code=REASON_NO_CAPABLE_MACHINE,
+                machine=str(e),
+            ) from e
         except MachineDown as e:
             # `rcm run --machine` 과 같은 규칙(결정 106) — 걸어 봐야 기다리기만 한다
             raise ApiError(
@@ -5419,6 +5440,21 @@ class App(RemoteWorkersMixin, CapabilitiesMixin, ShelfAppMixin):
             idle_pools = self.pools_without_workers(self.now_fn())
         except Exception:  # noqa: BLE001
             idle_pools = []
+        try:
+            capacity: dict[str, Any] | None = self.capacity()
+        except Exception as e:  # noqa: BLE001 — 정보 칸이다. 못 세면 null(모름)이지 0 이 아니다
+            # 왜 못 셌는지는 서버 로그에 남긴다 — `rcm check` 는 null 을 「못 셌다」로 그린다.
+            # health 는 자주 불린다. 같은 예외를 부를 때마다 남기면 `last_error` 의 다른 오류를
+            # 덮고 로그가 찬다 — 바뀔 때만(처음 · 다른 예외 · 나았다가 다시) 남긴다
+            err = (f"capacity: {type(e).__name__}", _safe(str(e)))
+            with self._lock:
+                fresh, self._capacity_error = err != self._capacity_error, err
+            if fresh:
+                self.record_error(err[0], detail=err[1])
+            capacity = None
+        else:
+            with self._lock:
+                self._capacity_error = None
         strict_cancel = bool(self.config.server.cancel_requires_submission_token)
         body = {
             "ok": ok,
@@ -5429,6 +5465,9 @@ class App(RemoteWorkersMixin, CapabilitiesMixin, ShelfAppMixin):
             "version": self.version,
             "storage": self._health_storage(),  # 부피 회계(M5g, 정보 — 503 조건은 아니다)
             "pools_without_workers": idle_pools,  # 등록된 원격 워커가 전부 down 인 풀(정보)
+            # 갈 수 있는 머신이 있는 프리셋 수 / 전체 프리셋 수(M5t-a 결정 243, 정보 — 503 조건은
+            # 아니다, ⛔ Q5). `rcm check` 가 0 이면 FAIL, 일부면 warn 으로 그린다
+            "capacity": capacity,
             "advertise": self._advertise_json(),  # mDNS 광고 상태(M5c, 정보)
             # 클라이언트가 서버 버전을 따라오는 길(M5i I8 · 결정 81·83, 정보 — 503 조건은 아니다)
             "client_wheel": self.client_wheel(),

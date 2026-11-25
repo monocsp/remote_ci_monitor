@@ -83,6 +83,7 @@ from remote_ci_monitor.core.render_text import (
     CAUSE_NOT_FOUND,
     DASH,
     MAX_IDENT,
+    RUNS_NO_JOBS,
     blocked_notes_text,
     failure_lines,
     fingerprint_summary,
@@ -2774,16 +2775,19 @@ def cmd_machines(args: argparse.Namespace) -> int:
         return 0
     rows = [list(MACHINES_HEADER)]
     for m in machines:
-        name = _machine_label(m) + ("" if m.get("alive", True) else " (down)")
         lanes = m.get("lanes")
+        # 레인 0 인 로컬 머신(분배 전용 서버)은 down 이 아니라 잡을 돌리지 않는 머신이다. 재지
+        # 않으니 판정 칸도 비운다 — 「보고 없음」은 기다리면 올 것처럼 읽힌다(M5t-a §3 C10)
+        idle = m.get("kind") == "local" and lanes == 0
+        tag = f" ({RUNS_NO_JOBS})" if idle else ("" if m.get("alive", True) else " (down)")
         rows.append(
             [
-                name,
+                _machine_label(m) + tag,
                 str(m.get("host_label") or DASH),
                 str(m.get("pool") or DASH),
                 str(lanes) if isinstance(lanes, int) else DASH,
                 fingerprint_summary(m.get("fingerprint")),
-                presets_summary(m.get("presets")),
+                DASH if idle else presets_summary(m.get("presets")),
             ]
         )
     print("\n".join(_table(rows)))
@@ -2809,8 +2813,12 @@ def _probe_change(name: str, probe: dict[str, Any]) -> str:
 
 
 def _machines_check_row(machines: list[dict[str, Any]]) -> tuple[str, bool, str]:
-    """`rcm check` 의 `machines` 행(가정 C7) — 24시간 안에 바뀐 환경과 실패한 점검."""
+    """`rcm check` 의 `machines` 행(가정 C7) — 24시간 안에 바뀐 환경과 실패한 점검.
+
+    분배 전용 서버(`lanes = 0`)의 `@local` 은 잡을 받는 머신이 아니라 세지 않는다(M5t-a 결정
+    243) — 「1 machine」이 워커가 하나 붙은 것으로 읽힌다."""
     now = datetime.now(UTC)
+    machines = [m for m in machines if not (m.get("kind") == "local" and m.get("lanes") == 0)]
     changed: list[str] = []
     failed: list[str] = []
     n_failed = 0
@@ -3881,11 +3889,15 @@ def _pools_row(doc: dict[str, Any], client: Client) -> tuple[str, bool | None, s
     local_held = [w for w in all_workers if not w.get("worker") and w.get("state") == "held"]
     head = f"default ({lanes} lane{'s' if lanes != 1 else ''}"
     head += f" · {len(local_held)} held)" if local_held else ")"
-    parts = [head]
     by_pool: dict[str, list[dict[str, Any]]] = {}
     for w in server.get("workers") or []:
         if w.get("worker"):
             by_pool.setdefault(w.get("pool") or "default", []).append(w)
+    # 분배 전용(`lanes = 0`) — 기본 풀은 원격 워커뿐이다. `default (0 lanes) · default (…)` 로
+    # 두 번 쓰지 않는다(M5t-a §3 C10)
+    parts = [] if server.get("lanes") == 0 and "default" in by_pool else [head]
+    if server.get("lanes") == 0 and "default" not in by_pool:
+        parts = ["default (no local lanes, no workers)"]
     for name in sorted(by_pool):
         pills: list[str] = []
         for w in sorted(by_pool[name], key=lambda x: (str(x.get("worker")), x.get("lane") or 0)):
@@ -3915,6 +3927,56 @@ def _pools_row(doc: dict[str, Any], client: Client) -> tuple[str, bool | None, s
     return ("pools", True, text)
 
 
+#: 로컬 레인이 없는 서버(`lanes = 0`)의 도구 행 — FAIL 이 아니다(M5t-a §4.2)
+NO_LOCAL_LANES_TEXT = "this machine runs no jobs (lanes = 0 — dispatch only)"
+
+
+#: 서버가 `capacity` 를 싣되 null 로 보냈다 — 세다가 실패했다(모름)
+CAPACITY_UNKNOWN_TEXT = "server could not count capacity"
+
+
+def _is_count(value: Any) -> bool:
+    """0 이상의 정수인가 — JSON 의 `true` 는 파이썬에서 `int` 라 따로 뺀다."""
+    return isinstance(value, int) and not isinstance(value, bool) and value >= 0
+
+
+def _capacity_row(health: Any, *, has_presets: bool) -> tuple[str, bool | None, str] | None:
+    """`capacity` — 지금 갈 수 있는 머신이 있는 프리셋 수 / 전체 프리셋 수(`/api/health`).
+
+    하나도 없으면 FAIL, 일부만 없으면 warn 으로 그 프리셋을 댄다 — 어느 머신도 못 돌리는 배포
+    프리셋은 정상일 수 있다. 프리셋이 0개이거나 옛 서버(키 없음)면 행을 그리지 않는다(M5t-a
+    결정 243 · §4.2).
+
+    키가 있는데 null 이면 서버가 세다가 실패한 것이다. 못 모은 칸은 실패로 그린다(PLAN.md
+    「rcm check」) — 분배 전용(`lanes = 0`)이면 이 칸이 「갈 곳이 있나」의 유일한 답이라 FAIL,
+    레인이 있는 서버는 로컬 레인이 받으므로 warn 이다. 키 없음(옛 서버)과는 구별한다.
+
+    꼴이 깨진 답(dict 가 아님 · `total` · `reachable` 이 없거나 정수가 아님 · `total <= 0` ·
+    `0 <= reachable <= total` 밖)도 null 과 같은 「못 셌다」다 — 옛 서버처럼 행을 빼면 분배 전용
+    서버의 `rcm check` 가 0 으로 끝난다(fail-open, P6 재확인)."""
+    if not isinstance(health, dict) or "capacity" not in health:
+        return None
+    cap = health.get("capacity")
+    if cap is None:
+        if not has_presets:
+            return None
+        return ("capacity", False if health.get("lanes") == 0 else None, CAPACITY_UNKNOWN_TEXT)
+    if not isinstance(cap, dict):
+        cap = {}  # 꼴이 깨진 답 — 아래에서 「못 셌다」로 떨어진다
+    total, reachable = cap.get("total"), cap.get("reachable")
+    if not (_is_count(total) and _is_count(reachable) and 0 < total and reachable <= total):
+        if not has_presets:
+            return None  # 프리셋이 없으면 셀 것도 없다(TL17)
+        unknown_grade = False if health.get("lanes") == 0 else None
+        return ("capacity", unknown_grade, CAPACITY_UNKNOWN_TEXT)
+    none = [str(n) for n in cap.get("unreachable") or []]
+    head = f"{reachable}/{total} presets have a machine to run on"
+    if not none:
+        return ("capacity", True, head)
+    detail = f"{head} — none for: {', '.join(none)}"
+    return ("capacity", False if reachable == 0 else None, detail)
+
+
 def _local_preset_tools_row(cfg: Any) -> tuple[str, bool, str] | None:
     """`local preset tools` — `requires` 를 선언한 프리셋마다 **이 셸**에서 도구를 찾아 본다.
 
@@ -3925,6 +3987,10 @@ def _local_preset_tools_row(cfg: Any) -> tuple[str, bool, str] | None:
     """
     from remote_ci_monitor.runner import missing_tools, public_tool_name
 
+    lanes = getattr(getattr(cfg, "server", None), "lanes", None)
+    if lanes == 0 and any(p.requires for p in cfg.presets):
+        # 분배 전용(M5t-a 결정 243) — 이 머신에서 돌 잡이 없으니 빠진 도구는 문제가 아니다
+        return ("local preset tools", True, NO_LOCAL_LANES_TEXT)
     parts: list[str] = []
     all_ok = True
     for preset in cfg.presets:
@@ -3964,6 +4030,9 @@ def _service_preset_env_row(
     facts = health.get("preset_env") if isinstance(health, dict) else None
     if not isinstance(facts, dict) or not facts:
         return None
+    if health.get("lanes") == 0:
+        # 분배 전용 서버(M5t-a 결정 243) — 서버의 환경에서 돌 잡이 없다
+        return ("service preset tools", True, NO_LOCAL_LANES_TEXT)
     parts: list[str] = []
     all_ok = True
     for name, entry in sorted(facts.items()):
@@ -4292,6 +4361,9 @@ def cmd_check(args: argparse.Namespace) -> int:
             names = ", ".join(p["name"] for p in doc.get("presets", [])) or "(none)"
             rows.append(("presets", bool(doc.get("presets")), names))
             rows.append(_pools_row(doc, client))
+            capacity_row = _capacity_row(health_body, has_presets=bool(doc.get("presets")))
+            if capacity_row is not None:
+                rows.append(capacity_row)
             rows.append(("timezone", True, doc.get("display_timezone") or "server local"))
             rows.extend(_machine_check_rows(client, doc))
             storage = (doc.get("server") or {}).get("job_storage")

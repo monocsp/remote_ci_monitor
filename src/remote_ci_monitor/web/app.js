@@ -235,7 +235,8 @@
       case "waiting_for_lane": {
         parts.push(T(lang, "reason.waiting_for_lane"));
         var busy = busyCount(status), lanes = laneCount(status);
-        if (isNum(busy) && isNum(lanes)) parts.push(T(lang, "reason.lanes_busy", { busy: busy, lanes: lanes }));
+        // 로컬 레인이 없는 서버(lanes 0)는 원격 레인을 기다린다 — `0/0` 은 아무것도 말하지 않는다
+        if (isNum(busy) && isNum(lanes) && lanes > 0) parts.push(T(lang, "reason.lanes_busy", { busy: busy, lanes: lanes }));
         if (isNum(row.ahead_job_id)) { parts.push(T(lang, "reason.behind", { id: row.ahead_job_id })); links.push({ jobId: row.ahead_job_id }); }
         if (isNum(est.wait_seconds)) parts.push(T(lang, "reason.frees_in", { dur: fmtDuration(est.wait_seconds) }));
         // any-capable · 지정 잡이면 어디서 돌지를 끝에 단다(M5n §8.3). pool 행은 오늘 그대로.
@@ -463,6 +464,19 @@
   // ── 풀 (M5b) ──
   // Host 절의 카드 목록(M5b-4): 기본 풀의 표본이 먼저(제목 = 이름, 오늘 그대로), 그 뒤 다른 풀의
   // 워커 표본(제목 `<이름> · pool <풀>`). 표본이 없거나 null 인 원격 풀은 카드를 만들지 않는다.
+  /** 서버 자신의 표본(`source: "local"`)인데 서버에 로컬 레인이 없나(M5t-a §3 C11) — 샘플러는
+   * 돌지만 그 머신은 잡을 돌리지 않는다. 원격 워커의 표본 · 레인이 있는 서버는 false. */
+  function hostRunsNoJobs(status, host) {
+    var s = status && status.server;
+    return !!(host && host.source === "local" && s && s.lanes === 0);
+  }
+  /** 호스트 카드 이름 줄의 사실(`hostCardHtml`) — OS · 코어 · 부하, 서버 자신인데 로컬 레인이
+   * 없으면 「잡을 돌리지 않는 머신」을 끝에 단다(M5t-a §3 C11). */
+  function hostFacts(status, h, lang) {
+    h = h || {};
+    return (h.os || DASH) + " · " + T(lang, "host.cores_load", { cores: isNum(h.cores) ? h.cores : DASH, load: Array.isArray(h.load) && isNum(h.load[0]) ? h.load[0].toFixed(1) : DASH })
+      + (hostRunsNoJobs(status, h) ? " · " + T(lang, "host.runs_no_jobs") : "");
+  }
   function hostCards(status, lang) {
     var pools = poolsOf(status);
     var out = [];
@@ -701,7 +715,9 @@
     var t = T(lang, "queue.counts", { total: q.length, running: running, waiting: waiting });
     if (waiting) t += " · " + T(lang, "queue.oldest_waiting", { dur: fmtDuration(oldest) });
     var busy = busyCount(status), lanes = laneCount(status);
-    if (isNum(busy) && isNum(lanes)) t += " · " + T(lang, "queue.lanes_busy", { busy: busy, lanes: lanes });
+    // 분배 전용(M5t-a 결정 243) — `lanes 0/0 busy` 는 「다 놀고 있다」로 읽힌다
+    if (lanes === 0) t += " · " + T(lang, "queue.no_local_lanes");
+    else if (isNum(busy) && isNum(lanes)) t += " · " + T(lang, "queue.lanes_busy", { busy: busy, lanes: lanes });
     return t;
   }
 
@@ -889,6 +905,8 @@
       case "report_missing": return T(lang, "place.report_missing");
       case "report_stale": return T(lang, "place.report_stale");
       case "fingerprint_unknown": return T(lang, "place.fingerprint_unknown");
+      // 분배 전용 서버(`lanes = 0`)의 `@local` — 갈 곳 잃은 잡의 이유(M5t-a 결정 243)
+      case "no_local_lanes": return T(lang, "place.no_local_lanes");
       default: return code || state || DASH;
     }
   }
@@ -1067,17 +1085,22 @@
       var ok = names.filter(function (k) { return presets[k] && presets[k].state === "eligible"; }).length;
       var checks = machineChecks(m);
       var sum = checkSummary(checks, lang);
+      // 레인 0 인 로컬 머신(분배 전용 서버)은 꺼진 것이 아니라 잡을 돌리지 않는 머신이다. 재지
+      // 않으므로 판정 수도 비운다(M5t-a §3 C10)
+      var noJobs = m.kind === "local" && m.lanes === 0;
       return {
         id: m.id,
         name: m.display_name || m.id || DASH,
-        alive: m.alive === true ? true : m.alive === false ? false : null,
+        alive: noJobs ? null : m.alive === true ? true : m.alive === false ? false : null,
+        noJobs: noJobs,
         host: m.host_label || DASH,
         fingerprint: probeSummary(m.fingerprint, lang),
-        presets: names.length ? T(lang, "machine.presets", { n: ok, total: names.length }) : DASH,
+        presets: names.length && !noJobs ? T(lang, "machine.presets", { n: ok, total: names.length }) : DASH,
         checks: checks.length ? checks.map(function (c) { return checkText(c, lang); }).join(" · ") : DASH,
         checkHead: sum.head,
         checkRest: sum.rest,
-        recheck: admin === true && checks.length > 0
+        // 레인 없는 `@local` 을 다시 점검하면 409 「no local lanes」다 — 버튼을 그리지 않는다
+        recheck: admin === true && checks.length > 0 && !noJobs
       };
     });
   }
@@ -3521,7 +3544,7 @@
     reasonText: reasonText, confidenceBadge: confidenceBadge, etaText: etaText,
     elapsedText: elapsedText, notMoving: notMoving, yourJobs: yourJobs, isMine: isMine,
     scheduledOf: scheduledOf, scheduledRowModel: scheduledRowModel, notifyFailuresBadge: notifyFailuresBadge, cancelLocked: cancelLocked, hostPressure: hostPressure,
-    jobStorageLine: jobStorageLine,
+    jobStorageLine: jobStorageLine, hostRunsNoJobs: hostRunsNoJobs, hostFacts: hostFacts,
     queueHeader: queueHeader, sortQueue: sortQueue, workerPills: workerPills, workersCrowded: workersCrowded, workerName: workerName, hostCards: hostCards, headerNote: headerNote, progressHead: progressHead, progressHeadHtml: progressHeadHtml, queueGroups: queueGroups, runningStep: runningStep,
     stepMark: stepMark, overallProgress: overallProgress, progressBarHtml: progressBarHtml, subProgress: subProgress, unitsGridHtml: unitsGridHtml, timePct: timePct, recentLine: recentLine, supersededHtml: supersededHtml, recentDetail: recentDetail, artifactsLine: artifactsLine, shelfLine: shelfLine, shelfDeletable: shelfDeletable, shelfDeleteOutcome: shelfDeleteOutcome, navModel: navModel, SSE_REFETCH_KINDS: SSE_REFETCH_KINDS, outcomeText: outcomeText, workerState: workerState, rerunCommand: rerunCommand, shellQuote: shellQuote, transitionsLine: transitionsLine,
     sourceHtml: sourceHtml, priorityChip: priorityChip, cacheText: cacheText,
@@ -4615,7 +4638,7 @@
       var m = findMachine(r.id);
       var red = machineChecks(m).some(function (c) { return c && c.state === "failed"; });
       h += '<tr data-machine="' + esc(r.id) + '"' + (r.alive === false ? ' class="down"' : "") + ">"
-        + '<td class="mname"><div class="mcell"><span class="mono mn" data-cut="mn" title="' + esc(r.name) + '">' + midHtml(r.name) + "</span>" + (r.alive === false ? '<span class="mdown">' + esc(tr("machines.down")) + "</span>" : "")
+        + '<td class="mname"><div class="mcell"><span class="mono mn" data-cut="mn" title="' + esc(r.name) + '">' + midHtml(r.name) + "</span>" + (r.alive === false ? '<span class="mdown">' + esc(tr("machines.down")) + "</span>" : "") + (r.noJobs ? '<span class="mrole">' + esc(tr("machines.no_lanes")) + "</span>" : "")
         + (r.name !== r.id ? '<span class="sub mono mid" data-cut="mid" title="' + esc(r.id) + '">' + midHtml(r.id) + "</span>" : "") + "</div></td>"
         + '<td class="mhost mono" title="' + esc(r.host) + '"><span class="mhv" data-cut="mhost" title="' + esc(r.host) + '">' + midHtml(r.host) + "</span></td>"
         + '<td class="mfp mono"><div class="clamp" data-cut="mfp" title="' + esc(r.fingerprint) + '">' + esc(r.fingerprint) + "</div></td>"
@@ -4706,7 +4729,7 @@
         (spark ? '<div class="spark">' + spark + "<span>" + esc(tr("host.window")) + "</span></div>" : "") + "</div>";
     };
     var name = title || h.name || DASH;
-    var facts = (h.os || DASH) + " · " + tr("host.cores_load", { cores: isNum(h.cores) ? h.cores : DASH, load: Array.isArray(h.load) && isNum(h.load[0]) ? h.load[0].toFixed(1) : DASH });
+    var facts = hostFacts(state.status, h, L());
     // 이름 · 나이 줄은 **한 줄**이다(말줄임 · 전문은 title) — 처리 대기 숫자의 자릿수가 5초마다 바뀌어도
     // 줄 수가 그대로여야 그 아래 카드가 뛰지 않는다
     var html = '<div class="hostcard' + (h.disk ? " m4" : "") + (stale ? " dim" : "") + '"><div class="hn"><span class="hname" data-cut="hname" title="' + esc(name) + '">' + midHtml(name) + '</span><span class="age" data-cut="age" title="' + esc(facts) + '">' + (stale ? '<span class="stale-badge">' + esc(tr("host.stale", { dur: fmtDuration(age) })) + "</span> · " : '<span data-tick="age" data-from="' + esc(h.sampled_at || "") + '">' + esc(tr("host.sampled", { age: fmtAgo(age, L()) })) + "</span> · ") + esc(facts) + "</span></div>";

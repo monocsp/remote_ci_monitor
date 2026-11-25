@@ -223,6 +223,33 @@ def test_discover_json_lists_objects_with_the_locked_keys(home, fake, capsys):
         assert doc["lanes"] == f.lanes, doc  # None → null
 
 
+def test_tl10_a_dispatch_only_server_shows_lanes_0_not_a_dash(home, fake, capsys):
+    """# TL10 — 분배 전용 서버(`lanes = 0`)의 TXT `lanes=0` 은 패킷 해석(`found_from_records`)과
+    `rcm discover` 의 표 · JSON 을 지나 `0` 으로 보인다. 0 을 거짓으로 읽어 「모름」(`—` · null)으로
+    바꾸면 「레인 수를 안 알리는 옛 서버」와 구별이 안 된다.
+
+    잠금 시험: 고치기 전에도 초록 — 지금 동작을 잠근다(P5 G1)."""
+    from remote_ci_monitor.core import mdns as core_mdns
+
+    packet = core_mdns.encode_response(
+        "coord._rcm._tcp.local.",
+        "coord.local.",
+        8790,
+        ["10.0.0.9"],
+        {"v": "0.11.0", "name": "coord", "lanes": "0"},
+    )
+    real = core_mdns.found_from_records(core_mdns.decode(packet)[1])
+    assert [f.lanes for f in real] == [0], real
+    fake(*real)
+    code, out, err = run(capsys, ["discover"])
+    assert code == 0, err
+    lines = [ln for ln in out.splitlines() if ln.strip()]
+    assert lines[1].split() == ["coord", "http://10.0.0.9:8790", "0.11.0", "0"], lines[1]
+    code, out, err = run(capsys, ["discover", "--json"])
+    assert code == 0, err
+    assert json.loads(out)[0]["lanes"] == 0, out
+
+
 def test_discover_passes_timeout_to_discover(home, fake, capsys):
     rec = fake(found())
     code, _, err = run(capsys, ["discover", "--timeout", "0.3"])
