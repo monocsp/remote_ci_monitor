@@ -123,19 +123,22 @@ HOST_FACT_KEYS = (
     "python",
 )
 HOST_FACT_MAX = 64
+#: 참 · 거짓 · null 만 받는 칸 — 나머지는 문자열 · null 이다. 문자열 "false" 를 참으로 읽지 않게
+HOST_FACT_BOOLS = frozenset({"rosetta", "container", "root"})
 _HOST_CONTROL_RE = re.compile(r"[\x00-\x1f\x7f-\x9f]")
 
 
 def clean_host_facts(raw: Any) -> dict[str, Any] | None:
-    """워커가 보낸 `host` → 허용 키만, 문자열은 제어문자를 지우고 64자로. 참 · 거짓 · null 은
-    그대로다. 객체가 아니면 None(모름). 값은 `rcm machines` 의 터미널과 웹에 그대로 나간다."""
+    """워커가 보낸 `host` → 허용 키만. `rosetta` · `container` · `root` 는 참 · 거짓만, 나머지는
+    문자열만 받고 제어문자를 지워 64자로 자른다. 모양이 틀린 값은 None(모름)이다. 객체가 아니면
+    None. 값은 `rcm machines` 의 터미널과 웹에 그대로 나간다."""
     if not isinstance(raw, dict):
         return None
     out: dict[str, Any] = {}
     for key in HOST_FACT_KEYS:
         value = raw.get(key)
-        if isinstance(value, bool) or value is None:
-            out[key] = value
+        if key in HOST_FACT_BOOLS:
+            out[key] = value if isinstance(value, bool) else None
         elif isinstance(value, str):
             out[key] = _HOST_CONTROL_RE.sub("", value)[:HOST_FACT_MAX] or None
         else:
