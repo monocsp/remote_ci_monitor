@@ -2298,6 +2298,19 @@ MUTANTS = (
         tests=("tests/test_redgreen.py::test_a_skipped_test_inside_a_requested_node_is_undecided",),
     ),
     Mutant(
+        # 신호 막기를 try 밖에서 건다 — 막기 호출 안에서 처리기가 SystemExit 를 던지면 SIGTERM ·
+        # SIGINT 가 막힌 채 남아 같은 pytest 워커의 다음 자식이 SIGTERM 을 못 받는다(rc -9,
+        # 2026-11-25 dev rcm/ci #4136 · #4137 · #4165)
+        name="redgreen-block-outside-try",
+        path="tools/redgreen.py",
+        old="    try:\n        signal.pthread_sigmask(signal.SIG_BLOCK, HELD)\n        yield\n",
+        new="    signal.pthread_sigmask(signal.SIG_BLOCK, HELD)\n    try:\n        yield\n",
+        tests=(
+            "tests/test_redgreen.py::"
+            "test_sm1_a_handler_that_fires_as_the_block_lands_leaves_no_mask",
+        ),
+    ),
+    Mutant(
         # 표 바로 뒤의 앞 `|` 없는 행을 보지 않는다 — GFM 은 행으로 그리는데 대조하지 않고
         # 통과한다(4라운드 H1)
         name="scenario-trace-unpiped-row-ignored",

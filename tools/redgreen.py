@@ -102,11 +102,15 @@ def _held() -> Any:
     if not hasattr(signal, "pthread_sigmask"):
         yield
         return
-    old = signal.pthread_sigmask(signal.SIG_BLOCK, HELD)
+    # 막기는 try 안에서 건다 — CPython 은 마스크를 바꾼 직후 미뤄 둔 처리기를 돌리므로, 이미 와
+    # 있던 신호의 처리기가 막기 호출 안에서 SystemExit 를 던지면 try 밖에서는 막힘이 영영 남는다
+    # (pytest 워커가 그 마스크로 다음 시험의 자식을 띄워 rc -9 가 났다, 2026-11-25)
+    before = signal.pthread_sigmask(signal.SIG_BLOCK, [])  # 읽기만 — 여기서 터지면 바뀐 게 없다
     try:
+        signal.pthread_sigmask(signal.SIG_BLOCK, HELD)
         yield
     finally:
-        signal.pthread_sigmask(signal.SIG_SETMASK, old)
+        signal.pthread_sigmask(signal.SIG_SETMASK, before)
 
 
 def resolve(repo: Path, fix: str, tests: list[str]) -> tuple[Path, str, str, list[str]]:
