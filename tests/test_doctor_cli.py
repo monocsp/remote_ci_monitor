@@ -1760,3 +1760,30 @@ def test_rcm_check_git_row_follows_the_shim_rule(env, clt_shim, monkeypatch, cap
     assert git is not None and git.startswith("FAIL"), lines
     assert "needs Command Line Tools" in git, git
     assert not marker.exists(), "rcm check ran the git shim"
+
+
+# ── 서버가 재지 않은 로컬 레인 프리셋은 모름 (P3 1라운드 MED · 검증자 1 #3) ────
+
+
+@pytest.mark.parametrize(
+    "measured", [None, {"unit": {"missing_tools": []}}], ids=["no-key", "no-entry"]
+)
+def test_a_local_lane_preset_the_server_did_not_measure_is_unknown(
+    env, coordinator, monkeypatch, capsys, measured
+):
+    """`/api/health` 에 `preset_env` 가 없거나 그 프리셋 항목이 없으면 서버가 무엇을 쟀는지
+    모른다. `requires` 가 있는 프리셋을 빈 「빠진 도구」로 읽어 ready 라 부르지 않는다."""
+    monkeypatch.setenv("RCM_TOKEN", CLIENT_TOKEN)
+    health: dict[str, Any] = {"ok": True, "version": __version__}
+    if measured is not None:
+        health["preset_env"] = measured
+    coordinator.route("GET", "/api/health", health)
+    cfg = server_toml(env, coordinator.port)
+    code, doc = run_json(capsys, "--role", "coordinator-worker", "--config", str(cfg))
+    assert row(doc, "lint")["state"] == "unknown", row(doc, "lint")
+    if measured is None:
+        assert row(doc, "unit")["state"] == "unknown", row(doc, "unit")
+    else:
+        assert row(doc, "unit")["state"] == "ready", row(doc, "unit")
+    assert any("lint" in u for u in doc["undecided"]), doc["undecided"]
+    assert code == 3, doc
