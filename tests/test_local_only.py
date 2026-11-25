@@ -460,12 +460,29 @@ def test_to10_to16_rcm_eta_has_no_estimate_when_no_local_lane_can_take_it(tmp_pa
         assert doc["job"]["estimate"]["wait_seconds"] == 0, doc["job"]
         status, doc = s.req("POST", "/api/eta", token="alice", json_body=marked)
         assert status == 200, doc
+        # 갈 레인이 없으면 앞선 잡 수도 없다 — 0 은 「바로 선다」로 읽힌다(위임 결정 7)
+        assert doc["ahead"] is None, doc
         job = doc["job"]
         assert job["reason"] == "no_capable_machine", job
         assert job["estimate"]["wait_seconds"] is None, job
         assert job["estimate"]["finish_at"] is None, job
     finally:
         s.close()
+
+
+@pytest.mark.parametrize("preset", ["rel", "relany"])
+def test_to10_rcm_eta_ahead_counts_only_jobs_that_contend_for_the_local_lanes(lo_ready, preset):
+    """`local_only` 프리셋의 `ahead` 는 후보 로컬 레인을 실제로 다투는 잡만 센다(위임 결정 7).
+    원격 워커를 지정한 대기 잡과 산 머신이 없는 다른 풀의 대기 잡은 그 레인에 오지 않으므로
+    세지 않는다. 로컬 레인에서 도는 잡과, 로컬 레인도 집을 수 있는 기본 풀 대기 잡은 센다."""
+    s = lo_ready
+    busy_local_lane(s)  # 셈: 로컬 레인에서 돈다
+    stored_job(s, "gate")  # 셈: 기본 풀 — 로컬 레인도 집는다
+    stored_job(s, "gate", target=REMOTE)  # 빼기: 원격 지정
+    stored_job(s, "gate", pool="mac2")  # 빼기: mac2 풀에는 산 머신이 없다
+    status, doc = s.req("POST", "/api/eta", token="alice", json_body={"preset": preset})
+    assert status == 200, doc
+    assert doc["ahead"] == 2, doc
 
 
 # ── TO3 · TO7 로컬 레인과 표식 없는 프리셋 ───────────────────────────────────
