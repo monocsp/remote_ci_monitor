@@ -33,11 +33,13 @@ from remote_ci_monitor.core.capability import (
     Verdict,
 )
 from remote_ci_monitor.core.model import (
+    CANCELLING,
     DEFAULT_POOL,
     PLACEMENT_CAPABLE,
     REASON_CHECK_FAILED,
     REASON_CHECK_PENDING,
     REASON_NO_CAPABLE_MACHINE,
+    RUNNING,
     Job,
     Placement,
     PlacementNote,
@@ -54,6 +56,10 @@ PROBE_VALUE_MAX = cap.PROBE_VALUE_MAX
 #: 판정에서 「도구 문제」— pool 잡은 이것으로 막지 않는다(결정 98: 집어서 즉시 tool_missing)
 _TOOL_CODES = frozenset({cap.CODE_TOOL_MISSING, cap.CODE_WORKSPACE_TOOL})
 _CHECK_CODES_PENDING = frozenset({cap.CODE_CHECK_RUNNING, cap.CODE_CHECK_NEEDED})
+#: 점검 때문에 막힌 판정 — 그 점검이 그 머신에서 돌 수 없으면 `check_local_only` 로 바뀐다(P6 X1)
+_CHECK_CODES_GATED = frozenset({*_CHECK_CODES_PENDING, cap.CODE_CHECK_FAILED})
+#: 워커가 집은 잡의 상태 — 대기(`queued` · `scheduled` · `uploading`)와 달리 끝까지 돈다
+_CLAIMED_JOB_STATES = frozenset({RUNNING, CANCELLING})
 #: 자동 점검의 하루 상한 — (워커, 점검)마다(결정 105). 워커는 자기 지문을 스스로 말하므로, 지문을
 #: 매번 바꿔 보내는 워커가 점검을 끝없이 돌리게 할 수 없다. 사람의 다시 점검은 세지 않는다
 AUTO_CHECKS_PER_DAY = 3
@@ -445,9 +451,12 @@ class CapabilitiesMixin:
         """(프리셋, 머신) 판정 — `cap.verdict` 에 후보 함수의 답을 얹는다(결정 254).
 
         원격 머신이 그 프리셋의 후보가 아니면 `local_only` 다. 보고가 「다 있다」고 해도 그 머신은
-        받지 않는다. 판정이 점검 대기(`check_needed`)인데 기다리는 점검이 그 머신에서는 돌 수
-        없으면(점검 프리셋이 `local_only`) `check_local_only` 다. 영영 안 오는 점검을
-        「점검 중」으로 부르면 잡이 조용히 기다린다."""
+        받지 않는다. 판정이 점검 때문에 막혔는데(`check_needed` · `check_running` ·
+        `check_failed`) 그 점검이 그 머신에서는 다시 돌 수 없으면(점검 프리셋이 `local_only`)
+        `check_local_only` 다. 그 점검의 기록을 따르는 것은 둘뿐이다: 통과(지문이 같은 동안
+        유효)와 그 머신이 이미 집어 돌리는 잡(끝까지 돌고 결과를 센다). 대기 중인 점검 잡은
+        아무도 못 집어 「점검 중」이 영영 안 끝나고, 실패는 다시 점검하라는 말이 409 로 끝난다(P6
+        X1). 영영 안 오는 점검을 「점검 중」으로 부르면 잡이 조용히 기다린다."""
         if view.kind != "local" and not self.machines_for(preset, [view]):
             return Verdict(cap.INELIGIBLE, CODE_LOCAL_ONLY)
         v = cap.verdict(
@@ -458,14 +467,19 @@ class CapabilitiesMixin:
             max_age_seconds=self._max_age(),
             check_records=records,
         )
-        if v.code != cap.CODE_CHECK_NEEDED or report is None:
+        if v.code not in _CHECK_CODES_GATED or report is None:
             return v
         fp = report.fingerprint.hash
         for name in preset.checks:
-            if not self.check_reachable(view, name):
-                state, _record = cap.check_state([r for r in records if r.preset == name], fp)
-                if state != cap.CHECK_PASSED:
-                    return Verdict(cap.INELIGIBLE, CODE_CHECK_LOCAL_ONLY, {"check": name})
+            if self.check_reachable(view, name):
+                continue
+            state, record = cap.check_state([r for r in records if r.preset == name], fp)
+            if state == cap.CHECK_PASSED:
+                continue
+            claimed = record is not None and record.job_state in _CLAIMED_JOB_STATES
+            if state == cap.CHECK_RUNNING and claimed:
+                continue
+            return Verdict(cap.INELIGIBLE, CODE_CHECK_LOCAL_ONLY, {"check": name})
         return v
 
     # ── 후보 머신 (M5t-a 결정 254) ─────────────────────────────────────────
