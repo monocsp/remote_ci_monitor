@@ -84,6 +84,8 @@ CHECK_LOCAL_ONLY = (
 CHECK_UNKNOWN = "check_unknown"
 NEEDS_CHECK_NOTE = "rcm runs the check once after it registers"
 NO_JOBS = "no jobs will come to this machine"
+#: 맨 바깥 경계(`doctor.run`)가 예상 못 한 예외에 다는 머리 — 사람용 이유가 아니다
+BOUNDARY = "could not decide"
 
 
 def decide_exit(problems: Sequence[str], undecided: Sequence[str]) -> int:
@@ -139,6 +141,14 @@ def hide_home(text: str, home: str) -> str:
     if not home:
         return text
     return re.sub(re.escape(home) + r"(?![\w.-])", "~", text)
+
+
+def could_not_decide(error: BaseException, home: str) -> str:
+    """맨 바깥 경계에 닿은 예외 → `could not decide: <예외 종류>: <정리된 한 줄>`. 첫 줄만,
+    제어문자 없이, 홈 폴더는 `~` 로."""
+    first = (str(error).splitlines() or [""])[0]
+    text = hide_home(clean_text(first, 200), home)
+    return f"{BOUNDARY}: {type(error).__name__}" + (f": {text}" if text else "")
 
 
 def clean_text(value: Any, limit: int = TEXT_MAX) -> str:

@@ -1327,10 +1327,14 @@ class _Run:
 
 
 def run(opts: Options, ctx: Context) -> tuple[int, dict[str, Any] | None]:
-    """(종료 코드, 문서). 사용법 오류면 (2, None) — 이유는 ctx.err 로 이미 나갔다."""
+    """(종료 코드, 문서). 사용법 오류면 (2, None) — 이유는 ctx.err 로 이미 나갔다.
+
+    맨 바깥 경계: 읽는 자리가 모르는 예외는 traceback 이 아니라 「판정 못 함」(종료 3)이다. 모름을
+    성공으로 적지 않고 모름으로 적을 뿐이다. 경계는 마지막 그물이다 — 읽는 자리마다 모양을 먼저
+    보고, 망가진 입력 표 시험(tests/test_doctor_cli.py)은 이 줄이 보이면 빨개진다."""
     home = str(ctx.environ.get("HOME") or Path.home())
+    role = opts.role
     try:
-        role = opts.role
         if role is None:
             roles = infer_roles(ctx.environ)
             if not roles:
@@ -1354,6 +1358,15 @@ def run(opts: Options, ctx: Context) -> tuple[int, dict[str, Any] | None]:
         # 설정 파일의 절대 경로가 문장에 든다 — 홈 폴더는 가린다(검증자 1 #5)
         ctx.err(f"rcm: {dc.hide_home(str(e), home)}")
         return dc.EXIT_USAGE, None
+    except Exception as e:  # noqa: BLE001 — doctor 의 맨 바깥 경계
+        line = dc.could_not_decide(e, home)
+        ctx.err(line)
+        crashed = _Run(opts, ctx, role or "unknown")
+        crashed.undecided.append(line)
+        doc = crashed.document()
+        if opts.json:
+            ctx.out(json.dumps(doc, ensure_ascii=False, indent=2))
+        return dc.EXIT_UNKNOWN, doc
     if opts.json:
         ctx.out(json.dumps(doc, ensure_ascii=False, indent=2))
     else:
