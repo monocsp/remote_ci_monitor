@@ -2859,7 +2859,10 @@ MUTANTS = (
         # guard 가 운영 data_dir(그 안 포함)을 고르는 `rcm setup` 을 막지 않는다(TR33)
         name="guard-setup-production-data-dir-allowed",
         path="tools/guard_production.py",
-        old="            if inside(data, prod.data_dir):\n",
+        old=(
+            "            if inside(data, prod.data_dir) or inside(_real(data), "
+            "real_prod.data_dir):\n"
+        ),
         new="            if False:\n",
         tests=(
             "tests/test_guard_production_setup.py::test_tr33_setup_on_the_production_data_dir_is_denied",
@@ -2897,7 +2900,10 @@ MUTANTS = (
         # guard 가 운영 설정 폴더에 쓰는 `rcm setup` 을 막지 않는다(TR20 규칙 1)
         name="guard-setup-production-config-allowed",
         path="tools/guard_production.py",
-        old="            hit = production_root(target, prod)\n",
+        old=(
+            "            hit = production_root(target, prod) or production_root(_real(target), "
+            "real_prod)\n"
+        ),
         new="            hit = None\n",
         tests=(
             "tests/test_guard_production_setup.py::test_tr20_setup_that_would_write_the_production_config_folder_is_denied",
@@ -2913,19 +2919,6 @@ MUTANTS = (
         tests=(
             "tests/test_guard_production_setup.py::test_tr20_setup_that_would_write_a_production_label_is_denied",
             "tests/test_guard_production_setup.py::test_tr20_no_label_means_the_standard_one_and_is_denied_but_a_client_has_none",
-        ),
-    ),
-    Mutant(
-        # guard 가 셸 변수를 제 값으로 펼치지 않는다 — `--data-dir $HOME/.local/share/rcm` 이
-        # 운영으로 간다(P3 v2-1). 2라운드부터는 펼치지 못한 `$` 가 남으면 막으므로 값을 빈 글자로
-        # 바꾸는 꼴로 잰다
-        name="guard-setup-shell-variables-unexpanded",
-        path="tools/guard_production.py",
-        old="        value = lookup.get(name)\n",
-        new='        value = lookup.get(name) and ""\n',
-        tests=(
-            "tests/test_guard_production_setup.py::test_tr33_a_data_dir_written_with_a_shell_variable_is_denied",
-            "tests/test_guard_production_setup.py::test_tr20_a_config_written_with_a_shell_variable_is_denied",
         ),
     ),
     Mutant(
@@ -3086,17 +3079,6 @@ MUTANTS = (
         tests=("tests/test_setup.py::test_tr28_a_report_that_fails_after_writing_is_exit_zero",),
     ),
     Mutant(
-        # guard 가 셸 단계를 다 한 뒤 남은 `$` 를 글자로 둔다 — `$1/…` · `${X:-y}` 를 setup 이
-        # 받을 값으로 본다(P3 2라운드 v2-1)
-        name="guard-setup-leftover-dollar-allowed",
-        path="tools/guard_production.py",
-        old='    if "$" in rest or "`" in rest:\n',
-        new="    if False:\n",
-        tests=(
-            "tests/test_guard_production_setup.py::test_tr33_a_value_the_hook_cannot_expand_is_denied",
-        ),
-    ),
-    Mutant(
         # guard 가 경로를 대소문자를 가려 견준다 — macOS 에서 `~/.config/RCM` 이 운영 설정 폴더인데
         # 지나간다(P3 2라운드)
         name="guard-setup-case-not-folded",
@@ -3126,21 +3108,6 @@ MUTANTS = (
         ),
     ),
     Mutant(
-        # guard 가 감싸기를 글자 그대로 본다 — `/usr/bin/env rcm setup` 이 setup 규칙을 지난다
-        # (P3 2라운드)
-        name="guard-wrapper-path-missed",
-        path="tools/guard_production.py",
-        old='        if _name(head) in WRAPPERS:\n            in_env = _name(head) == "env"\n',
-        new='        if head in WRAPPERS:\n            in_env = head == "env"\n',
-        tests=(
-            "tests/test_guard_production_setup.py::"
-            "test_tr20_a_wrapper_path_or_interpreter_flag_still_reaches_setup",
-            # P3 3라운드: 그물이 생긴 뒤에는 막는 쪽만으로는 이 변이를 못 본다 — 허용 칸이 본다
-            "tests/test_guard_production_setup.py::"
-            "test_tr20_a_wrapper_path_with_a_test_home_is_read_not_caught_by_the_net",
-        ),
-    ),
-    Mutant(
         # guard 가 python 의 인터프리터 플래그를 건너뛰지 않는다 — `python -u -m remote_ci_monitor
         # setup` 이 setup 규칙을 지난다(P3 2라운드)
         name="guard-python-flags-not-skipped",
@@ -3153,6 +3120,9 @@ MUTANTS = (
         tests=(
             "tests/test_guard_production_setup.py::"
             "test_tr20_a_wrapper_path_or_interpreter_flag_still_reaches_setup",
+            # P3 4라운드: 그물이 막는 쪽을 덮으므로 허용 칸이 본다
+            "tests/test_guard_production_setup.py::"
+            "test_tr20_python_flags_with_a_test_home_are_read_not_caught_by_the_net",
         ),
     ),
     # P3 2라운드 v2-2 가 짚은, 변이가 없던 규칙 가운데 싼 것
@@ -3219,7 +3189,10 @@ MUTANTS = (
         # 쓰는 setup 이 지나간다(P3 3라운드 v1-1, 근본 원인)
         name="guard-setup-narrow-production-list",
         path="tools/guard_production.py",
-        old="            hit = production_root(target, prod)\n",
+        old=(
+            "            hit = production_root(target, prod) or production_root(_real(target), "
+            "real_prod)\n"
+        ),
         new="            hit = production_root(target, Production(config_dir=prod.config_dir))\n",
         tests=(
             "tests/test_guard_production_setup.py::"
@@ -3239,32 +3212,14 @@ MUTANTS = (
     ),
     Mutant(
         # 닫는 쪽의 그물이 없다 — `sudo -u` · `if …; then` · `python -Im` 뒤의 setup 이 setup 규칙을
-        # 거치지 않는다(P3 3라운드 v1-2 · v1-3 · v2-3)
+        # 거치지 않는다(P3 3라운드 v1-2 · v1-3 · v2-3). P3 4라운드부터 그물은 `_setup_net` 하나다
         name="guard-setup-unread-call-allowed",
         path="tools/guard_production.py",
-        old=(
-            "        if net and _SETUP_WORD.search(_unquoted(segment)) and _rcm_subcommand(argv) "
-            '!= "setup":\n'
-        ),
-        new="        if False:\n",
+        old="    if prod.known and _setup_net(command):\n",
+        new="    if False:\n",
         tests=(
             "tests/test_guard_production_setup.py::"
             "test_tr20_a_setup_the_hook_cannot_read_as_a_plain_call_is_denied",
-        ),
-    ),
-    Mutant(
-        # 따라가지 못한 `cd` 뒤에도 짐작한 cwd 를 믿는다 — `cd -P <운영>/.. && rcm setup
-        # --data-dir rcm` 이 지나간다(P3 3라운드 v1-4)
-        name="guard-setup-unknown-cd-trusted",
-        path="tools/guard_production.py",
-        old=(
-            "                moves = not cwd_known and places != _resolve(core, call, ns, "
-            "_OTHER_CWD, manager)\n"
-        ),
-        new="                moves = False\n",
-        tests=(
-            "tests/test_guard_production_setup.py::"
-            "test_tr33_a_relative_path_after_a_cd_the_hook_cannot_follow_is_denied",
         ),
     ),
     Mutant(
@@ -3315,6 +3270,60 @@ MUTANTS = (
         new="        if True:\n",
         tests=(
             "tests/test_guard_production_setup.py::test_tr20_a_crash_while_judging_setup_is_a_deny",
+        ),
+    ),
+    # ── M5t-a PR4 P3 4라운드 — setup 판정은 허용 목록이다(batch-6) ──
+    Mutant(
+        # 허용 모양 검사가 메타 문자 하나(`&`)를 놓친다 — `rcm setup --help & rcm setup …` 이
+        # 도움말로 읽혀 지나간다(P3 4라운드)
+        name="guard-setup-plain-misses-a-metachar",
+        path="tools/guard_production.py",
+        old='_PLAIN_FORBIDDEN = frozenset(";&|$`(){}<>\\\\*?[]#!^")\n',
+        new='_PLAIN_FORBIDDEN = frozenset(";|$`(){}<>\\\\*?[]#!^")\n',
+        tests=(
+            "tests/test_guard_production_setup.py::"
+            "test_tr20_round4_shell_tricks_around_setup_are_denied",
+            "tests/test_guard_production_setup.py::"
+            "test_tr20_setup_help_passes_only_in_the_plain_shape",
+        ),
+    ),
+    Mutant(
+        # setup 의 상대 경로를 받는다 — 훅이 짐작한 cwd 로 풀어 시험 폴더로 본다(P3 4라운드)
+        name="guard-setup-relative-path-allowed",
+        path="tools/guard_production.py",
+        old="                if value is not None and not _anchored(value):\n",
+        new="                if False:\n",
+        tests=(
+            "tests/test_guard_production_setup.py::"
+            "test_tr33_a_relative_path_is_denied_wherever_the_session_stands",
+            "tests/test_guard_production_setup.py::"
+            "test_tr33_a_relative_data_dir_is_denied_in_any_working_folder",
+        ),
+    ),
+    Mutant(
+        # 심볼릭 링크를 풀지 않는다 — 운영 뿌리를 가리키는 링크 아래 경로가 지나간다(P3 4라운드
+        # LOW 6)
+        name="guard-setup-realpath-skipped",
+        path="tools/guard_production.py",
+        old="    return Path(_realpath(str(path)))\n",
+        new="    return path\n",
+        tests=(
+            "tests/test_guard_production_setup.py::"
+            "test_tr20_a_symlink_into_a_production_root_is_denied",
+        ),
+    ),
+    Mutant(
+        # 그물이 rcm 다음 하위 명령 자리를 보지 않는다 — `rcm ${S}tup` · `$R ${S}tup` 이 낱말 setup
+        # 없이 지나간다(P3 4라운드)
+        name="guard-setup-subcommand-place-unchecked",
+        path="tools/guard_production.py",
+        old="    for position in range(index + 1, len(tokens)):\n",
+        new="    return False\n    for position in range(index + 1, len(tokens)):\n",
+        tests=(
+            "tests/test_guard_production_setup.py::"
+            "test_tr20_a_subcommand_the_shell_makes_after_rcm_is_denied",
+            "tests/test_guard_production_setup.py::"
+            "test_tr20_round4_shell_tricks_around_setup_are_denied",
         ),
     ),
     # ── M5t-a PR3 — 분배 전용 코디네이터 `lanes = 0` (docs/m5t-workplan.md §7 변이 검사) ──

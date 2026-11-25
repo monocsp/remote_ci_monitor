@@ -19,6 +19,9 @@ stdin 으로 받아 판정 JSON 을 stdout 으로 낸다.
 `rcm setup` 에는 규칙 셋이 있다(M5t-a §4.1): 운영 뿌리(편집 규칙과 같은 `production_root`)나
 서비스 관리자 자리에 쓰는 것, 운영 라벨의 서비스 파일을 쓰는 것, 운영 `data_dir`(그 안 포함)을
 고르는 것을 막는다. setup 은 DB 를 열지 않으므로 `DB_OPENING` · `MIGRATING` 에는 넣지 않는다.
+setup 판정은 허용 목록이다(P3 4라운드): setup 에 닿을 수 있는 명령(`_setup_net`)은 명령 글 전체가
+평범한 setup 명령 하나(`_plain_setup` — 셸 메타 문자 · 역슬래시 · 글롭이 없고 경로는 절대 경로나
+`~`)일 때만 해석기에 묻고, 그 밖에는 막는다. 경로는 글자로도, 심볼릭 링크를 푼 경로로도 견준다.
 
 운영 설치가 없어도 하나는 본다 — **다른 빌드가 옛 DB 를 그 자리에서 마이그레이션하는 것**(사건 6f,
 2026-11-20: 검증 에이전트가 dev 워크트리 안에서 `--config` 없이 `rcm token add` · `rcm serve` 를
@@ -31,18 +34,20 @@ stdin 으로 받아 판정 JSON 을 stdout 으로 낸다.
 `uv run` · `$(…)` 안의 명령은 보지 않는다. 심링크 별칭(`/tmp` ↔ `/private/tmp`, 운영 data_dir
 로 가는 링크)은 못 본다 — 경로는 `normpath` 로만 비교한다. `$VAR` 은 훅 프로세스의 환경으로
 펼치고, 같은 명령줄 앞 조각의 `VAR=…; …` 정의는 못 본다. `pushd` 는 `cd` 가 아니다. `rcm setup`
-은 다르다: 셸 단계(따옴표 · `$VAR` · `~` · 리다이렉션)를 훅이 하고, 어디에 쓰는지는 setup 의
-해석기(`remote_ci_monitor.core.setup.where`)를 들여와 묻는다. 셸 단계로 다 펼칠 수 없는 값
-(`${VAR:-x}` · `$(…)` · 훅의 환경에 없는 변수)과 해석기를 못 들여오는 경우는 막는다(fail closed).
-macOS 에서는 경로를 대소문자 구분 없이 견준다(`FOLD_CASE`).
+은 다르다: 위 한계를 셸 해석으로 메우지 않고, 평범한 명령 하나가 아닌 setup 을 막는다. 어디에
+쓰는지는 setup 의 해석기(`remote_ci_monitor.core.setup.where`)를 들여와 묻고, 못 들여오면
+막는다(fail closed). setup 에도 남는 한계: 스크립트 · 별칭 · `python -c` 프로그램 안에서 만든
+setup 호출, 세션 환경의 변수를 모르는 감싸기 뒤에서 명령으로 쓰는 것(`caffeinate $R …`)은
+보지 못한다. macOS 에서는 경로를 대소문자 구분 없이 견준다(`FOLD_CASE`).
 
 훅 자체가 터지면 막지 않고 경고만 남긴다. 모든 Bash 를 막는 가드는 가드가 아니라 고장이다.
-다만 `rcm setup` 을 말하는 명령(`mentions_setup`)의 판정 중에 터지면 막는다 — setup 이 어디에
-쓸지 모르기 때문이다(P3 3라운드).
+다만 `rcm setup` 에 닿을 수 있는 명령(`_setup_net`)의 판정 중에 터지면 막는다 — setup 이
+어디에 쓸지 모르기 때문이다(P3 3라운드).
 """
 
 from __future__ import annotations
 
+import functools
 import importlib
 import json
 import os
@@ -456,26 +461,22 @@ def _bash_verdict(
 ) -> Verdict | None:
     """조각마다 판정한다. `cd <dir>` 은 뒤 조각의 cwd 를 바꾸고, 그러면 `./rcm.toml` 이 있는지도
     그 폴더에서 다시 본다(`(cd …)` 서브셸의 `cd` 도 뒤로 새지만 그쪽이 안전한 방향이다).
+    따라가지 못한 `cd`(`_cd_target` 이 None)는 예전처럼 짐작한다.
 
-    따라가지 못한 `cd`(`_cd_target` 이 None — `cd -P` · `cd --` · `cd -` · 펼칠 수 없는 값)와
-    `pushd` · `popd` 뒤에는 cwd 를 모른다(`cwd_known`). 다른 규칙은 예전처럼 짐작한 cwd 를 쓰고,
-    setup 규칙은 상대 경로를 막는다(P3 3라운드 v1-4).
-
-    운영 설치가 있고 명령 글에 rcm 과 낱말 setup 이 함께 있으면(`mentions_setup`), setup 이 든
-    조각은 모두 평범한 setup 호출로 풀려야 한다 — 아니면 막는다(`_unread_setup`)."""
-    net = prod.known and mentions_setup(command)
+    `rcm setup` 은 조각으로 나누지 않는다. 운영 설치가 있고 명령이 setup 에 닿을 수 있으면
+    (`_setup_net`) 명령 글 전체가 평범한 setup 명령 하나여야 한다(`_setup_verdict`, P3 4라운드)."""
+    if prod.known and _setup_net(command):
+        return _setup_verdict(command, cwd, prod, session)
     cwd_known = True
     for segment in _split_segments(command):
         argv = _argv(segment)
-        if net and _SETUP_WORD.search(_unquoted(segment)) and _rcm_subcommand(argv) != "setup":
-            return _unread_setup()
         if not argv:
             continue
         if argv[0] in ("cd", "pushd", "popd"):
             target = _cd_target(segment, cwd, session, known=cwd_known)
             if target is None:
                 cwd_known = False
-                if argv[0] == "cd":  # 다른 규칙은 예전처럼 짐작한다
+                if argv[0] == "cd":  # 짐작한다
                     target = _as_path(argv[1], cwd) if len(argv) > 1 else _as_path("~", cwd)
             else:
                 cwd_known = True
@@ -484,19 +485,18 @@ def _bash_verdict(
                 local_config = (cwd / "rcm.toml").exists()
             continue
         env = _env_of(segment, session)
-        verdict = _segment_verdict(
-            argv, cwd, prod, local_config, env=env, segment=segment, cwd_known=cwd_known
-        )
+        verdict = _segment_verdict(argv, cwd, prod, local_config, env=env)
         if verdict is not None:
             return verdict
     return None
 
 
 def _cd_target(segment: str, cwd: Path, session: Mapping[str, str], *, known: bool) -> Path | None:
-    """셸이 갈 폴더를 훅이 확실히 아는 `cd` 면 그 폴더, 아니면 None(모름). 셸 단계는 setup 과
-    같은 `_lex` · `_expand_word` 다. 모르는 것: 플래그(`cd -P` · `cd --`), `cd -`, 펼칠 수 없는
-    값(`$D` 가 훅의 환경에 없다), `CDPATH` 를 탈 수 있는 상대 경로, cwd 를 모를 때의 상대 경로,
-    `pushd` · `popd`."""
+    """셸이 갈 폴더를 훅이 확실히 아는 `cd` 면 그 폴더, 아니면 None(모름). 셸 단계는
+    `_lex` · `_expand_word` 다(P3 3라운드에 setup 용으로 만들었고, 4라운드부터 setup 은 쓰지
+    않는다 — `cd` 를 따라가는 다른 규칙만 쓴다). 모르는 것: 플래그(`cd -P` · `cd --`),
+    `cd -`, 펼칠 수 없는 값(`$D` 가 훅의 환경에 없다), `CDPATH` 를 탈 수 있는 상대 경로, cwd 를
+    모를 때의 상대 경로, `pushd` · `popd`."""
     try:
         words = _lex(_group_trimmed(segment))
     except _Unreadable:
@@ -529,52 +529,15 @@ def _without_pwd(session: Mapping[str, str]) -> dict[str, str]:
     return {k: v for k, v in session.items() if k not in ("PWD", "OLDPWD")}
 
 
-#: 닫는 쪽의 그물(P3 3라운드 v1-2 · v1-3 · v2-3). rcm 실행 파일(이름이 `rcm` ·
-#: `remote-ci-monitor`)이나 이 패키지(`remote_ci_monitor`, `-m` · `-c` 로 부를 때) — `rcm.toml` ·
-#: `rcm-server` · 워크트리 이름(`remote_ci_monitor-x`)은 아니다
-_RCM_WORD = re.compile(
-    r"(?<![\w.-])(?:rcm|remote-ci-monitor)(?![\w./-])|(?<![\w-])remote_ci_monitor(?![\w-])",
-    re.IGNORECASE,
-)
-#: 낱말 setup — 하위 명령 `setup` 과 모듈 `remote_ci_monitor.setup`. `setup.py` · `test_setup` ·
-#: `…-setup-…` 은 아니다
-_SETUP_WORD = re.compile(r"(?<![\w-])setup(?![\w./-])", re.IGNORECASE)
-
-
-def _unquoted(text: str) -> str:
-    """따옴표와 백슬래시를 지운 글자 — `s'etup'` · `r\\cm` 도 낱말로 보인다."""
-    return re.sub(r"[\\'\"]", "", text)
-
-
-def mentions_setup(command: str) -> bool:
-    """명령 글에 rcm(또는 이 패키지)과 낱말 setup 이 함께 있나 — 그물이 켜지는 조건."""
-    text = _unquoted(command)
-    return bool(_RCM_WORD.search(text)) and bool(_SETUP_WORD.search(text))
-
-
-def _unread_setup() -> Verdict:
-    return Verdict(
-        "deny",
-        "This command names rcm and `setup`, but the hook could not read the part with `setup` as "
-        "a plain `rcm setup …` call (a wrapper flag such as `sudo -u` or `env -C`, a shell keyword "
-        "such as `if` · `for` · `!`, a lone `&`, odd quoting, or `python -Im`), so it cannot tell "
-        "where setup would write. Write it as a plain `rcm setup …` command (`VAR=value`, `env`, "
-        "`nohup` and `cd /path &&` in front are fine). If the words are only text — a commit "
-        f"message, an echo — put the text in a file (`git commit -F <file>`). See {DOCS}.",
-    )
-
-
 def _segment_verdict(
     argv: list[str],
     cwd: Path,
     prod: Production,
     local_config: bool,
     env: SegmentEnv | None = None,
-    segment: str = "",
-    cwd_known: bool = True,
 ) -> Verdict | None:
-    """조각 하나의 판정. `segment` 는 따옴표가 남은 원래 글자다 — `rcm setup` 은 셸 단계를 그
-    글자로 다시 한다(`_setup_calls`). `cwd_known` 이 거짓이면 `cwd` 는 짐작이다."""
+    """조각 하나의 판정. `rcm setup` 은 여기 오지 않는다 — 명령 글 전체로 `_setup_verdict` 가
+    본다."""
     head = _name(argv[0])
     env = env or SegmentEnv({})
 
@@ -640,10 +603,6 @@ def _segment_verdict(
             )
 
     subcommand = _rcm_subcommand(argv)
-    if subcommand == "setup" and not _wants_help(argv):
-        verdict = _setup_verdict(segment or shlex.join(argv), cwd, prod, env, cwd_known=cwd_known)
-        if verdict is not None:
-            return verdict
     if subcommand in ("serve", "worker") and not _wants_help(argv):
         verdict = _server_verdict(argv, cwd, prod, subcommand, local_config, env)
         if verdict is not None:
@@ -925,9 +884,11 @@ def _server_verdict(
 # ── `rcm setup` (M5t-a §4.1, TR20 · TR33) ────────────────────────────────────
 #
 # 「setup 이 어디에 쓰나」는 setup 의 해석기 `remote_ci_monitor.core.setup.where` 가 정한다 — 훅은
-# 그것을 들여와 부른다. 훅이 하는 일은 셸 단계뿐이다: 따옴표를 풀고, 변수와 `~` 를 펼치고,
-# 리다이렉션과 주석을 뗀다. P3 1 · 2라운드의 HIGH 는 모두 훅이 setup 의 계산을 따로 다시 하다
-# 어긋난 것이었다(빈 값 · `${VAR:-x}` · 대소문자 · 줄인 옵션 · `--service-file`).
+# 그것을 들여와 부른다. P3 1 · 2라운드의 HIGH 는 모두 훅이 setup 의 계산을 따로 다시 하다
+# 어긋난 것이었다(빈 값 · `${VAR:-x}` · 대소문자 · 줄인 옵션 · `--service-file`). 3라운드까지는
+# 훅이 셸 단계(따옴표 · 변수 · `~` · 리다이렉션)를 했고, 4라운드부터는 셸 단계가 따옴표 벗기기와
+# 맨 앞 `~` 뿐인 명령(`_plain_setup`)만 받는다. 아래 `_lex` · `_expand_word` 는 `cd` 를 따라가는
+# 다른 규칙이 쓴다.
 
 
 def unit_name(label: str) -> str:
@@ -945,7 +906,7 @@ def _setup_core() -> ModuleType:
 
 
 class _Unreadable(Exception):
-    """셸 단계를 다 해도 setup 이 받을 글자를 모른다 — 운영으로 본다."""
+    """셸 단계를 다 해도 셸이 받을 글자를 모른다(`_cd_target` 은 그 `cd` 를 모르는 것으로 본다)."""
 
 
 #: 리다이렉션 — `2>&1` · `>>log` · `&>x` · `<in`. 단어의 맨 앞에서만 본다
@@ -1157,79 +1118,230 @@ def _subcommand_index(argv: list[str]) -> int | None:
     return None
 
 
+# ── `rcm setup`: 허용 목록 (P3 4라운드) ───────────────────────────────────────
+#
+# 네 라운드 동안 훅은 임의의 셸 글을 setup 에 대해 해석하려 했고, 라운드마다 새 셸 문법(줄
+# 잇기 · 실행되지 않은 `cd` · 앞 세그먼트의 변수 · `${S}tup` · `--help` 뒤의 밀반입)이 그 해석을
+# 비껴갔다. 셸 문법의 거부 목록은 완성할 수 없다. 그래서 운영 설치가 있는 머신에서는 setup 에
+# 닿을 수 있는 명령(`_setup_net`)이 평범한 명령 하나(`_plain_setup`)일 때만 해석기에 묻고,
+# 나머지는 막는다.
+
+#: rcm 실행 파일(이름이 `rcm` · `remote-ci-monitor`)이나 이 패키지(`remote_ci_monitor`, `-m` ·
+#: `-mremote_ci_monitor` · `-Imremote_ci_monitor` · `-c` 로 부를 때). `rcm.toml` · `rcm-server` ·
+#: 워크트리 이름(`remote_ci_monitor-x`)은 아니다
+_RCM_WORD = re.compile(
+    r"(?<![\w.-])(?:rcm|remote-ci-monitor)(?![\w./-])"
+    r"|(?:(?<![\w-])|(?<![\w])-[A-Za-z]*m)remote_ci_monitor(?![\w-])",
+    re.IGNORECASE,
+)
+#: 낱말 setup: 하위 명령 `setup` 과 모듈 `remote_ci_monitor.setup`. `setup.py` · `test_setup` ·
+#: `…-setup-…` 은 아니다
+_SETUP_WORD = re.compile(r"(?<![\w-])setup(?![\w./-])", re.IGNORECASE)
+#: 그물이 명령 글을 자르는 자리: 셸의 분리 · 묶음 글자와 백틱. 따옴표는 보지 않는다(넓게 자른다)
+_ROUGH_TOKEN = re.compile(r"[;&|()\n`]|[^\s;&|()`]+")
+_BREAKS = frozenset(";&|()\n`")
+#: 셸이 낱말을 쓰인 글자와 다르게 만드는 글자: 펼치기(`$` 백틱 `{` `}`), 글롭(`*` `?` `[`),
+#: 리다이렉션(`<` `>`). 명령 자리나 하위 명령 자리의 낱말에 있으면 그 낱말이 무엇이 될지 모른다
+_SHAPING = frozenset("$`{}*?[<>")
+#: 뒤 낱말을 여전히 명령 자리로 두는 셸 낱말
+_KEYWORDS = frozenset({"!", "if", "then", "else", "elif", "do", "while", "until", "{", "}"})
+#: 명령 자리의 `[` · `[[` 는 시험 명령이다 — 다른 명령을 실행하지 않는다
+_TESTS = frozenset({"[", "[["})
+#: 받은 명령을 실행하는 명령. 그 뒤의 변수 낱말은 모두 명령 자리일 수 있다(플래그의 값인지
+#: 가리지 않는다)
+_LAUNCHERS = WRAPPERS | frozenset(
+    {
+        "nice", "timeout", "gtimeout", "xargs", "eval", "doas", "su", "caffeinate", "stdbuf",
+        "setsid", "watch", "bash", "sh", "zsh", "dash", "ksh", "fish", "source", ".", "arch",
+        "ssh", "uv", "uvx", "pipx", "poetry", "script", "unbuffer", "flock", "ionice", "chronic",
+    }
+)  # fmt: skip
+
+
+def _letters(text: str) -> str:
+    """셸이 글자로 남길 것 — 줄 잇기(`\\`+줄바꿈)를 지우고 따옴표와 역슬래시를 벗긴다. 그래서
+    `se\\<줄바꿈>tup` · `s'etup'` · `r\\cm` 도 낱말로 보인다."""
+    return re.sub(r"[\\'\"]", "", text.replace("\\\n", ""))
+
+
+def _shaped(word: str) -> bool:
+    return any(c in _SHAPING for c in word)
+
+
+def _shaped_after(tokens: list[str], index: int) -> bool:
+    """`tokens[index]` 다음의 하위 명령 자리가 글자 그대로가 아닌가. 글자 그대로의 플래그
+    (`--no-follow`)는 건너뛰고, 첫 다른 낱말이 펼치기 · 글롭이면, 또는 그 자리에 명령
+    치환(백틱 · `(`)이 오면 참이다. 명령이 끝나면(`;` `&` `|` `)` 줄바꿈) 거짓이다."""
+    for position in range(index + 1, len(tokens)):
+        token = tokens[position]
+        if token in ("`", "("):
+            return True
+        if token in _BREAKS:
+            return False
+        word = _letters(token)
+        if word.startswith("-"):
+            continue
+        glued = tokens[position + 1 : position + 2] == ["("]  # zsh 의 `s(e)tup` 글롭
+        return _shaped(word) or glued
+    return False
+
+
+def _setup_net(command: str) -> bool:
+    """이 명령이 `rcm setup` 에 닿을 수 있나 — 하나뿐인 그물.
+
+    rcm 을 부를 수 있는 명령(글에 rcm 낱말이 있거나, 명령 자리에 변수 · 글롭이 있다)이 (a) 글
+    어디에든 낱말 setup 을 담거나, (b) rcm(또는 그 변수) 다음 하위 명령 자리가 글자 그대로가
+    아니면 참이다. 참이면 `_setup_verdict` 가 명령 글 전체를 평범한 setup 명령 하나로 읽을 수
+    있을 때만 허용한다. 평범한 `rcm setup …` 도 (a) 로 여기 걸린다.
+
+    따옴표는 하위 명령을 숨기지 못한다 — 따옴표를 벗긴 글자(`_letters`)에 setup 이 그대로
+    보이므로 (a) 가 잡는다. 그래서 (b) 는 따옴표가 아니라 셸이 글자를 바꾸는 것(`_SHAPING`)만
+    본다. 글에 rcm 낱말이 있으면 변수 낱말은 어디서든 rcm 일 수 있다(`R=rcm; nice $R …`)."""
+    text = command.replace("\\\n", "")
+    letters = _letters(text)
+    names_rcm = bool(_RCM_WORD.search(letters))
+    can_call = names_rcm
+    tokens = _ROUGH_TOKEN.findall(text)
+    position = True  # 다음 낱말이 명령 자리다
+    wrapped = False  # 감싸기 뒤 — 변수 낱말은 모두 명령 자리일 수 있다
+    for index, token in enumerate(tokens):
+        if token in _BREAKS:
+            position, wrapped = True, False
+            continue
+        word = _letters(token)
+        found = _RCM_WORD.search(word)
+        if found is not None and (_shaped(word[found.end() :]) or _shaped_after(tokens, index)):
+            return True
+        at_command = position or wrapped
+        assignment = bool(_ASSIGNMENT.match(word))
+        if at_command and (assignment or word in _KEYWORDS):
+            continue
+        variable = "$" in word or "`" in token
+        if not assignment and (
+            (position and _shaped(word) and word not in _TESTS)
+            or ((wrapped or names_rcm) and variable)
+        ):
+            can_call = True
+            if _shaped_after(tokens, index):
+                return True
+        if at_command and _name(word) in _LAUNCHERS:
+            wrapped = True
+        position = False
+    return can_call and bool(_SETUP_WORD.search(letters))
+
+
+#: 허용 모양에 있으면 안 되는 글자: 셸 메타 문자(`;` `&` `|` `$` 백틱 `(` `)` `{` `}` `<` `>`),
+#: 역슬래시, 글롭(`*` `?` `[` `]`), 주석 `#`, 이력 · zsh 글롭 `!` `^`. 줄바꿈과 다른 제어 문자도
+#: 안 된다(`_plain_words`)
+_PLAIN_FORBIDDEN = frozenset(";&|$`(){}<>\\*?[]#!^")
+#: 허용 모양의 낱말: 따옴표 없는 글자, 또는 홑 · 겹 따옴표로 통째로 감싼 값(앞에 `NAME=` ·
+#: `--flag=` 가 붙을 수 있다). 따옴표 안에 다른 따옴표는 없다
+_PLAIN_WORD = re.compile(r"""(?:[^ \t'"=]*=)?(?:'[^'"]*'|"[^'"]*")|[^ \t'"]+""")
+#: 허용 모양의 python: `python` · `python3` · `python3.11`
+_PYTHON = re.compile(r"python(?:3(?:\.\d+)?)?")
+_RCM_NAMES = ("rcm", "remote-ci-monitor")
+#: setup 의 경로 플래그(`core.parse_args` 의 이름)
+_SETUP_PATHS = ("config", "service_file", "data_dir")
+#: 앞머리 할당에서 `~` 를 setup 이 푸는 환경 이름 — HOME 은 글자 그대로 홈이 된다
+_ENV_TILDE_OK = frozenset({"XDG_CONFIG_HOME"})
+#: 그물의 거절 — 허용 모양을 그대로 말한다
+PLAIN_RULE = (
+    "run `rcm setup` as one plain command: no ; & | $ ` ( ) < > or backslash, "
+    "absolute or ~ paths only"
+)
+
+
 @dataclass(frozen=True)
-class SetupCall:
-    """셸이 setup 에 넘길 것 하나 — `setup` 뒤의 인자, 그 명령의 환경, 그 명령의 HOME."""
+class PlainSetup:
+    """평범한 `rcm setup` 명령 하나 — 앞머리 `NAME=value`(값, 따옴표로 감쌌나)와 `setup` 뒤의
+    인자(따옴표를 벗긴 글자)."""
 
+    prefix: tuple[tuple[str, str, bool], ...]
     args: tuple[str, ...]
-    environ: Mapping[str, str]
-    home: Path
 
 
-def _setup_calls(
-    segment: str, cwd: Path | None, session: Mapping[str, str], core: ModuleType
-) -> list[SetupCall]:
-    """셸 단계: 조각 하나를 셸처럼 풀어 setup 이 받을 인자와 환경을 만든다.
+def _plain_words(command: str) -> list[tuple[str, bool]] | None:
+    """명령 글을 (따옴표를 벗긴 낱말, 따옴표가 있었나) 로. 허용 모양이 아니면 None."""
+    if any(c in _PLAIN_FORBIDDEN or (c < " " and c != "\t") or c == "\x7f" for c in command):
+        return None
+    words: list[tuple[str, bool]] = []
+    pos, end = 0, len(command)
+    while True:
+        while pos < end and command[pos] in " \t":
+            pos += 1
+        if pos >= end:
+            return words
+        m = _PLAIN_WORD.match(command, pos)
+        if m is None or (m.end() < end and command[m.end()] not in " \t"):
+            return None
+        raw = m.group(0)
+        words.append((raw.replace("'", "").replace('"', ""), "'" in raw or '"' in raw))
+        pos = m.end()
 
-    셸은 인자의 `$VAR` 와 `~` 를 제 환경(세션 + 그 조각의 `$PWD`)으로 펼치고, 앞머리
-    `VAR=value` 는 명령에만 준다. 셸마다 앞머리 할당이 뒤의 펼치기에 닿는지가 다르므로 앞머리를
-    먼저 본 펼치기도 후보로 둔다. 둘이 같으면 하나다. `cwd` 가 None 이면(따라가지 못한 `cd`
-    뒤) `$PWD` 는 모르는 값이다."""
-    words = _lex(_group_trimmed(segment))
-    plain = [_plain(word) for word in words]
-    shell = {**session, "PWD": str(cwd)} if cwd is not None else _without_pwd(session)
-    shell_home = Path(session["HOME"]) if session.get("HOME") else Path.home()
-    calls: list[SetupCall] = []
-    for prefix_first in (False, True):
-        assigned: dict[str, str] = {}
-        unknown: set[str] = set()
-        unset: set[str] = set()
-        cleared = in_env = False
-        index = 0
-        while index < len(words):
-            head = plain[index]
-            if _name(head) in WRAPPERS:
-                in_env = _name(head) == "env"
-            elif in_env and head in ("-i", "--ignore-environment", "-"):
-                cleared = True
-            elif in_env and head in ("-u", "--unset"):
-                unset.add(plain[index + 1] if index + 1 < len(plain) else "")
-                index += 1
-            elif in_env and head.startswith("--unset="):
-                unset.add(head.split("=", 1)[1])
-            elif in_env and head == "--":
-                in_env = False
-            elif _ASSIGNMENT.match(head) and (
-                in_env or (words[index][0][0] == "bare" and _ASSIGNMENT.match(words[index][0][1]))
-            ):
-                name = head.split("=", 1)[0]
-                lookup = {**shell, **assigned} if prefix_first else shell
-                home = (
-                    Path(assigned["HOME"]) if prefix_first and assigned.get("HOME") else shell_home
-                )
-                try:
-                    assigned[name] = _expand_word(words[index], lookup, home, start=len(name) + 1)
-                    unknown.discard(name)
-                except _Unreadable:
-                    unknown.add(name)
-            else:
-                break
-            index += 1
-        found = _subcommand_index(plain[index:])
-        if found is None or plain[index + found] != "setup":
-            raise _Unreadable("the shell words do not read as `rcm setup`")
-        if unknown & set(_WHERE_ENV):
-            raise _Unreadable(f"{', '.join(sorted(unknown & set(_WHERE_ENV)))} before the command")
-        environ = {} if cleared else {k: v for k, v in session.items() if k not in unset}
-        environ.update(assigned)
-        command_home = core.home_of(environ, Path.home())
-        lookup = {**shell, **assigned} if prefix_first else shell
-        tilde = command_home if prefix_first else shell_home
-        args = tuple(_expand_word(word, lookup, tilde) for word in words[index + found + 1 :])
-        call = SetupCall(args, environ, command_home)
-        if call not in calls:
-            calls.append(call)
-    return calls
+
+def _plain_setup(command: str) -> PlainSetup | None:
+    """명령 글 **전체**가 평범한 setup 명령 하나면 그 내용, 아니면 None.
+
+    모양: 선택적인 `NAME=value` 접두 → rcm 낱말(이름이 `rcm` · `remote-ci-monitor`, 또는
+    `python[3[.x]] [플래그] -m remote_ci_monitor[.cli]`) → 글자 그대로의 `setup` → 인자들.
+    글 어디에도 `_PLAIN_FORBIDDEN` 이 없다. 그래서 셸은 따옴표를 벗기고 낱말을 나누고 맨 앞
+    `~` 를 펼치는 것밖에 하지 않는다 — 훅이 그것을 그대로 한다. 앞머리 값의 맨 앞이 아닌 `~`
+    (`a:~/b`, 할당에서 셸이 펼친다)는 받지 않는다."""
+    words = _plain_words(command)
+    if not words:
+        return None
+    index = 0
+    prefix: list[tuple[str, str, bool]] = []
+    while index < len(words) and _ASSIGNMENT.match(words[index][0]):
+        name, _, value = words[index][0].partition("=")
+        if "~" in value[1:]:
+            return None
+        prefix.append((name, value, words[index][1]))
+        index += 1
+    head = _name(words[index][0]) if index < len(words) else ""
+    if head in _RCM_NAMES:
+        start = index + 1
+    elif _PYTHON.fullmatch(head):
+        offset = _python_module_end([word for word, _ in words[index:]])
+        if offset is None:
+            return None
+        start = index + offset
+    else:
+        return None
+    if start >= len(words) or words[start][0] != "setup":
+        return None
+    return PlainSetup(tuple(prefix), tuple(word for word, _ in words[start + 1 :]))
+
+
+def _anchored(value: str) -> bool:
+    """작업 폴더에 기대지 않는 경로 글자 — 절대 경로, `~`, `~/…`(`~user` 는 아니다)."""
+    return value.startswith("/") or value == "~" or value.startswith("~/")
+
+
+def _home_joined(home: Path, value: str) -> str:
+    """`~` · `~/…` 를 그 홈으로 — 셸의 펼치기."""
+    return (str(home).rstrip("/") + value[1:]) or "/"
+
+
+def _not_plain() -> Verdict:
+    return Verdict(
+        "deny",
+        "This command can reach `rcm setup`, but not as a plain `rcm setup …` call the hook can "
+        "read, so it cannot tell what setup would write — its config file, service file, label "
+        f"or data directory. In short, {PLAIN_RULE} (`NAME=value` in front is fine; no `cd`, "
+        "`env`, `sudo` or a second command). If the words are only text — a "
+        "commit message, an echo — put the text in a file (`git commit -F <file>`, "
+        f'`gh pr create --title "$(cat <file>)"`). See {DOCS}.',
+    )
+
+
+def _loose_path(what: str, value: str) -> Verdict:
+    return Verdict(
+        "deny",
+        f"`rcm setup` here gives {what} the path {value!r}, which depends on the working folder "
+        "or another user's home; the hook does not trust the working folder to tell where setup "
+        f"would write. In short, {PLAIN_RULE}. See {DOCS}.",
+    )
 
 
 #: 반복할 수 있는 setup 의 값 플래그 — setup 은 마지막 값을 쓰지만 훅은 앞의 값도 본다(막는 쪽)
@@ -1250,38 +1362,76 @@ def _with_earlier_values(args: tuple[str, ...]) -> list[list[str]]:
     return out
 
 
+def _tilde_choices(ns: Any, session_home: Path) -> list[dict[str, str | None]]:
+    """경로 플래그 값의 `~` 를 누가 푸나 — 셸(맨 앞의 따옴표 없는 `~`, 세션의 HOME)과
+    setup(`--config=~/x` · 따옴표 안, 그 명령의 HOME). 어느 쪽인지 글자로 가리지 않고 둘 다 본다."""
+    choices: list[dict[str, str | None]] = [{}]
+    for flag in _SETUP_PATHS:
+        value = getattr(ns, flag)
+        options = [value]
+        if isinstance(value, str) and (value == "~" or value.startswith("~/")):
+            options.append(_home_joined(session_home, value))
+        choices = [{**choice, flag: option} for choice in choices for option in options]
+    return choices
+
+
+def _real(path: Path) -> Path:
+    """심볼릭 링크를 푼 경로 — 존재하는 가장 깊은 조상까지 `os.path.realpath` 가 풀고, 없는
+    꼬리는 글자 그대로 붙인다. setup 이 쓸 파일은 아직 없으니 링크는 조상에 있다(P3 4라운드)."""
+    return Path(_realpath(str(path)))
+
+
+@functools.lru_cache(maxsize=256)
+def _realpath(text: str) -> str:
+    """`os.path.realpath` 를 한 번만 — 훅은 한 판정에 같은 뿌리를 여러 번 푼다(macOS 의 `/home`
+    처럼 자동 마운트를 거치는 자리는 한 번에 수십 ms 다)."""
+    return os.path.realpath(text)
+
+
+def _real_production(prod: Production) -> Production:
+    def real(path: Path | None) -> Path | None:
+        return None if path is None else _real(path)
+
+    return Production(
+        checkout=real(prod.checkout),
+        venv=real(prod.venv),
+        config_dir=real(prod.config_dir),
+        data_dir=real(prod.data_dir),
+    )
+
+
 def _service_place(path: Path, home: Path) -> Path | None:
     """서비스 관리자가 읽는 자리(`SETUP_SERVICE_PLACES`) 안이면 그 자리. `~` 는 이 사용자의 홈
-    (세션의 HOME)이다 — 운영 서비스는 명령 앞의 `HOME=` 으로 옮겨 가지 않는다."""
+    (세션의 HOME)이다 — 운영 서비스는 명령 앞의 `HOME=` 으로 옮겨 가지 않는다. 글자로도,
+    심볼릭 링크를 푼 경로로도 본다."""
     for place in SETUP_SERVICE_PLACES:
         root = Path(str(home) + place[1:]) if place.startswith("~") else Path(place)
-        if inside(path, root):
+        if inside(path, root) or inside(_real(path), _real(root)):
             return _norm(root)
     return None
 
 
-#: cwd 를 모를 때 견줘 볼 다른 작업 폴더 — 해석기의 답이 cwd 에 따라 달라지면 상대 경로다
-_OTHER_CWD = Path("/rcm-guard-unknown-cwd")
-
-
 def _setup_verdict(
-    segment: str, cwd: Path, prod: Production, env: SegmentEnv, *, cwd_known: bool = True
+    command: str, cwd: Path, prod: Production, session: Mapping[str, str]
 ) -> Verdict | None:
-    """`rcm setup` 의 세 규칙. setup 은 DB 를 열지 않지만 운영 자리에 설정 · 서비스 파일을 쓰거나
-    운영 `data_dir` 을 고른 서버 설정을 만들 수 있다 — 그 서비스는 setup 을 돌린 빌드로 운영 DB 를
-    연다. 자리는 setup 의 해석기 `core.where` 가 정한다(셸 단계는 `_setup_calls`).
+    """setup 에 닿을 수 있는 명령(`_setup_net`)의 판정. 평범한 명령 하나(`_plain_setup`)가
+    아니면 막는다. 그렇다면 setup 의 세 규칙을 setup 의 해석기 `core.where` 로 본다:
 
     1. 쓸 자리(설정 파일 · 서비스 파일)가 운영 뿌리 넷(`production_root` — 체크아웃 · 서비스
        venv · 설정 폴더 · data_dir, 편집 규칙과 같은 함수) 안이거나 서비스 관리자가 읽는 자리
-       (`SETUP_SERVICE_PLACES` — 운영 서비스 파일이 있는 곳) 안이면 거절한다.
+       (`SETUP_SERVICE_PLACES`) 안이면 거절한다.
     2. 서비스 라벨이 운영 라벨이면 거절한다. `--label` 이 없으면 역할의 표준 라벨이다. 역할을 안
        주면 setup 이 물을 수 있으니 모든 역할로 본다. client 는 서비스 파일이 없다.
     3. 역할 2 · 4 의 `data_dir` 이 운영 `data_dir` 이거나 그 안이면 거절한다(6-A-L4 · 6-B-V5).
 
-    모르면 운영으로 본다(fail closed): 해석기를 못 들여오거나, 셸 단계를 다 해도 글자가 남거나,
-    setup 의 파서 · 해석기가 거절할 명령줄이거나, cwd 를 모르는데(`cwd_known`) 해석기의 답이
-    cwd 에 따라 달라지면(상대 경로) 거절한다."""
-    if not prod.known:
+    경로는 절대 경로나 `~` · `~/…` 만 받는다(작업 폴더를 믿지 않는다). 견줄 때는 글자로도,
+    심볼릭 링크를 푼 경로(`_real`)로도 본다. 모르면 운영으로 본다(fail closed): 해석기를 못
+    들여오거나, setup 의 파서 · 해석기가 거절할 명령줄이면 거절한다. `--help` · `-h` 는 허용
+    모양일 때만 지나간다."""
+    plain = _plain_setup(command)
+    if plain is None:
+        return _not_plain()
+    if _wants_help(list(plain.args)):
         return None
     try:
         core = _setup_core()
@@ -1292,60 +1442,65 @@ def _setup_verdict(
             f"decides where setup writes ({type(e).__name__}: {e}). Run the hook from a checkout "
             f"with src/ on Python 3.9 or newer. See {DOCS}.",
         )
-    try:
-        calls = _setup_calls(segment, cwd if cwd_known else None, env.session, core)
-    except _Unreadable as e:
-        return Verdict(
-            "deny",
-            f"`rcm setup` here has a value the hook cannot read the way the shell will ({e}), so "
-            "it cannot tell whether setup would write to the production install. Write the paths, "
-            f"role and label out, or quote them. See {DOCS}.",
-        )
-    session_home = Path(env.session["HOME"]) if env.session.get("HOME") else Path.home()
+    session_home = Path(session["HOME"]) if session.get("HOME") else Path.home()
+    environ = dict(session)
+    for name, value, quoted in plain.prefix:
+        if not quoted and (value == "~" or value.startswith("~/")):
+            value = _home_joined(session_home, value)  # 셸이 할당의 맨 앞 `~` 를 펼친다
+        environ[name] = value
+    for name in _WHERE_ENV:
+        value = environ.get(name)
+        if value and not (value.startswith("/") or (name in _ENV_TILDE_OK and _anchored(value))):
+            return _loose_path(f"${name}", value)
+    home = core.home_of(environ, Path.home())
     units = {unit_name(standard) for standard in SETUP_STANDARD_LABELS}
     manager = core.manager_of(sys.platform)
-    for call in calls:
-        for args in _with_earlier_values(call.args):
-            try:
-                ns = core.parse_args(args)
-                places = _resolve(core, call, ns, cwd, manager)
-                moves = not cwd_known and places != _resolve(core, call, ns, _OTHER_CWD, manager)
-            except (core.SetupArgError, core.SetupValueError) as e:
-                return Verdict(
-                    "deny",
-                    f"`rcm setup {shlex.join(args)}` is not a command setup reads ({e}) — the hook "
-                    f"cannot tell where it would write, so it refuses it. See {DOCS}.",
-                )
-            if moves:
-                return Verdict(
-                    "deny",
-                    "`rcm setup` here uses a relative path after a `cd` the hook cannot follow "
-                    "(`cd -P`, `cd --`, `cd -`, a `cd` it cannot expand, `pushd`), so it cannot "
-                    "tell where setup would write. Use absolute paths, or a plain `cd /path`. "
-                    f"See {DOCS}.",
-                )
-            verdict = _setup_place_verdict(places, prod, session_home, units)
-            if verdict is not None:
-                return verdict
+    for args in _with_earlier_values(plain.args):
+        try:
+            ns = core.parse_args(args)
+            for flag in _SETUP_PATHS:
+                value = getattr(ns, flag)
+                if value is not None and not _anchored(value):
+                    return _loose_path("--" + flag.replace("_", "-"), value)
+            places = [
+                place
+                for paths in _tilde_choices(ns, session_home)
+                for place in _resolve(core, ns, paths, environ, home, cwd, manager)
+            ]
+        except (core.SetupArgError, core.SetupValueError) as e:
+            return Verdict(
+                "deny",
+                f"`rcm setup {shlex.join(args)}` is not a command setup reads ({e}) — the hook "
+                f"cannot tell where it would write, so it refuses it. See {DOCS}.",
+            )
+        verdict = _setup_place_verdict(places, prod, session_home, units)
+        if verdict is not None:
+            return verdict
     return None
 
 
 def _resolve(
-    core: ModuleType, call: SetupCall, ns: Any, cwd: Path, manager: str | None
+    core: ModuleType,
+    ns: Any,
+    paths: Mapping[str, str | None],
+    environ: Mapping[str, str],
+    home: Path,
+    cwd: Path,
+    manager: str | None,
 ) -> list[Any]:
     """setup 이 그 명령줄로 쓸 자리 — 역할을 안 주면 setup 이 물을 수 있으니 모든 역할."""
     roles = [ns.role] if ns.role else list(core.ROLES)
     return [
         core.where(
             role,
-            environ=call.environ,
+            environ=environ,
             cwd=cwd,
-            home=call.home,
+            home=home,
             manager=manager,
-            config=ns.config,
+            config=paths["config"],
             label=ns.label,
-            service_file=ns.service_file,
-            data_dir=ns.data_dir,
+            service_file=paths["service_file"],
+            data_dir=paths["data_dir"],
             fold_case=FOLD_CASE,
             expand_user=os.path.expanduser,
         )
@@ -1357,12 +1512,14 @@ def _setup_place_verdict(
     places: list[Any], prod: Production, session_home: Path, units: set[str]
 ) -> Verdict | None:
     """`core.where` 의 답 하나하나에 세 규칙을 댄다. 쓰는 파일(설정 · 서비스)마다 운영 뿌리 넷
-    (`production_root` — 편집 규칙과 같은 함수)과 서비스 관리자 자리를 본다."""
+    (`production_root` — 편집 규칙과 같은 함수)과 서비스 관리자 자리를 본다. 글자로도, 심볼릭
+    링크를 푼 경로로도 본다."""
+    real_prod = _real_production(prod)
     for found in places:
         for target in (found.config, found.service_file):
             if target is None:
                 continue
-            hit = production_root(target, prod)
+            hit = production_root(target, prod) or production_root(_real(target), real_prod)
             if hit is not None:
                 name, root = hit
                 return Verdict(
@@ -1391,7 +1548,7 @@ def _setup_place_verdict(
                 )
         if found.role in SETUP_SERVER_ROLES and found.data_dir is not None:
             data = found.data_dir
-            if inside(data, prod.data_dir):
+            if inside(data, prod.data_dir) or inside(_real(data), real_prod.data_dir):
                 return Verdict(
                     "deny",
                     f"`rcm setup` here would point a server at {data}, inside the production "
@@ -1543,11 +1700,11 @@ def find_production() -> Production:
 
 
 def _about_setup(payload: Any) -> bool:
-    """훅 입력이 `rcm setup` 을 말하는 Bash 명령인가(`mentions_setup`). 무엇이 터져도 답한다."""
+    """훅 입력이 `rcm setup` 에 닿을 수 있는 Bash 명령인가(`_setup_net`). 무엇이 터져도 답한다."""
     try:
         tool_input = payload.get("tool_input") or {}
         command = tool_input.get("command")
-        return payload.get("tool_name") == "Bash" and mentions_setup(str(command or ""))
+        return payload.get("tool_name") == "Bash" and _setup_net(str(command or ""))
     except Exception:  # noqa: BLE001 — 모양이 이상한 입력은 setup 이 아니다
         return False
 
