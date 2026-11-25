@@ -16,6 +16,10 @@ stdin 으로 받아 판정 JSON 을 stdout 으로 낸다.
 `$XDG_CONFIG_HOME/rcm/server.toml`)과 PATH 의 실행 파일(`_which`)뿐이다.
 발견 `find_production()` 이 기계를 본다.
 
+`rcm setup` 에는 규칙 셋이 있다(M5t-a §4.1): 운영 설정 폴더에 쓰는 것, 운영 라벨의 서비스
+파일을 쓰는 것, 운영 `data_dir`(그 안 포함)을 고르는 것을 막는다. setup 은 DB 를 열지 않으므로
+`DB_OPENING` · `MIGRATING` 에는 넣지 않는다.
+
 운영 설치가 없어도 하나는 본다 — **다른 빌드가 옛 DB 를 그 자리에서 마이그레이션하는 것**(사건 6f,
 2026-11-20: 검증 에이전트가 dev 워크트리 안에서 `--config` 없이 `rcm token add` · `rcm serve` 를
 돌려 그 폴더 `rcm.toml` 의 개발 DB 를 v7 → v24 로 올렸다). `rcm serve|worker|token` 의 유효
@@ -102,6 +106,23 @@ SERVICE_UNITS = (
     "~/.config/systemd/user/rcm-server.service",
     "/etc/systemd/system/rcm-server.service",
 )
+#: `rcm setup` 의 표준 라벨 — 운영 서비스가 쓰는 이름이다(`examples/` · `SERVICE_UNITS`).
+SETUP_STANDARD_LABELS = ("com.remote-ci-monitor.server", "com.remote-ci-monitor.worker")
+#: systemd 유닛 이름 규칙(M5t-a 6-B-V1) — 표준 라벨은 `examples/systemd/` 의 이름, 다른 라벨은
+#: `<label>.service`. 훅은 패키지를 들여오지 않으므로 `remote_ci_monitor/core/setup.py` 의 같은
+#: 규칙을 여기 따로 둔다 — tests/test_guard_production_setup.py 가 둘을 맞춘다.
+_STANDARD_UNITS = {
+    "com.remote-ci-monitor.server": "rcm-server",
+    "com.remote-ci-monitor.worker": "rcm-worker",
+}
+#: 서버 데이터 폴더를 고르는 setup 역할(역할 2 · 4). 역할을 안 주면 setup 이 물을 수 있어
+#: 이쪽으로 본다.
+SETUP_SERVER_ROLES = ("coordinator", "coordinator-worker")
+SETUP_ROLE_LABELS = {
+    "coordinator": SETUP_STANDARD_LABELS[0],
+    "coordinator-worker": SETUP_STANDARD_LABELS[0],
+    "worker": SETUP_STANDARD_LABELS[1],
+}
 #: 명령 앞에서 떼어 내는 감싸기 — 뒤의 명령을 그대로 실행한다.
 WRAPPERS = frozenset({"sudo", "env", "exec", "command", "nohup", "time", "builtin"})
 #: 맨 이름(`rcm`)을 실행 파일로 푸는 함수 — 테스트가 바꿔 끼운다.
@@ -485,6 +506,10 @@ def _segment_verdict(
             )
 
     subcommand = _rcm_subcommand(argv)
+    if subcommand == "setup" and not _wants_help(argv):
+        verdict = _setup_verdict(argv, cwd, prod, env)
+        if verdict is not None:
+            return verdict
     if subcommand in ("serve", "worker") and not _wants_help(argv):
         verdict = _server_verdict(argv, cwd, prod, subcommand, local_config, env)
         if verdict is not None:
@@ -763,6 +788,106 @@ def _server_verdict(
     )
 
 
+# ── `rcm setup` (M5t-a §4.1, TR20 · TR33) ────────────────────────────────────
+
+
+def unit_name(label: str) -> str:
+    """systemd 유닛 파일 이름(6-B-V1) — setup · doctor 와 같은 규칙."""
+    return f"{_STANDARD_UNITS.get(label, label)}.service"
+
+
+def _home_of(env: SegmentEnv) -> Path:
+    """그 명령이 보는 HOME — 조각 앞의 `HOME=…` 가 세션의 것을 이긴다. 없으면(`env -i`) 이
+    사용자의 홈이다(`Path.home()` 이 passwd 로 찾는 것과 같다)."""
+    home = env.get("HOME")
+    return Path(home) if home else Path.home()
+
+
+def _setup_path(raw: str, home: Path, cwd: Path) -> Path | None:
+    """setup 이 경로를 푸는 법 — `~` 는 그 명령의 HOME, 상대 경로는 작업 폴더 기준이다
+    (`os.path.abspath(os.path.expanduser(…))`)."""
+    text = raw.strip().strip("'\"")
+    if not text:
+        return None
+    if text == "~" or text.startswith("~/"):
+        text = str(home) + text[1:]
+    elif text.startswith("~"):
+        text = os.path.expanduser(text)  # ~user
+    path = Path(text)
+    return _norm(path if path.is_absolute() else cwd / path)
+
+
+def _setup_targets(argv: list[str], cwd: Path, env: SegmentEnv) -> list[Path]:
+    """setup 이 쓸 자리 — setup 과 같은 규칙으로 계산한다. `--config` 가 있으면 그 파일과 옆의
+    `service/`, 없으면 설정 폴더(`$XDG_CONFIG_HOME/rcm`, 없으면 `$HOME/.config/rcm`,
+    config.py `user_config_dir`). `--service-file` 도 쓰는 자리다."""
+    home = _home_of(env)
+    out: list[Path] = []
+    config = _option_value(argv, ("--config",))
+    if config is not None:
+        path = _setup_path(config, home, cwd)
+        if path is not None:
+            out += [path, path.parent / "service"]
+    else:
+        xdg = env.get("XDG_CONFIG_HOME")
+        base = _setup_path(xdg, home, cwd) if xdg else None
+        out.append(_norm((base or home / ".config") / "rcm"))
+    service = _option_value(argv, ("--service-file",))
+    if service is not None:
+        path = _setup_path(service, home, cwd)
+        if path is not None:
+            out.append(path)
+    return out
+
+
+def _setup_verdict(argv: list[str], cwd: Path, prod: Production, env: SegmentEnv) -> Verdict | None:
+    """`rcm setup` 의 세 규칙. setup 은 DB 를 열지 않지만 운영 자리에 설정 · 서비스 파일을 쓰거나
+    운영 `data_dir` 을 고른 서버 설정을 만들 수 있다 — 그 서비스는 setup 을 돌린 빌드로 운영 DB 를
+    연다.
+
+    1. 쓸 자리(설정 파일 · `service/` · `--service-file`)가 운영 설정 폴더 안이면 거절한다.
+    2. 서비스 라벨이 운영 라벨이면 거절한다. `--label` 이 없으면 역할의 표준 라벨이다. 역할을 안
+       주면 setup 이 물을 수 있으니 표준 라벨로 본다. client 는 서비스 파일이 없다.
+    3. 역할 2 · 4(또는 역할 없음)의 `data_dir` — `--data-dir`, 없으면 템플릿 기본값을 그 명령의
+       HOME 으로 푼 것 — 이 운영 `data_dir` 이거나 그 안이면 거절한다(6-A-L4 · 6-B-V5)."""
+    if not prod.known:
+        return None
+    for target in _setup_targets(argv, cwd, env):
+        if inside(target, prod.config_dir):
+            return Verdict(
+                "deny",
+                f"`rcm setup` here would write {target}, inside the server's config directory "
+                f"({prod.config_dir}). Give it a test HOME or XDG_CONFIG_HOME, or `--config` and "
+                f"`--service-file` paths of its own. See {DOCS}.",
+            )
+    role = _option_value(argv, ("--role",))
+    if role != "client":
+        label = _option_value(argv, ("--label",))
+        if label is None:
+            label = SETUP_ROLE_LABELS.get(role or "", SETUP_STANDARD_LABELS[0])
+        units = {unit_name(standard) for standard in SETUP_STANDARD_LABELS}
+        if label in SETUP_STANDARD_LABELS or unit_name(label) in units:
+            return Verdict(
+                "deny",
+                f"`rcm setup` here would write a service file labelled {label} — the production "
+                "service's label on this machine. Pass `--label` with a test label. See "
+                f"{DOCS}.",
+            )
+    if role is None or role in SETUP_SERVER_ROLES:
+        home = _home_of(env)
+        raw = _option_value(argv, ("--data-dir",))
+        data = _setup_path(raw if raw is not None else DEFAULT_DATA_DIR, home, cwd)
+        if inside(data, prod.data_dir):
+            return Verdict(
+                "deny",
+                f"`rcm setup` here would point a server at {data}, inside the production data "
+                f"directory ({prod.data_dir}) — that server would open the production database "
+                "with the build that ran setup. Pass `--data-dir` with a new folder of its own. "
+                f"See {DOCS}.",
+            )
+    return None
+
+
 def decide(
     tool_name: str,
     tool_input: dict[str, object],
@@ -794,10 +919,6 @@ def decide(
 
 
 # ── 발견 (I/O) ───────────────────────────────────────────────────────────────
-
-
-def unit_name(label: str) -> str:
-    return ""
 
 
 def _venv_candidates() -> list[Path]:
