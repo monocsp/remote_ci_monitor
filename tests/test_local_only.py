@@ -803,6 +803,40 @@ def test_to19_rechecking_every_check_skips_the_local_only_one(lo, monkeypatch):
     assert ("simcheck", OTHER) in calls and ("localcheck", OTHER) not in calls
 
 
+def test_to19_removing_the_mark_leaves_no_local_only_code_on_the_check(lo, monkeypatch):
+    """표식을 뗀 뒤의 점검 칸에 옛 `local_only` 가 남지 않는다. 다음에 걸 때 로그도 옛 원인
+    (「after ref_unresolved」)을 지어내지 않는다(P3 1라운드 두 검증자의 LOW)."""
+    report(lo, OTHER, host_key=HOST_C)
+    record_checks(lo, monkeypatch)
+    status, body = lo.req("POST", f"/machines/{OTHER}/recheck", token="admin", json_body={})
+    assert status == 200, body
+    items = {j["preset"]: j for j in body["jobs"]}
+    assert items["localcheck"]["error_code"] == "local_only"
+    head = 'name = "localcheck"\nargv = ["sh", "-c", "echo localcheck"]\n'
+    unmarked = PRESETS.replace(head + "local_only = true\n", head)
+    assert unmarked != PRESETS
+    lo.write(PROBES + unmarked)
+    status, body = lo.req("POST", "/reload", token="admin", json_body={})
+    assert status == 200, body
+    assert lo.app.config.preset("localcheck").local_only is False
+    row = {c["preset"]: c for c in lo.machines()[OTHER]["checks"]}["localcheck"]
+    assert row["error_code"] is None, row
+    # 이제 걸린다 — 걸린 점검은 옛 원인을 로그에 남기지 않는다
+    logs: list[str] = []
+    monkeypatch.setattr(lo.app, "log", logs.append)
+    monkeypatch.setattr(
+        lo.app,
+        "submit_internal_check",
+        lambda preset, view, *, fingerprint_hash: stored_job(lo, preset.name, target=view.id),
+    )
+    status, body = lo.req(
+        "POST", f"/machines/{OTHER}/recheck", token="admin", json_body={"checks": ["localcheck"]}
+    )
+    assert status == 200, body
+    assert body["jobs"][0]["job_id"] is not None, body
+    assert not [m for m in logs if "ref_unresolved" in m], logs
+
+
 # ── 문서 ─────────────────────────────────────────────────────────────────────
 
 
