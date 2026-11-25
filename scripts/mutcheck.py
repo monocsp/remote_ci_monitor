@@ -2498,7 +2498,7 @@ MUTANTS = (
         # 아무 서버에 묻고 0 이나 「프리셋 없음」(1)으로 끝난다(P3 4라운드 HIGH)
         name="doctor-coordinator-defaults-trusted",
         path="src/remote_ci_monitor/doctor.py",
-        old="        if cfg.path is None:\n",
+        old="        if path is None:  # 서버 설정 파일이 어디에도 없다\n",
         new="        if False:\n",
         tests=(
             "tests/test_doctor_cli.py::"

@@ -45,6 +45,11 @@ SYSTEMD_GLOB = "rcm-*.service"
 #: 서비스의 환경을 바꾸지만 rcm 이 따라가지 않는 systemd 줄(P3 2라운드 MED). `EnvironmentFile=` 의
 #: 값은 `Environment=` 를 덮으므로 PATH 도 모른다
 SYSTEMD_UNFOLLOWED = ("EnvironmentFile", "PassEnvironment", "UnsetEnvironment")
+#: 라벨(plist 의 `Label` · 파일 이름)이 이 이름으로 끝나면 rcm 의 서비스처럼 보인다
+#: (`com.remote-ci-monitor.worker` · `rcm-server.service`)
+RCM_LABEL_ROLES = ("worker", "server")
+#: launchd 는 `WorkingDirectory` 가 없으면 `/` 에서 띄운다(launchd.plist(5) WorkingDirectory)
+LAUNCHD_DEFAULT_WORKDIR = "/"
 #: 역할마다 서비스 파일이 띄워야 하는 `rcm` 하위 명령 — 후보를 이것으로 거른다(6-B-V2)
 ROLE_COMMANDS = {
     dc.ROLE_WORKER: "worker",
@@ -310,6 +315,19 @@ class ServiceFile:
     #: 서비스가 rcm 을 띄우는 인자를 rcm 자신의 파서로 읽은 것(`command` · `config` · `port` …).
     #: rcm 을 띄우는지, 어느 하위 명령인지 풀지 못했으면 None
     launch: dict[str, Any] | None = None
+    #: 띄우는 명령 줄에 rcm 이 풀지 않는 지정자가 있다(`%S` · 사용자 유닛인지 모르는 파일의 `%h`) —
+    #: 명령(역할)은 알지만 그 인자의 값(`--config` …)은 모른다
+    launch_unexpanded: bool = False
+    #: plist 의 `Label`, systemd 는 파일 이름 — rcm 의 서비스처럼 보이는지 가린다
+    label: str | None = None
+    #: 띄우는 인자 전부(실행 파일 포함) — 풀지 못한 명령이 rcm 을 띄우는 것처럼 보이는지 본다
+    argv: list[str] = field(default_factory=list)
+    #: 서비스의 작업 폴더(`WorkingDirectory`) — 적혀 있지 않으면 None
+    workdir: str | None = None
+    #: 작업 폴더가 적혀 있지만 rcm 이 풀지 못한다(지정자 · 상대 경로)
+    workdir_unknown: bool = False
+    #: 사용자 유닛인 것을 안다(`~/.config/systemd/user/` · setup 자리) — `%h` 가 그 홈이다
+    user_unit: bool = False
 
     @property
     def env_names(self) -> list[str]:
@@ -346,6 +364,50 @@ def rcm_launch(program: str | None, argv: list[str]) -> dict[str, Any] | None:
     return {k: v for k, v in vars(args).items() if k != "func"}
 
 
+def looks_like_rcm(sf: ServiceFile) -> bool:
+    """띄우는 명령을 rcm 의 하위 명령으로 풀지 못한 파일이 rcm 의 서비스일 수 있나.
+
+    실행 파일과 인자 어디에도 rcm(`rcm` 실행 파일, `remote_ci_monitor` 모듈)이 없고 라벨도
+    worker · server 가 아니면 rcm 의 서비스가 아님이 확실하다. 그런 파일은 후보가 아니다 —
+    rcm-ci-connect 스킬의 `com.remote-ci-monitor.ci-watch.plist`(`python3 rcm_ci_watch.py`)가
+    그렇다(검증 사이클 2 의 1라운드 HIGH 1). `sh -c "exec rcm worker"` 처럼 한 인자에 든 명령은
+    낱말로 나눠 본다."""
+    for arg in [sf.program or "", *sf.argv]:
+        for word in arg.split():
+            if os.path.basename(word) == "rcm":
+                return True
+            if word == "remote_ci_monitor" or word.startswith("remote_ci_monitor."):
+                return True
+    names = [sf.label or "", sf.path.stem if sf.path is not None else ""]
+    for name in names:
+        tail = name.removeprefix("com.remote-ci-monitor.").removeprefix("rcm-")
+        if tail in RCM_LABEL_ROLES:
+            return True
+    return False
+
+
+def expand_specifiers(value: str, home: str | None) -> str | None:
+    """systemd 지정자를 푼다 — `%%` 는 `%`, `%h` 는 사용자 유닛의 홈(`home`, 모르면 None).
+    다른 지정자는 rcm 이 풀지 않는다: None(모름)."""
+    out: list[str] = []
+    i = 0
+    while i < len(value):
+        ch = value[i]
+        if ch != "%":
+            out.append(ch)
+            i += 1
+            continue
+        spec = value[i + 1 : i + 2]
+        if spec == "%":
+            out.append("%")
+        elif spec == "h" and home:
+            out.append(home.rstrip("/") or "/")
+        else:
+            return None
+        i += 2
+    return "".join(out)
+
+
 def _plist_reason(e: Exception) -> str:
     """plist 를 못 읽은 이유 — 형식 이름과 위치만. 메시지에는 파일의 값이 섞일 수 있다."""
     if isinstance(e, xml.parsers.expat.ExpatError):
@@ -378,6 +440,10 @@ def _read_plist(p: Path) -> ServiceFile:
         raise ServiceFileUnreadable(p, "SoftResourceLimits.NumberOfFiles is not an integer")
     if program is not None and not isinstance(program, str):
         raise ServiceFileUnreadable(p, "Program is not a string")
+    workdir = doc.get("WorkingDirectory")
+    if workdir is not None and not isinstance(workdir, str):
+        raise ServiceFileUnreadable(p, "WorkingDirectory is not a string")
+    label = doc.get("Label")
     # launchd 는 인자와 환경 변수 값을 문자열로만 받는다 — `str()` 로 바꿔 「PATH 가 7」로 재지
     # 않는다(P3 4라운드 LOW). 이유에는 이름만 넣고 값은 넣지 않는다
     if not all(isinstance(a, str) for a in raw_args):
@@ -399,17 +465,27 @@ def _read_plist(p: Path) -> ServiceFile:
         nofile or None,
         exe,
         launch=launch,
+        label=label if isinstance(label, str) else None,
+        argv=args,
+        workdir=workdir or None,
+        # launchd 는 `~` 를 풀지 않는다 — 절대 경로가 아니면 그 폴더를 모른다
+        workdir_unknown=bool(workdir) and not os.path.isabs(str(workdir)),
     )
 
 
-def read_service_file(path: str | os.PathLike[str]) -> ServiceFile:
+def read_service_file(path: str | os.PathLike[str], *, user_home: str | None = None) -> ServiceFile:
     """launchd plist 나 systemd 유닛을 읽는다. 파일을 못 읽으면 `ServiceFileUnreadable`.
+
+    `user_home` 은 그 유닛이 사용자 유닛인 것을 알 때(`~/.config/systemd/user/` · setup 자리)의
+    홈이다. 그때 `%h` 는 그 홈으로 푼다 — systemd 가 사용자 유닛의 `%h` 를 그 사용자의 홈으로 풀기
+    때문이다(systemd.unit 「Specifiers」). 시스템 유닛의 `%h` 는 `/root` 라서, 어느 쪽인지 모르는
+    파일에서는 풀지 않는다(검증 사이클 2 의 1라운드 MED 4).
 
     systemd 유닛의 줄 하나를 못 읽으면(닫히지 않은 따옴표 · 숫자가 아닌 한도) 그 줄을 건너뛰되
     `unreadable_lines` 에 남긴다 — 조용히 버리면 「PATH 를 주지 않았다」 같은 틀린 안내가 나간다.
 
-    rcm 이 따라가지 않는 줄(`SYSTEMD_UNFOLLOWED`)과 systemd 가 풀 지정자(`%h` …)가 든
-    `Environment=` 값은 `unfollowed` 에 남긴다. 지정자가 든 값은 환경에 넣지 않는다 — 글자 그대로
+    rcm 이 따라가지 않는 줄(`SYSTEMD_UNFOLLOWED`)과 rcm 이 풀지 않는 지정자가 든 `Environment=` ·
+    `ExecStart=` 값은 `unfollowed` 에 남긴다. 지정자가 든 값은 환경에 넣지 않는다 — 글자 그대로
     재면 없는 「빠짐」(종료 1)을 지어낸다. PATH 에 닿으면 `path_unknown` 이다. `$` 는 남긴다:
     systemd 는 `Environment=` 에서 변수를 펼치지 않으므로(systemd.exec 「Environment=」) 글자
     그대로가 서비스가 실제로 받는 값이다.
@@ -417,6 +493,7 @@ def read_service_file(path: str | os.PathLike[str]) -> ServiceFile:
     p = Path(path)
     if p.suffix == ".plist":
         return _read_plist(p)
+    home = user_home or None
     try:
         text = p.read_text(encoding="utf-8")
     except OSError as e:
@@ -431,6 +508,10 @@ def read_service_file(path: str | os.PathLike[str]) -> ServiceFile:
     unreadable: list[str] = []
     unfollowed: list[str] = []
     path_unknown = False
+    argv: list[str] = []
+    unexpanded = False
+    workdir: str | None = None
+    workdir_unknown = False
     for number, raw in enumerate(text.splitlines(), 1):
         line = raw.strip()
         key, _, value = line.partition("=")
@@ -444,7 +525,8 @@ def read_service_file(path: str | os.PathLike[str]) -> ServiceFile:
                     k, sep, v = item.partition("=")
                     if not sep:
                         continue
-                    if "%" in v.replace("%%", ""):
+                    expanded = expand_specifiers(v, home)
+                    if expanded is None:
                         unfollowed.append(
                             f"line {number} ({key}=): rcm does not expand systemd specifiers "
                             f"such as %h in {k}"
@@ -452,12 +534,32 @@ def read_service_file(path: str | os.PathLike[str]) -> ServiceFile:
                         path_unknown = path_unknown or k == "PATH"
                         env.pop(k, None)
                         continue
-                    env[k] = v.replace("%%", "%")
+                    env[k] = expanded
             elif key == "ExecStart":
                 argv = shlex.split(value)
+                expanded_argv = [expand_specifiers(a, home) for a in argv]
+                unexpanded = any(a is None for a in expanded_argv)
+                if unexpanded:
+                    # 명령(역할)은 글자 그대로 읽되 인자의 값은 모른다 — `%h/…` 를 상대 경로로
+                    # 읽어 「상대 --config」라고 말하지 않는다
+                    unfollowed.append(
+                        f"line {number} ({key}=): rcm does not expand this systemd specifier "
+                        "in ExecStart"
+                    )
+                else:
+                    argv = [a for a in expanded_argv if a is not None]
                 program = argv[0].lstrip("@-:+!") if argv else None
                 launch = rcm_launch(program, argv)
                 command = None if launch is None else launch["command"]
+            elif key == "WorkingDirectory":
+                # `-` 앞머리는 「없어도 된다」, `~` 는 사용자의 홈이다
+                # (systemd.exec 「WorkingDirectory=」)
+                wd = value.strip().removeprefix("-")
+                if wd == "~":
+                    wd = home or ""
+                resolved = expand_specifiers(wd, home) if wd else None
+                workdir = resolved
+                workdir_unknown = resolved is None or not os.path.isabs(resolved)
             elif key == "LimitNOFILE":
                 first = value.split(":", 1)[0].strip()
                 nofile_unit = 1 << 20 if first == "infinity" else int(first)
@@ -474,25 +576,40 @@ def read_service_file(path: str | os.PathLike[str]) -> ServiceFile:
         unfollowed,
         path_unknown,
         launch,
+        launch_unexpanded=unexpanded,
+        label=p.stem,
+        argv=argv,
+        workdir=None if workdir_unknown else workdir,
+        workdir_unknown=workdir_unknown,
+        user_unit=home is not None,
     )
 
 
 def _matching(
-    paths: list[Path], role: str, unreadable: list[ServiceFileUnreadable]
+    paths: list[Path],
+    role: str,
+    unreadable: list[ServiceFileUnreadable],
+    user_home: str | None = None,
 ) -> list[ServiceFile]:
     """그 역할의 `rcm` 하위 명령을 띄우는 파일만. 못 읽은 파일은 버리지 않고 `unreadable` 에
-    모은다 — 그 파일이 이 역할의 것이었는지 모르기 때문이다."""
+    모은다 — 그 파일이 이 역할의 것이었는지 모르기 때문이다. rcm 의 서비스가 아님이 확실한
+    파일(`looks_like_rcm`)은 후보도 못 읽은 파일도 아니다."""
     want = ROLE_COMMANDS.get(role)
     out: list[ServiceFile] = []
     for p in paths:
         try:
-            sf = read_service_file(p)
+            sf = read_service_file(p, user_home=user_home)
         except ServiceFileUnreadable as e:
             unreadable.append(e)
             continue
         if sf.command is None and any("ExecStart" in u for u in sf.unreadable_lines):
             # 띄우는 명령 줄을 못 읽었다 — 이 역할의 파일인지 모른다
             unreadable.append(ServiceFileUnreadable(p, f"cannot read {sf.unreadable_lines[0]}"))
+            continue
+        if sf.launch is None and not looks_like_rcm(sf):
+            # rcm 의 서비스가 아님이 확실하다(rcm-ci-connect 의 ci-watch plist). 이 파일을 「못
+            # 읽음」으로 적으면 모든 입력을 읽은 실행이 종료 3 이 된다(검증 사이클 2 의 1라운드
+            # HIGH 1)
             continue
         if sf.launch is None:
             # rcm 의 표준 자리에 있는데 띄우는 명령을 rcm 의 하위 명령으로 풀지 못했다(`env rcm …` ·
@@ -531,20 +648,26 @@ def pick_service_file(
     3라운드 HIGH). `--service-file` 로 준 파일이면 `ServiceFileUnreadable` 를 그대로 던진다.
     """
     skipped: list[ServiceFileUnreadable] = [] if unreadable is None else unreadable
+    user_dir = home / ".config" / "systemd" / "user"
+    staged_dir = config_dir / "service"
+    # 사용자 유닛인 것을 아는 자리 — 그 유닛의 `%h` 는 이 홈이다. setup 의 자리도 사용자 유닛을 쓴다
+    # (`rcm init worker --service-file` 의 안내: `~/.config/systemd/user/` 에 넣는다)
+    user_places = (user_dir, staged_dir)
+    user_home = str(home) if str(home) not in ("", ".") else None
     if explicit:
         p = Path(explicit).expanduser()
         if not p.is_file():
             raise DoctorUsage(f"service file not found: {p.name}")
-        return read_service_file(p)
-    installed = sorted((home / "Library" / "LaunchAgents").glob(LAUNCH_AGENTS_GLOB))
-    installed += sorted((home / ".config" / "systemd" / "user").glob(SYSTEMD_GLOB))
-    staged_dir = config_dir / "service"
+        known_user = p.absolute().parent in user_places
+        return read_service_file(p, user_home=user_home if known_user else None)
+    launch_agents = sorted((home / "Library" / "LaunchAgents").glob(LAUNCH_AGENTS_GLOB))
+    user_units = sorted(user_dir.glob(SYSTEMD_GLOB))
     staged = sorted(
         p for p in staged_dir.glob("*") if p.suffix in (".plist", ".service") and p.is_file()
     )
-    for stage in (installed, staged):
+    for stage in (launch_agents + user_units, staged):
         before = len(skipped)
-        found = _matching(stage, role, skipped)
+        found = _matching(stage, role, skipped, user_home)
         if len(skipped) > before:
             # 못 읽은 파일이 이 역할의 서비스였는지 모른다 — 같은 자리의 읽히는 파일로도 재지 않고
             # 다음 자리로도 넘어가지 않는다(P3 3라운드 HIGH · 4라운드 LOW)
@@ -556,7 +679,7 @@ def pick_service_file(
             if is_tty():
                 picked = choose([sf.path for sf in found if sf.path], str(home))
                 if picked is not None:
-                    return read_service_file(picked)
+                    return read_service_file(picked, user_home=user_home)
             raise DoctorUsage(f"several service files match: {names} — pass --service-file PATH")
     return None
 
@@ -1222,6 +1345,9 @@ class _Run:
                 f"cannot read the service file {self.mask(str(e.path))}: {e.reason} — fix it "
                 "or pass --service-file PATH"
             )
+        #: 사람이 준 파일인데 띄우는 명령을 rcm 의 하위 명령으로 풀지 못했다(`env PATH=… rcm` ·
+        #: `sh -c`) — 그 실행이 받는 PATH 와 읽는 설정을 모른다(검증 사이클 2 의 1라운드 MED 3)
+        unresolved = bool(self.opts.service_file) and sf is not None and sf.launch is None
         if sf is not None:
             for where in sf.unreadable_lines:
                 self.undecided.append(
@@ -1230,9 +1356,19 @@ class _Run:
                 )
             for where in sf.unfollowed:
                 # 그 줄이 바꾸는 값을 모른다 — 판정 못 함이다(P3 2라운드 MED)
+                advice = (
+                    "write the paths out in full"
+                    if "(ExecStart=)" in where
+                    else "write the values out in Environment= lines"
+                )
                 self.undecided.append(
-                    f"cannot read {where} (service file {self.mask(str(sf.path))}) — write the "
-                    "values out in Environment= lines"
+                    f"cannot read {where} (service file {self.mask(str(sf.path))}) — {advice}"
+                )
+            if unresolved:
+                self.undecided.append(
+                    f"cannot tell which rcm command the service file {self.mask(str(sf.path))} "
+                    "starts, so its PATH and config are unknown — start the rcm executable "
+                    "itself with arguments rcm accepts"
                 )
         manager = sf.manager if sf else (dc.LAUNCHD if PLATFORM == "darwin" else dc.SYSTEMD)
         if broken is not None:
@@ -1242,7 +1378,7 @@ class _Run:
             env.pop("PATH", None)
         elif sf is not None:
             env = dc.clean_env(manager, self.ctx.environ, sf.env)
-            if sf.path_unknown:
+            if sf.path_unknown or unresolved:
                 env.pop("PATH", None)
         elif skipped:
             # 후보를 못 읽어 고른 파일이 없다 — 그 파일의 PATH 를 모른다. 기본 PATH 를 짐작하는
@@ -1263,7 +1399,13 @@ class _Run:
             "env_names": sf.env_names if sf else [],
         }
         self._service_file = sf
-        if not self.path_known and broken is None and not skipped and not (sf and sf.path_unknown):
+        if (
+            not self.path_known
+            and broken is None
+            and not skipped
+            and not (sf and sf.path_unknown)
+            and not unresolved
+        ):
             # systemd 의 기본 PATH 는 배포판마다 다르다 — 추정해서 재면 없는 「빠짐」을 지어낸다
             self.undecided.append(
                 "the service file sets no PATH and systemd's default differs between "
@@ -1278,7 +1420,13 @@ class _Run:
                     "rcm in the service file and drop it from PATH (docs/operating.md)"
                 )
         want = ROLE_COMMANDS.get(self.role)
-        if self.opts.service_file and sf is not None and want and sf.command != want:
+        if (
+            self.opts.service_file
+            and sf is not None
+            and want
+            and sf.command != want
+            and not unresolved
+        ):
             # 사람이 고른 파일이라 거르지 않는다 — 그 파일로 재되 다른 역할의 파일이라고 알린다(E1)
             self.warnings.append(
                 f"{self.service['file']} starts rcm {sf.command or '(no command)'}, not rcm "
@@ -1304,7 +1452,18 @@ class _Run:
                 )
             return None
         if sf.launch is None or sf.command != ROLE_COMMANDS.get(self.role):
+            if self.opts.service_file and sf.launch is None:
+                # 사람이 준 파일의 명령을 풀지 못했다 — 표준 자리의 설정으로 재지 않는다(MED 3)
+                raise ConfigUnknown(
+                    "cannot tell which config the service starts with — rcm cannot read its "
+                    "command (pass --config PATH)"
+                )
             return None
+        if sf.launch_unexpanded:
+            raise ConfigUnknown(
+                "cannot tell which config the service starts with — its ExecStart= line has a "
+                "systemd specifier rcm does not expand (see above)"
+            )
         return sf.launch
 
     def service_config_path(self, raw: str) -> Path:
@@ -1335,24 +1494,104 @@ class _Run:
         if not theirs or self.opts.config is None:
             return
         mine = Path(self.opts.config).expanduser()
+        if not Path(theirs).expanduser().is_absolute():
+            # 서비스의 상대 경로는 서비스의 작업 폴더에 달렸다 — doctor 가 선 폴더로 풀어 「같은
+            # 파일」이나 「다른 파일」이라고 말하지 않는다(검증 사이클 2 의 1라운드 LOW)
+            self.warnings.append(
+                f"the service starts rcm with a relative --config ({self.mask(theirs)}) — rcm "
+                f"cannot tell whether that is {self.mask(str(mine))}; measured with the file given"
+            )
+            return
         if Path(theirs).expanduser().resolve() != mine.resolve():
             self.warnings.append(
                 f"the service starts rcm with --config {self.mask(theirs)}, not "
                 f"{self.mask(str(mine))} — measured with the file given"
             )
 
-    def worker_config(self) -> Any:
+    def config_dirs(self, env: Mapping[str, str]) -> list[Path]:
+        """서비스가 설정을 찾는 폴더(`rcm` 의 `user_config_dir` 와 같은 규칙). 서비스 파일이 있으면
+        그 서비스 환경의 `XDG_CONFIG_HOME`, 없으면 서비스 홈의 `.config` 다 — doctor 셸의
+        `XDG_CONFIG_HOME` 이 아니다(검증 사이클 2 의 1라운드 HIGH 2). 서비스 파일이 없으면 `rcm
+        init` 이 쓰는 자리(`user_config_dir`)다. 둘째 항목은 서버의 옛 자리 `~/.config/rcm` 이다."""
+        from remote_ci_monitor.config import user_config_dir
+
+        if self._service_file is None:
+            first = user_config_dir()
+            legacy = Path(self.home) / ".config" / "rcm"
+        else:
+            home = env.get("HOME") or self.home
+            xdg = env.get("XDG_CONFIG_HOME") or ""
+            if xdg.startswith("~"):
+                xdg = home + xdg[1:]
+            legacy = Path(home) / ".config" / "rcm"
+            first = Path(xdg) / "rcm" if xdg else legacy
+            if not first.is_absolute():
+                raise ConfigUnknown(
+                    "the service's XDG_CONFIG_HOME is not an absolute path — rcm cannot tell "
+                    "where it looks for its config (pass --config PATH)"
+                )
+        return [first] if first == legacy else [first, legacy]
+
+    def service_workdirs(self) -> list[str]:
+        """`rcm serve` 가 `./rcm.toml` 을 찾는 폴더 — 서비스의 작업 폴더. 적혀 있지 않으면 관리자의
+        기본값이다: launchd 는 `/`, systemd 는 사용자 유닛이면 홈 · 시스템 유닛이면 `/` 라서 어느
+        쪽인지 모르는 유닛은 둘 다다. 적혀 있는데 풀지 못하면 모른다(`ConfigUnknown`)."""
+        sf = self._service_file
+        assert sf is not None
+        if sf.workdir_unknown:
+            raise ConfigUnknown(
+                "cannot tell the service's working directory, where rcm serve looks for "
+                "rcm.toml — write an absolute WorkingDirectory or --config in the service file"
+            )
+        if sf.workdir:
+            return [sf.workdir]
+        if sf.manager == dc.LAUNCHD:
+            return [LAUNCHD_DEFAULT_WORKDIR]
+        home = self.home
+        return [home] if sf.user_unit else ["/", home]
+
+    def service_server_config(
+        self, launch: dict[str, Any], env: Mapping[str, str]
+    ) -> tuple[Path | None, bool]:
+        """서비스의 `rcm serve` 가 고르는 설정과, 그것을 서비스가 가리켰는지 — `--config` → 서비스
+        환경의 `RCM_CONFIG` → 서비스 작업 폴더의 `rcm.toml` → 표준 자리(`find_server_config` 의
+        순서). doctor 셸의 `RCM_CONFIG` 와 doctor 가 선 폴더는 보지 않는다(검증 사이클 2 의
+        1라운드 HIGH 2)."""
+        raw = launch.get("config") or env.get("RCM_CONFIG")
+        if raw:
+            return self.service_config_path(raw), True
+        dirs = self.service_workdirs()
+        found = [Path(d) / "rcm.toml" for d in dirs if (Path(d) / "rcm.toml").is_file()]
+        if found and len(dirs) > 1:
+            raise ConfigUnknown(
+                f"{self.mask(str(found[0]))} may be the server's config — rcm cannot tell whether "
+                "the unit runs from that folder (write WorkingDirectory= or --config in the "
+                "service file)"
+            )
+        if found:
+            return found[0], True
+        return self.standard_server_config(env), False
+
+    def standard_server_config(self, env: Mapping[str, str]) -> Path | None:
+        """표준 자리의 `server.toml` — 서비스의 설정 폴더(`config_dirs`) 순서대로 처음 있는 것."""
+        return next(
+            (d / "server.toml" for d in self.config_dirs(env) if (d / "server.toml").is_file()),
+            None,
+        )
+
+    def worker_config(self, env: Mapping[str, str]) -> Any:
         """워커의 설정 — `rcm worker` 가 고르는 것과 같은 것(`cli._worker_config`). `--config` 가
         먼저, 없으면 서비스 인자의 `--config` · `--server` · `--pool` · `--lanes`, 그것도 없으면
-        표준 자리. 서비스가 가리키는 파일을 못 읽은 것은 사용법 오류가 아니라 모름이다."""
-        from remote_ci_monitor.config import ConfigError, load_worker_config, user_config_dir
+        서비스의 설정 폴더(`config_dirs`)의 `worker.toml`. 서비스가 가리키는 파일을 못 읽은 것은
+        사용법 오류가 아니라 모름이다."""
+        from remote_ci_monitor.config import ConfigError, load_worker_config
 
         path: Path | str | None = self.opts.config
         overrides: dict[str, Any] = {}
         from_service = False
         if path is None:
             launch = self.service_launch()
-            default = user_config_dir() / "worker.toml"
+            default = self.config_dirs(env)[0] / "worker.toml"
             if launch is not None:
                 overrides = {k: launch.get(k) for k in ("server", "pool", "lanes")}
                 if launch.get("config"):
@@ -1374,15 +1613,15 @@ class _Run:
 
     def server_config(self, env: Mapping[str, str]) -> Any:
         """서버의 설정 — `rcm serve` 가 읽는 것. `--config` 가 먼저, 없으면 서비스 인자의
-        `--config` · `--bind` · `--port` 와 서비스 환경(`RCM_CONFIG` · `RCM_SERVER_*`), 그것도
-        없으면 표준 자리. 어디에도 설정 파일이 없으면 doctor 는 무엇을 잴지(프리셋 · 포트)
+        `--config` · `--bind` · `--port` 와 서비스 환경(`RCM_CONFIG` · `RCM_SERVER_*`) · 작업 폴더,
+        그것도 없으면 표준 자리. 환경 덮어쓰기(`RCM_SERVER_*`)는 언제나 서비스 환경의 것이다 —
+        doctor 셸의 것이 아니다. 어디에도 설정 파일이 없으면 doctor 는 무엇을 잴지(프리셋 · 포트)
         모른다 — 기본값(프리셋 없음 · 8787)으로 그 포트의 아무 서버에 묻지 않고 사용법 오류다
         (P3 4라운드 HIGH)."""
         from remote_ci_monitor.config import ConfigError, load_server_config
 
         path: Path | str | None = self.opts.config
         overrides: dict[str, dict[str, Any]] = {}
-        environ: dict[str, str] | None = None
         from_service = False
         if path is None:
             launch = self.service_launch()
@@ -1396,23 +1635,27 @@ class _Run:
                         "file has lines rcm does not read (see above)"
                     )
                 overrides = {"server": {"bind": launch.get("bind"), "port": launch.get("port")}}
-                environ = dict(env)  # 서비스가 받는 환경 — 셸의 `RCM_SERVER_PORT` 가 아니다
-                raw = launch.get("config") or environ.get("RCM_CONFIG")
-                if raw:
-                    path, from_service = self.service_config_path(raw), True
+                path, from_service = self.service_server_config(launch, env)
+            else:
+                path = self.standard_server_config(env)
         else:
             self.compare_config()
-        try:
-            cfg = load_server_config(path, check_tools=False, overrides=overrides, environ=environ)
-        except ConfigError as e:
-            if from_service:
-                raise self.config_unknown(e) from e
-            raise DoctorUsage(str(e)) from e
-        if cfg.path is None:
+        if path is None:  # 서버 설정 파일이 어디에도 없다
+            # `load_server_config(None)` 은 이 프로세스(doctor 셸)의 `RCM_CONFIG` 와 작업 폴더를
+            # 본다 — 부르지 않는다
             raise DoctorUsage(
                 "no server config found — pass --config PATH (without one, rcm serve starts with "
                 "no presets and doctor would only be guessing the port)"
             )
+        try:
+            # 서비스가 받는 환경 — 셸의 `RCM_SERVER_PORT` 가 아니다
+            cfg = load_server_config(
+                path, check_tools=False, overrides=overrides, environ=dict(env)
+            )
+        except ConfigError as e:
+            if from_service:
+                raise self.config_unknown(e) from e
+            raise DoctorUsage(str(e)) from e
         return cfg
 
     # ── 역할: worker ──
@@ -1423,7 +1666,7 @@ class _Run:
         self.host_facts(env.get("PATH"))
         self.base_requirements()
         try:
-            cfg = self.worker_config()
+            cfg = self.worker_config(env)
         except ConfigUnknown as e:
             # 설정을 모르면 그 설정에 달린 것(서버 · 토큰 · 풀 · 저장소)은 재지 않는다
             self.undecided.append(str(e))
