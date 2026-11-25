@@ -642,7 +642,7 @@ def _service(args: argparse.Namespace, ask: _Ask | None, world: World, plan: Pla
         data = cli.worker_unit(rcm, plan.config, home)
     plan.files.append(Planned(staged, data, 0o644, "service"))
     plan.manager, plan.service, plan.rcm, plan.log = manager, staged, rcm, log
-    plan.installed = core.install_dir(manager, home) / name
+    plan.installed = core.install_path(label, manager, home)
     if world.service_loaded(manager, label):
         plan.warnings.append(
             f"a service labelled {label} is already loaded — setup leaves it alone; the copy "

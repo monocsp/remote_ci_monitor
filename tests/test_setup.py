@@ -757,3 +757,9 @@ def test_tr24_doctor_finds_the_installed_copy_of_a_custom_label_service(
         found = doctor.pick_service_file(None, role, home=home, config_dir=cfg)
         assert found is not None and found.path == installed, (platform, role, found)
         installed.unlink()
+        staged.unlink()  # 다음 경우의 setup 자리에 같은 역할의 파일이 둘 남지 않게
+    # doctor 가 파일 이름에서 라벨을 되찾는 규칙은 setup 의 이름 규칙을 거꾸로 푼 것이다
+    for label in (SERVER_LABEL, WORKER_LABEL, "test.rcm.server"):
+        for manager in ("launchd", "systemd"):
+            assert core.label_of_file(core.service_file_name(label, manager)) == (label, manager)
+    assert core.label_of_file("notes.txt") is None

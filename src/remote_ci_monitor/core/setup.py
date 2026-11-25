@@ -248,6 +248,24 @@ def install_dir(manager: str, home: Path) -> Path:
     return home / ".config" / "systemd" / "user"
 
 
+def install_path(label: str, manager: str, home: Path) -> Path:
+    """라벨의 서비스 파일이 설치될 자리. setup 이 찍는 복사 명령의 목적지이고, doctor 가
+    setup 자리의 파일에서 거꾸로 찾는 자리다(6-B-V1: 유닛 이름 규칙 하나를 같이 쓴다)."""
+    return install_dir(manager, home) / service_file_name(label, manager)
+
+
+def label_of_file(name: str) -> tuple[str, str] | None:
+    """서비스 파일 이름 → (라벨, 서비스 관리자). `service_file_name` 을 거꾸로 푼다 — 표준 유닛
+    이름(`rcm-server.service`)은 표준 라벨로 돌린다. 서비스 파일 이름이 아니면 None."""
+    if name.endswith(".plist"):
+        return name.removesuffix(".plist"), LAUNCHD
+    if name.endswith(".service"):
+        base = name.removesuffix(".service")
+        standard = {unit: label for label, unit in _STANDARD_UNITS.items()}
+        return standard.get(base, base), SYSTEMD
+    return None
+
+
 def log_dir(manager: str, home: Path) -> Path:
     if manager == LAUNCHD:
         return home / "Library" / "Logs" / "rcm"
