@@ -19,9 +19,8 @@ import os
 import plistlib
 import re
 import shlex
-import sys
 import unicodedata
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -338,29 +337,31 @@ def install_places(home: Path) -> tuple[Path, ...]:
     return (install_dir(LAUNCHD, home), install_dir(SYSTEMD, home), *SYSTEM_SERVICE_DIRS)
 
 
-#: 대소문자를 가리지 않는 파일시스템으로 보나. macOS 의 기본 볼륨(APFS · HFS+)은 가리지 않는다 —
-#: `~/library/launchagents` 가 `~/Library/LaunchAgents` 다. 볼륨마다 재는 길(pathconf
-#: `_PC_CASE_SENSITIVE`)은 파이썬이 내주지 않으므로 darwin 이면 늘 접는다(막는 쪽).
-#: 시험이 바꿔 끼운다. 훅(`tools/guard_production.py`)의 `FOLD_CASE` 와 같은 규칙이다
-FOLD_CASE = sys.platform == "darwin"
+def folds_case(platform: str) -> bool:
+    """그 플랫폼의 파일시스템을 대소문자를 가리지 않는 것으로 보나. macOS 의 기본 볼륨(APFS ·
+    HFS+)은 가리지 않는다 — `~/library/launchagents` 가 `~/Library/LaunchAgents` 다. 볼륨마다
+    재는 길(pathconf `_PC_CASE_SENSITIVE`)은 파이썬이 내주지 않으므로 darwin 이면 늘 접는다(막는
+    쪽). 플랫폼은 호출자가 준다(`sys.platform` 을 여기서 읽지 않는다 — P3 3라운드 v1-5). 훅
+    (`tools/guard_production.py`)의 `FOLD_CASE` 와 같은 규칙이다."""
+    return platform.startswith("darwin")
 
 
-def place_key(path: str | Path) -> str:
+def place_key(path: str | Path, *, fold_case: bool) -> str:
     """경로를 견줄 때 쓰는 글자 — `normpath` 하고, 대소문자를 가리지 않는 디스크면 접는다
     (유니코드 정규화도 같이 한다. macOS 는 정규화 형태도 가리지 않는다)."""
     text = os.path.normpath(str(path))
-    if FOLD_CASE:
+    if fold_case:
         text = unicodedata.normalize("NFC", text).casefold()
     return text
 
 
-def install_place_of(path: Path, home: Path) -> Path | None:
+def install_place_of(path: Path, home: Path, *, fold_case: bool) -> Path | None:
     """`path` 가 설치 자리 안이면 그 자리. 바로 아래만이 아니라 그 안 전부다 — systemd 는
     `<유닛>.d/` 의 drop-in 도 읽는다. 경로는 글자로만 비교한다(심링크는 풀지 않는다). 대소문자는
-    `place_key` 가 디스크대로 다룬다."""
-    text = place_key(path)
+    `place_key` 가 `fold_case` 대로 다룬다."""
+    text = place_key(path, fold_case=fold_case)
     for place in install_places(home):
-        root = place_key(place)
+        root = place_key(place, fold_case=fold_case)
         if text == root or text.startswith(root.rstrip("/") + "/"):
             return place
     return None
@@ -577,15 +578,20 @@ def blank_flags(values: Mapping[str, Any]) -> list[str]:
     ]
 
 
-def abs_path(raw: str, *, home: Path, cwd: Path) -> Path:
+#: `~user` 를 그 사용자의 홈으로 푸는 함수 — passwd 를 읽는 I/O 라 호출자가 준다
+#: (`os.path.expanduser`). 풀 수 없으면 받은 글자를 그대로 돌려준다
+ExpandUser = Callable[[str], str]
+
+
+def abs_path(raw: str, *, home: Path, cwd: Path, expand_user: ExpandUser) -> Path:
     """setup 이 받은 경로 글자 하나를 절대 경로로 — `os.path.abspath(os.path.expanduser(raw))`
-    와 같은데 HOME 과 작업 폴더를 인자로 받는다. `~` · `~/…` 는 `home`, `~user` 는 그 사용자의
-    홈(passwd), 상대 경로는 `cwd` 기준이다. 심링크는 풀지 않는다."""
+    와 같은데 HOME · 작업 폴더 · `~user` 를 푸는 함수를 인자로 받는다. `~` · `~/…` 는 `home`,
+    `~user` 는 `expand_user`, 상대 경로는 `cwd` 기준이다. 심링크는 풀지 않는다."""
     if raw == "~" or raw.startswith("~/"):
         root = str(home).rstrip("/")
         text = (root + raw[1:]) or "/"
     elif raw.startswith("~"):
-        text = os.path.expanduser(raw)
+        text = expand_user(raw)
     else:
         text = raw
     return Path(os.path.normpath(os.path.join(str(cwd), text)))
@@ -599,11 +605,12 @@ def home_of(environ: Mapping[str, str], fallback: Path) -> Path:
     return Path(environ["HOME"].rstrip("/") or "/")
 
 
-def config_dir(environ: Mapping[str, str], *, home: Path, cwd: Path) -> Path:
+def config_dir(
+    environ: Mapping[str, str], *, home: Path, cwd: Path, expand_user: ExpandUser
+) -> Path:
     """설정 폴더 — `$XDG_CONFIG_HOME/rcm`, 없으면 `~/.config/rcm`(config.py `user_config_dir`)."""
-    xdg = environ.get("XDG_CONFIG_HOME")
-    base = abs_path(xdg, home=home, cwd=cwd) if xdg else abs_path("~/.config", home=home, cwd=cwd)
-    return base / "rcm"
+    raw = environ.get("XDG_CONFIG_HOME") or "~/.config"
+    return abs_path(raw, home=home, cwd=cwd, expand_user=expand_user) / "rcm"
 
 
 @dataclass(frozen=True)
@@ -635,13 +642,18 @@ def where(
     service_file: str | None = None,
     data_dir: str | None = None,
     default_data_dir: str = DEFAULT_DATA_DIR,
+    fold_case: bool,
+    expand_user: ExpandUser,
 ) -> Where:
     """setup 이 어디에 쓸지 — setup 의 경로 결정은 모두 이 함수를 거친다.
 
     값은 setup 이 받은 글자 그대로다(셸이 펼친 뒤). `--config` 가 없으면 설정 폴더의 역할 파일,
     `--service-file` 이 없으면 설정 파일 옆 `service/` 의 라벨 파일, `--data-dir` 이 없으면
     `default_data_dir`(템플릿의 기본값)을 `home` 으로 푼 것이다. 빈 값 · 맞지 않는 라벨 · 모르는
-    역할은 `SetupValueError` 다 — 빈 `--config` 를 기본 자리로 읽지 않는다."""
+    역할은 `SetupValueError` 다 — 빈 `--config` 를 기본 자리로 읽지 않는다.
+
+    기계에서 읽는 것은 없다: 대소문자 규칙(`fold_case`, `folds_case(platform)`)과 `~user` 를 푸는
+    함수(`expand_user`)는 호출자가 준다(P3 3라운드 v1-5)."""
     if role not in CONFIG_NAMES:
         raise SetupValueError(f"--role must be one of {', '.join(ROLES)} (got {role!r})")
     given = {"config": config, "service_file": service_file, "data_dir": data_dir, "label": label}
@@ -650,9 +662,11 @@ def where(
         raise SetupValueError(f"{' '.join(blank)} must not be empty")
     if label is not None and (problem := label_problem(label)):
         raise SetupValueError(problem)
-    folder = config_dir(environ, home=home, cwd=cwd)
+    folder = config_dir(environ, home=home, cwd=cwd, expand_user=expand_user)
     conf = (
-        abs_path(config, home=home, cwd=cwd) if config is not None else folder / CONFIG_NAMES[role]
+        abs_path(config, home=home, cwd=cwd, expand_user=expand_user)
+        if config is not None
+        else folder / CONFIG_NAMES[role]
     )
     kind = service_kind(role)
     chosen = (label if label is not None else default_label(role)) if kind else None
@@ -660,12 +674,12 @@ def where(
     place: Path | None = None
     if chosen is not None and manager is not None:
         if service_file is not None:
-            service = abs_path(service_file, home=home, cwd=cwd)
+            service = abs_path(service_file, home=home, cwd=cwd, expand_user=expand_user)
         else:
             service = conf.parent / "service" / service_file_name(chosen, manager)
-        place = install_place_of(service, home)
+        place = install_place_of(service, home, fold_case=fold_case)
     data: Path | None = None
     if role in SERVER_ROLES:
         raw = data_dir if data_dir is not None else default_data_dir
-        data = abs_path(raw, home=home, cwd=cwd)
+        data = abs_path(raw, home=home, cwd=cwd, expand_user=expand_user)
     return Where(role, folder, conf, chosen, service, place, data)

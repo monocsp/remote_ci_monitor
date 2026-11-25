@@ -148,7 +148,7 @@ SETUP_ROLE_LABELS = {
 WRAPPERS = frozenset({"sudo", "env", "exec", "command", "nohup", "time", "builtin"})
 #: 대소문자를 가리지 않는 파일시스템으로 보나 — macOS 의 기본 볼륨(APFS · HFS+)은 가리지 않는다.
 #: 볼륨마다 재는 길을 파이썬이 내주지 않으므로 darwin 이면 늘 접는다(막는 쪽). setup 의
-#: `core.setup.FOLD_CASE` 와 같은 규칙이다. 시험이 바꿔 끼운다
+#: `core.setup.folds_case` 와 같은 규칙이고, `core.where` 에 이 값을 준다. 시험이 바꿔 끼운다
 FOLD_CASE = sys.platform == "darwin"
 #: 맨 이름(`rcm`)을 실행 파일로 푸는 함수 — 테스트가 바꿔 끼운다.
 _which = shutil.which
@@ -1203,6 +1203,8 @@ def _setup_verdict(segment: str, cwd: Path, prod: Production, env: SegmentEnv) -
                         label=ns.label,
                         service_file=ns.service_file,
                         data_dir=ns.data_dir,
+                        fold_case=FOLD_CASE,
+                        expand_user=os.path.expanduser,
                     )
                     for role in roles
                 ]

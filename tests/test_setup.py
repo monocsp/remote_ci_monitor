@@ -1115,6 +1115,8 @@ def test_tr20_setup_writes_exactly_where_the_shared_resolver_says(home, tmp_path
             cwd=Path.cwd(),
             home=Path.home(),
             manager=core.LAUNCHD,
+            fold_case=core.folds_case("darwin"),
+            expand_user=os.path.expanduser,
         )
         wrote = {Path(line) for line in fake.out.getvalue().splitlines()}
         assert wrote == {p for p in (want.config, want.service_file) if p is not None}, argv
@@ -1125,8 +1127,7 @@ def test_tr20_setup_writes_exactly_where_the_shared_resolver_says(home, tmp_path
 
 def test_tr24_an_install_place_in_another_case_is_refused(cfg, home, tmp_path, monkeypatch):
     # P3 2라운드: macOS 의 기본 파일시스템은 대소문자를 가리지 않는다 — `~/library/launchagents`
-    # 도 서비스 관리자가 읽는 자리다
-    monkeypatch.setattr(core, "FOLD_CASE", True, raising=False)
+    # 도 서비스 관리자가 읽는 자리다. 접는 규칙은 setup 이 도는 플랫폼(`World.platform`)에서 온다
     target = home / "library" / "launchagents" / "test.rcm.server.plist"
     fake = Fake(platform="darwin")
     argv = coordinator_args(tmp_path / "data", "--service-file", str(target))

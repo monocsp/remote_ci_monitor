@@ -382,17 +382,22 @@ def _where(args: argparse.Namespace, world: World, role: str, **given: Any) -> c
         "data_dir": args.data_dir,
     }
     values.update(given)
+    home = Path.home()
+    fold = core.folds_case(world.platform)
     try:
-        return core.where(
+        found = core.where(
             role,
             environ=os.environ,
             cwd=Path.cwd(),
-            home=Path.home(),
+            home=home,
             manager=core.manager_of(world.platform),
+            fold_case=fold,
+            expand_user=os.path.expanduser,
             **values,
         )
     except core.SetupValueError as e:
         raise SetupUsage(str(e)) from None
+    return found
 
 
 #: 글자로 받는 옵션 — 설정 · 서비스 파일에 UTF-8 로 들어간다
