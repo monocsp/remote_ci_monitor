@@ -1126,8 +1126,13 @@ class CapabilitiesMixin:
             job_id = self._submit_check(view, name, fp, auto=False)
             item: dict[str, Any] = {"preset": name, "job_id": job_id}
             if job_id is None:
-                # 못 걸었다 — 번호 없는 성공처럼 보이지 않게 이유를 싣는다(점검 칸과 같은 코드)
-                item["error_code"] = self._check_errors.get((view.id, name), "not_submitted")
+                # 못 걸었다 — 번호 없는 성공처럼 보이지 않게 이유를 싣는다(점검 칸과 같은 코드).
+                # 돌 수 없는 점검(`local_only`)은 지금 설정으로 셈한다(`_check_rows` 와 같다)
+                item["error_code"] = (
+                    self._check_errors.get((view.id, name), "not_submitted")
+                    if self.check_reachable(view, name)
+                    else CODE_LOCAL_ONLY
+                )
             out.append(item)
         return out
 
@@ -1138,8 +1143,10 @@ class CapabilitiesMixin:
         if preset is None:
             return None
         if not self.check_reachable(view, name):
-            # 점검 잡을 만들기 전에 후보를 본다(6-A-L3) — 아무도 못 집는 지정 잡을 남기지 않는다
-            self._check_errors[(view.id, name)] = CODE_LOCAL_ONLY
+            # 점검 잡을 만들기 전에 후보를 본다(6-A-L3) — 아무도 못 집는 지정 잡을 남기지 않는다.
+            # `_check_errors` 에 적지 않는다: 설정에서 나온 사실이라 reload 로 표식을 떼면 바로
+            # 사라져야 한다. 적어 두면 다음 성공까지 거짓 `local_only` 가 남고, 그 성공은
+            # 「after ref_unresolved」로 틀린 원인을 로그에 남긴다(P3 1라운드)
             return None
         try:
             job = self.submit_internal_check(preset, view, fingerprint_hash=fp)
