@@ -806,7 +806,15 @@ class _Run:
                 "for other pools cannot be counted"
             )
         os_name = "darwin" if PLATFORM.startswith("darwin") else "linux"
+        # 서버는 이 머신이 후보가 아닌 프리셋(`local_only`)을 명세에서 뺀다 — 후보 함수의 답이다
+        # (PR1). `checks` 의 이름은 설정이 아는 프리셋뿐이므로, 명세에 없는 점검은 이 머신에서
+        # 돌 수 없는 점검이다(TO18). 옛 서버의 명세는 판정할 키가 없어 보지 않는다
+        listed = {str(p["name"]) for p in entries}
+        new_spec = bool(entries) and all("placement" in p for p in entries)
         for p in entries:
+            far = (
+                [str(c) for c in p.get("checks") or () if str(c) not in listed] if new_spec else []
+            )
             passthrough = tuple(str(x) for x in p.get("env_passthrough") or ())
             fixed = {str(k): str(v) for k, v in (p.get("env") or {}).items()}
             requires = tuple(str(x) for x in p.get("requires") or ())
@@ -821,6 +829,7 @@ class _Run:
                 accept_any=accept_any,
                 hints=hints,
                 os_name=os_name,
+                local_only_checks=far,
             )
             for m in row.missing:
                 note = runner.missing_note(m["tool"], job_env)
@@ -879,6 +888,8 @@ class _Run:
             self.requirements.append(local_network_requirement())
         if PLATFORM.startswith("darwin"):
             self.requirements.append(sleep_requirement())
+        if self.role == dc.ROLE_COORDINATOR:
+            self.local_lane_only(cfg)
         bind = cfg.server.bind
         host = "127.0.0.1" if bind in ("0.0.0.0", "::", "") else bind
         host = f"[{host}]" if ":" in host else host
@@ -928,11 +939,36 @@ class _Run:
             local = next((m for m in listed if m.get("kind") == "local"), {})
             self.local_lane(cfg, health, local)
 
+    def local_lane_only(self, cfg: Any) -> None:
+        """원격 머신이 후보가 아닌 프리셋을 「로컬 레인 필요」로 보인다(TO6). 판정은 서버의 후보
+        함수(`capabilities.remote_can_take`)가 한다 — 같은 규칙을 여기 다시 쓰지 않는다(6-A-U1).
+        설정만 보므로 서버에 닿지 못해도 보인다."""
+        from remote_ci_monitor.capabilities import remote_can_take
+
+        for p in cfg.presets:
+            if remote_can_take(cfg, p):
+                continue
+            self.rows.append(
+                dc.PresetRow(
+                    p.name,
+                    dc.APPLIES_LOCAL_LANE,
+                    None,
+                    checks=list(p.checks),
+                    code="local_only",
+                    tools=[os.path.basename(t) for t in p.requires],
+                    note=dc.LOCAL_LANE_NOTE,
+                )
+            )
+
     def local_lane(self, cfg: Any, health: Mapping[str, Any], local: Mapping[str, Any]) -> None:
         """로컬 레인은 서버가 자기 서비스 환경에서 잰 값으로 본다(`preset_env`, G7 · TD30)."""
         measured = health.get("preset_env") if isinstance(health.get("preset_env"), dict) else {}
         verdicts = local.get("presets") if isinstance(local.get("presets"), dict) else {}
         os_name = "darwin" if PLATFORM.startswith("darwin") else "linux"
+        # 로컬 레인 행도 워커와 같은 `[[tools]]` 안내를 쓴다(위임 결정 E3)
+        hints = dc.tool_hints(
+            [{"name": t.name, "docs": t.docs, "install": dict(t.install)} for t in cfg.tools]
+        )
         for p in cfg.presets:
             facts = measured.get(p.name) if isinstance(measured.get(p.name), dict) else {}
             entry = {
@@ -948,7 +984,7 @@ class _Run:
                 {"missing_tools": facts.get("missing_tools") or []},
                 pool=dc.DEFAULT_POOL,
                 accept_any=bool(cfg.server.local_accept_any),
-                hints={},
+                hints=hints,
                 os_name=os_name,
             )
             verdict = verdicts.get(p.name)

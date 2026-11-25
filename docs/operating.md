@@ -112,7 +112,11 @@ Each preset shows one state: `ready` (it starts taking jobs once the service rep
 check` (its tools are there and rcm runs its check presets once after the worker registers — not
 "ok" yet), `missing` (with the install hint and docs link from the coordinator's `[[tools]]` when
 there is one), or `unknown`. An `any-capable` preset that misses a tool is "not coming to this
-machine" — a warning, not a failure. A preset for another pool is listed and left out.
+machine" — a warning, not a failure. A preset for another pool is listed and left out. On a remote
+worker, a preset whose `checks` name a `local_only` check is "not coming (check is local-only)",
+not "needs check": that check never runs there. `rcm doctor --role coordinator` lists every
+`local_only` preset as "needs a local lane", judged by the same rule the server places jobs with.
+The coordinator's `[[tools]]` hints show for the server's own lane too.
 
 The service file is found in this order: `--service-file`; the standard places
 (`~/Library/LaunchAgents/com.remote-ci-monitor.*.plist`, `~/.config/systemd/user/rcm-*.service`);

@@ -40,6 +40,7 @@ APPLIES_POOL = "pool"  # 이 머신이 든 풀의 `pool` 프리셋 — 빠지면
 APPLIES_CAPABLE = "any-capable"  # 판정이 eligible 이면 오는 프리셋
 APPLIES_NOT_COMING = "not_coming"  # `any-capable` 인데 이 머신에는 오지 않는다(warn)
 APPLIES_OTHER_POOL = "other_pool"  # 다른 풀 전용 — 대상이 아니다
+APPLIES_LOCAL_LANE = "local_lane_only"  # coordinator 진단: 원격 머신은 후보가 아니다(TO6)
 COMING = (APPLIES_POOL, APPLIES_CAPABLE)
 
 #: 설정 문자열(`any-capable`)과 내부 값(`capable`) 둘 다 받는다
@@ -74,6 +75,10 @@ STATE_TEXT = {
     UNKNOWN: "unknown",
 }
 READY_NOTE = "starts taking jobs once the service reports"
+LOCAL_LANE_NOTE = "needs a local lane (local_only)"
+CHECK_LOCAL_ONLY = (
+    "check_local_only"  # 서버 판정 코드와 같은 이름(capabilities.CODE_CHECK_LOCAL_ONLY)
+)
 NEEDS_CHECK_NOTE = "rcm runs the check once after it registers"
 NO_JOBS = "no jobs will come to this machine"
 
@@ -205,6 +210,7 @@ def classify_preset(
     accept_any: bool,
     hints: Mapping[str, Any],
     os_name: str,
+    local_only_checks: Sequence[str] = (),
 ) -> PresetRow:
     """`/worker/spec` 의 프리셋 하나와 이 머신에서 잰 사실 → 행(명세 §4.5 「프리셋 상태」).
 
@@ -212,7 +218,9 @@ def classify_preset(
     도구는 `missing`(종료 1), 워크스페이스에만 있을 수 있는 도구는 `ready` + warn 이다.
     `any-capable` 프리셋은 도구가 빠졌거나 워크스페이스 안 도구면 서버 판정이 eligible 이 아니라
     이 머신에 오지 않는다. 그때는 「오지 않음」과 설치 안내를 warn 으로만 적는다. `checks` 가
-    남으면 `needs_check` 다.
+    남으면 `needs_check` 다. `checks` 의 점검이 이 머신에서 돌 수 없으면(`local_only_checks`,
+    점검 프리셋이 `local_only`) 도구와 상관없이 「오지 않음(점검이 로컬 전용)」이다 — 점검이 영영
+    안 오므로 「점검 필요」라 부르지 않는다(TO18).
     """
     name = str(entry.get("name"))
     tools = _names(entry.get("requires"))
@@ -228,6 +236,16 @@ def classify_preset(
     def row(applies: str, state: str | None, code: str | None, **kw: Any) -> PresetRow:
         return PresetRow(name, applies, state, missing_rows, checks, code, tools=tools, **kw)
 
+    far = [c for c in checks if c in set(local_only_checks)]
+
+    def check_far() -> PresetRow:
+        return row(
+            APPLIES_NOT_COMING,
+            None,
+            CHECK_LOCAL_ONLY,
+            note=f"not coming (check is local-only: {', '.join(far)})",
+        )
+
     if not capable:
         pools = {
             str(entry.get("pool") or DEFAULT_POOL),
@@ -237,6 +255,8 @@ def classify_preset(
             return row(
                 APPLIES_OTHER_POOL, None, None, note=f"runs in pool {', '.join(sorted(pools))}"
             )
+        if far:
+            return check_far()
         if missing:
             return row(APPLIES_POOL, MISSING, "tool_missing")
         if workspace:
@@ -254,6 +274,8 @@ def classify_preset(
             None,
             note="this machine does not take any-capable jobs (accept_any = false)",
         )
+    if far:
+        return check_far()
     if missing:
         hint = "; ".join(f"{m['tool']}: {m['install']}" for m in missing_rows if m["install"])
         warn = f"not coming to this machine: {', '.join(missing)} missing"
@@ -330,7 +352,7 @@ def _preset_detail(p: Mapping[str, Any]) -> str:
         if m.get("docs"):
             bit += f" · docs: {m['docs']}"
         parts.append(bit)
-    if p["applies"] == APPLIES_OTHER_POOL or (p["applies"] == APPLIES_NOT_COMING and not parts):
+    if p["applies"] in (APPLIES_OTHER_POOL, APPLIES_NOT_COMING, APPLIES_LOCAL_LANE):
         parts.append(p.get("note") or "")
     elif p["state"] == READY:
         parts.append(READY_NOTE)
@@ -348,6 +370,8 @@ def _preset_state(p: Mapping[str, Any]) -> str:
         return "other pool"
     if p["applies"] == APPLIES_NOT_COMING:
         return "not coming"
+    if p["applies"] == APPLIES_LOCAL_LANE:
+        return "local lane"
     return STATE_TEXT.get(p.get("state") or "", "—")
 
 

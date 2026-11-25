@@ -1231,6 +1231,30 @@ def _record_holds(state: str, record: cap.CheckRecord | None) -> bool:
     return state == cap.CHECK_RUNNING and claimed
 
 
+class _ConfigOnly:
+    """후보 함수의 정적인 절반을 설정만 가지고 부르는 자리 — App 없이 판정하는 `rcm doctor` 가
+    쓴다(docs/m5t-workplan.md §13 6-A-U1). `machines_for` · `_local_gap` · `check_reachable` 은
+    `self.config` 만 본다. 메서드를 그대로 불러 같은 규칙을 다시 쓰지 않는다."""
+
+    def __init__(self, config: Any):
+        self.config = config
+
+    def machines_for(self, *args: Any, **kwargs: Any) -> list[_MachineView]:
+        return CapabilitiesMixin.machines_for(self, *args, **kwargs)  # type: ignore[arg-type]
+
+    def _local_gap(self, *args: Any, **kwargs: Any) -> str | None:
+        return CapabilitiesMixin._local_gap(self, *args, **kwargs)  # type: ignore[arg-type]
+
+    def check_reachable(self, *args: Any, **kwargs: Any) -> bool:
+        return CapabilitiesMixin.check_reachable(self, *args, **kwargs)  # type: ignore[arg-type]
+
+
+def remote_can_take(config: Any, preset: Preset) -> bool:
+    """원격 머신이 그 프리셋의 후보가 될 수 있나 — 서버의 후보 함수 그대로(결정 254). 거짓이면
+    그 프리셋은 로컬 레인에서만 돈다(coordinator 진단의 「로컬 레인 필요」, TO6)."""
+    return bool(_ConfigOnly(config).machines_for(preset, [_bare_view("")]))
+
+
 def _local_only_head(preset: Preset) -> str:
     """`local_only` 거절 문장의 앞머리 — 409 의 사람용 문장이 모두 이것으로 시작한다."""
     return f"preset '{preset.name}' runs only on this server's local lanes (local_only)"

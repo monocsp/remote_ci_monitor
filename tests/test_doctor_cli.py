@@ -388,7 +388,10 @@ def test_td27_workspace_tools(worker, srv, svcbin, capsys):
 
 
 def test_td11_needs_check_is_not_called_ok(worker, srv, capsys):
-    srv.route("GET", "/worker/spec", spec_doc(preset("ios", checks=("sim-check",))))
+    # 서버는 이 머신에서 돌 수 있는 점검 프리셋을 명세에 함께 싣는다 — 없으면 로컬 전용(TO18)
+    srv.route(
+        "GET", "/worker/spec", spec_doc(preset("ios", checks=("sim-check",)), preset("sim-check"))
+    )
     code, doc = worker(capsys)
     assert code == 0, doc
     assert row(doc, "ios")["state"] == "needs_check" and row(doc, "ios")["checks"] == ["sim-check"]
@@ -1120,3 +1123,90 @@ def test_d6_sleep_is_guidance_only_on_macos(worker, monkeypatch, capsys):
     code, doc = worker(capsys)
     row_ = req(doc, "sleep")
     assert row_ is not None and row_["state"] == "info" and "pmset" in row_["detail"], row_
+
+
+# ── local_only 와 coordinator 진단 (TO6 · TO18 · 위임 결정 E3) ───────────────
+
+LOCAL_ONLY_PRESET = """
+[[presets]]
+name = "rel"
+argv = ["true"]
+local_only = true
+"""
+
+TOOLS_HINT = f"""
+[[tools]]
+name = "{LACK}"
+docs = "https://example.invalid/td-lack"
+[tools.install]
+any = "install td-lack from the docs"
+"""
+
+
+def test_to6_coordinator_shows_a_local_only_preset_as_needing_a_local_lane(
+    env, coordinator, monkeypatch, capsys
+):
+    monkeypatch.setenv("RCM_TOKEN", CLIENT_TOKEN)
+    cfg = server_toml(env, coordinator.port)
+    cfg.write_text(cfg.read_text() + LOCAL_ONLY_PRESET)
+    code, doc = run_json(capsys, "--role", "coordinator", "--config", str(cfg))
+    assert any(p["name"] == "rel" for p in doc["presets"]), doc["presets"]
+    rel = row(doc, "rel")
+    assert rel["applies"] == "local_lane_only" and "needs a local lane" in rel["note"], rel
+    assert not any(
+        p["name"] == "unit" and p["applies"] == "local_lane_only" for p in doc["presets"]
+    )
+    code, out, _ = run(capsys, "--role", "coordinator", "--config", str(cfg))
+    line = next(ln for ln in out.splitlines() if " rel " in f" {ln} ")
+    assert "needs a local lane" in line, line
+
+
+def test_to6_coordinator_asks_the_servers_own_candidate_function(
+    env, coordinator, monkeypatch, capsys
+):
+    """6-A-U1: doctor 는 같은 규칙을 다시 쓰지 않는다 — 서버의 후보 함수가 원격을 뺐는지로 본다.
+    그 함수가 원격도 후보로 두면(변이) 「로컬 레인 필요」가 사라져야 한다."""
+    from remote_ci_monitor import capabilities
+
+    monkeypatch.setenv("RCM_TOKEN", CLIENT_TOKEN)
+    cfg = server_toml(env, coordinator.port)
+    cfg.write_text(cfg.read_text() + LOCAL_ONLY_PRESET)
+    monkeypatch.setattr(
+        capabilities.CapabilitiesMixin, "machines_for", lambda self, preset, views, **kw: views
+    )
+    code, doc = run_json(capsys, "--role", "coordinator", "--config", str(cfg))
+    assert not any(p["applies"] == "local_lane_only" for p in doc["presets"]), doc["presets"]
+
+
+def test_to18_a_preset_whose_check_is_local_only_is_not_coming_and_not_needs_check(
+    worker, srv, capsys
+):
+    """서버는 원격 워커의 명세에서 `local_only` 프리셋을 뺀다(후보 함수, PR1). 그래서 `checks` 에
+    오른 점검이 명세에 없으면 그 점검은 이 머신에서 돌 수 없다 — 「오지 않음(점검이 로컬 전용)」
+    이고 「점검 필요」가 아니다(TO18 의 doctor 절반)."""
+    srv.route(
+        "GET",
+        "/worker/spec",
+        spec_doc(preset("build"), preset("qa", checks=("localcheck",))),
+    )
+    code, doc = worker(capsys)
+    qa = row(doc, "qa")
+    assert qa["applies"] == "not_coming" and qa["state"] != "needs_check", qa
+    assert qa["code"] == "check_local_only" and "check is local-only" in (qa["note"] or ""), qa
+    assert doc["summary"]["needs_check"] == 0, doc["summary"]
+    assert code == 0, doc
+    code, out, _ = worker.text(capsys)
+    line = next(ln for ln in out.splitlines() if " qa " in f" {ln} ")
+    assert "needs check" not in line and "local-only" in line, line
+
+
+def test_e3_the_local_lane_rows_use_the_coordinators_tools_hints(
+    env, coordinator, monkeypatch, capsys
+):
+    monkeypatch.setenv("RCM_TOKEN", CLIENT_TOKEN)
+    cfg = server_toml(env, coordinator.port)
+    cfg.write_text(cfg.read_text() + TOOLS_HINT)
+    code, doc = run_json(capsys, "--role", "coordinator-worker", "--config", str(cfg))
+    lint = row(doc, "lint")
+    assert lint["missing"][0]["install"] == "install td-lack from the docs", lint
+    assert lint["missing"][0]["docs"] == "https://example.invalid/td-lack", lint
