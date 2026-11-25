@@ -2797,6 +2797,18 @@ MUTANTS = (
             "test_x_ctrlc_interrupting_doctor_leaves_no_git_or_service_python_behind",
         ),
     ),
+    Mutant(
+        # 서비스의 Python 이 CLT shim 인지 보지 않고 돌린다 — CLT 없는 Mac 에서 doctor 가 설치 창을
+        # 띄운다(batch 10 재확인 X-python shim)
+        name="doctor-service-python-shim-runs",
+        path="src/remote_ci_monitor/doctor.py",
+        old="        if runner.tool_blocked(python):\n",
+        new="        if False:\n",
+        tests=(
+            "tests/test_doctor_cli.py::"
+            "test_x_python_a_service_python_that_is_a_clt_shim_is_never_run",
+        ),
+    ),
 )
 
 

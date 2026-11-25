@@ -1324,6 +1324,20 @@ class _Run:
         python = service_interpreter(sf.program, env.get("PATH") if self.path_known else None)
         if python is None or os.path.realpath(python) == os.path.realpath(sys.executable):
             return
+        if runner.tool_blocked(python):
+            # CLT 없는 Mac 의 `/usr/bin/python3` shim — 실행하면 설치 창이 뜬다. 돌리지 않는다:
+            # 그 서비스는 돌 수 없으니 FAIL 이다(batch 10 재확인 X-python shim). 안내는 rcm 이
+            # 바라는 Python 설치다 — CLT 를 깔아 생기는 python3 가 3.11.4 이상이라는 보장은 없다
+            self.requirements.append(
+                requirement(
+                    "service python",
+                    "fail",
+                    f"{self.mask(python)} is {runner.CLT_NOTE} ({SERVICE_PYTHON})",
+                    "every role",
+                    install_hint("python", **platform),
+                )
+            )
+            return
         got = measure_python(python, env)
         if got is None:
             self.requirements.append(

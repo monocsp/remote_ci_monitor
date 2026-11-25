@@ -4693,6 +4693,38 @@ def test_x_python_a_service_on_another_python_is_measured_or_unknown(
         assert code == 1, doc
 
 
+@pytest.mark.parametrize("how", ["python-program", "rcm-shebang"])
+def test_x_python_a_service_python_that_is_a_clt_shim_is_never_run(
+    worker, env, srv, svcbin, clt_shim, capsys, how
+):
+    """CLT 없는 Mac 에서 서비스가 `/usr/bin/python3` 으로 rcm 을 띄우면 그것은 shim 이다 — 실행하면
+    Command Line Tools 설치 창이 뜬다. doctor 는 그 Python 을 돌리지 않고(`runner.tool_blocked`)
+    「없음(CLT 필요)」으로 FAIL 이다: 그 서비스는 돌 수 없다(batch 10 재확인 X-python shim)."""
+    shims, _git_marker = clt_shim
+    marker = env / "python-shim-ran"
+    python = script(
+        shims / "python3", f"# links against libxcselect.dylib\ntouch {marker}\necho '3 12 1 True'"
+    )
+    cfg = worker_toml(env, srv.url)
+    if how == "python-program":
+        args = [str(python), "-m", "remote_ci_monitor.cli", "worker", "--config", str(cfg)]
+    else:
+        rcm = svcbin.parent / "venv-bin" / "rcm"
+        rcm.parent.mkdir()
+        rcm.write_text(f"#!{python}\nimport sys\n")
+        rcm.chmod(0o755)
+        args = [str(rcm), "worker", "--config", str(cfg)]
+    sf = service_plist(env, args, svcbin)
+    code, doc = run_json(
+        capsys, "--role", "worker", "--config", str(cfg), "--service-file", str(sf)
+    )
+    assert not marker.exists(), "the python shim was executed"
+    row = req(doc, "service python")
+    assert row is not None and row["state"] == "fail", doc["rcm_requirements"]
+    assert "Command Line Tools" in row["detail"], row
+    assert code == 1, doc
+
+
 def test_x_python_the_same_python_adds_no_row(worker, env, srv, svcbin, capsys):
     """과잉 교정 막기: 서비스의 rcm 이 doctor 와 같은 Python 이면 행을 더하지 않는다."""
     cfg = worker_toml(env, srv.url)
