@@ -2025,6 +2025,23 @@ class _Run:
             # linger 는 사용자 유닛의 것이다 — 시스템 유닛에는 없다(P6 GAP X-linger)
             user = self.ctx.environ.get("USER") or self.ctx.environ.get("LOGNAME")
             self.requirements.append(linger_requirement(user or None))
+        elif (
+            self._service_file is not None
+            and self._service_file.manager == dc.SYSTEMD
+            and not self._service_file.system
+        ):
+            # 사용자 유닛 자리도 시스템 자리도 아닌 `--service-file` — 사용자 유닛인지 모른다.
+            # 행을 빼면 linger 가 꺼진 사용자 유닛을 「문제 없음」으로 보인다(batch 10 triage)
+            self.requirements.append(
+                requirement(
+                    "linger",
+                    "unknown",
+                    f"cannot tell whether {self.mask(str(self._service_file.path))} is a systemd "
+                    "user unit — a user unit needs linger to keep running after you log out "
+                    "(loginctl enable-linger USER)",
+                    "a systemd user service",
+                )
+            )
 
     def repo_reach(
         self, repo: Any, git: str | None, env: Mapping[str, str]

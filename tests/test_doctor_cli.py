@@ -4724,20 +4724,34 @@ def systemd_worker_unit(where: Path, cfg: Path, svcbin: Path) -> Path:
     return p
 
 
-@pytest.mark.parametrize("place", ["user-unit", "system-unit"])
+@pytest.mark.parametrize("place", ["user-unit", "system-unit", "elsewhere"])
 def test_x_linger_row_is_for_user_units_only(worker, env, srv, svcbin, monkeypatch, capsys, place):
-    """linger 는 systemd **사용자** 유닛이 로그아웃 뒤에도 돌기 위한 것이다 — 시스템 유닛에는 그
-    행이 없다(P6 GAP X-linger)."""
+    """linger 는 systemd **사용자** 유닛이 로그아웃 뒤에도 돌기 위한 것이다 — 시스템 자리
+    (`/etc/systemd/system`)의 유닛에는 그 행이 없다(P6 GAP X-linger). 사용자 유닛인지 모르는
+    자리의 `--service-file` 이면 행을 빼지 않고 모름이다(batch 10 triage)."""
     monkeypatch.setattr(doctor, "PLATFORM", "linux")
+    units = env / "etc-systemd-system"
+    monkeypatch.setattr(doctor, "SYSTEM_UNIT_DIR", units)
     cfg = worker_toml(env, srv.url)
     home = env / "home"
-    where = home / ".config" / "systemd" / "user" if place == "user-unit" else env / "etc-units"
+    where = {
+        "user-unit": home / ".config" / "systemd" / "user",
+        "system-unit": units,
+        "elsewhere": env / "elsewhere-units",
+    }[place]
     sf = systemd_worker_unit(where, cfg, svcbin)
     code, doc = run_json(
         capsys, "--role", "worker", "--config", str(cfg), "--service-file", str(sf)
     )
-    names = [r["name"] for r in doc["rcm_requirements"]]
-    assert ("linger" in names) == (place == "user-unit"), names
+    linger = [r for r in doc["rcm_requirements"] if r["name"] == "linger"]
+    if place == "system-unit":
+        assert linger == [], doc["rcm_requirements"]
+    elif place == "elsewhere":
+        assert linger and linger[0]["state"] == "unknown", doc["rcm_requirements"]
+        assert "user unit" in linger[0]["detail"], linger
+        assert code == 3, doc
+    else:
+        assert linger and linger[0]["state"] != "unknown", doc["rcm_requirements"]
 
 
 def test_x_linger_without_a_known_user_is_unknown(worker, env, srv, svcbin, monkeypatch, capsys):
