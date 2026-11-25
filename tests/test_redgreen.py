@@ -120,7 +120,9 @@ def test_the_receipt_names_no_temporary_or_home_path(repo, capsys):
     scratch = str(repo.path.parent / "scratch")
     assert scratch not in text and os.path.realpath(scratch) not in text
     assert os.path.dirname(sys.executable) not in text
-    assert receipt["interpreter"] in (".venv/bin/python", Path(sys.executable).name)
+    # RG1 옛 venv 처럼 python3.11 로 떠도 이름이나 .venv/bin/<이름> 만 남는다
+    exe = Path(sys.executable).name
+    assert receipt["interpreter"] in (exe, f".venv/bin/{exe}")
     assert receipt["red"]["cmd"].startswith(receipt["interpreter"] + " -m pytest")
 
 
