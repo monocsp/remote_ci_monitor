@@ -77,6 +77,7 @@ documents that stay in the repository are written in 평어체.
    export GH_TOKEN=$(gh auth token --user monocsp)
    git push -u origin <branch>
    python3 tools/guard_naming.py pr "<title>"
+   mkdir -p <abs worktree>/.verify/handoff/<branch with / as ->   # where the body file lives
    gh pr create --base dev --title "<title>" \
      --body-file <abs worktree>/.verify/handoff/<branch with / as ->/pr-body-<branch with / as ->.md
    ```

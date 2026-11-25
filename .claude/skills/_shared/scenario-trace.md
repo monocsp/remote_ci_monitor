@@ -92,6 +92,7 @@ the owner: the row is probably too vague to test, which is a workplan question. 
 - Text of a row beyond its line. Write each row as one line.
 - Whether a `(live)` row was actually run. `live-verify` lists them; a live verifier raises a missing one.
 - A tag in a test that a runtime `pytest.skip()` or `pytest.importorskip()` inside its body skips
-  (decorators, `pytestmark` and `xfail` are seen), or in a comment of the wrong test; the verifier
-  calls that `WEAK`.
+  (unconditional and constant-condition marks are seen; a `skipif`/`xfail` with an expression or a
+  string, and a mark through an alias, count as proof), or in a comment of the wrong test; the
+  verifier calls those `WEAK`.
 - A row that was never written. That is plan verification's and the owner's job.
