@@ -2784,6 +2784,19 @@ MUTANTS = (
         new="    fenced = value.strip()\n",
         tests=("tests/test_doctor.py::test_x_bidi_tools_refuse_controls_at_either_end_too",),
     ),
+    Mutant(
+        # 자기 세션의 git · 서비스 Python 을 Ctrl-C 때 거두지 않는다 — `Popen.__exit__` 가 0.25초
+        # 뒤 두고 가서 그 손자가 doctor 뒤에 남는다(batch 10 재확인 Ctrl-C 자식)
+        name="gitops-run-process-ctrl-c-leaves-group",
+        path="src/remote_ci_monitor/gitops.py",
+        old="        except BaseException:\n",
+        new="        except subprocess.TimeoutExpired:\n",
+        tests=(
+            "tests/test_doctor_cli.py::test_x_ctrlc_run_process_takes_its_group_down_on_ctrl_c",
+            "tests/test_doctor_cli.py::"
+            "test_x_ctrlc_interrupting_doctor_leaves_no_git_or_service_python_behind",
+        ),
+    ),
 )
 
 

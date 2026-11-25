@@ -149,6 +149,10 @@ def _run_process(argv: list[str], **kwargs: Any) -> subprocess.CompletedProcess[
     `subprocess.run` 은 직접 자식(git)만 죽여서 ssh · credential helper · fetch-pack 같은
     손자가 멈춘 원격을 붙들고 남는다. `start_new_session` 으로 git 이 세션 리더이므로 그
     pid 의 그룹을 SIGKILL 한다(세션을 안 만든 호출은 우리 그룹일 수 있어 자식만 죽인다).
+
+    Ctrl-C(KeyboardInterrupt)와 다른 BaseException 도 같다. 자기 세션의 git 은 터미널의 SIGINT
+    를 받지 않고, `Popen.__exit__` 는 KeyboardInterrupt 면 0.25초만 기다리고 두고 간다 — 그룹을
+    거둔 뒤 다시 던진다(batch 10 재확인 Ctrl-C 자식).
     """
     timeout = kwargs.pop("timeout", None)
     if kwargs.pop("capture_output", False):
@@ -157,7 +161,7 @@ def _run_process(argv: list[str], **kwargs: Any) -> subprocess.CompletedProcess[
     with subprocess.Popen(argv, **kwargs) as proc:
         try:
             out, err = proc.communicate(timeout=timeout)
-        except subprocess.TimeoutExpired:
+        except BaseException:
             try:
                 if own_group:
                     os.killpg(proc.pid, signal.SIGKILL)

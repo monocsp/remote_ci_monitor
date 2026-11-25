@@ -4533,6 +4533,66 @@ def test_x_ctrlc_interrupting_doctor_stops_the_running_probes(
     assert code == 130 and "Traceback" not in err, (code, err)
 
 
+def ctrl_c_while(monkeypatch, program: Path, pidfile: Path) -> None:
+    """`program` 을 기다리는 동안(`Popen.communicate`) 사람이 Ctrl-C 를 누른다 — 그 프로그램이
+    손자를 띄운 뒤에. 다른 자식은 그대로 돈다."""
+    import subprocess
+    import time
+
+    real = subprocess.Popen.communicate
+
+    def communicate(self, *args, **kwargs):
+        if self.args and str(self.args[0]) == str(program):
+            deadline = time.monotonic() + 10
+            while not (pidfile.exists() and pidfile.read_text().strip()):
+                assert time.monotonic() < deadline, "the child never started its helper"
+                time.sleep(0.02)
+            raise KeyboardInterrupt  # 사람이 Ctrl-C 를 눌렀다
+        return real(self, *args, **kwargs)
+
+    monkeypatch.setattr(subprocess.Popen, "communicate", communicate)
+
+
+def test_x_ctrlc_run_process_takes_its_group_down_on_ctrl_c(tmp_path, monkeypatch):
+    """git 은 자기 세션에서 돈다(P6 GAP E2) — 그래서 터미널의 SIGINT 를 받지 않는다. Ctrl-C 가
+    `_run_process` 를 끊으면 그 그룹(git 과 손자)을 거둔 뒤 KeyboardInterrupt 를 다시 던진다.
+    `Popen.__exit__` 는 0.25초만 기다리고 두고 간다(batch 10 재확인 Ctrl-C 자식)."""
+    from remote_ci_monitor import gitops
+
+    git, pidfile = lingering_git(tmp_path)
+    ctrl_c_while(monkeypatch, git, pidfile)
+    with pytest.raises(KeyboardInterrupt):
+        gitops._run_process(
+            [str(git), "--version"], capture_output=True, timeout=30, start_new_session=True
+        )
+    assert gone(pidfile), "the helper outlived Ctrl-C"
+
+
+@pytest.mark.parametrize("what", ["git", "service-python"])
+def test_x_ctrlc_interrupting_doctor_leaves_no_git_or_service_python_behind(
+    worker, env, srv, svcbin, monkeypatch, capsys, what
+):
+    """doctor 가 서비스 PATH 의 git(`git ls-remote` · `git --version`)이나 서비스의 Python 을 재는
+    중에 Ctrl-C 가 오면 그 자식과 손자를 거두고 종료 130 이다(batch 10 재확인 Ctrl-C 자식)."""
+    cfg = worker_toml(env, srv.url, extra=local_repo(env) if what == "git" else "")
+    if what == "git":
+        program, pidfile = lingering_git(svcbin)
+        sf = plist(env / "svc", f"{svcbin}:/usr/bin:/bin")
+    else:
+        pidfile = svcbin / "grandchild.pid"
+        program = script(
+            svcbin / "python3.10", f"/bin/sleep 30 >/dev/null 2>&1 &\necho $! > {pidfile}\nwait"
+        )
+        args = [str(program), "-m", "remote_ci_monitor.cli", "worker", "--config", str(cfg)]
+        sf = service_plist(env, args, svcbin)
+    ctrl_c_while(monkeypatch, program, pidfile)
+    code, out, err = run(
+        capsys, "--role", "worker", "--config", str(cfg), "--service-file", str(sf)
+    )
+    assert gone(pidfile), f"the {what} helper outlived Ctrl-C"
+    assert code == 130 and "Traceback" not in err, (code, err)
+
+
 # ── P6 GAP X-linger: linger 행은 사용자 유닛에만, 사용자를 모르면 모름 ─────────────────
 
 
