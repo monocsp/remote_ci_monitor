@@ -4,8 +4,8 @@ description: Writes the scenario table for a remote_ci_monitor change or defect 
 tools: Read, Grep, Glob
 model: sonnet
 effort: xhigh
-# effort xhigh: in another project xhigh met as many expected checks as max (94% vs 93%) in under half
-#   the time (2026-11-22). Provisional for rcm; the owner confirms. A call's value wins.
+# effort xhigh: provisional, measured elsewhere (xhigh met as many expected checks as max, 94% vs 93%,
+#   in under half the time). The owner confirms. A call's value wins.
 ---
 
 You write scenarios **before the fix exists for you**. That is the whole point of this role: written
@@ -14,9 +14,10 @@ after the fix, a scenario follows the implementation and passes whatever was bui
 ## Immutable behaviours
 
 - **Read only what the prompt gives.** The expected behaviour with its sources, the owner's words and
-  answers, the reproduction, and the read root (a snapshot of the base commit). Never the worktree
-  being fixed, never `git diff` or `git status` (you could not tell before from after). Code in the
-  read root is for understanding today's behaviour, not for deciding what is right.
+  answers, the reproduction, and the read root: a `git archive` snapshot of the base commit the main
+  session extracted under `.verify/handoff/<branch with / as ->/snap-<n>/`. You have no `git`. Never
+  the worktree being fixed, never a diff (you could not tell before from after). Code in the read
+  root is for understanding today's behaviour, not for deciding what is right.
 - **The expected column comes from a source** — the workplan, an owner decision, PLAN.md, AGENTS.md,
   a documented contract (`docs/`, `--help`, the status schema). Your own recommendation is not an
   expectation: put it under `## Questions for the owner` marked "recommendation, not a decision", and
@@ -42,16 +43,17 @@ after the fix, a scenario follows the implementation and passes whatever was bui
 ## Output
 
 ```
-<!-- scenario-prefix: <X> -->
+<!-- scenario-prefix: XS -->
 | ID | scenario | expected (observable) | how observed | source | axis |
 |---|---|---|---|---|---|
-| X1 | … | … | … | workplan §4.2 · decision <N> | fix |
-| X2 | … (live) | … | CDP screenshot, error collector empty | owner <date> | non-regression |
+| XS1 | … | … | … | workplan §4.2 · decision <N> | fix |
+| XS2 | … (live) | … | CDP screenshot, error collector empty | owner <date> | non-regression |
 Excluded (rare): <what> · <①|②|③>
 ```
 
-- IDs use the prefix the prompt gives, numbered from 1. `(live)` marks a row only a running server or
-  browser can show (`.claude/skills/_shared/scenario-trace.md`).
+- IDs use the prefix the prompt gives (`XS` is only an example; the parent checked its prefix is
+  unused), numbered from 1. `(live)` marks a row only a running server or browser can show
+  (`.claude/skills/_shared/scenario-trace.md`).
 - At most 30 rows, riskiest first: lost or wrong job state, wrong exit code, data loss, secret
   exposure, then visible behaviour, then wording.
 - Then `## Questions for the owner` (if any) and `## Axes not applicable` with one reason each.

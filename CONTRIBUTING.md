@@ -6,12 +6,11 @@ being small and honest about what it knows.
 ## Development
 
 ```sh
-python -m venv .venv && . .venv/bin/activate
-pip install -e ".[dev]"
-ruff check . && ruff format --check . && pytest
-node --test tests/web/*.test.js  # web UI pure functions
-python scripts/mutcheck.py      # proves the tests go red for every mutant in scripts/mutcheck.py (--list)
-scripts/smoke_install.sh        # the README setup on a fresh venv (builds the wheel first)
+python3.11 -m venv .venv && ./.venv/bin/python -m pip install -e ".[dev]"
+./.venv/bin/ruff check . && ./.venv/bin/ruff format --check . && ./.venv/bin/python -m pytest
+node --test tests/web/*.test.js         # web UI pure functions
+./.venv/bin/python scripts/mutcheck.py  # proves the tests go red for every mutant in scripts/mutcheck.py (--list)
+scripts/smoke_install.sh                # the README setup on a fresh venv (builds the wheel first)
 ```
 
 The required check is the commit status `rcm/ci`, posted by the build machine's rcm job `rcm-ci`.
@@ -28,9 +27,10 @@ checkout](docs/operating.md#from-a-git-checkout).
 
 Agents working in this repository follow the development loop described in `AGENTS.md`
 (Development loop) and the skills under `.claude/skills/`; humans are welcome to use the same
-tools: `python3 tools/scenario_trace.py docs/<workplan>.md` checks a plan's scenario IDs against
-the tests, and `python3 tools/redgreen.py --fix <sha> --test <node id>` proves a regression test
-was red before a fix.
+tools, from the worktree's `.venv`: `./.venv/bin/python tools/scenario_trace.py docs/<workplan>.md`
+checks a plan's scenario IDs against the tests, and
+`./.venv/bin/python tools/redgreen.py --fix <sha> --test <node id>` proves a regression test was red
+before a fix.
 
 ## House rules
 

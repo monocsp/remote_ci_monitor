@@ -2,9 +2,8 @@
 
 A workplan's test table lists what must be true; the tests are supposed to lock each row. Two kinds
 of slip get through review unless something looks for them: a row with no test at all, and a test
-that carries the row's name but does not assert its result. Two devices catch them (adopted from
-another project, 2026-11-20: its owner asked how anyone knew the tests matched the plan, and only the
-implementer's own mapping existed, which nothing else read):
+that carries the row's name but does not assert its result. Without a check, the only mapping from
+rows to tests is the implementer's own, which nothing else reads. Two devices catch them:
 
 | device | catches | who |
 |---|---|---|
@@ -16,28 +15,31 @@ Only workplans that carry the marker are traced; older ones without it are left 
 ## Format
 
 ```markdown
-<!-- scenario-prefix: T -->
+<!-- scenario-prefix: XT -->
 | ID | scenario | result to check | where | PR |
 |---|---|---|---|---|
-| T1 | a job submitted while the server restarts | it ends `lost`, never `queued` again | e2e | A |
-| T2 | `rcm wait` loses the server | exit 3, stderr says unknown | unit | A |
-| T3 | the queue card after a restart | the job shows as lost (live) | browser | B |
+| XT1 | a job submitted while the server restarts | it ends `lost`, never `queued` again | e2e | A |
+| XT2 | `rcm wait` loses the server | exit 3, stderr says unknown | unit | A |
+| XT3 | the queue card after a restart | the job shows as lost (live) | browser | B |
 ```
 
 - The marker sits on the line directly above the table; the first column is the ID: the prefix, then
-  a number (`T1`, `T2`, … no leading zeros). The prefix is capital letters, one per workplan, chosen
-  from the milestone so two workplans never share it. A QA round uses its own prefix the same way.
+  a number (`XT1`, `XT2`, … no leading zeros). `XT` is only an example.
+- **The prefix** is two or more capital letters, one per workplan, QA table or dev-lite card, and used
+  by no test yet: existing tests already carry short tags (`test_s1_…`, `test_a10_…`, `# P2`), and a
+  prefix that matches them turns the repository's trace test red. Check each candidate and take one
+  with zero usage: `cd <abs worktree> && ./.venv/bin/python tools/scenario_trace.py --prefix-usage <P>`.
 - `(live)` in a row means a live run proves it (`.claude/skills/live-verify/SKILL.md`), not pytest.
   Use it only for what needs a running server, worker or browser. A table where every row is `(live)`
   locks nothing; the plan verifier raises it.
-- Tests tag a row by name, `def test_t3_queue_card_shows_lost(...)` (several from the front:
-  `test_t3_t4_…`), or by a comment `# T3` inside the test function. A row may be covered by tests in
-  several files.
+- Tests tag a row by name, `def test_xt3_queue_card_shows_lost(...)` (several from the front:
+  `test_xt3_xt4_…`), or by a comment `# XT3` inside the test function. A row may be covered by tests
+  in several files.
 - Deleting or renumbering a row means fixing its tags in the same commit; an orphan tag fails the
   trace.
 
 ```sh
-python3 tools/scenario_trace.py docs/m5x-workplan.md [more.md …] [--tests tests/] [--json]
+./.venv/bin/python tools/scenario_trace.py docs/m5x-workplan.md [more.md …] [--tests tests/] [--json]
 # problems: format · empty (a table with no IDs) · duplicate · missing (a row with no test) ·
 #   orphan (a tag the table lacks) · clash (two documents, one prefix) · nothing (no marker at all)
 # exit 0 ok · 1 problems (listed) · 2 usage
@@ -52,16 +54,17 @@ python3 tools/scenario_trace.py docs/m5x-workplan.md [more.md …] [--tests test
   back. Then the main session spawns the plan-to-test verifier below. `SOUND` is a condition for P2
   being done; `WEAK` and `MISSING` are fixed in P2 regardless of severity.
 - **QA** uses the expected-behaviour IDs of the defect the same way at the end of B4.
+- **dev-lite** gives its card's acceptance lines a prefix of their own per PR, checked as above.
 
 ## The plan-to-test verifier
 
-One `isolated-verifier`, spawned by the main session with `effort: "xhigh"` on the Agent call (in
-another project its verdicts matched `max` in about a fifth of the time; provisional here). It sees
-the workplan and the tagged tests in a snapshot, never `src/`: with the implementation in view it
-reads "the code does this, so this test is enough".
+One `isolated-verifier`, spawned by the main session with `effort: "xhigh"` on the Agent call (its
+verdicts matched `max` in about a fifth of the time; measured elsewhere, provisional for rcm). It sees
+the workplan and the tagged tests in a snapshot the main session makes, never `src/`: with the
+implementation in view it reads "the code does this, so this test is enough".
 
 ```sh
-cd <abs worktree> && S=.verify/handoff/<branch-dashes>/snap-trace-<n> && mkdir -p "$S" \
+cd <abs worktree> && S=.verify/handoff/<branch with / as ->/snap-<n> && mkdir -p "$S" \
   && git archive <40-char sha> -- docs/m5x-workplan.md <tagged test files> <tests/ helpers they import> \
   | tar -x -C "$S"
 ```
@@ -71,14 +74,14 @@ helper, the verdict needs it. Prompt:
 
 ```
 You are the plan-to-test verifier for <workplan> at <40-char sha>. Read only <abs snapshot path>.
-For every row with prefix <X>, check that a tagged test sets up the row's situation, triggers it,
+For every row with prefix <P>, check that a tagged test sets up the row's situation, triggers it,
 and asserts the result in the row. Use the plan-to-test verdicts of .claude/agents/isolated-verifier.md.
 Start your answer with `reviewed: <40-char sha>`. End with `verdict: SOUND` or `verdict: UNSOUND`.
 ```
 
 `UNSOUND`: fix the tests, commit, trace and ask again on the new sha. Three `UNSOUND` in a row go to
 the owner: the row is probably too vague to test, which is a workplan question. Keep each answer as
-`.verify/handoff/<branch-dashes>/trace-review-<n>.txt`, `n` going up.
+`.verify/handoff/<branch with / as ->/trace-review-<n>.txt`, `n` going up.
 
 ## What the machine does not see
 

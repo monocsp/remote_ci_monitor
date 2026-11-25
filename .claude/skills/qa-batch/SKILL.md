@@ -68,8 +68,9 @@ behaviour with its source, two reproductions and a control. The reading may be s
 one per finding; the main session writes the table. Keep the received words untouched. Draft a severity per
 [isolated-verifier.md](../../agents/isolated-verifier.md), which also fixes the grade of a missing explicit
 owner request. Group: findings whose suspected files overlap share one branch; the rest get one branch
-each. With four or more findings over several branches, register the branches with `tools/dev_batch.py` as in
-`dev-batch` §0, so overlapping files are refused and `status` gives one table.
+each. With four or more findings over several branches, register the branches with
+`./.venv/bin/python tools/dev_batch.py add` as in `dev-batch` §0, so overlapping files are refused and
+`status` gives one table.
 
 **3 Decision page.** Every ⛔ of the batch — no expected-behaviour source, a policy conflict, disagreement with
 an owner's explicit words — on one page per [decision-page.md](../_shared/decision-page.md). Search for an
@@ -79,13 +80,15 @@ that come up after the owner answered go ahead with the recommended default and 
 "decided by recommended default" in the report.
 
 **4 Scenarios.** Before any fix exists, a `scenario-author` per finding gets the finding as received, the
-observable statements, the expected behaviour with its source and the repro recipe — not the cause, not the
-plan (`qa-defect-fix` says why). The main session writes the returned table to the round folder. Scenarios
-written after the fix are a checklist of what was done.
+observable statements, the expected behaviour with its source, the repro recipe and a base snapshot as
+`qa-defect-fix` §0 sets it up — not the cause, not the plan (`qa-defect-fix` says why). The main
+session writes the returned table to the round folder. Scenarios written after the fix are a
+checklist of what was done.
 
 **5 Fix.** One `build-lead` per branch, mode `qa-fix`, in file per [stage-lead.md](../_shared/stage-lead.md),
-spawned together in one message (three at most). The procedure is `qa-defect-fix`. Accept `out.json` only
-with a red-then-green receipt from `tools/redgreen.py` per finding.
+spawned together in one message (three at most). The procedure is `qa-defect-fix`. A branch moves on only
+when the main session's own `tools/redgreen.py` receipt exits 0 for each of its findings (the lead never
+runs it; [stage-lead.md](../_shared/stage-lead.md) «The red-then-green receipt»).
 
 **6 PR and `rcm/ci`.** As `dev-batch` §3: ruff before push, the `pr` skill, wait for `rcm/ci` in the
 background, hand submission after two minutes, `rcm logs <N>` into the next lead round when red.
@@ -108,8 +111,8 @@ Remove the worktrees this round created, `git fetch --prune`. Report to the owne
 
 - No fix without two reproductions and a control (B2); no cause called proven without a flip or an
   injection (B3); no fix without a test that was red before it (B4); no closing by the one who fixed it (B5).
-- The received words are never summarised in the table or the report (lesson from another project: a
-  summary dropped the one clue that decided the cause).
+- The received words are never summarised in the table or the report: a summary drops the clue that
+  decides the cause first.
 - Evidence files are never overwritten once their hash is listed; a re-run writes a new name.
 - During verification only HIGH findings are fixed; MED and LOW are carried, triaged at the end
   ([isolated-verifier.md](../../agents/isolated-verifier.md)).
@@ -135,7 +138,7 @@ guard, not another paragraph here.
 
 ## False PASS — shapes that have already fooled a run
 
-Generalised from another project's rounds and from rcm's own; check for them in every result you accept.
+Check for them in every result you accept.
 
 - **An empty path.** `cd ""` succeeds and stays where it was; `git -C ""` runs in the current repository.
   Check a path variable is non-empty and absolute before using it, or write the literal path.

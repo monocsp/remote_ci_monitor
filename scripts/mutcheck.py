@@ -157,7 +157,8 @@
      상태 값을 믿음 · 행이 차면 문서 찾기도 건너뜀 · 합친 잡을 새것부터 안 세움 · 실패한 조회를
      모른 척함 (`docs/m5s-workplan.md` §4.4 · §3 #11, #254 격리 검증)
   개발 루프 도구 — `scenario-trace-zero-ids-pass`: 표지는 있고 ID 가 없는 표를 통과시킴
-     (`tools/scenario_trace.py`, 2026-11-25)
+     (`tools/scenario_trace.py`, 2026-11-25) + `dev-batch-*` 셋: 보고 없는 rcm/ci 를 초록으로 ·
+     낡은 `verified:` 를 yes 로 · porcelain 첫 줄의 앞 공백을 잃음 (`tools/dev_batch.py`, 격리 검증)
   #246 격리 검증 — 넷: 새 커밋으로 풀린 제출을 닫힌 PR 잡으로 취소함 · 다시 열린 PR 을 건너뜀 · PR
      목록의 첫 쪽만 읽음 · `guard_merge` 가 저장소 옵션을 한 번만 봄
 
@@ -2117,6 +2118,39 @@ MUTANTS = (
         old='        if not group["ids"]:\n',
         new="        if False:\n",
         tests=("tests/test_scenario_trace.py",),
+    ),
+    Mutant(
+        # 아직 보고가 없는 rcm/ci 를 초록으로 읽는다 — status 가 「merge」를 권한다(격리 검증 F2)
+        name="dev-batch-unreported-ci-success",
+        path="tools/dev_batch.py",
+        old='    found = ((c.pending, "pending"), (c.missing, "not reported"))\n',
+        new='    found = ((c.pending, "pending"),)\n',
+        tests=(
+            "tests/test_dev_batch.py::"
+            "test_status_never_reads_an_unfinished_check_or_an_old_marker_as_done",
+        ),
+    ),
+    Mutant(
+        # 다른 sha 에 단 `verified:` 표식을 지금 head 의 검증으로 센다(격리 검증 F2)
+        name="dev-batch-stale-verified-yes",
+        path="tools/dev_batch.py",
+        old='row["verified"] = "yes" if sha in marks else "stale" if marks else "no"',
+        new='row["verified"] = "yes" if marks else "no"',
+        tests=(
+            "tests/test_dev_batch.py::"
+            "test_status_never_reads_an_unfinished_check_or_an_old_marker_as_done",
+        ),
+    ),
+    Mutant(
+        # porcelain 출력을 strip 한다 — 첫 줄 ` M docs/a.md` 가 `ocs/a.md` 가 되어 범위 밖으로
+        # 보인다(격리 검증 F1)
+        name="dev-batch-porcelain-first-line",
+        path="tools/dev_batch.py",
+        old="for entry in _git(*status, cwd=wt, strip=False).split",
+        new="for entry in _git(*status, cwd=wt, strip=True).split",
+        tests=(
+            "tests/test_dev_batch.py::test_scope_reads_the_worktree_status_without_losing_characters",
+        ),
     ),
 )
 

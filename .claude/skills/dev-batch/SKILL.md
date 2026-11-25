@@ -30,36 +30,33 @@ PRs this way by hand; the tool below adds what that run had to check by eye.
 | owner | answers the one decision page; approves anything that changes the spec | — |
 
 Judgement-free hand work (captures, collecting files) goes to a general agent with `model: "sonnet"`,
-`effort: "high"` on the Agent call (lesson from another project, 2026-10-13: a capture agent that inherited
-the top setting ran 281 minutes).
+`effort: "high"` on the Agent call; without them it inherits the main session's model and effort.
 
 ## Invariants
 
 - One bundle = one PR = one branch = one worktree (`../remote_ci_monitor-<what-it-does>`, its own `.venv`).
   A merged bundle is never dispatched again; a follow-up is a new branch.
-- Every bundle of a wave is cut from the same pinned 40-character base sha, fetched once (lesson from another
-  project: fetching before each cut gave bundles different bases).
+- Every bundle of a wave is cut from the same pinned 40-character base sha, fetched once: fetching before
+  each cut gives bundles different bases.
 - `owns` never overlap between unmerged bundles; `tools/dev_batch.py add` refuses it. Shared registries take
   only additions of the bundle's own entries.
 - A lead's `complete` is a claim. Done is `rcm/ci` green on that head plus isolated verification passed.
-- Full 40-character shas everywhere — in files, comments, commands (lesson from another project, 2026-10-13:
-  a 9-character sha sent twelve re-reviews to the wrong head, about three hours).
-- The head is frozen while it is verified. Fixes wait until the round ends (same project, same date: a fix
-  landed mid-verification and the rounds verified a stale head).
-- Results come back as files, never as a lead's chat text (lesson from another project, 2026-10-05: a
-  terminal read cut a 4,900-character result to 1,214).
+- Full 40-character shas everywhere — in files, comments, commands.
+- The head is frozen while it is verified. Fixes wait until the round ends; a fix landed mid-round leaves
+  the round verifying a stale head.
+- Results come back as files, never as a lead's chat text, which a terminal read can cut short.
 
 ## 0 Set up
 
 ```sh
 git fetch origin                                     # once for this wave
 export RCM_DEV_BATCH=~/.local/state/rcm-dev-batch/<batch-id>.json
-python3 tools/dev_batch.py init --id <batch-id> --base origin/dev   # prints the pinned base sha
+./.venv/bin/python tools/dev_batch.py init --id <batch-id> --base origin/dev   # prints the base sha
 ```
 
 The state file lives outside every worktree: a scratchpad dies on restart and a file in a worktree dies with
 it. The tool reads its path only from `--batch` or `RCM_DEV_BATCH` — export it in every Bash call, shell
-state does not carry over.
+state does not carry over. Run the tool from the main session's own worktree and its `.venv`.
 
 Per bundle: name the branch with the `branch` skill, then cut it from the pinned sha (not `origin/dev`, which
 may have moved) and give it its own `.venv`:
@@ -67,7 +64,7 @@ may have moved) and give it its own `.venv`:
 ```sh
 git worktree add -b <type>/<scope>-<what> ../remote_ci_monitor-<what> <base sha>
 cd ../remote_ci_monitor-<what> && python3.11 -m venv .venv && ./.venv/bin/python -m pip install -e '.[dev]'
-python3 tools/dev_batch.py add --bundle <A> --branch <type>/<scope>-<what> \
+./.venv/bin/python tools/dev_batch.py add --bundle <A> --branch <type>/<scope>-<what> \
   --worktree <absolute path> --owns <path>... [--shared <path>...] [--after <bundle>...] --merge-order <n>
 ```
 
@@ -88,8 +85,7 @@ the scenario IDs this PR proves ([scenario-trace.md](../_shared/scenario-trace.m
 Spawn the leads of one wave in **one message**: one Agent call per bundle, `subagent_type: "build-lead"`,
 the prompt's first lines as stage-lead.md gives them (`stage lead · stage: batch · mode: batch`, then the
 in file's absolute path). While a lead works, leave its worktree's git alone. The completion notice is the
-signal — do not poll, do not wake on a timer (lesson from another project: waking for every notification
-cost 43 % of its cache reads).
+signal — do not poll, do not wake on a timer: every wake re-reads the main session's whole context.
 
 At most **three implementing leads at once** (provisional, never measured in rcm). This machine is also the
 build machine: `rcm-ci` runs on the same CPUs, and a loaded machine turns time-threshold tests red
@@ -104,7 +100,7 @@ in file, then check it against the tree:
 ```sh
 git -C <wt> rev-parse HEAD            # equals out.json "head"
 git -C <wt> status --porcelain        # empty
-python3 tools/dev_batch.py scope --bundle <A>   # every touched path inside owns ∪ shared
+./.venv/bin/python tools/dev_batch.py scope --bundle <A>   # every touched path inside owns ∪ shared
 ```
 
 `scope` lists each path a commit since the base (or since the last merge of `origin/dev`) touched outside
@@ -147,14 +143,15 @@ fresh `build-lead` on the same worktree. The main session does not patch it.
 ## 4 Isolated verification
 
 Per PR, the P3 review rounds of [dev-loop](../dev-loop/SKILL.md) on the diff, plus `live-verify` and
-`edge-audit` when the PR's lane in the spec (full or short, as `dev-loop` reads it) calls for them.
-Severity, rounds, convergence, escalation and triage are
+`edge-audit` when the PR's lane in the spec (full or short, [workplan](../workplan/SKILL.md) «Lane»)
+calls for them. Severity, rounds, convergence, escalation and triage are
 [isolated-verifier.md](../../agents/isolated-verifier.md); this skill adds only:
 
 - Freeze the head: no new round for that bundle until the verification round has ended.
-- Give each verifier the spec section, the PR's diff (`git diff <base>...<head>`) and a snapshot of the
-  head — `git -C <wt> archive <head> | tar -x -C <empty directory outside the repo>` — never a moving
-  worktree and never your own conclusion.
+- Give each verifier the spec section, the PR's diff as a file (`diff-<n>.patch`) and a `git archive`
+  snapshot of the head (`snap-<n>/`), both under `.verify/handoff/<branch with / as ->/` of that worktree
+  ([stage-lead.md](../_shared/stage-lead.md) «What a read-only agent gets») — never a moving worktree and
+  never your own conclusion.
 - Post one `verify-round:` comment per round and `verified: <40-char head>` when it passes, in the formats
   of isolated-verifier.md. A HIGH goes back to the lead as a new round with the finding verbatim; the new
   head needs `rcm/ci` and the next round.
@@ -162,7 +159,7 @@ Severity, rounds, convergence, escalation and triage are
 ## 5 Merge in order
 
 ```sh
-python3 tools/dev_batch.py status          # local and remote head, PR, rcm/ci on that head, verified, merged
+./.venv/bin/python tools/dev_batch.py status   # local and remote head, PR, rcm/ci on that head, verified, merged
 export GH_TOKEN=...                        # as the pr skill pins it
 python3 tools/merge_pr.py <N> --wait --delete-branch
 ```
@@ -180,7 +177,7 @@ After each merge:
   the ruleset refuses it and every `verified:` would point at a sha that no longer exists.
 - A conflict confined to registry lines (both sides appended) is resolved by keeping both sides. A conflict
   in behaviour is not resolved by the main session: `git -C <wt> merge --abort`, then a lead round or the
-  owner (lesson from another project: an auto-resolved conflict became approved text nobody had checked).
+  owner: an auto-resolved conflict becomes approved text nobody checked.
 - A re-synced bundle has a new head: `rcm/ci` and verification run again before it merges.
 
 ## 6 Clean up and report

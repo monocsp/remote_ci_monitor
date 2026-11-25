@@ -30,8 +30,8 @@ The same shape as a commit header (`commit` skill), because the merge commit tak
 - 스키마·설정·종료 코드가 바뀌면 여기에 **Breaking** 으로.
 
 ## 검사
-- `ruff check . && ruff format --check . && pytest` — 3150 passed
-- `node --test tests/web/*.test.js` · `python scripts/mutcheck.py` (N/N)
+- `./.venv/bin/ruff check . && ./.venv/bin/ruff format --check . && ./.venv/bin/python -m pytest` — 3150 passed
+- `node --test tests/web/*.test.js` · `./.venv/bin/python scripts/mutcheck.py` (N/N)
 - 실기: 무엇을 어디서 돌려 봤나(포트 · data_dir · 잡 번호)
 
 ## 문서
@@ -40,9 +40,11 @@ CHANGELOG [Unreleased] · docs/… · README 미러 — 또는 「사용자에�
 Refs: #80
 ```
 
-Two more sections when the development loop produced them (`.claude/skills/dev-loop/SKILL.md`):
-`## Differs from the spec` (`.claude/skills/_shared/workplan-diff.md`) and `## Remaining findings`
-(the MED/LOW the final triage reported rather than fixed, `.claude/agents/isolated-verifier.md`).
+More sections when the development loop produced them (`.claude/skills/dev-loop/SKILL.md`):
+`## 요청 카드` right after `## 한 줄` (`dev-lite`), `## Differs from the spec`
+(`.claude/skills/_shared/workplan-diff.md`), `## Edge audit` (the confirmed GAP table, `edge-audit`)
+and `## Remaining findings` (the MED/LOW the final triage reported rather than fixed,
+`.claude/agents/isolated-verifier.md`).
 
 End the body with the attribution block given at session start.
 
@@ -60,8 +62,9 @@ documents that stay in the repository are written in 평어체.
 
 ## Steps
 
-1. Before opening: `ruff check . && ruff format --check . && pytest`, plus `node --test` and
-   `python scripts/mutcheck.py` when the change touches what they cover; the `docs` skill for a
+1. Before opening: `./.venv/bin/ruff check . && ./.venv/bin/ruff format --check . &&
+   ./.venv/bin/python -m pytest`, plus `node --test` and `./.venv/bin/python scripts/mutcheck.py`
+   when the change touches what they cover; the `docs` skill for a
    user-visible change. Load the `korean-writing` skill and write the title's summary and the body
    by its rules (its §6 check before you paste them). Push with the pinned account:
    ```sh

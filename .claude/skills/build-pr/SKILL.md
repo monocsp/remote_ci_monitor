@@ -13,8 +13,9 @@ isolated verifiers decide.
 
 The main session: creates the worktree, writes the in-file, starts
 [`build-lead`](../../agents/build-lead.md), reads its out.json, runs the plan↔test check, pushes,
-opens the PR, waits for `rcm/ci`. The lead: everything in §2 or §4, committed on its own branch. The
-handoff format, location (`.verify/handoff/<branch>/`, stage `P2` or `P6`), the out.json contract and
+opens the PR, waits for `rcm/ci`, and makes the red-then-green receipt. The lead: everything in §2
+or §4, committed on its own branch. The handoff format, location
+(`.verify/handoff/<branch with / as ->/`, stage `P2` or `P6`), the out.json contract, the receipt and
 the rules a lead keeps are [`_shared/stage-lead.md`](../_shared/stage-lead.md). A lead is new for
 every stage and every retry — a red gate or an UNSOUND check goes into a new in-file for a new lead.
 
@@ -27,8 +28,9 @@ every stage and every retry — a red gate or an UNSOUND check goes into a new i
    `scripts/mutcheck.py`, `tests/test_docs_<code>.py` — add your own entries only), the frozen
    contracts it must not change, and in P6 the GAP table and the redesign targets.
 4. A defect whose red test is hard to pin down (a race, a restart) may first go to
-   [`regression-test-author`](../../agents/regression-test-author.md); its test and proposed mutant
-   go into the in-file. Leads cannot spawn agents.
+   [`regression-test-author`](../../agents/regression-test-author.md) stage `red`, which returns a red
+   test; the main session commits it as it is and names it in the in-file. The mutant proposal comes
+   later, from its `prove` stage on the fix's sha (§3). Leads cannot spawn agents.
 
 ## 2. P2 — what the lead does, in order
 
@@ -39,18 +41,19 @@ every stage and every retry — a red gate or an UNSOUND check goes into a new i
 2. **Prove them red** before writing the code. The evidence is the command and the failure it
    printed, and the failure is in the assertion, not in collecting or importing the test file — an
    import error proves only that a name is missing; when that is the point (a new module), say so.
-   Once the fix is committed, `python3 tools/redgreen.py --fix <sha> --test <nodeid>…` gives the
-   receipt for out.json `red`.
+   The command and its first failing line go in out.json `red`. The `tools/redgreen.py` receipt is
+   not the lead's: the main session makes it (§3).
 3. **Implement.** Standard library only, Korean comments, English identifiers and output, pure
-   computation in `core/` with `now` as an argument. Run the changed tests and `ruff check . &&
-   ruff format --check .`; `node --test tests/web/*.test.js` when `web/` changed. The full suite,
+   computation in `core/` with `now` as an argument. Run the changed tests and `./.venv/bin/ruff
+   check . && ./.venv/bin/ruff format --check .`; `node --test tests/web/*.test.js` when `web/`
+   changed. The full suite,
    the full `mutcheck` and `smoke_install.sh` are `rcm-ci`'s — not repeated locally.
-4. **Trace.** `python3 tools/scenario_trace.py docs/<code>-workplan.md --tests tests/` exits 0:
-   no row without a test, no tag without a row.
+4. **Trace.** `./.venv/bin/python tools/scenario_trace.py docs/<code>-workplan.md --tests tests/`
+   exits 0: no row without a test, no tag without a row.
 5. **Mutants.** Every defect this PR fixes, and every check it adds that a silent deletion would
    undo, gets a permanent mutant in `scripts/mutcheck.py` with its source in the docstring. Prove each:
-   `python scripts/mutcheck.py --only <name>` must go red. It works on a copy in a temporary folder,
-   so the worktree is safe.
+   `./.venv/bin/python scripts/mutcheck.py --only <name>` must go red. It works on a copy in a
+   temporary folder, so the worktree is safe.
 6. **Docs** with the `docs` skill for anything a user sees; the doc-lock test names missing wording.
 7. **Commits** with the `commit` skill (Korean by `korean-writing`), small, on the branch. No push.
 8. **out.json** `complete` only with a non-empty `red`. A departure from the workplan goes in
@@ -62,11 +65,15 @@ Never weaken, skip or `xfail` a test, and never `# noqa` a rule, to get green.
 ## 3. After the lead (main session)
 
 1. `git -C <worktree> status --porcelain` is empty and its HEAD is out.json `head`. Tell the owner
-   each `workplan_diff` row in one chat line as it comes in.
+   each `workplan_diff` row in one chat line as it comes in, and add it to the workplan's §13.
+   Make the receipt, `<stage>-<n>-redgreen.json`, as [`_shared/stage-lead.md`](../_shared/stage-lead.md)
+   «The red-then-green receipt» gives it; exit 1 or 3 sends the work back to a new lead. For a defect
+   test from `regression-test-author`, its `prove` stage runs now on the fix's sha; the main session
+   commits any test change it leaves, and its mutant proposal goes to a new lead's in-file.
 2. **Plan↔test check, without the code.** Snapshot what the verifier may see — the workplan and
    the tests, not `src/`:
    ```sh
-   S=<abs handoff folder>/snap-P2-<n>; mkdir -p "$S"     # folder: _shared/stage-lead.md
+   S=<abs worktree>/.verify/handoff/<branch with / as ->/snap-<n>; mkdir -p "$S"
    git -C <worktree> archive <head> docs/<code>-workplan.md tests/ | tar -x -C "$S"
    ```
    One [`isolated-verifier`](../../agents/isolated-verifier.md) gets only that folder and the prompt
@@ -94,17 +101,18 @@ redesign targets. The lead, a new one — not the P2 lead:
 3. **A cause seen in a second round is redesigned, not patched again.** Write the cause as one
    sentence; first write a test that varies the order of the events behind it (claim, heartbeat,
    finish, cancel, restart in shuffled interleavings, a fake clock) and see it red; then change the
-   code where the cause is. A new LOW from a redesigned cause is deferred (lesson from another project,
-   2026-10-13: five rounds of local fixes to one cause ended in a HIGH regression).
-4. Each GAP: a test that was red (named with the edge's ID), the fix, a mutant as in §2.5, a
-   `redgreen.py` receipt.
+   code where the cause is. A new LOW from a redesigned cause is deferred (canon:
+   [`isolated-verifier`](../../agents/isolated-verifier.md) «Rounds» 5).
+4. Each GAP: a test that was red (named with the edge's ID), the fix, a mutant as in §2.5. The main
+   session then makes the receipt per GAP as in §3.1.
 5. out.json as in §2.8; the GAPs it closed and how, in `notes`.
 
 The main session then pushes, waits for `rcm/ci`, and runs the re-check: two isolated verifiers
-judge each GAP again with the [`edge-audit`](../edge-audit/SKILL.md) prompt, plus "does the test
-reproduce this path and fail without the fix?". **Closed = HANDLED by the re-check and a test that
-locks the path.** A self-assessment never closes a gap. New HIGH from the re-check is fixed here; new
-MED/LOW are deferred to the PR body. The same gap not closed three times → stop and ask the owner.
+judge each GAP again with the [`edge-audit`](../edge-audit/SKILL.md) prompt and the files it names
+(snapshot, diff), plus "does the test reproduce this path and fail without the fix?" with the
+receipt. **Closed = HANDLED by the re-check and a test that locks the path.** A self-assessment
+never closes a gap. New HIGH from the re-check is fixed here; new MED/LOW are deferred to the PR
+body. The same gap not closed three times → stop and ask the owner.
 
 ## 5. Meta loop
 

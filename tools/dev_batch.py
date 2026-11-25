@@ -6,7 +6,7 @@
 상태 파일은 `--batch` · `RCM_DEV_BATCH` 로만 받는다(cwd 폴백 없음). GitHub 읽기는 `merge_pr`.
 
 종료 코드: 0 정상 · 1 거부(이름 · 경로 · 겹침 · 범위 밖 경로, 이미 있는 상태 파일) · 2 사용법 ·
-3 모름(git · GitHub 이 답하지 않음 — 그 칸은 `—`).
+3 모름(git · GitHub 이 답하지 않음 — 그 칸은 `—`, 상태 파일이 깨짐).
 """
 
 from __future__ import annotations
@@ -15,6 +15,7 @@ import argparse
 import contextlib
 import json
 import os
+import posixpath
 import subprocess
 import sys
 from pathlib import Path
@@ -28,6 +29,9 @@ EXIT_OK, EXIT_REFUSED, EXIT_USAGE, EXIT_UNKNOWN = 0, 1, 2, 3
 UNKNOWN = "—"
 STATE_HINT = "~/.local/state/rcm-dev-batch/{id}.json"
 #: 통째로 가질 수 없는 맨 위 뿌리 — 「src/ 전부」는 겹침 검사를 무력하게 만든다.
+#: 상태 파일의 꼴 — 손으로 고치다 깨진 파일은 트레이스백이 아니라 종료 3(모름)이다.
+KEYS = ("id", "base_ref", "base")
+BUNDLE_KEYS = dict(branch=str, worktree=str, owns=list, shared=list, after=list, merge_order=int)
 ROOTS = frozenset(". src src/remote_ci_monitor tests docs tools scripts .claude".split()) | {""}
 
 
@@ -35,7 +39,8 @@ class Stop(Exception):
     """`Stop(종료 코드, 메시지)` — main 이 메시지를 찍고 그 코드로 끝낸다."""
 
 
-def _git(*args: str, cwd: Path | str = ".") -> str:
+def _git(*args: str, cwd: Path | str = ".", strip: bool = True) -> str:
+    """`strip=False` 는 `-z` 출력용 — porcelain 의 첫 칸 공백(` M`)도 자료다."""
     env = {**os.environ, "GIT_TERMINAL_PROMPT": "0", "LC_ALL": "C"}
     run = {"capture_output": True, "text": True, "timeout": 120}
     try:
@@ -44,13 +49,23 @@ def _git(*args: str, cwd: Path | str = ".") -> str:
         raise Stop(EXIT_UNKNOWN, f"git {args[0]}: {error}") from None
     if proc.returncode != 0:
         raise Stop(EXIT_UNKNOWN, f"git {' '.join(args)}: {proc.stderr.strip()}")
-    return proc.stdout.strip()
+    return proc.stdout.strip() if strip else proc.stdout
 
 
 def _load(path: Path) -> dict[str, Any]:
     if not path.is_file():
         raise Stop(EXIT_USAGE, f"no batch at {path} — run init first")
-    return json.loads(path.read_text(encoding="utf-8"))
+    try:
+        state = json.loads(path.read_text(encoding="utf-8"))
+        bundles = state["bundles"]
+        shapes = [isinstance(bundles, dict), *(isinstance(state[k], str) for k in KEYS)]
+        for b in bundles.values():
+            shapes += [isinstance(b[k], t) for k, t in BUNDLE_KEYS.items()]
+        if not all(shapes):
+            raise TypeError("a field has the wrong type")
+    except (OSError, ValueError, KeyError, TypeError, AttributeError) as error:
+        raise Stop(EXIT_UNKNOWN, f"{path} is corrupt ({type(error).__name__}: {error})") from None
+    return state
 
 
 def _save(path: Path, state: dict[str, Any]) -> None:
@@ -76,18 +91,24 @@ def cmd_init(path: Path, args: argparse.Namespace) -> int:
 def _norm(raw: str) -> str:
     """경로 하나를 묶음이 가질 수 있는 꼴로. 안 되면 Stop(거부)."""
     p = raw.strip().removeprefix("./")
+    p = p[:-1] if p.endswith("/") and p != "/" else p
+    parts = p.split("/")
     for bad, why in (
         (any(ch in p for ch in "*?["), "a glob"),
         (p.startswith(("/", "~")), "absolute — paths are relative to the repository root"),
-        (".." in p.split("/"), "it climbs out with `..`"),
-        (p.rstrip("/") in ROOTS, "a whole top-level root — name the files or a narrower folder"),
+        (".." in parts, "it climbs out with `..`"),
+        (p.casefold() in ROOTS, "a whole top-level root — name the files or a narrower folder"),
+        ("" in parts or "." in parts, "an empty or `.` segment — write the path plainly"),
     ):
         if bad:
             raise Stop(EXIT_REFUSED, f"path {raw!r} refused: {why}")
-    return p.rstrip("/")
+    return posixpath.normpath(p)
 
 
-def _within(path: str, claim: str) -> bool:
+def _within(path: str, claim: str, fold: bool = False) -> bool:
+    """`fold` 는 겹침 검사용 — macOS 기본 파일 시스템에서 `Docs/A.md` 는 `docs/a.md` 다."""
+    if fold:
+        path, claim = path.casefold(), claim.casefold()
     return path == claim or path.startswith(claim + "/")
 
 
@@ -121,7 +142,7 @@ def cmd_add(path: Path, args: argparse.Namespace) -> int:
         theirs = [(q, "owns") for q in other["owns"]] + [(q, "shared") for q in other["shared"]]
         for p, kind in [(p, "owns") for p in owns] + [(p, "shared") for p in shared]:
             for q, their in theirs:
-                if "owns" in (kind, their) and (_within(p, q) or _within(q, p)):
+                if "owns" in (kind, their) and (_within(p, q, True) or _within(q, p, True)):
                     raise Stop(EXIT_REFUSED, f"{kind} {p} overlaps {name}'s {their} {q}")
     bundles[args.bundle] = dict(branch=args.branch, worktree=str(wt), owns=owns, shared=shared)
     bundles[args.bundle].update(after=list(args.after), merge_order=args.merge_order, merged=None)
@@ -144,17 +165,21 @@ def cmd_scope(path: Path, args: argparse.Namespace) -> int:
     allowed = b["owns"] + b["shared"]
     # base 브랜치(origin/dev)에 이미 있는 커밋은 뺀다 — 들여온 병합으로 따라온 남의 묶음이다
     tip = _git("rev-parse", "--verify", f"{state['base_ref']}^{{commit}}", cwd=wt)
-    log = ("log", "--no-merges", "--no-renames", "--format=@%H", "--name-only", "HEAD")
-    out = _git(*log, f"^{state['base']}", f"^{tip}", cwd=wt)
+    # `-z` — 경로를 따옴표 · 8진수로 싸지 않는다(공백 · 한글 이름)
+    log = ("log", "-z", "--no-merges", "--no-renames", "--format=@%H", "--name-only", "HEAD")
+    out = _git(*log, f"^{state['base']}", f"^{tip}", cwd=wt, strip=False)
     touched: list[tuple[str, str]] = []
     sha, commits = "", 0
-    for line in out.splitlines():
-        if line.startswith("@"):
-            sha, commits = line[1:], commits + 1
-        elif line:
-            touched.append((sha[:12], line))
-    for line in _git("status", "--porcelain", "--untracked-files=all", cwd=wt).splitlines():
-        touched.append(("worktree", line[3:].split(" -> ")[-1]))
+    for item in out.split("\0"):
+        item = item.removeprefix("\n")
+        if item.startswith("@"):
+            sha, commits = item[1:], commits + 1
+        elif item:
+            touched.append((sha[:12], item))
+    status = ("status", "--porcelain", "-z", "--untracked-files=all", "--no-renames")
+    for entry in _git(*status, cwd=wt, strip=False).split("\0"):
+        if entry:  # `XY path` — 앞 두 칸은 상태(공백일 수 있다), 셋째는 띄어쓰기
+            touched.append(("worktree", entry[3:]))
     stray = [(w, rel) for w, rel in touched if not any(_within(rel, p) for p in allowed)]
     print(f"{args.bundle}: {commits} commits since {state['base'][:12]} on {b['branch']}")
     for where, rel in stray:
@@ -189,6 +214,8 @@ def _row(name: str, b: dict[str, Any], state: dict[str, Any], api: merge_pr.Api)
             row["merged"] = b["merged"] = pr.get("merge_commit_sha") or "yes"
         elif not b.get("merged"):
             row["merged"] = "no"
+            if pr and pr.get("state") != "open":
+                row["pr"] += " (closed)"  # 머지 없이 닫힌 PR — 머지할 것이 없다
         sha = pr["head"]["sha"] if pr else head
         row["rcm_ci"] = "none" if sha is None else _rcm_ci(api, repo, sha)
         row["verified"] = "no"
@@ -197,15 +224,18 @@ def _row(name: str, b: dict[str, Any], state: dict[str, Any], api: merge_pr.Api)
             bodies = (str(c.get("body") or "") for c in merge_pr._pages(api, path))
             marks = [m for body in bodies for m in merge_pr.VERIFIED_RE.findall(body)]
             row["verified"] = "yes" if sha in marks else "stale" if marks else "no"
-    except merge_pr.ApiError as error:
-        print(f"{name}: GitHub did not answer — {error}", file=sys.stderr)
+    except (merge_pr.ApiError, ValueError, KeyError, TypeError, AttributeError) as error:
+        # gh 가 JSON 이 아닌 것(HTML 오류 쪽)이나 다른 모양을 주면 모름 — 트레이스백이 아니다
+        print(f"{name}: GitHub did not answer — {type(error).__name__}: {error}", file=sys.stderr)
     row["next"] = _next(row, b, state)
     return row
 
 
 def _rcm_ci(api: merge_pr.Api, repo: str, sha: str) -> str:
     c = merge_pr.read_checks(api, repo, sha, ("rcm/ci",))
-    found = ((c.failed, "failure"), (c.pending, "pending"), (c.missing, "not reported"))
+    if c.failed:  # `rcm/ci (error)` → `error`
+        return c.failed[0].rsplit("(", 1)[-1].rstrip(")")
+    found = ((c.pending, "pending"), (c.missing, "not reported"))
     return next((word for hit, word in found if hit), "success")
 
 
@@ -219,9 +249,14 @@ def _next(row: dict[str, Any], b: dict[str, Any], state: dict[str, Any]) -> str:
         return "push"
     if row["pr"] == "none":
         return "open PR"
-    if row["rcm_ci"] != "success" or row["verified"] != "yes":
-        fix = {"failure": "fix rcm/ci", "success": "verify"}
-        return fix.get(row["rcm_ci"], "wait for rcm/ci")
+    if row["pr"].endswith("(closed)"):
+        return "reopen or open a new PR"
+    if row["rcm_ci"] in ("pending", "not reported"):
+        return "wait for rcm/ci"
+    if row["rcm_ci"] != "success":
+        return "fix rcm/ci"  # failure · error · 실패한 check-run 의 결론
+    if row["verified"] != "yes":
+        return "verify"
     waiting = [a for a in b["after"] if not state["bundles"][a].get("merged")]
     return f"wait for {', '.join(waiting)}" if waiting else "merge"
 

@@ -11,12 +11,16 @@ read for in the code. This stage reads; it changes nothing.
 
 ## Input
 
-The main session assembles, for the PR's head sha:
+The main session assembles, for the PR's head sha, as files in the handoff folder (the verifiers
+have no `git`; [`_shared/stage-lead.md`](../_shared/stage-lead.md) «What a read-only agent gets»):
 
 1. The edge list: the workplan's edge rows for this PR (§7 IDs), its §9 risks, and the irreversible
    results that [`_shared/edge-scope.md`](../_shared/edge-scope.md) always keeps.
-2. The diff: `git diff origin/dev...<head>` and the files it touches, at that sha.
-3. What P3 and P4 already settled on this head, marked as such, so it is not judged twice.
+2. A `git archive` snapshot of the head (`snap-<n>/`) and the diff
+   (`git -C <wt> diff origin/dev...<head> > diff-<n>.patch`).
+3. The history search for the edges' keywords (`git log --grep`, `CHANGELOG.md`,
+   `docs/acceptance/reports/`), which edge-scope asks for, as `search-<n>.txt`.
+4. What P3 and P4 already settled on this head, marked as such, so it is not judged twice.
 
 ## Run
 
@@ -25,10 +29,11 @@ calls — they only read, so they cannot disturb each other), each with the prom
 else: not your expectation, not the other's output.
 
 ```
-You audit edge cases of remote_ci_monitor at <head sha> in <abs worktree>. Read only (Read, Grep,
-Glob); change nothing. Rules of the house: AGENTS.md, PLAN.md 「fail-open 금지」.
+You audit edge cases of remote_ci_monitor at <40-char head sha>. Read only (Read, Grep, Glob) the
+snapshot <abs snap-<n>/>; change nothing. Rules of the house: its AGENTS.md, PLAN.md 「fail-open 금지」.
 This is the edge audit (P5) of your agent file: its verdicts and its JSON shape.
-Workplan: docs/<code>-workplan.md (§7 rows, §9 risks). Diff: git diff origin/dev...<head sha>.
+Workplan: <abs snap-<n>/>docs/<code>-workplan.md (§7 rows, §9 risks). Diff: <abs diff-<n>.patch>.
+History search already run for you: <abs search-<n>.txt>.
 Edges (id · Given/When/Then):
 <list>
 Causes that recur in this code base; look for them first:

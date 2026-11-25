@@ -2,19 +2,25 @@
 """명세의 시험 표(시나리오 ID)와 pytest 시험이 서로 어긋나지 않는지 본다.
 
   python3 tools/scenario_trace.py <workplan.md>... [--tests DIR] [--json]
+  python3 tools/scenario_trace.py --prefix-usage <P> [--tests DIR]   # 새 명세의 접두어 고르기
 
 왜 있나(2026-11-25): 명세의 시험 행과 실제 시험을 사람이 눈으로 맞췄다. 행이 빠지거나 시험이 없는
 행을 가리켜도 아무것도 빨개지지 않는다. 표지 하나와 이름 규칙 하나로 기계가 대조하게 한다.
 
 명세 쪽: 시험 표 **바로 위 줄**에 `<!-- scenario-prefix: X -->`(대문자 접두어). 표의 첫 칸이 ID
 (`X1`, `X2` …). 행에 `(live)` 가 있으면 pytest 가 아니라 실기(live run)로 증명하는 행이라 누락으로
-세지 않는다. 표지가 없는 문서는 건드리지 않는다(옛 명세).
+세지 않는다. 표지가 없는 문서는 건드리지 않는다(옛 명세). 펜스 코드 블록(```` ``` ```` · `~~~`)
+안의 표지와 표는 예시라서 읽지 않는다.
 시험 쪽: 이름 `test_x3_…`(앞에서부터 `test_x1_x2_…` 처럼 여럿) 또는 시험 함수 **안**의 주석 `# X3`.
 
 문제의 종류: format(표지 · 표 · ID 꼴) · empty(ID 가 하나도 없는 표 — 검사한 것이 없다) ·
 duplicate · missing(시험이 없는 행) · orphan(명세에 없는 ID 를 단 시험) · clash(두 문서가 같은
 접두어) · nothing(넘긴 문서 어디에도 표지가 없다 — 검사하지 않은 것을 통과로 세지 않는다) ·
-unreadable(시험 파일을 못 읽음).
+unreadable(시험 파일을 못 읽음). UTF-8 이 아닌 명세는 format 이다.
+
+접두어는 새 명세마다 **아무 시험도 쓰지 않는 것**을 고른다(`--prefix-usage`). 기존 시험이 이미
+`test_s1_` · `test_a10_` · `# P2` 꼴을 쓰므로 흔한 한 글자는 고아로 쏟아진다. `TR` 같은 여러 글자도
+된다.
 
 종료 코드: 0 문제 없음 · 1 문제 있음 · 2 사용법(파일 · 폴더 없음).
 """
@@ -39,6 +45,8 @@ MARKER_RE = re.compile(r"<!--\s*scenario-prefix:\s*(\S*?)\s*-->")
 PREFIX_RE = re.compile(r"^[A-Z]+$")
 SEPARATOR_RE = re.compile(r"^\|[\s:|-]+$")
 NAME_TOKEN_RE = re.compile(r"^([a-z]+)([1-9]\d*)$")
+FENCE_RE = re.compile(r"^\s{0,3}(`{3,}|~{3,})")
+SHOWN = 5  # --prefix-usage 가 보여 주는 자리 수
 
 
 def _problem(kind: str, where: str, message: str, ident: str = "") -> dict[str, str]:
@@ -47,10 +55,19 @@ def _problem(kind: str, where: str, message: str, ident: str = "") -> dict[str, 
 
 def parse_doc(path: Path, problems: list[dict[str, str]]) -> dict[str, dict[str, Any]]:
     """문서 하나의 표들 → {접두어: {"ids": {ID: 줄}, "live": set, "line": 표지 줄}}."""
-    lines = path.read_text(encoding="utf-8").splitlines()
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except (OSError, UnicodeDecodeError) as error:
+        problems.append(_problem("format", str(path), f"cannot read as UTF-8: {error}"))
+        return {}
     groups: dict[str, dict[str, Any]] = {}
+    fence = ""
     for index, line in enumerate(lines):
-        marker = MARKER_RE.search(line)
+        opener = FENCE_RE.match(line)
+        if opener and (not fence or opener.group(1).startswith(fence)):
+            fence = "" if fence else opener.group(1)  # 펜스 안의 표지는 예시다
+            continue
+        marker = None if fence else MARKER_RE.search(line)
         if marker is None:
             continue
         where = f"{path}:{index + 1}"
@@ -182,22 +199,58 @@ def _print_text(report: dict[str, Any]) -> None:
     print("ok" if report["ok"] else f"{count} problem{'s' if count != 1 else ''}")
 
 
+def prefix_usage(prefix: str, tests_dir: Path, as_json: bool) -> int:
+    """접두어 하나를 이미 쓰는 시험 태그 수. 0 이면 새 명세가 써도 된다(종료 0), 아니면 1."""
+    problems: list[dict[str, str]] = []
+    tags = scan_tests(tests_dir, {prefix}, problems)
+    places = sorted(f"{place} ({ident})" for ident, found in tags.items() for place in found)
+    if as_json:
+        print(json.dumps({"prefix": prefix, "count": len(places), "places": places,
+                          "problems": problems}, ensure_ascii=False, indent=2))  # fmt: skip
+    elif places:
+        print(f"prefix {prefix}: {len(places)} test tags already use it — pick another")
+        for place in places[:SHOWN]:
+            print(f"  {place}")
+        if len(places) > SHOWN:
+            print(f"  … {len(places) - SHOWN} more")
+    elif not problems:
+        print(f"prefix {prefix}: no test uses it — free for a new workplan")
+    for p in problems:  # 못 읽은 파일이 있으면 0 이라고 말할 수 없다
+        print(f"{p['where']}: {p['kind']}: {p['message']}")
+    return EXIT_PROBLEMS if places or problems else EXIT_OK
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(
         prog="scenario_trace.py",
         description="Check a workplan's scenario table (<!-- scenario-prefix: X --> above it, "
         "IDs X1, X2 … in the first column) against the tests that tag its rows "
         "(test_x3_… or a # X3 comment inside a test).",
-        epilog="exit codes: 0 ok · 1 problems (including a table with no IDs and no marked "
-        "document at all) · 2 usage",
+        epilog="A new workplan must pick a prefix with zero usage: run --prefix-usage first. "
+        "Existing tests already carry tags such as test_s1_, test_a10_ and # P2, so a common "
+        "one-letter prefix turns them into orphans. Multi-letter prefixes such as TR are "
+        "allowed. Markers and tables inside fenced code blocks are not read. "
+        "exit codes: 0 ok (--prefix-usage: unused) · 1 problems (including a table with no IDs "
+        "and no marked document at all; --prefix-usage: already used) · 2 usage",
     )
-    ap.add_argument("docs", nargs="+", type=Path, help="workplan / scenario markdown files")
+    ap.add_argument("docs", nargs="*", type=Path, help="workplan / scenario markdown files")
     ap.add_argument("--tests", type=Path, default=Path("tests"), help="test folder (tests/)")
     ap.add_argument("--json", action="store_true", help="print the report as JSON")
+    ap.add_argument(
+        "--prefix-usage",
+        metavar="P",
+        help="count the test tags that already use prefix P (A-Z letters) and exit 1 if any",
+    )
     try:
         args = ap.parse_args(argv)
     except SystemExit as stop:
         return EXIT_USAGE if stop.code else EXIT_OK
+    if args.prefix_usage is not None and not PREFIX_RE.match(args.prefix_usage):
+        print(f"--prefix-usage {args.prefix_usage!r}: A-Z letters only", file=sys.stderr)
+        return EXIT_USAGE
+    if args.prefix_usage is None and not args.docs:
+        print("give at least one workplan, or --prefix-usage P", file=sys.stderr)
+        return EXIT_USAGE
     missing = [str(d) for d in args.docs if not d.is_file()]
     if missing:
         print(f"no such file: {', '.join(missing)}", file=sys.stderr)
@@ -205,6 +258,8 @@ def main(argv: list[str] | None = None) -> int:
     if not args.tests.is_dir():
         print(f"no such test folder: {args.tests}", file=sys.stderr)
         return EXIT_USAGE
+    if args.prefix_usage is not None:
+        return prefix_usage(args.prefix_usage, args.tests, args.json)
     report = check(args.docs, args.tests)
     if args.json:
         print(json.dumps(report, ensure_ascii=False, indent=2))

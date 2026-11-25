@@ -56,8 +56,8 @@ class Batch:
         git("worktree", "add", "-q", "-b", branch, str(path), "origin/dev", cwd=self.clone)
         return path
 
-    def add(self, bundle: str, branch: str, wt: Path, *owns: str, extra=()) -> int:
-        order = str(len(self.read().get("bundles", {})) + 1)
+    def add(self, bundle: str, branch: str, wt: Path, *owns: str, extra=(), order=None) -> int:
+        order = str(order or len(self.read().get("bundles", {})) + 1)
         args = ["add", "--bundle", bundle, "--branch", branch, "--worktree", str(wt)]
         return self.run(*args, "--owns", *owns, *extra, "--merge-order", order)
 
@@ -228,3 +228,145 @@ def test_status_prints_a_dash_and_exits_3_when_github_does_not_answer(batch, cap
     assert row["remote"] == row["pr"] == row["rcm_ci"] == row["verified"] == "—"
     assert row["merged"] == "—" and row["next"] == "—"
     assert row["local"] == batch.remote.dev
+
+
+def _green_api(heads: dict, number: int, branch: str, sha: str, **kw) -> tuple[dict, FakeGitHub]:
+    """그 브랜치에 PR 하나 · rcm/ci 초록 · `verified:` 표식까지 갖춘 가짜 GitHub."""
+    pr = {"number": number, "head": {"ref": branch, "sha": sha}, "merged_at": None}
+    pr["state"] = "open"
+    statuses = kw.get("statuses", {sha: [{"context": "rcm/ci", "state": "success"}]})
+    comments = kw.get("comments", {number: [{"body": f"verified: {sha}"}]})
+    return pr, FakeGitHub(heads, [pr], statuses, comments)
+
+
+def _status_row(batch, capsys, api, bundle="A") -> tuple[int, dict]:
+    capsys.readouterr()
+    code = batch.run("status", "--json", api=api)
+    rows = {r["bundle"]: r for r in json.loads(capsys.readouterr().out)["bundles"]}
+    return code, rows[bundle]
+
+
+@pytest.mark.parametrize(
+    "case, want",
+    [
+        ("unreported", ("not reported", "yes", "wait for rcm/ci")),
+        ("pending", ("pending", "yes", "wait for rcm/ci")),
+        ("failure", ("failure", "yes", "fix rcm/ci")),
+        ("error", ("error", "yes", "fix rcm/ci")),
+        ("stale", ("success", "stale", "verify")),
+        ("unverified", ("success", "no", "verify")),
+    ],
+)
+def test_status_never_reads_an_unfinished_check_or_an_old_marker_as_done(batch, capsys, case, want):
+    a = batch.worktree("wt-a", A_BRANCH)
+    assert batch.add("A", A_BRANCH, a, "docs/a.md") == 0
+    old = _commit(a, "docs/a.md", "one\n")
+    head = _commit(a, "docs/a.md", "two\n")
+    states = {"unreported": [], "pending": [{"context": "rcm/ci", "state": "pending"}]}
+    for word in ("failure", "error"):
+        states[word] = [{"context": "rcm/ci", "state": word}]
+    ok = [{"context": "rcm/ci", "state": "success"}]
+    marks = {"stale": [{"body": f"verified: {old}"}], "unverified": []}
+    kw = {"statuses": {head: states.get(case, ok)}}
+    kw["comments"] = {41: marks.get(case, [{"body": f"verified: {head}"}])}
+    _, api = _green_api({A_BRANCH: head}, 41, A_BRANCH, head, **kw)
+    code, row = _status_row(batch, capsys, api)
+    assert code == 0, row
+    assert (row["rcm_ci"], row["verified"], row["next"]) == want
+
+
+def test_status_next_step_is_push_then_wait_for_the_bundle_it_follows(batch, capsys):
+    a = batch.worktree("wt-a", A_BRANCH)
+    b = batch.worktree("wt-b", B_BRANCH)
+    assert batch.add("A", A_BRANCH, a, "docs/a.md") == 0
+    assert batch.add("B", B_BRANCH, b, "docs/b.md", extra=["--after", "A"]) == 0
+    pushed = _commit(b, "docs/b.md", "one\n")
+    _, api = _green_api({B_BRANCH: pushed}, 42, B_BRANCH, pushed)
+    code, row = _status_row(batch, capsys, api, "B")
+    assert code == 0 and row["next"] == "wait for A"
+    _commit(b, "docs/b.md", "two\n")  # 로컬이 원격보다 앞선다
+    code, row = _status_row(batch, capsys, api, "B")
+    assert code == 0 and row["next"] == "push"
+
+
+def test_a_pr_closed_without_merging_is_not_ready_to_merge(batch, capsys):
+    a = batch.worktree("wt-a", A_BRANCH)
+    assert batch.add("A", A_BRANCH, a, "docs/a.md") == 0
+    head = _commit(a, "docs/a.md")
+    pr, api = _green_api({A_BRANCH: head}, 41, A_BRANCH, head)
+    pr["state"] = "closed"
+    code, row = _status_row(batch, capsys, api)
+    assert code == 0 and row["merged"] == "no"
+    assert row["next"] == "reopen or open a new PR"
+
+
+def test_status_says_unknown_when_gh_answers_with_something_that_is_not_json(batch, capsys):
+    a = batch.worktree("wt-a", A_BRANCH)
+    assert batch.add("A", A_BRANCH, a, "docs/a.md") == 0
+
+    def run(cmd, **kw):
+        return db.subprocess.CompletedProcess(cmd, 0, "<html>rate limited</html>", "")
+
+    capsys.readouterr()
+    assert batch.run("status", "--json", api=db.merge_pr.GhApi(run=run)) == 3
+    captured = capsys.readouterr()
+    [row] = json.loads(captured.out)["bundles"]
+    assert row["remote"] == row["next"] == "—" and "GitHub" in captured.err
+
+
+@pytest.mark.parametrize("text", ["{not json", "[]", '{"id": "m5x"}'])
+@pytest.mark.parametrize("cmd", [["status"], ["scope", "--bundle", "A"], ["add"]])
+def test_a_corrupt_state_file_is_unknown_not_a_traceback(batch, capsys, text, cmd):
+    batch.state.write_text(text)
+    if cmd == ["add"]:
+        wt = batch.worktree("wt-a", A_BRANCH)
+        cmd = ["add", "--bundle", "A", "--branch", A_BRANCH, "--worktree", str(wt)]
+        cmd += ["--owns", "docs/a.md", "--merge-order", "1"]
+    capsys.readouterr()
+    assert batch.run(*cmd, api=FakeGitHub({})) == 3
+    assert "corrupt" in capsys.readouterr().err
+
+
+def test_scope_reads_the_worktree_status_without_losing_characters(batch, capsys):
+    wt = batch.worktree("wt-a", A_BRANCH)
+    assert batch.add("A", A_BRANCH, wt, "docs/a.md", "docs/한 글.md") == 0
+    _commit(wt, "docs/a.md")
+    (wt / "docs" / "a.md").write_text("unstaged\n")  # porcelain 의 첫 줄이 ` M docs/a.md`
+    (wt / "docs" / "한 글.md").write_text("new\n")  # 따옴표로 싸이는 이름
+    capsys.readouterr()
+    assert batch.run("scope", "--bundle", "A") == 0, capsys.readouterr().out
+    (wt / "hello.txt").write_text("changed, not committed\n")
+    (wt / "notes 1.txt").write_text("untracked\n")
+    capsys.readouterr()
+    assert batch.run("scope", "--bundle", "A") == 1
+    out = capsys.readouterr().out
+    assert "worktree  hello.txt" in out and "worktree  notes 1.txt" in out
+    assert "docs" not in out.split("commits since", 1)[1]
+
+
+@pytest.mark.parametrize("owns", ["docs/./a.md", "docs//a.md", "./", "docs/."])
+def test_add_refuses_empty_and_dot_segments(batch, owns):
+    wt = batch.worktree("wt-a", A_BRANCH)
+    assert batch.add("A", A_BRANCH, wt, owns) == 1
+
+
+def test_overlap_ignores_case_and_shared_may_meet_shared(batch, capsys):
+    a = batch.worktree("wt-a", A_BRANCH)
+    b = batch.worktree("wt-b", B_BRANCH)
+    assert batch.add("A", A_BRANCH, a, "docs/Sub/a.md", extra=["--shared", "CHANGELOG.md"]) == 0
+    assert batch.add("B", B_BRANCH, b, "docs/sub/") == 1
+    assert batch.add("B", B_BRANCH, b, "docs/b.md", extra=["--shared", "CHANGELOG.md"]) == 0
+    assert batch.read()["bundles"]["A"]["owns"] == ["docs/Sub/a.md"]
+
+
+def test_add_refuses_a_taken_merge_order_a_taken_branch_and_a_branch_behind_the_base(batch):
+    a = batch.worktree("wt-a", A_BRANCH)
+    b = batch.worktree("wt-b", B_BRANCH)
+    assert batch.add("A", A_BRANCH, a, "docs/a.md") == 0
+    assert batch.add("B", B_BRANCH, b, "docs/b.md", order=1) == 1
+    assert batch.add("B", A_BRANCH, a, "docs/b.md") == 1
+    old = batch.tmp / "wt-old"
+    branch = "feat/web-show-old-badge"
+    git("worktree", "add", "-q", "-b", branch, str(old), "origin/main", cwd=batch.clone)
+    assert batch.add("C", branch, old, "docs/c.md") == 1
+    assert set(batch.read()["bundles"]) == {"A"}

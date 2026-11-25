@@ -11,12 +11,12 @@ A closing without a fix writes this report too; "why not" matters to the reporte
 
 ## 1 Collect evidence first — while the worktrees still exist
 
-Evidence lives in the fix worktrees (`.verify/handoff/…`, receipts, verifier answers) and in the round
-folder. **Before any worktree is removed**, copy what the report will cite into the round folder
+Evidence lives in the fix worktrees (`.verify/handoff/<branch with / as ->/`: receipts, verifier
+answers) and in the round folder. **Before any worktree is removed**, copy what the report will cite
+into the round folder
 (`~/.local/state/rcm-qa/<date>-<topic>/F<n>/`). A file that is gone is written as **missing**, with where
-it was expected — never recreated after the fact, never searched for in another session's worktree
-(lesson from another project: four report writers stopped in front of evidence that sat in other workers'
-trees, and stopping was right).
+it was expected — never recreated after the fact, never searched for in another session's worktree:
+stopping in front of evidence that sits in another session's tree is right.
 
 ## 2 Redact, then place in the repository
 
@@ -26,8 +26,9 @@ copies:
 - the home directory → `<HOME>`; user, host and machine names → generic words;
 - tokens, capabilities and anything token-shaped → the first 4 characters;
 - e-mail addresses, account logins, repository paths of other projects → removed;
-- screenshots through `tools/screenshots` (it neutralises host, paths, ports, tokens) — and look at each image
-  anyway;
+- screenshots come from the CDP helper on a test server (`tests/test_web_browser.py`) and nothing redacts
+  them for you: crop or retake any image that shows a token, a port, a home path or a host name, and look
+  at each one. `tools/screenshots` only runs its own demo and cannot capture a finding;
 - a high-entropy literal fails the `secrets` scan even as a placeholder (AGENTS.md): cut it shorter.
 
 Then list them, once:
@@ -37,9 +38,9 @@ cd docs/acceptance/reports/evidence/<date>-<topic> && shasum -a 256 F*/* > SHA25
 ```
 
 **A listed file is never written over.** A re-run, a re-capture after another fix round, a new log: a new
-name (`-r2`) and a new line (`shasum -a 256 F3/repro-1-r2.txt >> SHA256SUMS`). Before the PR, `shasum -a 256 -c SHA256SUMS` must print only `OK` (lesson from
-another project: a re-run gate overwrote 7 of 13 registered evidence files, and a report writer overwrote a
-registered image while "making a better one").
+name (`-r2`) and a new line (`shasum -a 256 F3/repro-1-r2.txt >> SHA256SUMS`). Before the PR,
+`shasum -a 256 -c SHA256SUMS` must print only `OK`: a re-run or a "better" re-capture written over a listed
+file erases the evidence the report cites.
 
 ## 3 The report
 

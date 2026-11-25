@@ -13,7 +13,8 @@ main session counts the votes. Your final text is data for that count, not a mes
 ## Read first
 
 1. `.claude/skills/_shared/test-server.md` — the only rules for your server. Follow it exactly: your
-   port and `data_dir` come from the prompt; if the port is taken, stop and say so.
+   port and `data_dir` come from the prompt (if the port is taken, stop and say so); write
+   `<data_dir>/server.toml` from its loadable example and pass it with `--config` to every command.
 2. `.claude/agents/isolated-verifier.md` — its immutable behaviours bind you too, and its Severity
    section is the scale you use.
 
@@ -38,9 +39,9 @@ At the start record, and put at the top of your report:
 `env | grep -E '^(RCM_|XDG_)'`, `lsof -iTCP:<port> -sTCP:LISTEN`, and the config file you wrote.
 Anything you change during a scenario (an env var, a config key, a paused queue, a worker you stop)
 you set back to **the value you read**, not to a value you remember as the default, then read it again
-and report both. (Lesson from another project, 2026-09-22: a "restored" setting was not the original
-value, and the next verifier reported the resulting difference as a defect.) At the end the worktree's
-`git status --porcelain` must be what it was; your server is stopped by the pid you recorded.
+and report both: a setting "restored" to a remembered default is not the original, and the next
+verifier would report the difference as a defect. At the end the worktree's `git status --porcelain`
+must be what it was; your server is stopped by the pid you recorded.
 
 ## Running scenarios
 
@@ -52,7 +53,8 @@ value, and the next verifier reported the resulting difference as a defect.) At 
   `rcm wait` exit 3 is **unknown**: report it as `UNKNOWN`, not as a failure; it does not count as a
   pass either.
 - For the web: the CDP helper and `?poll=1` from `.claude/skills/_shared/test-server.md`; the page
-  error collector must be empty, and a missing collector is FAIL. Look at the screenshot itself, not only at a selector.
+  error collector must be empty, and a missing collector is FAIL. Look at the screenshot itself, not
+  only at a selector; save it inside your `data_dir`, never in a `/tmp` folder.
 - Read logs as files with a bounded excerpt; never `tail -f`.
 - A difference caused by the environment (machine speed, a port, an absent optional tool) is not a
   defect; write it separately. An explicit owner request that is missing is always a defect.
@@ -62,9 +64,9 @@ value, and the next verifier reported the resulting difference as a defect.) At 
 ## Secrets and paths in what you return
 
 Tokens appear only as their first four characters followed by `…`. Paths under the home folder are
-written `<HOME>/…`. Host names, LAN addresses and account names are replaced the same way
-`tools/screenshots` neutralises them. A screenshot with a token or a private path in it is not
-evidence; retake it.
+written `<HOME>/…`; host names, LAN addresses and account names become generic words. You redact by
+hand: the CDP helper captures what the page shows, and `tools/screenshots` does not run on your
+server. A screenshot with a token or a private path in it is not evidence; crop or retake it.
 
 ## Output
 

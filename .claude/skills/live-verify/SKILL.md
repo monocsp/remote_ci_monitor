@@ -28,7 +28,8 @@ change. A `(live)` row that is not run is reported as `—` with the reason, nev
 
 Before the run, the PR has `scripts/acceptance/<topic>_live.sh` — written by a build-lead (or the
 main session), reviewed like code, never edited by a verifier. `scripts/acceptance/m5s_live.sh` is the
-model:
+model for its shape, except that it starts by deleting its base folder; a new script never `rm -rf`s
+an existing folder and picks a new name instead ([`_shared/test-server.md`](../_shared/test-server.md)):
 
 - it uses only the worktree's `.venv/bin/rcm` and builds its server exactly as
   [`_shared/test-server.md`](../_shared/test-server.md) says (the only place for those rules — port,
@@ -54,12 +55,13 @@ this PR. The prompt asks each to:
    opinion, not the verdict.
 3. **Judge where it arrives.** The job's final state from `GET /jobs/<id>` and the events, the hook's
    file, `rcm wait`'s exit code, the artifact on disk, the page after the update — not the `200` of
-   the submission or the transition in a log (lesson from another project: four verifiers passed a
-   navigation that arrived on a broken result).
+   the submission or the transition in a log: a transition can succeed and land on a broken result.
 4. For the web: the CDP `Chrome` helper in `tests/test_web_browser.py`, the page's error collector at
    0, the phone width at **390 px measured inside the page** (the phone test once ran at 500 px
    because of Chrome's minimum window, M5d §4.7) and a desktop width, both languages when wording
-   changed. Screenshots through `tools/screenshots`, which neutralises host, paths, ports and tokens.
+   changed. Screenshots with the same helper's `Chrome.screenshot()`, saved in the verifier's
+   `data_dir`, redacted by hand before they leave it (`tools/screenshots` runs only its own demo
+   server and cannot capture this one).
 5. For workers: the two-process helpers in `tests/test_e2e_worker.py` — a real `rcm worker` process,
    `kill -9`, SIGTERM, a server restart while a job runs.
 6. Report per ID: command, job number, observed result, verdict, severity — severity as
@@ -90,4 +92,5 @@ with images in `docs/acceptance/reports/shots/`, committed in the PR:
   observed, verdict;
 - findings `F1…` with severity and what happened to each, and what was not checked and why.
 
-Look at every image before committing it; the `docs` skill covers screenshots.
+Look at every image before committing it: nothing redacted it but you (tokens, ports, home paths,
+host names). The `docs` skill covers the generated images under `docs/images/ui/`, not these.

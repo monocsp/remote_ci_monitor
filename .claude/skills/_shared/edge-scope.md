@@ -3,8 +3,8 @@
 An edge enters a workplan's test table, a scenario author's table or an edge audit by **what has to
 come together for it to happen**, not by a guess at how often it happens (nobody can measure that).
 Why a rule at all: without one, every audit adds every edge it can think of, every confirmed gap must
-be closed, and the loop drowns. In another project an audit stood at 10 HIGH findings next to 124
-confirmed MED/LOW gaps before this rule (2026-11-20).
+be closed, and the loop drowns (measured elsewhere: one audit stood at 10 HIGH findings next to 124
+confirmed MED/LOW gaps; provisional for rcm, the owner confirms).
 
 ## Common or rare
 
@@ -46,9 +46,11 @@ Excluded (rare): server restart during an upload while the disk fills · ① · 
 ```
 
 A line without its condition number (①②③) is not an exclusion; a verifier puts it back as a row.
-Whoever can read the history searches it: the plan writer and the edge auditor search themselves; a
-scenario author, who must not read the case's cause and fix, writes the condition only, and the parent
-that copies the table searches and returns any match to the author as a row to write.
+The history search is run by whoever has a shell: `plan-lead` searches itself. For the edge audit the
+main session runs it before the spawn and passes the result as a file (`search-<n>.txt`,
+`.claude/skills/_shared/stage-lead.md`): the auditors have no `git`. A scenario author, who must not
+read the case's cause and fix, writes the condition only; the parent that copies the table searches
+and returns any match to the author as a row to write.
 
 ## Where it applies
 

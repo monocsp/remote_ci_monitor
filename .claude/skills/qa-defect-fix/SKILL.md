@@ -15,11 +15,11 @@ Nobody here judges whether the fix works — that is B5.
 
 Right after B2, spawn a `scenario-author` ([agent](../../agents/scenario-author.md); by `subagent_type`,
 a general agent would have Edit and Write). Give it the finding as received, the B1 observable statements,
-the expected behaviour with its source, the B2 recipe, and as read root a snapshot of the base commit
-(`git -C <wt> archive <base> | tar -x -C <empty directory outside the repo>`). **Not** the cause, **not** a
+the expected behaviour with its source, the B2 recipe, the row prefix (B4.1), and as read root a snapshot
+of the base commit at `.verify/handoff/<branch with / as ->/snap-<n>/` of the fix worktree
+([stage-lead.md](../_shared/stage-lead.md) «What a read-only agent gets»). **Not** the cause, **not** a
 fix plan, **not** a diff: a cause or a plan is the diff in prose, and a scenario written from it checks the
-fix instead of the behaviour (lesson from another project: scenarios written after the fix turned into a
-list of what had been changed).
+fix instead of the behaviour.
 
 It returns a table — what must be observable once fixed and how; neighbouring paths that use the same code
 and must still work; the edge axes worth a row per [edge-scope.md](../_shared/edge-scope.md). The main
@@ -47,8 +47,9 @@ question and a `blocked` round. It is never decided in code.
 
 **1 Expected-behaviour rows.** The main session commits to the fix branch a short table in the
 [scenario-trace.md](../_shared/scenario-trace.md) format at `docs/acceptance/qa/<date>-<topic>-<what>.md`:
-its own capital prefix, one row per observable expected result, the source in each row. Tests tag these
-IDs; the trace at the end of B4 reads them.
+its own prefix of two or more capital letters that `./.venv/bin/python tools/scenario_trace.py
+--prefix-usage <P>` reports unused, one row per observable expected result, the source in each row.
+Tests tag these IDs; the trace at the end of B4 reads them.
 
 **2 The red test, by another hand.** Spawn `regression-test-author` stage `red`
 ([agent](../../agents/regression-test-author.md)) with the worktree, the finding, the cause hypothesis and
@@ -68,22 +69,18 @@ contract and stands in the way is a POLICY question.
 
 **4 Shake the green.** After the lead's commit, spawn `regression-test-author` stage `prove` on the fix's
 40-character sha: an equivalent rewrite stays green, the defect put back into that rewritten form goes red,
-deleting what is checked goes red — "found nothing" and "found it fine" must not look the same (lesson from
-another project: a test that matched only the old shape of the code let the defect back in a new shape).
-It proposes a permanent mutant for `scripts/mutcheck.py`. The mutant, and any test change `prove` left
-uncommitted, go to a short follow-up `qa-fix` round (`n+1`); the main session does not edit code, and
-`rcm-ci` runs mutcheck, not the lead.
+deleting what is checked goes red — "found nothing" and "found it fine" must not look the same: a test that
+matches only the old shape of the code lets the defect back in a new shape. Any test change `prove` left
+uncommitted is committed by the main session as it is, before the next lead (as in step 2). Its proposed
+permanent mutant for `scripts/mutcheck.py` goes to a short follow-up `qa-fix` round (`n+1`); the main
+session does not edit code, and `rcm-ci` runs the full mutcheck, not the lead.
 
-**5 The receipt.** The one test run the main session makes itself:
-
-```sh
-cd <abs worktree> && python3 tools/redgreen.py --fix <40-char fix commit> --test <pytest node id>... --json \
-  > .verify/handoff/<branch-dashes>/qa-fix-<n>-redgreen.json
-```
-
-It puts the fix commit's test files onto its parent and runs them there (must fail; it says whether they
-failed in the test or while being collected), then at the fix commit (must pass). Exit 0 is
-red-then-green; 1 is not, and B4 is not done; 3 is "could not decide" — not a pass, find out why.
+**5 The receipt.** The one test run the main session makes itself, never the lead (it adds worktrees
+outside the lead's): `qa-fix-<n>-redgreen.json`, made and read as
+[stage-lead.md](../_shared/stage-lead.md) «The red-then-green receipt» says. It puts the fix commit's
+test files onto its parent and runs them there (must fail; it says whether they failed in the test or
+while being collected), then at the fix commit (must pass). Exit 1 means B4 is not done; 3 is "could
+not decide" — not a pass, find out why.
 
 **6 Plan-to-test.** The machine trace over the expected-behaviour table with `--tests tests/`, then one fresh
 `isolated-verifier` that sees the table and the tagged tests, never `src/`

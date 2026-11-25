@@ -59,7 +59,7 @@ session writes it. Evidence files sit next to it under `F<n>/`.
 
    Open the file and check the line is there before writing the ref. **No source → ⛔**: ask on the decision
    page with two options and a default, and stop this finding. Fixing toward a "normal" nobody decided brings
-   the opposite report next round (lesson from another project).
+   the opposite report next round.
 
    The same output through a different path can still be the defect: a number that happens to be right but is
    computed where the contract says it is read, or `0` printed where the value is unknown

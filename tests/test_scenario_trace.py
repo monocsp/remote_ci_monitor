@@ -169,11 +169,90 @@ def test_usage_errors_exit_2(tmp_path, capsys, argv):
     assert st.main(argv) == 2
 
 
+SAMPLE = ROOT / "tests" / "fixtures" / "scenario_trace" / "plan.md"
+
+
 def test_the_repository_plans_with_a_marker_hold_together():
-    """레포의 표지 달린 명세가 서로 · 시험과 어긋나지 않는다(rcm/ci 가 막는다). 누락은 보지 않는다 —
-    명세 PR 은 시험보다 먼저 머지되고, PR 여럿이 한 명세를 나눠 구현한다(누락은 CLI 로 본다)."""
-    docs = [p for p in sorted((ROOT / "docs").rglob("*.md")) if st.MARKER_RE.search(p.read_text())]
-    if not docs:
-        pytest.skip("no plan in docs/ carries a scenario-prefix marker yet")
-    report = st.check(docs, ROOT / "tests")
-    assert [p for p in report["problems"] if p["kind"] != "missing"] == []
+    """레포의 표지 달린 명세가 서로 · 시험과 어긋나지 않는다(rcm/ci 가 막는다). docs/ 의 누락은 보지
+    않는다 — 명세 PR 은 시험보다 먼저 머지되고, PR 여럿이 한 명세를 나눠 구현한다(누락은 CLI 로
+    본다). 커밋된 표본 명세(`TRC`)를 늘 같이 넣어 이 시험이 아무것도 안 보고 초록이 되지 않게 한다 —
+    흔한 접두어(`S` · `A` …)를 고른 새 명세는 기존 시험 이름과 부딪혀 여기서 빨개진다."""
+    marked = [
+        p for p in sorted((ROOT / "docs").rglob("*.md")) if st.MARKER_RE.search(p.read_text())
+    ]
+    report = st.check([*marked, SAMPLE], ROOT / "tests")
+    problems = [p for p in report["problems"]
+                if p["kind"] != "missing" or str(SAMPLE) in p["where"]]  # fmt: skip
+    assert problems == []
+    [sample] = [d for d in report["documents"] if d["path"] == str(SAMPLE)]
+    assert sample["ids"] == sample["tagged"] == ["TRC1", "TRC2", "TRC3", "TRC4"]
+
+
+def test_trc1_prefix_usage_counts_the_tags_already_taken(tmp_path, capsys):
+    tdir = tmp_path / "tests"
+    tdir.mkdir()
+    (tdir / "test_old.py").write_text(
+        "def test_s1_s2_old():\n    pass\n\n\ndef test_other():\n    # S7\n    pass\n"
+    )
+    assert st.main(["--prefix-usage", "S", "--tests", str(tdir)]) == 1
+    out = capsys.readouterr().out
+    assert "3 test tags" in out and "test_s1_s2_old" in out and "test_other" in out
+    assert st.main(["--prefix-usage", "Q", "--tests", str(tdir)]) == 0
+    assert "free" in capsys.readouterr().out
+    assert st.main(["--prefix-usage", "s1", "--tests", str(tdir)]) == 2
+    (tdir / "test_bad.py").write_bytes(b"def test_x():\n    '\xff'\n")
+    assert st.main(["--prefix-usage", "Q", "--tests", str(tdir)]) == 1  # 못 읽은 것은 0 이 아니다
+
+
+def test_trc1_the_help_tells_a_new_workplan_to_pick_an_unused_prefix(capsys):
+    assert st.main(["--help"]) == 0
+    out = " ".join(capsys.readouterr().out.split())
+    assert "--prefix-usage" in out and "zero usage" in out and "TR" in out
+
+
+def test_trc2_markers_and_tables_inside_fenced_code_are_not_read(tmp_path, capsys):
+    fenced = "```markdown\n<!-- scenario-prefix: X -->\n| ID |\n|---|\n| X9 |\n```\n\n"
+    code, report = _run(tmp_path, capsys, plan=fenced + PLAN)
+    assert code == 0, report
+    assert report["documents"][0]["ids"] == ["X1", "X2", "X3"]
+    code, report = _run(tmp_path, capsys, plan="~~~\n<!-- scenario-prefix: X -->\n~~~\n")
+    assert code == 1 and _kinds(report) == [("nothing", "")]
+
+
+def test_trc3_a_plan_that_is_not_utf8_is_a_format_problem(tmp_path, capsys):
+    (tmp_path / "bad.md").write_bytes(b"<!-- scenario-prefix: X -->\n\xff\xfe\n")
+    code, report = _run(tmp_path, capsys, docs=[str(tmp_path / "bad.md")])
+    assert code == 1
+    assert ("format", "") in _kinds(report)
+
+
+def test_trc4_a_multi_letter_prefix_is_accepted(tmp_path, capsys):
+    plan = "<!-- scenario-prefix: TR -->\n| ID | 상황 |\n|---|---|\n| TR1 | a |\n| TR2 | b |\n"
+    tests = "def test_tr1_a():\n    pass\n\n\ndef test_b():\n    # TR2\n    pass\n"
+    tests += "\n\ndef test_t1_not_tr():\n    # T3 TRX1\n    pass\n"
+    code, report = _run(tmp_path, capsys, plan=plan, tests=tests)
+    assert code == 0, report
+    assert report["documents"][0]["tagged"] == ["TR1", "TR2"]
+
+
+def test_only_the_leading_tokens_of_a_test_name_tag_rows(tmp_path, capsys):
+    tests = TESTS + "\n\ndef test_cancel_x3_x9_later():\n    pass\n"
+    code, report = _run(tmp_path, capsys, tests=tests.replace("test_x1_a_job", "test_a_x1_job"))
+    assert code == 1
+    assert _kinds(report) == [("missing", "X1")]  # x3 · x9 는 이름 중간이라 세지 않는다
+
+
+def test_a_table_without_a_separator_row_is_a_format_problem(tmp_path, capsys):
+    plan = "<!-- scenario-prefix: X -->\n| ID | 상황 |\n| X1 | a |\n| X2 | b |\n"
+    code, report = _run(tmp_path, capsys, plan=plan, tests="def test_a():\n    pass\n")
+    assert code == 1 and _kinds(report) == [("empty", ""), ("format", "")]
+
+
+@pytest.mark.parametrize("body", [b"def test_x1(:\n", b"def test_x1():\n    '\xff'\n"])
+def test_an_unreadable_test_file_is_a_problem(tmp_path, capsys, body):
+    code, report = _run(tmp_path, capsys)
+    assert code == 0, report
+    (tmp_path / "tests" / "test_broken.py").write_bytes(body)
+    code = st.main([str(tmp_path / "plan.md"), "--tests", str(tmp_path / "tests"), "--json"])
+    report = json.loads(capsys.readouterr().out)
+    assert code == 1 and _kinds(report) == [("unreadable", "")]

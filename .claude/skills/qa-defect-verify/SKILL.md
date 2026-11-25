@@ -14,7 +14,7 @@ broken". Severity, rounds, quorum, round-3 analysis, round-4 report and the fina
 - A finding observed by running rcm (a command, the web page, an API answer) is verified by
   **`live-verifier`s** ([agent](../../agents/live-verifier.md)): they run the scenarios and judge from what
   they observe. Every round after a fix is a run round too — a fix checked only by reading is not
-  verified (lesson from another project, 2026-09-23).
+  verified.
 - A finding that only reading shows (a wrong condition with no reachable runtime symptom yet) is verified by
   **`isolated-verifier`s** reading the diff against the scenarios.
 - Never the session or the lead that made the fix, and never a verifier that saw another's verdict.
@@ -48,6 +48,7 @@ If you cannot confirm something, it is FAIL. You will not see other verifiers' r
 Read:
 - the scenario table: <abs path>
 - the diff: <abs path of `git diff <base>...<head>` output> (files: <list>)
+- the head as files: <abs .verify/handoff/<branch with / as ->/snap-<n>/> (you are not asked to run git)
 - the B2 recipe and the control: <abs paths>
 - .claude/agents/isolated-verifier.md — severity, output shape
 

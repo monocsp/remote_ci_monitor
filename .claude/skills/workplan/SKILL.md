@@ -57,13 +57,16 @@ model; keep its order.
 | §10 (when asked) | what goes back to a requester's document, from which section, when |
 | §11 결정 표 | `#`, item, decided, 오너 확인 (확정 with date · 추천 · ⛔), differs from the request |
 | §12 격리 반박에서 바뀐 것 | rebuttal id, grade, first edition, this edition, decision |
+| §13 구현하며 바뀐 것 (Changed while implementing) | empty at approval; filled per PR as `docs/m5q-workplan.md` §12 does |
 
 Facts in §3 are measured, never estimated. A number that was not measured is `—` with what would
-measure it. The production database is read only with the owner's OK and only as
-[`_shared/test-server.md`](../_shared/test-server.md) describes.
+measure it. A production number comes only from the main session, with the owner's OK, by the
+read-only route of [`_shared/test-server.md`](../_shared/test-server.md); `plan-lead` gets it through
+its in file and never reads production itself.
 
-Implementation that later departs from the plan is recorded as
-[`_shared/workplan-diff.md`](../_shared/workplan-diff.md) says, not by editing §4.
+After the merge the plan is frozen. Implementation that departs from it is recorded as
+[`_shared/workplan-diff.md`](../_shared/workplan-diff.md) says, in §13 only, never by editing §4–§7.
+Only the main session writes §13, in the PR that departs; a `build-lead` never edits the workplan.
 
 ## 2. Scenario table
 
@@ -71,20 +74,25 @@ Implementation that later departs from the plan is recorded as
 whole workplan:
 
 ```
-<!-- scenario-prefix: S -->
+<!-- scenario-prefix: XS -->
 | ID | 시나리오 | 확인할 결과 | 어디서 | PR |
 |---|---|---|---|---|
-| S1 | … | an observable result, not "works" | 단위 · e2e · 브라우저 · (live) | A |
+| XS1 | … | an observable result, not "works" | 단위 · e2e · 브라우저 · (live) | A |
 ```
 
-The ID is the first column; the prefix clashes with no other workplan. `(live)` marks a row that
-only a live run proves ([`live-verify`](../live-verify/SKILL.md)). The format, test tagging and the
-tool are in [`_shared/scenario-trace.md`](../_shared/scenario-trace.md). Before review, check the table
-alone:
-
-```sh
-python3 tools/scenario_trace.py docs/<code>-workplan.md
-```
+1. **Prefix.** Existing tests already carry short tags (`test_s1_…`, `test_a10_…`, `# P2`), and a
+   workplan whose prefix matches them turns the repository's trace test red. Pick two or more
+   capital letters and check each candidate first; take one that reports zero usage:
+   `cd <abs worktree> && ./.venv/bin/python tools/scenario_trace.py --prefix-usage <P>`.
+2. **Scenarios before any design is read as code.** The main session spawns a
+   [`scenario-author`](../../agents/scenario-author.md) (by `subagent_type`) with the owner's words,
+   their sources, the prefix, the axes to cover and a snapshot of the base commit
+   ([`_shared/stage-lead.md`](../_shared/stage-lead.md) «What a read-only agent gets»). Its table goes
+   into the P1 in file; `plan-lead` builds §7 from it, and a row it drops is listed in §12 with why.
+3. **Rows.** The ID is the first column. `(live)` marks a row that only a live run proves
+   ([`live-verify`](../live-verify/SKILL.md)). The format, test tagging and the tool are in
+   [`_shared/scenario-trace.md`](../_shared/scenario-trace.md). Before review, check the table alone:
+   `cd <abs worktree> && ./.venv/bin/python tools/scenario_trace.py docs/<code>-workplan.md`.
 
 Edge rows are chosen by reach condition, and irreversible results always get a row —
 [`_shared/edge-scope.md`](../_shared/edge-scope.md) decides which. A table of every conceivable edge
@@ -92,8 +100,14 @@ is not thoroughness: it buries the few rows that matter.
 
 ## 3. Lane
 
-For every PR in §5, `plan-lead` recommends **full** (P2–P7 with live run and edge audit) or
-**short** (P2 → P3 → P7). Recommend full when any of these applies to that PR:
+This section is the only definition of the lanes; other skills link here. For every PR in §5,
+`plan-lead` recommends one:
+
+- **full** — P2 build → P3 review → P4 live run (when [`live-verify`](../live-verify/SKILL.md) says it
+  is required) → P5 edge audit → P6 gap fix → triage → P7 merge;
+- **short** — P2 build → P3 review → triage → P7 merge; no live run, no edge audit, no gap fix.
+
+Recommend full when any of these applies to that PR:
 
 | condition | what the full lane catches that short misses |
 |---|---|
@@ -109,9 +123,10 @@ owner's answer, recorded as a §11 row; the plan never picks it alone.
 
 ## 4. Plan review
 
-Two [`isolated-verifier`](../../agents/isolated-verifier.md)s per round, one after the other, each
-given the workplan file and the repository at the pinned sha — not the chat, not the in-file, not the
-other's verdict. Ask each to check:
+Two [`isolated-verifier`](../../agents/isolated-verifier.md)s per round, one after the other. The
+main session prepares a `git archive` snapshot of the pinned sha with the workplan in it
+([`_shared/stage-lead.md`](../_shared/stage-lead.md) «What a read-only agent gets»); each verifier gets
+that absolute path — not the chat, not the in-file, not the other's verdict. Ask each to check:
 
 - every `file:line` in §3 against the code, and every new identifier (state, error code, config key,
   CLI flag) with `grep`, so a name already used elsewhere is caught (M5s §3 #7: `expired` already

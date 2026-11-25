@@ -29,10 +29,11 @@ The rules for every lead (handoff files, the out.json contract, what leads never
    `<stage>-<n>-progress.md` at once, and put them in `red`. No `red`, no `complete`. Never weaken
    an existing test to get green; if one stands in the way, that is a POLICY question.
 5. **Build**, then the narrow checks only: `./.venv/bin/python -m pytest <changed test files> -q`,
-   `ruff check <changed files> && ruff format --check <changed files>` (Korean is double width for
-   E501), `node --test tests/web/<changed>.test.js` for web code, and the doc-lock tests the `docs`
-   skill names when docs change. Tests stay under 20 seconds or carry `@pytest.mark.slow`; no network,
-   no reverse DNS. The full suite, `scripts/mutcheck.py` and `scripts/smoke_install.sh` are `rcm-ci`'s.
+   `./.venv/bin/ruff check <changed files> && ./.venv/bin/ruff format --check <changed files>`
+   (Korean is double width for E501), `node --test tests/web/<changed>.test.js` for web code, and
+   the doc-lock tests the `docs` skill names when docs change. Tests stay under 20 seconds or carry
+   `@pytest.mark.slow`; no network, no reverse DNS. The full suite, `scripts/mutcheck.py` and
+   `scripts/smoke_install.sh` are `rcm-ci`'s.
 6. **A live check**, when the in file asks for one, runs on a server set up by
    `.claude/skills/_shared/test-server.md`, with the port and `data_dir` the in file gives.
 7. **Docs in the same PR** for anything a user sees: read `.claude/skills/docs/SKILL.md` and follow
@@ -51,18 +52,20 @@ The rules for every lead (handoff files, the out.json contract, what leads never
 
 | mode | read first | does | extra in the result |
 |---|---|---|---|
-| `implement` (P2) | the frozen workplan's sections for this PR, its test table, the decision answers | rows to RED tests, then code; `python3 tools/scenario_trace.py <workplan>` exits 0 before returning | the trace command in `tests` |
-| `gap-fix` (P6) | the confirmed GAP table (`file:line`), the redesign target, the edge-audit JSON | one regression test per GAP, red first; one GAP per commit; a mutant entry per GAP for `scripts/mutcheck.py`, run once with `python scripts/mutcheck.py --only <name>` | per GAP in `notes`: commit, test `file:line`, mutant name |
-| `batch` | the dev-batch spec in the in file (bundle, branch, base sha, `owns`, `shared`, workplan section, merge order) | as `implement` for this PR only; keep every commit inside `owns` and `shared` (`git diff --name-only <base>..HEAD` before returning). The batch state file lives outside the worktree, so the main session runs `tools/dev_batch.py scope` on your result, not you | the changed-path list in `notes` |
-| `qa-fix` | the finding verbatim, its reproduction and observed output, the expected behaviour with its source, the cause (`file:line`, proven or marked hypothesis) | a hypothesis is proven first: undo the suspected line, the symptom goes; keep it, it stays. If a red test from `regression-test-author` is named, confirm it is red and keep it as is; otherwise write it. Then fix and commit. Add one mutant entry for the defect — the one named in the in file if `regression-test-author` already proposed it, otherwise your own; a mutant it proposes later comes as a new `qa-fix` round | proof of cause in `notes`; `red` from before the fix |
+| `implement` (P2) | the frozen workplan's sections for this PR, its test table, the decision answers | rows to RED tests, then code; `./.venv/bin/python tools/scenario_trace.py <workplan> --tests tests/` exits 0 before returning | the trace command in `tests` |
+| `gap-fix` (P6) | the confirmed GAP table (`file:line`), the redesign target, the edge-audit JSON | one regression test per GAP, red first; one GAP per commit; a mutant entry per GAP for `scripts/mutcheck.py`, run once with `./.venv/bin/python scripts/mutcheck.py --only <name>` | per GAP in `notes`: commit, test `file:line`, mutant name |
+| `batch` | the dev-batch spec in the in file (bundle, branch, base sha, `owns`, `shared`, workplan section, merge order) | as `implement` for this PR only; keep every commit inside `owns` and `shared` (`git diff --name-only <base>..HEAD` before returning). The batch state file lives outside the worktree, so the main session runs `./.venv/bin/python tools/dev_batch.py scope` on your result, not you | the changed-path list in `notes` |
+| `qa-fix` | the finding verbatim, its reproduction and observed output, the expected behaviour with its source, the cause (`file:line`, proven or marked hypothesis) | a hypothesis is proven first: undo the suspected line, the symptom goes; keep it, it stays. If a red test from `regression-test-author` is named, confirm it is red and keep it as is; otherwise write it. Then fix and commit. Add one mutant entry for the defect — the one named in the in file if `regression-test-author` already proposed it, otherwise your own; a mutant it proposes later comes as a new `qa-fix` round | proof of cause in `notes`; `red` from before the fix (the `tools/redgreen.py` receipt is the main session's) |
 
 **Redesign (gap-fix).** If the in file names a redesign target, do not patch the symptom: write the
 cause as one sentence in `notes`, write a generative or ordering test that is red first, and fix at
-the cause (another project, 2026-10-13: a local fix carried over five rounds produced a HIGH
-regression). Fix only the confirmed list; prefer what loses data or crashes first.
+the cause (canon: `.claude/agents/isolated-verifier.md` «Rounds» 5). Fix only the confirmed list;
+prefer what loses data or crashes first.
 
-**After your commit,** in `gap-fix` and `qa-fix` the main session may run `regression-test-author`'s
-`prove` stage on your sha; you do not run it, and you leave the tree clean so it can start.
+**After your commit,** the main session makes the `tools/redgreen.py` receipt (it adds worktrees
+outside yours, which you may not), and in `gap-fix` and `qa-fix` may run `regression-test-author`'s
+`prove` stage on your sha; you run neither, and you leave the tree clean so they can start. You never
+edit the frozen workplan: departures go in `workplan_diff`, and the main session records them.
 
 ## Blocking questions
 

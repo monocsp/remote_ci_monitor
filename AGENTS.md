@@ -94,10 +94,10 @@ migrates the database in place, and the build that made it refuses it afterwards
 ## Checks before a pull request
 
 ```sh
-ruff check . && ruff format --check . && pytest
-node --test tests/web/*.test.js      # web UI pure functions
-python scripts/mutcheck.py           # the tests must go red for every mutant in scripts/mutcheck.py (--list)
-scripts/smoke_install.sh             # the README's own commands on a fresh venv
+./.venv/bin/ruff check . && ./.venv/bin/ruff format --check . && ./.venv/bin/python -m pytest
+node --test tests/web/*.test.js           # web UI pure functions
+./.venv/bin/python scripts/mutcheck.py    # the tests must go red for every mutant in scripts/mutcheck.py (--list)
+scripts/smoke_install.sh                  # the README's own commands on a fresh venv
 ```
 
 ## Documentation
@@ -115,8 +115,11 @@ severity, round and triage rules), a live run on a test server when the change i
 processes (`live-verify`, rules in `.claude/skills/_shared/test-server.md`), an edge audit
 (`edge-audit`), then the `pr` skill. Small changes use `dev-lite`; several PRs of one milestone at
 once use `dev-batch`; defects found after the fact use `qa-batch` / `qa-defect-loop`. The tools
-behind them are `tools/scenario_trace.py` (scenario IDs against tests), `tools/dev_batch.py`
-(bundle paths must not overlap) and `tools/redgreen.py` (a test red before the fix, green after).
+behind them run from the worktree's `.venv`, never a bare `python3`, which has no pytest:
+`./.venv/bin/python tools/scenario_trace.py` (scenario IDs against tests),
+`./.venv/bin/python tools/dev_batch.py` (bundle paths must not overlap) and
+`./.venv/bin/python tools/redgreen.py` (a test red before the fix, green after; the main session
+runs it, since it adds worktrees outside a lead's).
 
 ## Traps that have already cost a session
 

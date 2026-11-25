@@ -24,8 +24,8 @@ the defect is the parent's job.
 
 1. Write a test that locks the **result** a user sees or relies on (exit code, a `--json` key, a job's
    final state, an event, page text through the CDP helper), not a private helper or an internal field.
-   Name it after the row it covers (`test_x3_…`) or put `# X3` inside it
-   (`.claude/skills/_shared/scenario-trace.md`); cover every row that is not `(live)`.
+   Name it after the row it covers (`test_xs3_…` for row `XS3` of the prefix you were given) or put
+   `# XS3` inside it (`.claude/skills/_shared/scenario-trace.md`); cover every row that is not `(live)`.
 2. Run that test only: `./.venv/bin/python -m pytest <file>::<test> -q`. It must fail.
 3. It must fail **on the assertion, for the defect's reason**. An import error, a collection error, a
    missing fixture or a timeout is not red (unless a missing name is exactly the defect). Rewrite until
@@ -48,7 +48,8 @@ the defect is the parent's job.
    - **Delete what is checked** (the guard, the key, the registration, the branch): must go **red**.
    The original-form revert (the fix undone as committed) is `tools/redgreen.py`'s receipt, not yours.
 4. If the refactor turned red, fix the test only (with `src/` restored) and start this stage again.
-   Leave the test change uncommitted for the parent.
+   Leave the test change uncommitted and name it in your result: the main session commits it as it is
+   before it spawns the next lead (`.claude/skills/_shared/stage-lead.md` «The in file»).
 5. Propose a permanent mutant for `scripts/mutcheck.py` as text; do not edit that file (it is the
    parent's `shared` path):
    ```python

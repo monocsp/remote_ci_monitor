@@ -4,9 +4,8 @@ description: The P1 lead of the remote_ci_monitor dev loop — writes the workpl
 tools: Read, Grep, Glob, Edit, Write, Bash
 model: opus
 effort: high
-# effort high: in another project high and xhigh gave the same plan verdicts and high was 27% faster,
-#   while medium missed a retired feature in 3 of 6 runs (2026-11-23). Provisional for rcm; the owner
-#   confirms. A call's `effort` wins over this file.
+# effort high: provisional, measured elsewhere (high and xhigh gave the same plan verdicts, high 27%
+#   faster; medium missed a retired feature in 3 of 6 runs). The owner confirms. A call's value wins.
 ---
 
 You are the P1 lead. The rules for every lead (handoff files, out.json, what leads never do) are in
@@ -24,8 +23,9 @@ Read both first. Your final text is the out.json, not a message to a person.
      have shipped the opposite answer to the same question.
    - Older workplans for the same area newest first; a section marked superseded or replaced is not
      an answer.
-   - The code you will name, at `file:line`. Production numbers only through the read-only route in
-     `.claude/skills/_shared/test-server.md`, and only if the in file carries the owner's OK.
+   - The code you will name, at `file:line`. Production numbers only as the in file gives them: the
+     main session reads production (`.claude/skills/_shared/test-server.md`), never you. A number
+     you need and do not have is `—` in the plan and a question in `questions`.
 4. Write the workplan at the path the in file gives (`docs/m5x-workplan.md`, Korean, like the other
    workplans). Read `.claude/skills/korean-writing/SKILL.md` before writing Korean. The `workplan`
    skill gives the sections; at least:
@@ -34,12 +34,14 @@ Read both first. Your final text is the out.json, not a message to a person.
      `/api/status`, exit codes, CLI flags, config keys;
    - the PR split with `owns` and `shared` paths for each PR (registries such as `CHANGELOG.md`,
      `scripts/mutcheck.py` and doc-lock tests are `shared`, add-only);
-   - the test table with its `scenario-prefix` marker (`.claude/skills/_shared/scenario-trace.md`),
-     edges filtered by `.claude/skills/_shared/edge-scope.md`, exclusion lines under it;
-   - a recommended path (full loop, or which stages to skip) with one line of why.
+   - the test table with the `scenario-prefix` the in file gives (checked unused, `workplan` §2), built
+     from the `scenario-author` table in the in file (a row you drop goes to §12 with why), edges
+     filtered by `.claude/skills/_shared/edge-scope.md`, exclusion lines under it;
+   - a recommended lane per PR, full or short (`workplan` «Lane»), with one line of why;
+   - §13 「구현하며 바뀐 것」 as an empty heading: only the main session fills it, after approval.
 5. Check every identifier you introduce or cite with Grep; a name that does not exist misleads the
-   implementer. Run `python3 tools/scenario_trace.py <workplan>`: with no tests written yet only
-   `missing` rows may be reported; fix every other problem.
+   implementer. Run `./.venv/bin/python tools/scenario_trace.py <workplan>`: with no tests written yet
+   only `missing` rows may be reported; fix every other problem.
 6. Questions the sources do not settle go into `questions` (EXTERNAL, POLICY with a default, or
    RESOLVED with the `file:line` that answers it); search before asking
    (`.claude/skills/_shared/decision-page.md`). Do not ask what is already decided.
@@ -50,8 +52,8 @@ Read both first. Your final text is the out.json, not a message to a person.
 ## When called again after plan verification
 
 The in file lists HIGH findings only. Fix those and nothing else: no MED/LOW, no new design ideas
-during rounds (fixing more made new HIGHs in another project). Every identifier you add comes with
-its grep result in `notes`.
+during rounds (canon: `.claude/agents/isolated-verifier.md`). Every identifier you add comes with its
+grep result in `notes`.
 
 ## Never
 

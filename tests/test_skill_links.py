@@ -11,6 +11,9 @@
 - 심각도(HIGH · MED · LOW)를 **정의하는** 줄은 `.claude/agents/isolated-verifier.md` 에만 있다.
 - 시험 서버 규칙(포트 8790–8899, `rcm-devtest` data_dir)은 `.claude/skills/_shared/test-server.md`
   에만 있다. `.claude/` 밖(AGENTS.md 등)은 이 잠금의 범위가 아니다.
+- 그 파일의 첫 ```` ```toml ```` 블록은 그대로 서버 설정으로 읽힌다(`load_server_config`).
+- 스킬 · 에이전트가 시키는 명령은 워크트리의 `.venv` 것이다 — `python3 tools/redgreen.py` 는 pytest
+  가 없는 인터프리터로 돌고, 맨 `ruff` · `python scripts/mutcheck.py` 는 PATH 의 남의 것을 쓴다.
 """
 
 from __future__ import annotations
@@ -19,6 +22,8 @@ import re
 from pathlib import Path
 
 import pytest
+
+from remote_ci_monitor.config import load_server_config
 
 ROOT = Path(__file__).resolve().parents[1]
 CLAUDE = ROOT / ".claude"
@@ -64,6 +69,14 @@ DEFINES_RE = re.compile(
 #: 정의를 다시 적는 줄 — 심각도 낱말과 정본의 기준 낱말 둘 이상이 한 줄에.
 CRITERIA = ("fail-open", "traceback", "secret", "auth", "corrupt", "migrat", "mutcheck")
 TEST_SERVER_WORDS = ("8790", "8899", "rcm-devtest")
+TOML_BLOCK_RE = re.compile(r"^```toml\n(.*?)^```", re.S | re.M)
+#: 워크트리 `.venv` 가 아닌 명령 꼴. 허용: `./.venv/bin/python tools/…` ·
+#: `./.venv/bin/python scripts/mutcheck.py` · `./.venv/bin/ruff`.
+BARE_COMMANDS = {
+    "python3 tools/redgreen.py": re.compile(r"(?<![\w/.-])python3?\s+tools/redgreen\.py"),
+    "python scripts/mutcheck.py": re.compile(r"(?<![\w/.-])python3?\s+scripts/mutcheck\.py"),
+    "ruff …": re.compile(r"(?<![\w/.-])ruff\s+(check|format)\b"),
+}
 
 
 def _docs() -> list[Path]:
@@ -157,3 +170,24 @@ def test_test_server_rules_live_only_in_the_shared_file() -> None:
         if p != TEST_SERVER_CANON
     }
     assert not {k: v for k, v in elsewhere.items() if v}, elsewhere
+
+
+def test_the_test_server_config_block_loads_as_a_server_config(tmp_path: Path) -> None:
+    block = TOML_BLOCK_RE.search(TEST_SERVER_CANON.read_text(encoding="utf-8"))
+    assert block, f"{_rel(TEST_SERVER_CANON)} has no ```toml block"
+    config = tmp_path / "server.toml"
+    config.write_text(block.group(1), encoding="utf-8")
+    cfg = load_server_config(config, environ={})
+    assert 8790 <= cfg.server.port <= 8899
+    assert "rcm-devtest" in str(cfg.server.data_dir)
+
+
+@pytest.mark.parametrize("doc", _docs(), ids=_rel)
+def test_commands_run_from_the_worktree_venv(doc: Path) -> None:
+    text = doc.read_text(encoding="utf-8")
+    bare = [
+        f"line {text.count(chr(10), 0, m.start()) + 1}: {m.group(0)!r} ({form})"
+        for form, pattern in BARE_COMMANDS.items()
+        for m in pattern.finditer(text)
+    ]
+    assert not bare, f"{_rel(doc)}: use ./.venv/bin/python or ./.venv/bin/ruff — {bare}"

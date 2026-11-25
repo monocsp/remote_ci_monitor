@@ -11,8 +11,7 @@ stage's steps here is how the two drift apart.
 
 The main session runs this skill. It talks to the owner, starts leads and verifiers, pushes, waits
 for `rcm/ci`, posts the round records and merges. It does not write the plan or the code of P1, P2
-and P6 itself (lesson from another project, 2026-11-23: most of a loop's cost was the main session
-re-reading files a lead had already read).
+and P6 itself; why is in [`_shared/stage-lead.md`](../_shared/stage-lead.md).
 
 ## The loop
 
@@ -27,11 +26,10 @@ re-reading files a lead had already read).
 | triage | [`isolated-verifier`](../../agents/isolated-verifier.md) «triage» | last-round MED/LOW scored; 3–4 points fixed, the rest in `## Remaining findings` |
 | P7 merge | [`pr`](../pr/SKILL.md) | `verified: <head sha>` posted, `tools/merge_pr.py` merged, worktree removed |
 
-A workplan's §5 gives each PR a lane. **full** runs every stage above. **short** runs P2 → P3 →
-triage → P7 (no live run, no edge audit). Which one is the owner's answer on the P1 decision page;
-the conditions are in [`workplan`](../workplan/SKILL.md) «Lane». A change too small for a workplan
-goes to [`dev-lite`](../dev-lite/SKILL.md); a wave of two or more PRs goes to
-[`dev-batch`](../dev-batch/SKILL.md), which runs this loop once per PR.
+A workplan's §5 gives each PR a lane, **full** or **short**; which stages each lane runs, and when a
+PR is full, is defined only in [`workplan`](../workplan/SKILL.md) «Lane», and the owner picks it on the
+P1 decision page. A change too small for a workplan goes to [`dev-lite`](../dev-lite/SKILL.md); a wave
+of two or more PRs goes to [`dev-batch`](../dev-batch/SKILL.md), which runs this loop once per PR.
 
 ## Canon — read these, do not restate them
 
@@ -62,7 +60,7 @@ git show origin/dev:docs/<code>-workplan.md | sed -n '/^## 6\./,/^## 7\./p'   # 
 gh pr list --state all --search "<code>" --json number,title,state,headRefName,headRefOid
 gh pr view <N> --json headRefOid,comments --jq '.comments[].body' | grep -E '^(verify-round|verify-analysis|verified):'
 gh api repos/{owner}/{repo}/commits/<head sha>/status --jq '.statuses[] | [.context, .state, .description]'
-ls .verify/handoff/<branch-with-dashes>/        # last <stage>-<n>-out.json of a lead
+ls .verify/handoff/<branch with / as ->/        # last <stage>-<n>-out.json of a lead
 ```
 
 A workplan that is not on `origin/dev` yet is on its spec PR's branch. After a session break, read
@@ -111,7 +109,7 @@ what was tried, what is known, and the default you would pick — then the loop 
 
 | stage | lead (writes, commits) | verifiers | main session |
 |---|---|---|---|
-| P1 | [`plan-lead`](../../agents/plan-lead.md) | [`isolated-verifier`](../../agents/isolated-verifier.md) ×2 per round on the plan | in-file with the owner's words verbatim, decision page, push, spec PR, round records, merge after the owner |
+| P1 | [`plan-lead`](../../agents/plan-lead.md) | [`isolated-verifier`](../../agents/isolated-verifier.md) ×2 per round on the plan | [`scenario-author`](../../agents/scenario-author.md)'s table first, in-file with the owner's words verbatim, decision page, push, spec PR, round records, merge after the owner |
 | P2 | [`build-lead`](../../agents/build-lead.md), new | `isolated-verifier` ×1, plan↔tests without the code | worktree, in-file, push, PR, wait for `rcm/ci` |
 | P3 | — | `isolated-verifier` ×2 per round on the diff | spawn, tally, fix HIGH (small) or a new lead |
 | P4 | — | [`live-verifier`](../../agents/live-verifier.md) ×2, each on its own test server | spawn, tally, report |
@@ -120,8 +118,8 @@ what was tried, what is known, and the default you would pick — then the loop 
 | triage, P7 | — | — | score, fix, PR body, `verified:`, merge, clean up |
 
 A lead is fresh for every stage and every retry. A small follow-up (a comment, a doc line, one more
-assertion) goes to a new agent given only the files it needs, not to the previous lead resumed (lesson
-from another project: resuming a long-context agent cost more than starting a small one).
+assertion) goes to a new agent given only the files it needs, not to the previous lead resumed: a
+resumed lead carries its whole context into every call.
 
 ### Roles and models (provisional — the owner confirms)
 
@@ -133,10 +131,11 @@ from another project: resuming a long-context agent cost more than starting a sm
 | hand work without judgement (captures, running a script, copying a table) | sonnet | Agent call: `model: "sonnet"`, `effort: "high"` |
 | `korean-writer` | its frontmatter | `.claude/agents/korean-writer.md` |
 
-No Haiku — never measured here. No `effort` in frontmatter unless a measurement says so; an
-`effort` passed on the Agent call overrides the definition (measured in another project,
-2026-11-22), and a `general-purpose` agent with no `model` inherits the main session's, so hand work
-always names its model. None of these values was measured in rcm.
+No Haiku — never measured here. An `effort` in an agent's frontmatter (`plan-lead`,
+`scenario-author`) is a provisional value measured elsewhere, which the owner confirms; none was
+measured in rcm, and the others carry none. An `effort` passed on the Agent call overrides the
+definition, and a `general-purpose` agent with no `model` inherits the main session's, so hand work
+always names its model.
 
 ### The main session does the long waits
 
@@ -149,10 +148,13 @@ main session does not touch that worktree's git state.
 ## 5. P3 review
 
 On the head that `rcm/ci` passed: two [`isolated-verifier`](../../agents/isolated-verifier.md)s, one
-after the other, each given the PR diff (`git diff origin/dev...<head>`), the workplan sections the
-PR implements and the PR body — never your conclusion or the other's verdict. Each looks at all three
-axes the agent file names. After each round post the record line the canon gives
-(`verify-round: <sha> r<N> …`). During rounds fix HIGH only; MED/LOW wait for triage.
+after the other. The main session first writes, in the handoff folder, the diff
+(`git -C <wt> diff origin/dev...<head> > diff-<n>.patch`) and a `git archive` snapshot of the head
+(`snap-<n>/`, [`_shared/stage-lead.md`](../_shared/stage-lead.md) «What a read-only agent gets»); each
+verifier gets those absolute paths, the workplan sections the PR implements and the PR body — never
+your conclusion or the other's verdict. Each looks at all three axes the agent file names. After
+each round post the record line the canon gives (`verify-round: <sha> r<N> …`). During rounds fix
+HIGH only; MED/LOW wait for triage.
 
 ## 6. Loop summary
 

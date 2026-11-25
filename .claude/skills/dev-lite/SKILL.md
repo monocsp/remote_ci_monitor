@@ -31,7 +31,10 @@ Kept as a working note, then pasted into the PR body under `## 요청 카드`, r
 It lives **only in the PR body**: a commit would move the head and send `rcm/ci` round again.
 
 - the owner's request and decisions, verbatim;
-- 3–6 acceptance lines (Given / When / Then), each with an ID (`L1`, `L2`…) that the tests carry;
+- 3–6 acceptance lines (Given / When / Then), each with an ID the tests carry, under a prefix of two
+  or more capital letters unique to this PR (`XL1`, `XL2`… — `XL` is only an example). Short tags such
+  as `L1` already exist in tests; take a prefix that
+  `./.venv/bin/python tools/scenario_trace.py --prefix-usage <P>` reports unused;
 - the files that will change, and the §0 answer;
 - each item of the request: done · needs-decision · ⛔;
 - after verification: verified head, verifier count, findings, `rcm/ci` job number.
@@ -39,13 +42,13 @@ It lives **only in the PR body**: a commit would move the head and send `rcm/ci`
 ## 2. Build
 
 1. Branch with the `branch` skill; its own worktree and `.venv`.
-2. A test per acceptance line first, named with its ID (`test_l1_…`); run it and keep the failure
+2. A test per acceptance line first, named with its ID (`test_xl1_…`); run it and keep the failure
    it printed. It must fail in the assertion, not on import.
-3. The fix. Changed tests + `ruff check . && ruff format --check .`; `node --test
-   tests/web/*.test.js` if `web/` changed.
+3. The fix. Changed tests + `./.venv/bin/ruff check . && ./.venv/bin/ruff format --check .`;
+   `node --test tests/web/*.test.js` if `web/` changed.
 4. A fix to a defect gets a permanent mutant in `scripts/mutcheck.py`, proven with
-   `python scripts/mutcheck.py --only <name>`. A plain addition (a new message, a flag) does not need
-   one.
+   `./.venv/bin/python scripts/mutcheck.py --only <name>`. A plain addition (a new message, a flag)
+   does not need one.
 5. User-visible → the `docs` skill (`CHANGELOG.md` `[Unreleased]` and the owning document).
 6. Commit with the `commit` skill. When output changed, run the command once from the worktree's
    `.venv` and paste what it printed under `## 검사`.
@@ -57,8 +60,10 @@ It lives **only in the PR body**: a commit would move the head and send `rcm/ci`
 2. Isolated verification on the green head: the count is the one
    [`isolated-verifier`](../../agents/isolated-verifier.md) gives for `dev-lite` — one verifier, two
    when the change touches `core/`, `store.py`, `server.py`, `remote_workers.py` or `worker.py`. Each
-   gets the diff, the card and the claims to check (each acceptance line, plus "the test fails without
-   the fix"), and marks every finding with a severity.
+   gets, as absolute paths, the diff file and a snapshot of the head
+   ([`_shared/stage-lead.md`](../_shared/stage-lead.md) «What a read-only agent gets»), the card and
+   the claims to check (each acceptance line, plus "the test fails without the fix", with the
+   `tools/redgreen.py` receipt made as that file says), and marks every finding with a severity.
 3. HIGH → fix it, `rcm/ci` green again, **one** more look on the new head with the same count.
    Still HIGH → stop and tell the owner: it was not small.
 4. MED/LOW are not fixed here; they go into the PR body under `## Remaining findings`.

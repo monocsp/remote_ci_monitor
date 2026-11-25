@@ -3,9 +3,8 @@
 Whatever the loop builds differently from the spec, or builds where the spec says nothing, is
 recorded the moment it is decided, in one shape, from the lead's result to the PR body. A reviewer,
 the owner and whoever bisects later need to see "it was going to be X, it became Y, because Z"
-without reading the diff (adopted from another project, 2026-11-19, whose owner asked to know when
-something was not in the plan: "what it was, what it became, and one line of why"). M5q's workplan
-§12 already has this shape.
+without reading the diff. rcm already keeps such a record: `docs/m5q-workplan.md` §12
+「구현하며 바뀐 것」.
 
 ## What the spec is
 
@@ -49,12 +48,14 @@ decision page, and whenever a lead, a fix or a verifier settles something the sp
 
 | flow | collected from | recorded in |
 |---|---|---|
-| dev-loop, dev-lite | the lead's `out.json` `workplan_diff`, decision answers, P3–P6 fixes | the PR body section, and the workplan's own section of that name in the same PR |
+| dev-loop | the lead's `out.json` `workplan_diff`, decision answers, P3–P6 fixes | the PR body section, and the workplan's §13 「구현하며 바뀐 것 / Changed while implementing」 in the same PR |
+| dev-lite | the request card and the fix | the PR body section (there is no workplan) |
 | dev-batch | each PR's lead result | each PR's body; the main session keeps the batch's list until the last merge |
 | QA | the fix lead's result, the triage answer | the PR body; the round report lists them again |
 
 Leads write each line in the six columns, ` · ` between them:
-`differs from spec · <what> · <spec said> → <built> · <why> · <decided where>`.
+`differs from spec · <what> · <spec said> → <built> · <why> · <decided where>`. Only the main session
+writes §13 (`workplan` §1); a lead returns lines in `out.json` and never edits the frozen workplan.
 
 ## The PR section
 

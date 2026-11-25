@@ -1,8 +1,11 @@
 #!/usr/bin/env python3
 """고친 커밋의 시험이 「고치기 전에 빨강, 고친 뒤에 초록」인지 돌려 보고 영수증을 찍는다.
 
-  python3 tools/redgreen.py --fix <sha> --test <pytest nodeid>... [--repo .] [--json]
-                            [--import-red-ok]
+  ./.venv/bin/python tools/redgreen.py --fix <sha> --test <pytest nodeid>... [--repo .]
+                                       [--json] [--import-red-ok]
+
+pytest 는 이 도구를 돌린 인터프리터(`sys.executable`)로 돈다 — 그 인터프리터가 pytest 를 못 들이면
+곧바로 종료 2 다. 워크트리의 `.venv` python 으로 돌린다.
 
 왜 있나(2026-11-25): AGENTS.md 「Tests first」 — 고침은 고치기 전에 빨갛던 시험과 함께 온다.
 말로만 적은 빨강은 확인할 길이 없다. `<sha>^` 트리에 `<sha>` 의 시험 파일만 얹어 돌리고(실패해야
@@ -11,10 +14,14 @@
 
 빨강은 시험 **안**의 실패(FAILED)여야 한다. 수집 · import 실패와 픽스처 오류는 시험이 아직 못 도는
 것이라 기본은 빨강이 아니다 — 없는 이름을 들여오는 것이 요점이면 `--import-red-ok`. 어느 쪽인지는
-`kinds` 에 적는다. 건너뛴(skip) 시험은 통과가 아니다 — 모르는 값을 성공으로 세지 않는다.
+`kinds` 에 적는다. 건너뛴(skip) 시험은 통과가 아니다 — 모르는 값을 성공으로 세지 않는다. 파일
+하나처럼 여러 시험으로 펼쳐지는 nodeid 에서 고치기 전에 통과한 것이 섞이면 `mixed` 이고 빨강이
+아니다(어느 것이 통과했는지 `note` 에 적는다). 영수증에는 임시 경로 대신 `<red>` · `<green>` 을,
+인터프리터는 이름(`python3`)이나 `.venv/bin/python` 만 적는다.
 
-종료 코드: 0 빨강→초록 · 1 아님(not red · not green) · 2 사용법(sha · 부모 · 시험 파일 없음) ·
-3 판정 못 함(pytest 가 시험을 못 찾음 · 시간 초과 · 워크트리를 못 만듦 · 결과 줄 없음).
+종료 코드: 0 빨강→초록 · 1 아님(not red · not green · mixed) · 2 사용법(sha · 부모 · 시험 파일
+없음, 폴더를 줌, pytest 없는 인터프리터) · 3 판정 못 함(pytest 가 시험을 못 찾음 · 시간 초과 ·
+워크트리를 못 만듦 · 결과 줄 없음 · 시험 파일 경로가 임시 트리 밖으로 풀림).
 """
 
 from __future__ import annotations
@@ -64,13 +71,32 @@ def resolve(repo: Path, fix: str, tests: list[str]) -> tuple[Path, str, str, lis
     for rel in files:
         if PurePosixPath(rel).is_absolute() or ".." in PurePosixPath(rel).parts:
             raise Usage(f"{rel}: the test path must be inside the repository")
-        if _git(root, "cat-file", "-e", f"{sha}:{rel}").returncode != 0:
+        kind = _git(root, "cat-file", "-t", f"{sha}:{rel}")
+        if kind.returncode != 0:
             raise Usage(f"{rel} does not exist at {sha[:12]}")
+        if kind.stdout.strip() != "blob":
+            raise Usage(f"{rel} is a directory at {sha[:12]} — name a test file or node id")
     return root, sha, parent, files
 
 
+def interpreter() -> str:
+    """영수증에 적을 인터프리터 — 집 경로를 남기지 않게 `.venv/bin/python` 이나 이름만."""
+    exe = Path(sys.executable)
+    if ".venv" in exe.parts:
+        return "/".join(exe.parts[exe.parts.index(".venv") :])
+    return exe.name or "python"
+
+
+def has_pytest() -> bool:
+    probe = "import importlib.util, sys; sys.exit(importlib.util.find_spec('pytest') is None)"
+    try:
+        return subprocess.run([sys.executable, "-c", probe], timeout=60).returncode == 0
+    except (OSError, subprocess.SubprocessError):
+        return False
+
+
 def kinds(output: str, tests: list[str]) -> dict[str, str]:
-    """요청한 nodeid 마다 결과 하나: collection · failed · error · passed · none."""
+    """요청한 nodeid 마다 결과 하나: collection · mixed · failed · error · passed · none."""
     seen = [m.groups() for m in map(SUMMARY_RE.match, output.splitlines()) if m]
     out: dict[str, str] = {}
     for node in tests:
@@ -78,6 +104,8 @@ def kinds(output: str, tests: list[str]) -> dict[str, str]:
         mine = [s for s, nid in seen if nid == node or nid.startswith((node + "::", node + "["))]
         if any(s == "ERROR" and nid == file for s, nid in seen):
             out[node] = "collection"  # 시험 파일 자체가 수집 · import 단계에서 실패
+        elif "PASSED" in mine and {"FAILED", "ERROR"} & set(mine):
+            out[node] = "mixed"  # 펼쳐진 시험 가운데 통과한 것이 섞였다
         elif "FAILED" in mine:
             out[node] = "failed"
         elif "ERROR" in mine:
@@ -94,19 +122,21 @@ def run_side(tree: Path, tests: list[str], label: str) -> dict[str, Any]:
     env = {**os.environ, "PYTHONDONTWRITEBYTECODE": "1"}
     src = [str(tree / "src")] if (tree / "src").is_dir() else []  # editable 설치의 src 를 이긴다
     env["PYTHONPATH"] = os.pathsep.join([*src, *filter(None, [env.get("PYTHONPATH")])])
-    shown = shlex.join(["python", *cmd[1:]])
+    shown = shlex.join([interpreter(), *cmd[1:]])
     try:
         proc = subprocess.run(cmd, cwd=tree, env=env, capture_output=True, text=True,
                               timeout=PYTEST_TIMEOUT)  # fmt: skip
     except subprocess.TimeoutExpired:
-        return {"tree": str(tree), "cmd": shown, "exit": None,
+        return {"tree": f"<{label}>", "cmd": shown, "exit": None, "passed": [],
                 "kinds": dict.fromkeys(tests, "none"), "tail": ["timed out"]}  # fmt: skip
     text = proc.stdout + proc.stderr
     for real in {str(tree), str(tree.resolve())}:
         text = text.replace(real, f"<{label}>")  # 영수증에 개인 경로를 남기지 않는다
     text = text.replace(str(Path.home()), "~")
     tail = text.strip().splitlines()[-TAIL:]
-    return {"tree": str(tree), "cmd": shown, "exit": proc.returncode,
+    passed = [nid for s, nid in (m.groups() for m in map(SUMMARY_RE.match, text.splitlines()) if m)
+              if s == "PASSED"]  # fmt: skip
+    return {"tree": f"<{label}>", "cmd": shown, "exit": proc.returncode, "passed": passed,
             "kinds": kinds(text, tests), "tail": tail}  # fmt: skip
 
 
@@ -122,7 +152,7 @@ def verdict(red: dict[str, Any], green: dict[str, Any], import_ok: bool) -> tupl
         return "unknown", EXIT_UNKNOWN
     if green["exit"] not in (0, 1, 2) and "collection" not in gk:
         return "unknown", EXIT_UNKNOWN
-    if green["exit"] != 0 or gk & {"failed", "error", "collection"}:
+    if green["exit"] != 0 or gk & {"failed", "error", "collection", "mixed"}:
         return "not green", EXIT_NOT
     if gk != {"passed"}:
         return "unknown", EXIT_UNKNOWN
@@ -131,6 +161,8 @@ def verdict(red: dict[str, Any], green: dict[str, Any], import_ok: bool) -> tupl
 
 def _print_text(receipt: dict[str, Any]) -> None:
     print(f"redgreen: {receipt['verdict']}")
+    if receipt.get("note"):
+        print(f"note    {receipt['note']}")
     print(f"fix     {receipt['fix']}\nparent  {receipt['parent']}")
     print(f"overlay {', '.join(receipt['files'])} (from fix onto parent)")
     for side, what in (("red", "parent + test files"), ("green", "fix")):
@@ -142,6 +174,22 @@ def _print_text(receipt: dict[str, Any]) -> None:
         print(f"{side} ({what}): exit {exit_code} · {found}\n  $ {r['cmd']}")
         for line in r["tail"]:
             print(f"  | {line}")
+
+
+def _cleanup(root: Path, tmp: Path, created: list[Path]) -> None:
+    """자기가 만든(만들려던) 워크트리만 치운다. 못 치운 것은 stderr 에 적고 등록을 prune 한다."""
+    for path in created:
+        if not path.exists():
+            continue  # add 가 폴더를 만들기 전에 끊겼다
+        gone = _git(root, "worktree", "remove", "--force", str(path))
+        if gone.returncode != 0:
+            why = gone.stderr.strip().replace(str(tmp.resolve()), "").replace(str(tmp), "")
+            print(f"could not remove worktree <{path.name}>: {why}", file=sys.stderr)
+    shutil.rmtree(tmp, ignore_errors=True)
+    if created:  # 폴더는 지웠는데 등록이 남은 것 — prune 은 폴더 없는 등록만 지운다
+        listed = _git(root, "worktree", "list", "--porcelain").stdout
+        if any(str(p) in listed or str(p.resolve()) in listed for p in created):
+            _git(root, "worktree", "prune")
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -165,30 +213,38 @@ def main(argv: list[str] | None = None) -> int:
     except Usage as why:
         print(f"usage: {why}", file=sys.stderr)
         return EXIT_USAGE
+    if not has_pytest():
+        print(f"usage: {sys.executable} cannot import pytest — run it with the worktree's .venv "
+              "python (./.venv/bin/python tools/redgreen.py …)", file=sys.stderr)  # fmt: skip
+        return EXIT_USAGE
     tmp = Path(tempfile.mkdtemp(prefix="redgreen-"))
     created: list[Path] = []
     receipt: dict[str, Any] = {"fix": sha, "parent": parent, "tests": args.test, "files": files}
-    receipt.update(red=None, green=None, verdict="unknown")
+    receipt.update(interpreter=interpreter(), red=None, green=None, verdict="unknown")
     code = EXIT_UNKNOWN
     try:
         for side, at in (("red", parent), ("green", sha)):
+            created.append(tmp / side)  # add 보다 먼저 적는다 — 중간에 끊겨도 치운다
             made = _git(root, "worktree", "add", "--quiet", "--detach", str(tmp / side), at)
             if made.returncode != 0:
                 raise OSError(f"git worktree add failed: {made.stderr.strip()}")
-            created.append(tmp / side)
+        red_root = (tmp / "red").resolve()
         for rel in files:  # 고친 커밋의 시험 파일을 부모 트리 위에 얹는다
             target = tmp / "red" / rel
+            if not target.resolve().is_relative_to(red_root):  # 부모 트리의 심볼릭 링크
+                raise OSError(f"{rel} resolves outside the red tree on the parent — not written")
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_bytes(_git(root, "show", f"{sha}:{rel}", binary=True).stdout)
         receipt["red"] = run_side(tmp / "red", args.test, "red")
         receipt["green"] = run_side(tmp / "green", args.test, "green")
         receipt["verdict"], code = verdict(receipt["red"], receipt["green"], args.import_red_ok)
+        if mixed := [n for n, k in receipt["red"]["kinds"].items() if k == "mixed"]:
+            passed = ", ".join(receipt["red"]["passed"])
+            receipt["note"] = f"{', '.join(mixed)} expands to tests that passed before: {passed}"
     except (OSError, subprocess.SubprocessError) as error:
         print(f"unknown: {error}", file=sys.stderr)
     finally:
-        for path in created:  # 자기가 만든 워크트리만 치운다
-            _git(root, "worktree", "remove", "--force", str(path))
-        shutil.rmtree(tmp, ignore_errors=True)
+        _cleanup(root, tmp, created)
     if args.json:
         print(json.dumps(receipt, ensure_ascii=False, indent=2))
     else:

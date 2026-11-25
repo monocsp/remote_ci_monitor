@@ -6,9 +6,8 @@ together, each with one recommended answer. Leads and verifiers never ask the ow
 questions in their results and the main session collects them here.
 
 Why one page: questions asked one by one stall the work, and a list in the chat makes the owner
-rebuild which screen, command or rule each line is about before answering (lesson from another
-project, 2026-11-25: questions split over many messages left a whole session without progress). An
-answer stored on the page is also read back as written, with nothing lost to summarising.
+rebuild which screen, command or rule each line is about before answering. An answer stored on the
+page is also read back as written, with nothing lost to summarising.
 
 ## Before asking
 
@@ -36,8 +35,10 @@ answer stored on the page is also read back as written, with nothing lost to sum
   One field at the bottom takes only remarks that span questions.
 
 Questions with something to show (a web screen, a terminal output, a diff) show it next to the
-question: a CDP screenshot or a `tools/screenshots` image for the web, a code block for the terminal.
-A question with nothing to show goes in a second group without a picture.
+question: for the web, a screenshot taken with the CDP helper on a test server and redacted by hand
+(`.claude/skills/_shared/test-server.md` «Driving it»), or an existing image from `docs/images/ui/`
+when the screen is unchanged; a code block for the terminal. A question with nothing to show goes in
+a second group without a picture.
 
 ## Publishing
 
@@ -72,4 +73,4 @@ the owner. An Artifact is private by default; say so if it is meant for someone 
 
 Making the page is not approval. For a workplan the gate is the spec PR merged after the answers are
 folded in (the `workplan` skill); for code it is `rcm/ci` and isolated verification. A workplan's
-page always carries the path question: the full loop, or which stages to skip and why.
+page always carries the lane question: full or short for each PR, as `workplan` «Lane» defines them.
