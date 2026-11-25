@@ -193,7 +193,9 @@ def _run_git(
     env = git_env(credential=credential)
     if git_blocked(env):
         raise GitError(
-            f"git is not installed on the build machine ({runner.CLT_NOTE})", kind="no_git", op=what
+            "git is not installed on the build machine (needs Command Line Tools)",
+            kind="no_git",
+            op=what,
         )
     kwargs: dict[str, Any] = {
         "cwd": str(cwd) if cwd is not None else None,
