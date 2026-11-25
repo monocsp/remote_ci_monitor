@@ -226,7 +226,9 @@ def test_discover_json_lists_objects_with_the_locked_keys(home, fake, capsys):
 def test_tl10_a_dispatch_only_server_shows_lanes_0_not_a_dash(home, fake, capsys):
     """# TL10 — 분배 전용 서버(`lanes = 0`)의 TXT `lanes=0` 은 패킷 해석(`found_from_records`)과
     `rcm discover` 의 표 · JSON 을 지나 `0` 으로 보인다. 0 을 거짓으로 읽어 「모름」(`—` · null)으로
-    바꾸면 「레인 수를 안 알리는 옛 서버」와 구별이 안 된다."""
+    바꾸면 「레인 수를 안 알리는 옛 서버」와 구별이 안 된다.
+
+    잠금 시험: 고치기 전에도 초록 — 지금 동작을 잠근다(P5 G1)."""
     from remote_ci_monitor.core import mdns as core_mdns
 
     packet = core_mdns.encode_response(

@@ -242,11 +242,21 @@ def test_tl7_at_local_is_not_alive(lz):
     assert views[LOCAL].alive is False
 
 
-def test_tl7_recheck_on_at_local_says_this_server_has_no_local_lanes(tmp_path):
+def test_tl7_recheck_on_at_local_says_this_server_has_no_local_lanes(tmp_path, monkeypatch):
     """`@local` 다시 점검은 제출과 같은 409 다 — 「start rcm worker there」는 엉뚱한 조언이다
     (`@local` 은 워커를 띄워 살릴 머신이 아니다). 레인이 있는 서버에서 꺼진 원격 워커는 오늘처럼
-    「start rcm worker there」(비교 행)."""
-    s = zero(tmp_path, presets=CHECKED)
+    「start rcm worker there」(비교 행). 레인이 하나라도 있는 서버의 `@local` 은 오늘처럼 다시
+    점검된다(비교 행 — 409 가 `lanes = 0` 에만 걸린다)."""
+    one = zero(tmp_path / "one", lanes=1, presets=CHECKED)
+    try:
+        one.app.measure_capabilities()
+        calls = record_checks(one, monkeypatch)
+        status, body = one.req("POST", f"/machines/{LOCAL}/recheck", token="admin", json_body={})
+        assert status == 200, body
+        assert ("simcheck", LOCAL) in calls, calls
+    finally:
+        one.close()
+    s = zero(tmp_path / "zero", presets=CHECKED)
     try:
         status, body = s.req("POST", f"/machines/{LOCAL}/recheck", token="admin", json_body={})
         assert status == 409, body
@@ -378,7 +388,9 @@ def _lost_at_local(tmp_path: Path, presets: str = PRESETS) -> tuple[M5nServer, i
 
 def test_tl15_a_job_that_lost_its_place_can_be_cancelled(tmp_path):
     """# TL15 · P5 G2 — 갈 곳을 잃은 `@local` 잡은 실패로 닫히지 않고 기다린다. 사람이 취소하면
-    도는 잡이 없으니 곧장 cancelled 다(cancelling 에 남지 않는다)."""
+    도는 잡이 없으니 곧장 cancelled 다(cancelling 에 남지 않는다).
+
+    잠금 시험: 고치기 전에도 초록 — 지금 동작을 잠근다."""
     s, jid = _lost_at_local(tmp_path)
     try:
         status, body = s.req("POST", f"/jobs/{jid}/cancel", token="admin", json_body={})
@@ -400,7 +412,9 @@ RETRYING = block(
 def test_tl15_the_retry_of_a_job_pinned_to_at_local_waits_with_no_capable_machine(tmp_path):
     """# TL15 · P5 G3 — 반복의 다음 시도는 제출을 거치지 않고(409 는 제출 경로뿐) 지정 머신을
     물려받는다. lanes 를 0 으로 바꿔 다시 띄우면 그 시도도 TL15 와 같은 규칙이다: 실패로 닫지
-    않고 `no_capable_machine` · ETA null 로 기다린다."""
+    않고 `no_capable_machine` · ETA null 로 기다린다.
+
+    잠금 시험: 고치기 전에도 초록 — 지금 동작을 잠근다."""
     s = zero(tmp_path, lanes=1, presets=PRESETS + RETRYING)
     jid = queued(s, "relgitretry", token="admin", machine=LOCAL)
     now = s.clock()
@@ -436,7 +450,9 @@ SUPERSEDING = PRESETS.replace(
 def test_tl15_supersede_leaves_a_job_pinned_to_at_local_alone(tmp_path):
     """# TL15 · P5 G3 — 갈 곳을 잃은 `@local` 지정 잡은 같은 브랜치의 새 제출이 치우지 않는다
     (supersede 규칙 8: 사람이 고른 머신). 새 잡은 지정 머신이 없어 기본 풀에서 기다린다.
-    비교 행: 같은 꼴인데 지정 머신이 없는 옛 잡은 치운다 — supersede 는 돈다."""
+    비교 행: 같은 꼴인데 지정 머신이 없는 옛 잡은 치운다 — supersede 는 돈다.
+
+    잠금 시험: 고치기 전에도 초록 — 지금 동작을 잠근다."""
     assert SUPERSEDING != PRESETS
     s, pinned = _lost_at_local(tmp_path, presets=SUPERSEDING)
     try:
