@@ -30,6 +30,7 @@ import tempfile
 import time
 import urllib.parse
 import zipfile
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -60,6 +61,7 @@ from remote_ci_monitor.config import (
     user_config_dir,
 )
 from remote_ci_monitor.core import artifacts as art_core
+from remote_ci_monitor.core import doctor as doctor_core
 from remote_ci_monitor.core import shelf as shelf_rules
 from remote_ci_monitor.core.artifacts import BundleFile
 from remote_ci_monitor.core.gitref import validate_ref
@@ -81,6 +83,7 @@ from remote_ci_monitor.core.render_text import (
     CAUSE_NOT_FOUND,
     DASH,
     MAX_IDENT,
+    RUNS_NO_JOBS,
     blocked_notes_text,
     failure_lines,
     fingerprint_summary,
@@ -410,6 +413,20 @@ _DISCOVERY: list[Any] | None = None
 _FOUND_SAID = False
 
 
+def _found_where(f: Any) -> str:
+    """mDNS 로 찾은 서버 하나의 「이름 (주소)」 — 한 줄로 정리한다. 이름 · 호스트는 LAN 의 TXT ·
+    SRV 레코드에서 온다: ESC · 줄바꿈 · bidi 가 남으면 터미널의 줄을 지우거나 가짜 줄을 만든다
+    (`doctor.Run.found_where` 와 같은 규칙, batch 10 triage)."""
+    return f"{doctor_core.clean_text(f.name, 64)} ({doctor_core.clean_text(f.address, 200)})"
+
+
+def _found_line(f: Any) -> str:
+    """찾기 줄 `server: found 이름 (ip:port) on this network` — 이름과 주소를 정리한다."""
+    ip = f.ips[0] if f.ips else f.host.rstrip(".")
+    where = doctor_core.clean_text(f"{ip}:{f.port}", 200)
+    return f"server: found {doctor_core.clean_text(f.name, 64)} ({where}) on this network"
+
+
 def _discover_once(timeout: float) -> list[Any]:
     global _DISCOVERY
     if _DISCOVERY is None:
@@ -428,14 +445,13 @@ def _resolve_server(cfg: Any, *, timeout: float = 1.5) -> Any:
     if len(found) == 1:
         cfg.server = found[0].address
         cfg.discovered = found[0]
-        ip = found[0].ips[0] if found[0].ips else found[0].host.rstrip(".")
         if not _FOUND_SAID:
             _FOUND_SAID = True
-            _info(f"server: found {found[0].name} ({ip}:{found[0].port}) on this network")
+            _info(_found_line(found[0]))
         return cfg
     if not found:
         raise ConfigError(f"{NO_SERVER_HINT} — {DISCOVER_NONE_HINT}")
-    names = ", ".join(f"{f.name} ({f.address})" for f in found)
+    names = ", ".join(_found_where(f) for f in found)
     raise ConfigError(
         f"several rcm servers on this network: {names} — pick one with --server or client.toml"
     )
@@ -2454,7 +2470,11 @@ def cmd_eta(args: argparse.Namespace) -> int:
             busy_others = sum(
                 1 for r in queue if r.get("id") != args.job and r.get("position") is None
             )
-            ahead = busy_others + (row["position"] - 1) if row.get("position") else 0
+            ahead: int | None = busy_others + (row["position"] - 1) if row.get("position") else 0
+            if row.get("reason") == "no_capable_machine":
+                # 갈 레인이 없는 잡 — 앞선 잡을 세면 없는 순서를 지어낸다. `/api/eta` 의 `ahead`
+                # null 과 같다(M5t-a 위임 결정 7)
+                ahead = None
             if args.json:
                 _print_json(row)
             else:
@@ -2653,6 +2673,29 @@ def _table(rows: list[list[str]]) -> list[str]:
     ]
 
 
+def _host_facts_text(host: Any) -> str:
+    """워커가 보낸 호스트 사실 한 줄(M5t-a §4.5 · TD21). 받지 못했거나 토큰 없는 응답이면 —."""
+    if not isinstance(host, dict):
+        return DASH
+
+    def text(key: str) -> str:
+        value = host.get(key)
+        return follow.clean(value) if isinstance(value, str) and value else ""
+
+    release = text("os_release") or text("os")
+    if text("os_like"):
+        release += f" (like {text('os_like')})"
+    bits = [
+        release,
+        text("arch") + (" (Rosetta)" if host.get("rosetta") else ""),
+        "container" if host.get("container") else "",
+        "root" if host.get("root") else "",
+        text("package_manager"),
+        f"Python {text('python')}" if text("python") else "",
+    ]
+    return " · ".join(b for b in bits if b) or DASH
+
+
 def _machine_detail(m: dict[str, Any]) -> list[str]:
     """`rcm machines --machine ID` — 판정 전부 · 프로브 값 전부(앞 값과 함께) · 점검."""
     out = [
@@ -2660,6 +2703,7 @@ def _machine_detail(m: dict[str, Any]) -> list[str]:
         f"{m.get('pool') or DASH} · {m.get('host_label') or DASH}"
         f"{'' if m.get('alive', True) else ' · down'})"
     ]
+    out.append(f"host     {_host_facts_text(m.get('host'))}")
     presets = m.get("presets") if isinstance(m.get("presets"), dict) else {}
     out.append("presets")
     rows = [["preset", "state", "code", "detail"]]
@@ -2731,16 +2775,19 @@ def cmd_machines(args: argparse.Namespace) -> int:
         return 0
     rows = [list(MACHINES_HEADER)]
     for m in machines:
-        name = _machine_label(m) + ("" if m.get("alive", True) else " (down)")
         lanes = m.get("lanes")
+        # 레인 0 인 로컬 머신(분배 전용 서버)은 down 이 아니라 잡을 돌리지 않는 머신이다. 재지
+        # 않으니 판정 칸도 비운다 — 「보고 없음」은 기다리면 올 것처럼 읽힌다(M5t-a §3 C10)
+        idle = m.get("kind") == "local" and lanes == 0
+        tag = f" ({RUNS_NO_JOBS})" if idle else ("" if m.get("alive", True) else " (down)")
         rows.append(
             [
-                name,
+                _machine_label(m) + tag,
                 str(m.get("host_label") or DASH),
                 str(m.get("pool") or DASH),
                 str(lanes) if isinstance(lanes, int) else DASH,
                 fingerprint_summary(m.get("fingerprint")),
-                presets_summary(m.get("presets")),
+                DASH if idle else presets_summary(m.get("presets")),
             ]
         )
     print("\n".join(_table(rows)))
@@ -2766,8 +2813,12 @@ def _probe_change(name: str, probe: dict[str, Any]) -> str:
 
 
 def _machines_check_row(machines: list[dict[str, Any]]) -> tuple[str, bool, str]:
-    """`rcm check` 의 `machines` 행(가정 C7) — 24시간 안에 바뀐 환경과 실패한 점검."""
+    """`rcm check` 의 `machines` 행(가정 C7) — 24시간 안에 바뀐 환경과 실패한 점검.
+
+    분배 전용 서버(`lanes = 0`)의 `@local` 은 잡을 받는 머신이 아니라 세지 않는다(M5t-a 결정
+    243) — 「1 machine」이 워커가 하나 붙은 것으로 읽힌다."""
     now = datetime.now(UTC)
+    machines = [m for m in machines if not (m.get("kind") == "local" and m.get("lanes") == 0)]
     changed: list[str] = []
     failed: list[str] = []
     n_failed = 0
@@ -2895,8 +2946,14 @@ def cmd_recheck(args: argparse.Namespace) -> int:
             return _usage(f"recheck: unknown machine '{args.machine}' (or an older server)")
         return _client_fail(client, "recheck", e)
     jobs = [j for j in ((resp or {}).get("jobs") or []) if isinstance(j, dict)]
+    # 그 머신에서는 못 도는 점검(`local_only`) — 건너뛴 것이지 실패가 아니다(M5t-a 위임 결정 4)
+    skipped = [j for j in ((resp or {}).get("skipped") or []) if isinstance(j, dict)]
+    for j in skipped:
+        code = follow.clean(j.get("code") or "skipped")
+        print(f"{follow.clean(j.get('preset'))} skipped on {args.machine} [{code}]")
     if not jobs:
-        print(f"nothing to recheck on {args.machine}")
+        if not skipped:
+            print(f"nothing to recheck on {args.machine}")
         return 0
     failed = 0
     for j in jobs:
@@ -3832,11 +3889,15 @@ def _pools_row(doc: dict[str, Any], client: Client) -> tuple[str, bool | None, s
     local_held = [w for w in all_workers if not w.get("worker") and w.get("state") == "held"]
     head = f"default ({lanes} lane{'s' if lanes != 1 else ''}"
     head += f" · {len(local_held)} held)" if local_held else ")"
-    parts = [head]
     by_pool: dict[str, list[dict[str, Any]]] = {}
     for w in server.get("workers") or []:
         if w.get("worker"):
             by_pool.setdefault(w.get("pool") or "default", []).append(w)
+    # 분배 전용(`lanes = 0`) — 기본 풀은 원격 워커뿐이다. `default (0 lanes) · default (…)` 로
+    # 두 번 쓰지 않는다(M5t-a §3 C10)
+    parts = [] if server.get("lanes") == 0 and "default" in by_pool else [head]
+    if server.get("lanes") == 0 and "default" not in by_pool:
+        parts = ["default (no local lanes, no workers)"]
     for name in sorted(by_pool):
         pills: list[str] = []
         for w in sorted(by_pool[name], key=lambda x: (str(x.get("worker")), x.get("lane") or 0)):
@@ -3866,6 +3927,56 @@ def _pools_row(doc: dict[str, Any], client: Client) -> tuple[str, bool | None, s
     return ("pools", True, text)
 
 
+#: 로컬 레인이 없는 서버(`lanes = 0`)의 도구 행 — FAIL 이 아니다(M5t-a §4.2)
+NO_LOCAL_LANES_TEXT = "this machine runs no jobs (lanes = 0 — dispatch only)"
+
+
+#: 서버가 `capacity` 를 싣되 null 로 보냈다 — 세다가 실패했다(모름)
+CAPACITY_UNKNOWN_TEXT = "server could not count capacity"
+
+
+def _is_count(value: Any) -> bool:
+    """0 이상의 정수인가 — JSON 의 `true` 는 파이썬에서 `int` 라 따로 뺀다."""
+    return isinstance(value, int) and not isinstance(value, bool) and value >= 0
+
+
+def _capacity_row(health: Any, *, has_presets: bool) -> tuple[str, bool | None, str] | None:
+    """`capacity` — 지금 갈 수 있는 머신이 있는 프리셋 수 / 전체 프리셋 수(`/api/health`).
+
+    하나도 없으면 FAIL, 일부만 없으면 warn 으로 그 프리셋을 댄다 — 어느 머신도 못 돌리는 배포
+    프리셋은 정상일 수 있다. 프리셋이 0개이거나 옛 서버(키 없음)면 행을 그리지 않는다(M5t-a
+    결정 243 · §4.2).
+
+    키가 있는데 null 이면 서버가 세다가 실패한 것이다. 못 모은 칸은 실패로 그린다(PLAN.md
+    「rcm check」) — 분배 전용(`lanes = 0`)이면 이 칸이 「갈 곳이 있나」의 유일한 답이라 FAIL,
+    레인이 있는 서버는 로컬 레인이 받으므로 warn 이다. 키 없음(옛 서버)과는 구별한다.
+
+    꼴이 깨진 답(dict 가 아님 · `total` · `reachable` 이 없거나 정수가 아님 · `total <= 0` ·
+    `0 <= reachable <= total` 밖)도 null 과 같은 「못 셌다」다 — 옛 서버처럼 행을 빼면 분배 전용
+    서버의 `rcm check` 가 0 으로 끝난다(fail-open, P6 재확인)."""
+    if not isinstance(health, dict) or "capacity" not in health:
+        return None
+    cap = health.get("capacity")
+    if cap is None:
+        if not has_presets:
+            return None
+        return ("capacity", False if health.get("lanes") == 0 else None, CAPACITY_UNKNOWN_TEXT)
+    if not isinstance(cap, dict):
+        cap = {}  # 꼴이 깨진 답 — 아래에서 「못 셌다」로 떨어진다
+    total, reachable = cap.get("total"), cap.get("reachable")
+    if not (_is_count(total) and _is_count(reachable) and 0 < total and reachable <= total):
+        if not has_presets:
+            return None  # 프리셋이 없으면 셀 것도 없다(TL17)
+        unknown_grade = False if health.get("lanes") == 0 else None
+        return ("capacity", unknown_grade, CAPACITY_UNKNOWN_TEXT)
+    none = [str(n) for n in cap.get("unreachable") or []]
+    head = f"{reachable}/{total} presets have a machine to run on"
+    if not none:
+        return ("capacity", True, head)
+    detail = f"{head} — none for: {', '.join(none)}"
+    return ("capacity", False if reachable == 0 else None, detail)
+
+
 def _local_preset_tools_row(cfg: Any) -> tuple[str, bool, str] | None:
     """`local preset tools` — `requires` 를 선언한 프리셋마다 **이 셸**에서 도구를 찾아 본다.
 
@@ -3876,6 +3987,10 @@ def _local_preset_tools_row(cfg: Any) -> tuple[str, bool, str] | None:
     """
     from remote_ci_monitor.runner import missing_tools, public_tool_name
 
+    lanes = getattr(getattr(cfg, "server", None), "lanes", None)
+    if lanes == 0 and any(p.requires for p in cfg.presets):
+        # 분배 전용(M5t-a 결정 243) — 이 머신에서 돌 잡이 없으니 빠진 도구는 문제가 아니다
+        return ("local preset tools", True, NO_LOCAL_LANES_TEXT)
     parts: list[str] = []
     all_ok = True
     for preset in cfg.presets:
@@ -3915,6 +4030,9 @@ def _service_preset_env_row(
     facts = health.get("preset_env") if isinstance(health, dict) else None
     if not isinstance(facts, dict) or not facts:
         return None
+    if health.get("lanes") == 0:
+        # 분배 전용 서버(M5t-a 결정 243) — 서버의 환경에서 돌 잡이 없다
+        return ("service preset tools", True, NO_LOCAL_LANES_TEXT)
     parts: list[str] = []
     all_ok = True
     for name, entry in sorted(facts.items()):
@@ -4243,6 +4361,9 @@ def cmd_check(args: argparse.Namespace) -> int:
             names = ", ".join(p["name"] for p in doc.get("presets", [])) or "(none)"
             rows.append(("presets", bool(doc.get("presets")), names))
             rows.append(_pools_row(doc, client))
+            capacity_row = _capacity_row(health_body, has_presets=bool(doc.get("presets")))
+            if capacity_row is not None:
+                rows.append(capacity_row)
             rows.append(("timezone", True, doc.get("display_timezone") or "server local"))
             rows.extend(_machine_check_rows(client, doc))
             storage = (doc.get("server") or {}).get("job_storage")
@@ -4284,8 +4405,7 @@ def cmd_check(args: argparse.Namespace) -> int:
             if service_row is not None:
                 rows.append(service_row)
             if cfg.repos:
-                git = shutil.which("git")
-                rows.append(("git", git is not None, git or "not on PATH (git_ref presets)"))
+                rows.append(_git_tool_row()[0])
             for repo in cfg.repos:
                 if repo.release is not None:
                     rows.append(_release_row(cfg, repo.name, repo.release))
@@ -4366,20 +4486,24 @@ def _found_server_from_boot() -> str | None:
     return os.environ.pop("RCM_SERVER", None) or None
 
 
+#: 마지막으로 mDNS 가 찾은 서버들 — 확인 질문에 주소만이 아니라 이름도 보이려고 둔다
+_LAST_FOUND: list[Any] = []
+
+
 def _pick_worker_server(cfg: Any, *, timeout: float = 1.5) -> str:
     """같은 망의 rcm 서버를 찾는다(M5n §9). 하나면 그것, 여럿이면 `server_name` 과 이름이 맞는
     것. 그래도 모호하거나 없으면 `ConfigError`(이름들과 고치는 법을 말한다)."""
     found = discover(timeout=timeout)
+    _LAST_FOUND[:] = list(found)  # 확인 질문(`_confirm_found_server`)이 이름을 보인다
     want = (cfg.server_name or "").strip()
     picks = [f for f in found if f.name == want] if want else list(found)
     if len(picks) == 1:
         f = picks[0]
-        ip = f.ips[0] if f.ips else f.host.rstrip(".")
-        _info(f"server: found {f.name} ({ip}:{f.port}) on this network")
+        _info(_found_line(f))
         return f.address
     if not found:
         raise ConfigError(f"worker needs a server — {DISCOVER_NONE_HINT}")
-    names = ", ".join(f"{f.name} ({f.address})" for f in found)
+    names = ", ".join(_found_where(f) for f in found)
     if want:
         raise ConfigError(
             f"no rcm server named {want!r} on this network (found: {names}) — "
@@ -4532,6 +4656,8 @@ def cmd_worker(args: argparse.Namespace) -> int:
         )
     client = WorkerClient(cfg.server, cfg.token)
     if getattr(args, "check", False):
+        if getattr(cfg, "discovered_server", False) and not _confirm_found_server(cfg.server):
+            return EXIT_UNKNOWN
         return _worker_check(cfg, client)
     following = bool(getattr(args, "follow_enabled", False))
     state = None
@@ -4613,22 +4739,84 @@ def _worker_exec_installed(args: argparse.Namespace, worker: Any, code: int) -> 
     return code  # 가짜 execve 가 돌아온 경우(시험)
 
 
-def _ls_remote_problem(url: str, timeout: float = 10.0) -> str | None:
-    """`git ls-remote` 가 닿는지. 문제면 짧은 사유(경로·URL 없이), 아니면 None."""
+def _confirm_found_server(url: str) -> bool:
+    """mDNS 로 찾은 서버 — 사람이 확인하기 전에는 아무 요청도 보내지 않는다(M5t-a §4.5 「첫 실행
+    안전」 · §4.7 · TD28). 프로브 argv 는 그 서버의 설정에서 오므로 확인 안 한 서버의 명령을 돌리지
+    않는다. 비TTY 면 물을 사람이 없다 — 거짓(종료 3). `rcm doctor` 와 같은 함수로 묻는다."""
+    from remote_ci_monitor import doctor
+
+    name = next((f.name for f in _LAST_FOUND if f.address == url), "")
+    # 이름은 LAN 의 TXT 레코드에서 온다 — 묻기 전에 한 줄로 정리한다(P6 GAP X-mdns)
+    name, shown = doctor_core.clean_text(name, 64), doctor_core.clean_text(url, 200)
+    where = f"{name} ({shown})" if name else shown
+    if not doctor.is_tty():
+        _err(
+            f"server {where} was found on this network and nobody confirmed it — pass "
+            "--server URL or run rcm worker --check in a terminal"
+        )
+        return False
+    if not doctor.ask(f"Use the rcm server {where} found on this network?"):
+        _err(f"server {where} was not confirmed")
+        return False
+    return True
+
+
+def _git_tool_row() -> tuple[tuple[str, bool | None, str], str | None]:
+    """`rcm check` · `rcm worker --check` 의 git 행과 찾은 git(없으면 None).
+
+    `shutil.which` 가 아니라 `runner.find_tool` 이다 — CLT 없는 Mac 의 `/usr/bin/git` shim 은
+    실행하면 설치 대화상자를 띄우므로 「없음(CLT 필요)」으로 센다(doctor · 서버 판정과 같은 규칙).
+    """
+    from remote_ci_monitor import runner
+
+    path = os.environ.get("PATH", "")
+    git = runner.find_tool("git", path)
+    if git is not None:
+        return ("git", True, git), git
+    note = runner.missing_note("git", {"PATH": path})
+    return (
+        "git",
+        False,
+        f"{note} (git_ref presets)" if note else "not on PATH (git_ref presets)",
+    ), None
+
+
+def _ls_remote_problem(
+    url: str,
+    timeout: float = 10.0,
+    *,
+    git: str = "git",
+    env: Mapping[str, str] | None = None,
+) -> str | None:
+    """`git ls-remote` 가 닿는지. 문제면 짧은 사유(경로·URL 없이), 아니면 None. 시한을 넘기거나
+    git 을 실행하지 못한 것은 저장소에 닿지 않는다는 사실이 아니다 — `core.doctor.Unsure` 로
+    돌려준다(doctor 는 모름으로, `rcm worker --check` 는 지금처럼 문제 줄로 찍는다).
+
+    `git` 은 부를 실행 파일, `env` 는 그 환경이다. doctor 는 서비스 PATH 에서 찾은 git 과 서비스
+    환경을 넘긴다 — 셸의 git · 셸의 변수로 재면 서비스에서는 다른 답이 나온다. 주지 않으면 이
+    프로세스의 것이다(`rcm worker --check`). 부르는 쪽이 shim 을 이미 걸렀다(`runner.find_tool`).
+
+    git 은 자기 프로세스 그룹에서 돈다. 시한을 넘기면 그룹째 거둔다 — `git-remote-https` · 자격
+    헬퍼 같은 손자가 git 만 죽인 뒤에 남지 않게(`gitops._run_process`, P6 GAP E2).
+    """
     import subprocess
 
+    from remote_ci_monitor.gitops import _run_process
+
+    base = os.environ if env is None else env
     try:
-        proc = subprocess.run(
-            ["git", "ls-remote", "--exit-code", url, "HEAD"],
+        proc = _run_process(
+            [git, "ls-remote", "--exit-code", url, "HEAD"],
             stdin=subprocess.DEVNULL,
             capture_output=True,
             timeout=timeout,
-            env={**os.environ, "GIT_TERMINAL_PROMPT": "0"},
+            env={**base, "GIT_TERMINAL_PROMPT": "0"},
+            start_new_session=True,
         )
     except subprocess.TimeoutExpired:
-        return f"unreachable: timed out after {int(timeout)}s"
+        return doctor_core.Unsure(f"git ls-remote timed out after {int(timeout)}s")
     except OSError as e:
-        return f"cannot run git: {type(e).__name__}"
+        return doctor_core.Unsure(f"cannot run git: {type(e).__name__}")
     if proc.returncode == 0:
         return None
     lines = [ln.strip() for ln in proc.stderr.decode("utf-8", errors="replace").splitlines()]
@@ -4646,36 +4834,51 @@ def _worker_check(cfg: Any, client: Any) -> int:
     """`rcm worker --check` — 서버 · 토큰(kind worker) · 풀 · repos 를 표로."""
     from remote_ci_monitor.client import ClientError
 
-    rows: list[tuple[str, bool, str]] = [python_row()]
+    rows: list[tuple[str, bool | None, str]] = [python_row()]
+    health: dict[str, Any] | None = None
+    not_rcm = "the answer is not rcm's JSON object — check the URL and port"
     try:
         h = client.health()
-        # 서버가 보낸 문자열 — 제어 문자를 지우고 64자로 자른다(M5q §14.5, `rcm check` 와 같다)
-        server_v = follow.clean(h.get("version"))
-        rows.append(("server", bool(h.get("ok")), f"{client.server} · v{server_v}"))
+        health = h if isinstance(h, dict) else None
+        if health is None:
+            # 틀린 포트 · 프록시의 답 — `.get` 으로 터지지 않고 FAIL 줄이다(P3 3라운드 LOW)
+            rows.append(("server", False, f"{client.server} · {not_rcm}"))
+        else:
+            # 서버가 보낸 문자열 — 제어 문자를 지우고 64자로 자른다(M5q §14.5, `rcm check` 와 같다)
+            raw_v = health.get("version")
+            # 서버가 버전을 말하지 않으면 `vNone` 이 아니다(P3 4라운드 검증자 2 #3)
+            known = isinstance(raw_v, str) and raw_v
+            shown_v = f"v{follow.clean(raw_v)}" if known else "version unknown"
+            rows.append(("server", bool(health.get("ok")), f"{client.server} · {shown_v}"))
     except ClientError as e:
         rows.append(("server", False, e.message if e.status else f"cannot reach {client.server}"))
     try:
         me = client.whoami()
+        if not isinstance(me, dict):
+            raise TypeError(not_rcm)
         kind = me.get("kind") or ("admin" if me.get("admin") else "client")
         ok = kind == "worker"
+        name = me.get("name")
+        who = f"{follow.clean(name)} ({kind})" if isinstance(name, str) and name else f"({kind})"
         rows.append(
             (
                 "token",
                 ok,
-                f"{me.get('name')} ({kind})"
-                + ("" if ok else " — worker token required: rcm token add NAME --worker"),
+                who + ("" if ok else " — worker token required: rcm token add NAME --worker"),
             )
         )
+    except TypeError as e:
+        rows.append(("token", False, str(e)))
     except ClientError as e:
         rows.append(("token", False, e.message if e.status else f"cannot reach {client.server}"))
     rows.append(("pool", True, f"{cfg.pool} · lanes {cfg.lanes}"))
     if cfg.repos:
-        git = shutil.which("git")
-        rows.append(("git", git is not None, git or "not on PATH (git_ref presets)"))
+        git_row, git = _git_tool_row()
+        rows.append(git_row)
         details: list[str] = []
         all_ok = git is not None
         for r in cfg.repos:
-            problem = _ls_remote_problem(r.url) if git else "git missing"
+            problem = _ls_remote_problem(r.url, git=git) if git else "git missing"
             all_ok = all_ok and problem is None
             details.append(f"{r.name} ({'ok' if problem is None else problem})")
         rows.append(("repos", all_ok, " · ".join(details)))
@@ -4684,7 +4887,21 @@ def _worker_check(cfg: Any, client: Any) -> int:
     d = cfg.data_path
     writable = _dir_writable(d)
     rows.append(("data dir", writable, f"{d} ({'writable' if writable else 'not writable'})"))
-    rows.extend(_worker_capability_rows(cfg, client))
+    capability_rows, missing = _worker_capability_rows(cfg, client)
+    rows.extend(capability_rows)
+    version = _worker_version_row(health)
+    if version is not None:
+        rows.append(version)
+    # 끝 줄(M5t-a §4.5): 빠진 도구 수와 설치 안내를 볼 곳. 0개일 때만 ok 이고 하나라도 있거나
+    # 셀 수 없으면(—) warn 이다(결정표 3). 지금 줄들처럼 FAIL 이 되지 않는다 — 종료 코드는 그대로
+    count = "—" if missing is None else f"{missing}"
+    rows.append(
+        (
+            "missing",
+            True if missing == 0 else None,
+            f"{count} missing · rcm doctor --role worker for what to install",
+        )
+    )
     ok_all = all(ok is not False for _, ok, _ in rows)
     for name, ok, detail in rows:
         mark = "ok " if ok else ("warn" if ok is None else "FAIL")
@@ -4697,12 +4914,40 @@ def _probe_summary(name: str, state: str, value: str | None) -> str:
     return f"{name} {probe_token(state, value)}"
 
 
-def _worker_capability_rows(cfg: Any, client: Any) -> list[tuple[str, bool | None, str]]:
+def _worker_version_row(health: dict[str, Any] | None) -> tuple[str, bool | None, str] | None:
+    """`version` 행(M5t-a §4.5 · TD18) — 지금은 버전이 다르면 등록할 때 409 를 받아야 안다.
+
+    같으면 ok. 다르면 버전 따라가기(M5q)로 맞출 수 있을 때 warn, editable · 고정 설치처럼 따라갈
+    수 없으면 FAIL 이다. 서버가 버전을 말하지 않으면 행을 그리지 않는다.
+    """
+    raw = (health or {}).get("version")
+    if not isinstance(raw, str) or not raw:
+        return None
+    server_v = follow.clean(raw)
+    if raw == __version__:
+        return ("version", True, f"{__version__} · the same as the server")
+    head = f"this worker runs v{__version__}, the server v{server_v}"
+    kind = follow.install_kind()
+    try:
+        setting, _warning = follow.setting_for(no_follow=False, environ=os.environ, kind=kind)
+    except ConfigError as e:
+        return ("version", False, f"{head} and cannot follow it ({e}) — install the same release")
+    if setting.mode == follow.MODE_FOLLOW and os.name == "posix":
+        return ("version", None, f"{head} — registering follows the server version")
+    why = "pinned" if setting.mode == follow.MODE_PIN else f"{kind} install"
+    return ("version", False, f"{head} and cannot follow it ({why}) — install the same release")
+
+
+def _worker_capability_rows(
+    cfg: Any, client: Any
+) -> tuple[list[tuple[str, bool | None, str]], int | None]:
     """`rcm worker --check` 의 `fingerprint` · `presets` — 서버의 명세를 받아 **여기서** 잰다.
 
     서버에 보고하지 않는다(등록도 capabilities 도 없다). 못 도는 프리셋은 사실이지 검사 실패가
-    아니다 — 두 행은 FAIL 이 되지 않는다.
+    아니다 — 두 행은 FAIL 이 되지 않는다. 둘째 값은 빠진 도구 수(서로 다른 이름) — 명세를 못
+    받았으면 None.
     """
+    from remote_ci_monitor import doctor
     from remote_ci_monitor.client import ClientError
     from remote_ci_monitor.remote_worker import RemoteWorker
 
@@ -4710,7 +4955,21 @@ def _worker_capability_rows(cfg: Any, client: Any) -> list[tuple[str, bool | Non
         spec = client.spec()
     except ClientError as e:
         why = "server has no /worker/spec (older rcm)" if e.status == 404 else e.message
-        return [("fingerprint", None, f"— {why}"), ("presets", None, f"— {why}")]
+        return [("fingerprint", None, f"— {why}"), ("presets", None, f"— {why}")], None
+    except ValueError:  # JSON 이 아니다(틀린 포트의 HTML)
+        problem: str | None = "not JSON"
+    else:
+        # doctor 와 같은 모양 검사 — 목록 · 문자열 · 숫자가 아닌 시한을 재다가 터지지 않게
+        # health · whoami 처럼 FAIL 줄로 둔다(P3 4라운드 검증자 2 #1)
+        problem = doctor.shape_problem(spec, doctor.ANSWER_SHAPES["/worker/spec"])
+        if problem is None:
+            try:
+                doctor.parse_spec(spec)
+            except doctor.AnswerUnreadable as e:
+                problem = str(e)
+    if problem is not None:
+        detail = f"/worker/spec: the answer is not rcm's ({problem}) — check the URL and port"
+        return [("fingerprint", None, "— see the presets row"), ("presets", False, detail)], None
     body = RemoteWorker(cfg, client=client, log=lambda _m: None).measure(spec)
     fp = " · ".join(
         _probe_summary(n, p.get("state", ""), p.get("value"))
@@ -4730,7 +4989,24 @@ def _worker_capability_rows(cfg: Any, client: Any) -> list[tuple[str, bool | Non
         reasons[key] = reasons.get(key, 0) + 1
     top = sorted(reasons.items(), key=lambda kv: (-kv[1], kv[0]))[:3]
     detail = " · ".join([f"{ok}/{total} ok", *(f"{n} {k}" for k, n in top)])
-    return [("fingerprint", True, fp or "no probes configured"), ("presets", True, detail)]
+    missing = {t for facts in body["presets"].values() for t in facts["missing_tools"]}
+    rows = [("fingerprint", True, fp or "no probes configured"), ("presets", True, detail)]
+    return rows, len(missing)
+
+
+def cmd_doctor(args: argparse.Namespace) -> int:
+    """`rcm doctor` — 이 머신에서 무엇을 빌드 · 시험할 수 있고 무엇을 깔아야 하는지(M5t-a 결정
+    246). 판정과 출력은 `doctor` 모듈이 한다. 여기서는 바깥 세계를 넘긴다 — mDNS 찾기와
+    `git ls-remote` 는 부를 때 이 모듈의 이름으로 찾는다(시험이 바꿔 끼우는 자리)."""
+    from remote_ci_monitor import doctor
+
+    ctx = doctor.Context(
+        environ=os.environ,
+        discover=lambda timeout: discover(timeout=timeout),
+        ls_remote=lambda url, git, env: _ls_remote_problem(url, git=git, env=env),
+        worker_service_path=WORKER_SERVICE_PATH,
+    )
+    return doctor.main(args, ctx)
 
 
 def cmd_token(args: argparse.Namespace) -> int:
@@ -5515,6 +5791,16 @@ def build_parser() -> argparse.ArgumentParser:
         "--force", action="store_true", help="overwrite files whose content differs"
     )
     skills.set_defaults(func=cmd_skills)
+
+    doc = sub.add_parser("doctor", help="what this machine can build and test, and what to install")
+    doc.add_argument("--role", choices=("client", "worker", "coordinator", "coordinator-worker"))
+    doc.add_argument("--server")
+    doc.add_argument("--config")
+    doc.add_argument("--json", action="store_true")
+    doc.add_argument("--offline", action="store_true")
+    doc.add_argument("--shell-path", action="store_true")
+    doc.add_argument("--service-file")
+    doc.set_defaults(func=cmd_doctor)
 
     version = sub.add_parser("version", help="print the version (and Python/OS with --json)")
     version.add_argument("--json", action="store_true")

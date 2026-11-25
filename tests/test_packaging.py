@@ -130,7 +130,9 @@ def test_project_urls_classifiers_and_keywords(pyproject):
         assert f"Programming Language :: Python :: 3.{minor}" in classifiers
     assert "Development Status :: 4 - Beta" in classifiers
     assert "Intended Audience :: Developers" in classifiers
-    assert project["requires-python"] == ">=3.11"
+    # M5t-a Q7(docs/m5t-workplan.md §4.5 「rcm 자신의 요구」): 3.11.0~3.11.3 에는 안전한
+    # `tarfile.data_filter` 가 없어 깔려도 `rcm check` 가 FAIL 이다 — 깔리지 않게 하한을 올렸다
+    assert project["requires-python"] == ">=3.11.4"
     assert project.get("keywords"), "keywords are empty"
 
 
@@ -207,7 +209,7 @@ def test_wheel_metadata_license_python_and_no_runtime_deps(wheel):
     assert re.search(r"^License-Expression: MIT$", meta, re.M), meta
     assert re.search(r"^License-File: LICENSE$", meta, re.M), meta
     assert not re.search(r"^Classifier: License ::", meta, re.M), meta
-    assert re.search(r"^Requires-Python: >=3\.11$", meta, re.M), meta
+    assert re.search(r"^Requires-Python: >=3\.11\.4$", meta, re.M), meta  # M5t-a Q7
     # 런타임 의존성 0 — extra 가 붙지 않은 Requires-Dist 가 없어야 한다
     runtime = [
         ln for ln in meta.splitlines() if ln.startswith("Requires-Dist:") and "extra ==" not in ln

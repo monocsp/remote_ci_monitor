@@ -69,6 +69,18 @@ WORKSPACE_KEEP_DAYS = 7
 STOP_SUMMARY = "worker stopped"
 #: 연결 실패가 이만큼 **연속**이면 같은 망에서 서버를 다시 찾는다(`server = "auto"` 일 때만, M5n §9)
 REDISCOVER_AFTER_FAILURES = 5
+#: 등록 · 능력 보고에 싣는 호스트 사실의 키(서버의 `capabilities.HOST_FACT_KEYS` 와 같다)
+HOST_KEYS = (
+    "os",
+    "os_release",
+    "os_like",
+    "arch",
+    "rosetta",
+    "container",
+    "root",
+    "package_manager",
+    "python",
+)
 #: 드레인 끝에 보고하지 못한 잡의 finish 를 다시 시도하는 상한(M5q §14 B질문11). 재실행 뒤의 등록은
 #: 그 워커의 도는 잡을 lost 로 닫으므로 바로 exec 하지 않는다
 DRAIN_REPORT_SECONDS = 60
@@ -265,6 +277,7 @@ class RemoteWorker:
         self.rand_fn = rand_fn
         self.log = log or (lambda msg: print(f"[rcm worker] {msg}", file=sys.stderr, flush=True))
         self.environ = environ
+        self._host: dict[str, Any] | None = None  # 호스트 사실 — 처음 쓸 때 한 번 잰다
         self.once = once
         self.stopping = threading.Event()
         self.paused = False
@@ -350,6 +363,7 @@ class RemoteWorker:
                     lanes=self.config.lanes,
                     host_name=self.name,
                     version=__version__,
+                    host=self.host_facts(),
                 )
             except ClientError as e:
                 if e.status == 403:
@@ -663,6 +677,16 @@ class RemoteWorker:
 
     # ── 능력 보고 (M5n §4.2) ────────────────────────────────────────────────
 
+    def host_facts(self) -> dict[str, Any]:
+        """OS 버전 · arch · Rosetta · 컨테이너 · root · 패키지 관리자 · Python(M5t-a §4.5). 프로세스
+        하나에 한 번 잰다 — 등록과 능력 보고가 같은 값을 보낸다. 서버는 메모리에만 둔다."""
+        if self._host is None:
+            from remote_ci_monitor import hostsample
+
+            facts = hostsample.host_facts()
+            self._host = {k: facts.get(k) for k in HOST_KEYS}
+        return dict(self._host)
+
     def measure(self, spec: dict[str, Any]) -> dict[str, Any]:
         """명세대로 **이 프로세스의 환경**에서 잰다 — 보고 본문. 서버에 보내지 않는다."""
         from remote_ci_monitor.config import Probe
@@ -708,6 +732,8 @@ class RemoteWorker:
             "accept_any": bool(getattr(self.config, "accept_any", True)),
             "fingerprint": fingerprint,
             "presets": presets,
+            # 서버 재시작 뒤에도 다음 보고가 호스트 사실을 다시 채운다(TD42). 옛 서버는 무시한다
+            "host": self.host_facts(),
         }
 
     def measure_and_report(self) -> bool:

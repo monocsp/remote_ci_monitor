@@ -300,7 +300,8 @@ def test_worker_spec_is_the_probes_and_the_preset_requirements(srv):
     gen = srv.generation()
     status, spec = srv.spec()
     assert status == 200, spec
-    assert set(spec) == {"generation", "probe_interval_seconds", "probes", "presets"}
+    # M5t-a TD15 이 `tools` 를 더했다(docs/m5t-workplan.md §4.5 「대상 프리셋」)
+    assert set(spec) == {"generation", "probe_interval_seconds", "probes", "presets", "tools"}
     assert spec["generation"] == gen
     assert spec["probe_interval_seconds"] == 600
     assert spec["probes"] == [
@@ -309,11 +310,20 @@ def test_worker_spec_is_the_probes_and_the_preset_requirements(srv):
     assert [p["name"] for p in spec["presets"]] == PRESET_NAMES
     capgate = next(p for p in spec["presets"] if p["name"] == "capgate")
     # claim payload 에 이미 실리던 것과 같은 범위 — argv · 비밀 · 저장소는 안 실린다
+    # M5t-a TD15 · TD51 · TO18 이 배치 키 · git_ref 키 · unreachable_checks 를 더했다 —
+    # argv · 비밀 · 저장소 주소는 여전히 없다
     assert capgate == {
         "name": "capgate",
         "requires": [FAKE_TOOL],
         "env_passthrough": ["PATH", "HOME", "LANG"],
         "env": {},
+        "pool": "default",
+        "pools": [],
+        "placement": "any-capable",
+        "checks": [],
+        "source_modes": ["tree"],
+        "repo": None,
+        "unreachable_checks": [],
     }
 
 

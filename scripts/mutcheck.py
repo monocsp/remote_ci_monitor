@@ -14,6 +14,12 @@
      + `m5t-check-local-only-claimed-ignored`: 그 머신이 집은 점검도 check_local_only 로 냄
      (`capabilities.py`, batch 7 T3)
      + `m5t-claim-excluded-sql-dropped`: claim SQL 이 제외 목록을 안 씀(`store.py`, batch 7 T5)
+  M5t-a PR2 — `doctor-unknown-exits-0`: 판정 못 함을 0 으로 끝냄(`core/doctor.py`, 결정 246) +
+     `doctor-spec-unreachable-checks-empty`: `/worker/spec` 의 `unreachable_checks` 가 늘 빔
+     (`capabilities.py`, TO18) + P3 1라운드의 넷: 잘린 XML plist 를 안 잡음(`doctor.py`) ·
+     `rcm check` 의 git 행이 shim 규칙을 건너뜀(`cli.py`) · 서버가 재지 않은 로컬 레인 프리셋이
+     ready(`doctor.py`) · 호스트 사실의 제어문자를 안 지움(`capabilities.py`) + P3 2라운드의 둘:
+     doctor 의 맨 바깥 경계가 없음 · 서버 답의 모양을 안 봄(`doctor.py`)
   M5s C — `action-*` 다섯: 도는 행의 표식을 이유가 무시 · code 어휘 검사 제거 · note 제어문자를
      안 지움 · 플래그 없이 4 · 취소 중에도 4 + `clean-line-keeps-bidi`(note · 실패 이름이 bidi 를
      남김) (`docs/m5s-workplan.md` §4.3 · 결정 213 · 234 · #251 격리 검증)
@@ -1034,7 +1040,7 @@ MUTANTS = (
     Mutant(
         name="requires-check-skipped",
         path="src/remote_ci_monitor/runner.py",
-        old="    return [name for name in requires if shutil.which(name, path=path) is None]\n",
+        old="    return [name for name in requires if find_tool(name, path) is None]\n",
         new="    return []  # noqa: mutant\n",
         tests=("tests/test_requires.py",),
     ),
@@ -1292,8 +1298,8 @@ MUTANTS = (
         # `rcm serve` 가 따라간다 — 서버가 정본이다(§2.3)
         name="m5q-follow-serve-follows",
         path="src/remote_ci_monitor/follow.py",
-        old='    {"serve", "worker", "token", "init", "discover", "version", "skills"}',
-        new='    {"worker", "token", "init", "discover", "version", "skills"}',
+        old='    {"serve", "worker", "token", "init", "discover", "version", "skills", "doctor"}',
+        new='    {"worker", "token", "init", "discover", "version", "skills", "doctor"}',
         tests=("tests/test_follow_rules.py",),
     ),
     Mutant(
@@ -1332,8 +1338,14 @@ MUTANTS = (
         # `rcm check` 의 client 행이 서버가 보낸 version 을 그대로 찍는다(#226 D3)
         name="m5q-check-row-unclean-version",
         path="src/remote_ci_monitor/cli.py",
-        old="    server_v = follow.clean(raw)\n",
-        new="    server_v = raw\n",
+        old=(
+            "    server_v = follow.clean(raw)\n"
+            "    mine, theirs = _version_key(__version__), _version_key(server_v)\n"
+        ),
+        new=(
+            "    server_v = raw\n"
+            "    mine, theirs = _version_key(__version__), _version_key(server_v)\n"
+        ),
         tests=("tests/test_follow_cli.py",),
     ),
     Mutant(
@@ -2343,6 +2355,238 @@ MUTANTS = (
         new="        pass\n",
         tests=("tests/test_dev_batch.py::test_concurrent_adds_keep_every_bundle",),
     ),
+    # ── M5t-a PR2 — 환경 진단 rcm doctor (docs/m5t-workplan.md §7 「변이 검사」) ──
+    Mutant(
+        # doctor 가 판정 못 함(서버 불통 · 시한 초과 · 옛 서버)을 0 으로 끝낸다 — 「다 갖춤」과
+        # 「알 수 없음」이 같은 0 이 되어 자동화가 모르는 머신을 준비됐다고 읽는다(결정 246)
+        name="doctor-unknown-exits-0",
+        path="src/remote_ci_monitor/core/doctor.py",
+        old="    if undecided:\n        return EXIT_UNKNOWN\n",
+        new="    if undecided:\n        return EXIT_OK\n",
+        tests=(
+            "tests/test_doctor.py::test_td34_exit_priority_is_problem_then_unknown_then_ok",
+            "tests/test_doctor_cli.py::test_td3_a_probe_timeout_is_unknown_and_exits_3",
+            "tests/test_doctor_cli.py::test_td4_an_unreachable_server_exits_3_not_0",
+            "tests/test_doctor_cli.py::test_td5_an_older_server_without_the_new_keys_exits_3",
+        ),
+    ),
+    Mutant(
+        # `/worker/spec` 의 `unreachable_checks` 를 늘 빈 목록으로 낸다 — 원격 워커의 doctor 가
+        # 영영 안 오는 `local_only` 점검을 「점검 필요」로 읽는다(TO18, 위임 결정 2)
+        name="doctor-spec-unreachable-checks-empty",
+        path="src/remote_ci_monitor/capabilities.py",
+        old="                        if not self.check_reachable(remote, c)\n",
+        new="                        if False\n",
+        tests=(
+            "tests/test_doctor_cli.py::"
+            "test_to18_worker_spec_names_the_checks_a_remote_worker_cannot_reach",
+            "tests/test_doctor_cli.py::test_to18_doctor_reads_the_real_servers_unreachable_checks",
+        ),
+    ),
+    Mutant(
+        # 잘린 XML 의 plist(ExpatError — ValueError 가 아니다)를 잡지 않는다 — 설치 자리에 깨진
+        # plist 하나만 있어도 `--service-file` 없는 doctor 가 traceback 으로 끝난다(P3 1라운드 HIGH)
+        name="doctor-service-file-expat-uncaught",
+        path="src/remote_ci_monitor/doctor.py",
+        old=(
+            "    except (ValueError, plistlib.InvalidFileException, xml.parsers.expat.ExpatError)"
+            " as e:\n"
+        ),
+        new="    except (ValueError, plistlib.InvalidFileException) as e:\n",
+        tests=(
+            "tests/test_doctor_cli.py::"
+            "test_an_unreadable_plist_in_launch_agents_is_named_and_exits_3",
+            "tests/test_doctor_cli.py::"
+            "test_an_unreadable_explicit_service_file_is_unknown_not_a_crash",
+        ),
+    ),
+    Mutant(
+        # `rcm check` · `rcm worker --check` 의 git 행이 shim 규칙 없이 `shutil.which` 를 쓴다 — CLT
+        # 없는 Mac 에서 shim 을 「있음」으로 세고 그것으로 `git ls-remote` 를 돌려 설치 창을 띄운다
+        # (P3 1라운드 MED, 검증자 1 #2)
+        name="check-git-row-skips-shim-rule",
+        path="src/remote_ci_monitor/cli.py",
+        old='    git = runner.find_tool("git", path)\n',
+        new='    git = shutil.which("git", path=path)\n',
+        tests=(
+            "tests/test_doctor_cli.py::test_worker_check_git_row_follows_the_shim_rule",
+            "tests/test_doctor_cli.py::test_rcm_check_git_row_follows_the_shim_rule",
+        ),
+    ),
+    Mutant(
+        # 서버가 재지 않은 로컬 레인 프리셋(`preset_env` 에 없음)을 빈 「빠진 도구」로 읽어 ready 라
+        # 부른다(P3 1라운드 MED, 검증자 1 #3)
+        name="doctor-local-lane-unmeasured-ready",
+        path="src/remote_ci_monitor/doctor.py",
+        old="            if got is None and p.requires and row.counts:\n",
+        new="            if False:\n",
+        tests=(
+            "tests/test_doctor_cli.py::"
+            "test_a_local_lane_preset_the_server_did_not_measure_is_unknown",
+        ),
+    ),
+    Mutant(
+        # 워커가 보낸 호스트 사실의 제어문자를 지우지 않는다 — ESC 가 `rcm machines` 의 터미널과
+        # 웹에 그대로 나간다(P3 1라운드 MED, 검증자 2 #3)
+        name="host-facts-control-chars-kept",
+        path="src/remote_ci_monitor/capabilities.py",
+        old="            out[key] = clean_line(value)[:HOST_FACT_MAX] or None\n",
+        new="            out[key] = value[:HOST_FACT_MAX] or None\n",
+        tests=(
+            "tests/test_doctor_cli.py::test_host_facts_lose_control_characters_and_stop_at_64",
+            "tests/test_doctor_cli.py::test_host_facts_lose_line_separators_and_bidi_controls",
+        ),
+    ),
+    Mutant(
+        # doctor 의 맨 바깥 경계가 없다 — 읽는 자리가 모르는 예외가 「판정 못 함」(종료 3)이 아니라
+        # traceback 과 종료 1 로 끝난다(P3 2라운드 HIGH)
+        name="doctor-boundary-removed",
+        path="src/remote_ci_monitor/doctor.py",
+        old="    except Exception as e:  # noqa: BLE001 — doctor 의 맨 바깥 경계\n",
+        new="    except ZeroDivisionError as e:  # 변이: 경계가 없다\n",
+        tests=(
+            "tests/test_doctor_cli.py::"
+            "test_an_unexpected_error_is_could_not_decide_not_a_traceback",
+        ),
+    ),
+    Mutant(
+        # `reach` 가 서버 답의 모양을 보지 않는다 — HTML 200 · 빈 200 · [] · null · 칸 타입이 틀린
+        # 답을 dict 로 믿고 쓰다 경계에 닿는다. 경계가 있어도 망가진 입력 표가 빨개진다(P3 2라운드)
+        name="doctor-answer-shape-unchecked",
+        path="src/remote_ci_monitor/doctor.py",
+        old="            why = shape_problem(answer, ANSWER_SHAPES[route])\n",
+        new="            why = None\n",
+        tests=(
+            "tests/test_doctor_cli.py::"
+            "test_a_server_answer_of_the_wrong_shape_is_named_and_exits_3",
+        ),
+    ),
+    Mutant(
+        # 필수 칸 검사를 끈다 — `{}` · 남의 서비스의 `{"status":"ok"}` · `version` 없는 health 를
+        # rcm 서버의 답으로 믿고 0 이나 1 로 끝낸다. 생성형 표가 빨개진다(P3 3라운드 근본 원인)
+        name="doctor-required-key-unchecked",
+        path="src/remote_ci_monitor/doctor.py",
+        old="                if sub.required:\n",
+        new="                if False:\n",
+        tests=(
+            "tests/test_doctor_cli.py::"
+            "test_a_required_fact_the_server_did_not_give_is_never_exit_0_or_1",
+        ),
+    ),
+    Mutant(
+        # 서비스 파일 후보를 못 읽어 고른 파일이 없는데도 기본 PATH 를 짐작해 잰다 — 빠진 도구가
+        # 종료 1 이 된다. 순서 표가 빨개진다(P3 3라운드 HIGH)
+        name="doctor-unreadable-candidate-path-guessed",
+        path="src/remote_ci_monitor/doctor.py",
+        old="        elif skipped:\n",
+        new="        elif False:\n",
+        tests=(
+            "tests/test_doctor_cli.py::"
+            "test_an_unreadable_service_file_leaves_the_path_unknown_in_every_order",
+        ),
+    ),
+    Mutant(
+        # `placement` 없는 옛 서버의 프리셋을 `pool` 로 짐작한다 — 빠진 도구가 종료 1 이 된다(TD5,
+        # 메인 세션 결정: 모름 · 종료 3)
+        name="doctor-older-server-read-as-pool",
+        path="src/remote_ci_monitor/core/doctor.py",
+        old="    if placement is None:\n",
+        new='    if placement is None:\n        placement = "pool"\n    if False:\n',
+        tests=(
+            "tests/test_doctor_cli.py::test_td5_an_older_server_with_a_missing_tool_exits_3_not_1",
+        ),
+    ),
+    Mutant(
+        # 설정 파일이 어디에도 없는 coordinator 를 기본값(프리셋 없음 · 8787)으로 잰다 — 그 포트의
+        # 아무 서버에 묻고 0 이나 「프리셋 없음」(1)으로 끝난다(P3 4라운드 HIGH)
+        name="doctor-coordinator-defaults-trusted",
+        path="src/remote_ci_monitor/doctor.py",
+        old="        if path is None:  # 서버 설정 파일이 어디에도 없다\n",
+        new="        if False:\n",
+        tests=(
+            "tests/test_doctor_cli.py::"
+            "test_a_coordinator_role_without_a_server_config_is_a_usage_error",
+            "tests/test_doctor_cli.py::test_every_input_doctor_did_not_read_ends_in_2_or_3",
+        ),
+    ),
+    Mutant(
+        # 서비스 파일의 실행 인자(`--config` · `--port`)를 읽지 않는다 — 서비스가 X 로 떠도 표준
+        # 자리나 기본값으로 잰다(P3 4라운드 HIGH)
+        name="doctor-service-launch-ignored",
+        path="src/remote_ci_monitor/doctor.py",
+        old="        if sf.launch is None or sf.command != ROLE_COMMANDS.get(self.role):\n",
+        new="        if True:\n",
+        tests=(
+            "tests/test_doctor_cli.py::"
+            "test_the_service_files_config_argument_is_the_config_doctor_reads",
+            "tests/test_doctor_cli.py::"
+            "test_the_servers_service_arguments_and_environment_choose_the_port",
+        ),
+    ),
+    Mutant(
+        # 같은 자리에 못 읽은 형제 파일이 있어도 읽히는 파일로 잰다(P3 4라운드 LOW)
+        name="doctor-unreadable-sibling-ignored",
+        path="src/remote_ci_monitor/doctor.py",
+        old="        if len(skipped) > before:\n",
+        new="        if False:\n",
+        tests=(
+            "tests/test_doctor_cli.py::"
+            "test_a_readable_file_next_to_an_unreadable_one_is_not_chosen",
+        ),
+    ),
+    Mutant(
+        # 실행 명령을 rcm 의 하위 명령으로 풀지 못한 서비스 파일을 조용히 뺀다(P3 4라운드 LOW)
+        name="doctor-unresolved-command-dropped",
+        path="src/remote_ci_monitor/doctor.py",
+        old="        if sf.launch is None:\n",
+        new="        if False:\n",
+        tests=(
+            "tests/test_doctor_cli.py::"
+            "test_a_service_file_whose_rcm_command_rcm_cannot_tell_is_named",
+        ),
+    ),
+    Mutant(
+        # `git ls-remote` 의 시한 초과 · 실행 실패를 「닿지 않음」(FAIL, 종료 1)으로 단정한다
+        # (P3 4라운드 MED)
+        name="doctor-ls-remote-unsure-is-unreachable",
+        path="src/remote_ci_monitor/doctor.py",
+        old="    if isinstance(result, dc.Unsure):\n",
+        new="    if False:\n",
+        tests=(
+            "tests/test_doctor_cli.py::"
+            "test_a_git_ls_remote_that_times_out_or_cannot_run_is_unknown_not_unreachable",
+        ),
+    ),
+    Mutant(
+        # 모름인 프리셋 행이 「판정 못 함」 줄을 내지 않는다 — 옛 서버의 프리셋이 종료 0 이 된다
+        # (3라운드에 생긴 규칙, P3 4라운드 검증자 1 #9)
+        name="doctor-unknown-rows-not-undecided",
+        path="src/remote_ci_monitor/doctor.py",
+        old="        undecided += dc.unknown_rows(rows)\n",
+        new="        undecided += []\n",
+        tests=(
+            "tests/test_doctor_cli.py::test_td5_an_older_server_with_a_missing_tool_exits_3_not_1",
+        ),
+    ),
+    Mutant(
+        # 읽지 못한 git 버전을 「낮다」(FAIL)로 단정한다(3라운드에 생긴 규칙, 검증자 1 #9)
+        name="doctor-git-version-unknown-fails",
+        path="src/remote_ci_monitor/doctor.py",
+        old='            return requirement("git", "unknown", detail, needed)\n',
+        new='            return requirement("git", "fail", detail, needed)\n',
+        tests=(
+            "tests/test_doctor_cli.py::test_a_git_version_rcm_cannot_read_is_unknown_not_a_fail",
+        ),
+    ),
+    Mutant(
+        # 오는지 모르는 프리셋이 있어도 「아무것도 오지 않는다」(종료 1)로 단정한다(3라운드에 생긴
+        # 규칙, 검증자 1 #9)
+        name="doctor-no-jobs-ignores-unknown",
+        path="src/remote_ci_monitor/core/doctor.py",
+        old="    if any(r.counts or r.applies == APPLIES_UNKNOWN for r in rows):\n",
+        new="    if any(r.counts for r in rows):\n",
+        tests=("tests/test_doctor.py::test_no_jobs_reason_does_not_fire_while_a_preset_may_come",),
+    ),
     Mutant(
         # 후보 함수가 `local_only` 프리셋에서 원격 머신을 빼지 않는다 — 배치 · ETA · 제출 · 점검 ·
         # `/worker/spec` · claim · `/api/machines` 가 모두 원격을 후보로 본다(M5t-a 결정 254, TO15)
@@ -2411,6 +2655,323 @@ MUTANTS = (
         tests=(
             "tests/test_local_only.py::"
             "test_to15_the_claim_sql_drops_excluded_presets_on_every_branch",
+        ),
+    ),
+    # ── #268 검증 사이클 2 의 1라운드 — 확정을 모름으로 · 셸이 서비스를 대신한다 ──
+    Mutant(
+        # rcm 의 서비스가 아님이 확실한 파일(ci-watch plist)도 「못 읽음」으로 적는다 — 모든 입력을
+        # 읽은 실행이 종료 3 이 된다(HIGH 1)
+        name="doctor-foreign-service-file-unreadable",
+        path="src/remote_ci_monitor/doctor.py",
+        old="        if sf.launch is None and not looks_like_rcm(sf):\n",
+        new="        if False:\n",
+        tests=(
+            "tests/test_doctor_cli.py::"
+            "test_the_ci_watch_plist_next_to_the_service_is_not_a_candidate",
+            "tests/test_doctor_cli.py::test_only_files_that_look_like_rcm_are_named_unreadable",
+        ),
+    ),
+    Mutant(
+        # 서비스 인자에 --config 가 없으면 doctor 셸의 RCM_CONFIG 를 읽는다(HIGH 2)
+        name="doctor-shell-rcm-config-leaks",
+        path="src/remote_ci_monitor/doctor.py",
+        old='        raw = launch.get("config") or env.get("RCM_CONFIG")\n',
+        new='        raw = launch.get("config") or os.environ.get("RCM_CONFIG")\n',
+        tests=(
+            "tests/test_doctor_cli.py::"
+            "test_the_doctor_shells_rcm_config_and_folder_never_choose_the_servers_config",
+        ),
+    ),
+    Mutant(
+        # 작업 폴더가 적혀 있지 않은 launchd 서비스의 `./rcm.toml` 을 doctor 가 선 폴더에서 찾는다
+        # (HIGH 2)
+        name="doctor-cwd-is-the-services-folder",
+        path="src/remote_ci_monitor/doctor.py",
+        old="            return [LAUNCHD_DEFAULT_WORKDIR]\n",
+        new="            return [os.getcwd()]\n",
+        tests=(
+            "tests/test_doctor_cli.py::"
+            "test_the_doctor_shells_rcm_config_and_folder_never_choose_the_servers_config",
+        ),
+    ),
+    Mutant(
+        # 사람이 준 서비스 파일의 명령을 풀지 못해도 그 파일의 PATH 로 잰다(MED 3)
+        name="doctor-explicit-unresolved-path-trusted",
+        path="src/remote_ci_monitor/doctor.py",
+        old=(
+            "        unresolved = bool(self.opts.service_file) and sf is not None "
+            "and sf.launch is None\n"
+        ),
+        new="        unresolved = False\n",
+        tests=(
+            "tests/test_doctor_cli.py::"
+            "test_an_explicit_service_file_whose_command_rcm_cannot_resolve_is_unknown",
+        ),
+    ),
+    Mutant(
+        # 사용자 유닛 자리의 `%h` 를 풀지 않는다 — rcm 이 아는 홈을 모름으로 만든다(MED 4)
+        name="doctor-user-unit-home-unexpanded",
+        path="src/remote_ci_monitor/doctor.py",
+        old="        found = _matching(stage, role, skipped, user_home)\n",
+        new="        found = _matching(stage, role, skipped, None)\n",
+        tests=("tests/test_doctor_cli.py::test_h_in_a_user_unit_is_the_home_doctor_knows",),
+    ),
+    Mutant(
+        # 출력 뒤 stdout 을 flush 하지 않는다 — 닫힌 파이프를 파이썬 종료 때 알아 종료 120 과
+        # `Exception ignored … BrokenPipeError` 가 난다(P6 GAP E3)
+        name="doctor-closed-pipe-at-exit",
+        path="src/remote_ci_monitor/doctor.py",
+        old="        sys.stdout.flush()\n",
+        new="        pass\n",
+        tests=(
+            "tests/test_doctor_cli.py::"
+            "test_e3_a_closed_pipe_keeps_the_verdict_and_prints_no_traceback",
+        ),
+    ),
+    Mutant(
+        # git_ref 잡의 git 이 shim 규칙을 건너뛴다 — CLT 없는 Mac 에서 잡마다 설치 창이 뜬다
+        # (P6 GAP R2)
+        name="gitops-git-shim-runs",
+        path="src/remote_ci_monitor/gitops.py",
+        old='    return shutil.which("git", path=path) is not None and '
+        'runner.find_tool("git", path) is None\n',
+        new="    return False\n",
+        tests=("tests/test_tool_shim.py::test_r2_git_ref_jobs_never_run_a_blocked_git_shim",),
+    ),
+    Mutant(
+        # 서버가 잰 정의와 디스크의 정의를 견주지 않는다 — reload 전 서버의 옛 측정으로 ready 를
+        # 낸다(P6 GAP E4)
+        name="doctor-lane-generation-unchecked",
+        path="src/remote_ci_monitor/doctor.py",
+        old="            stale = got is not None and got.digest != mine\n",
+        new="            stale = False\n",
+        tests=(
+            "tests/test_doctor_cli.py::test_e4_a_server_that_has_not_reloaded_the_config_is_unknown",
+        ),
+    ),
+    Mutant(
+        # 시스템 자리(`/etc/systemd/system` · `/Library/LaunchDaemons`)를 보지 않는다 — 문서의
+        # Linux 서버 설치를 못 찾고 워커의 PATH 로 짐작한다(P3 사이클 2 r2 검증자 1 #1)
+        name="doctor-system-service-place-ignored",
+        path="src/remote_ci_monitor/doctor.py",
+        old="    for stage in (launch_agents + user_units + system_files, staged):\n",
+        new="    for stage in (launch_agents + user_units, staged):\n",
+        # `examples/` 는 변이 사본에 없다 — 그 파일을 읽지 않는 LaunchDaemons 칸으로 본다
+        tests=(
+            "tests/test_doctor_cli.py::"
+            "test_p3_the_documented_system_server_service_is_found[LaunchDaemons]",
+        ),
+    ),
+    Mutant(
+        # 시험의 운영 보호 가드가 운영 폴더의 조상인 허용 뿌리(홈에서 시작한 pytest 의 cwd)를 그대로
+        # 둔다 — 그 실행에서는 가드가 아무것도 막지 않는다(P3 사이클 2 r2 두 명)
+        name="test-guard-ancestor-root-kept",
+        path="tests/conftest.py",
+        old="    return tuple(sorted(r for r in roots if not any(_under(d, r) for d in "
+        "PRODUCTION_DIRS)))\n",
+        new="    return tuple(sorted(roots))\n",
+        tests=(
+            "tests/test_doctor_cli.py::"
+            "test_the_production_guard_fails_a_test_that_reaches_production[home]",
+        ),
+    ),
+    Mutant(
+        # `[[tools]]` 의 글자 검사가 `str.strip()` 한 값과 견준다 — 앞뒤의 `\r` · `\n` · U+2028 이
+        # 거절되지 않고 그대로 저장된다(batch 10 재확인 X-bidi)
+        name="config-tool-text-ends-unchecked",
+        path="src/remote_ci_monitor/config.py",
+        old='    fenced = f"|{value}|"\n',
+        new="    fenced = value.strip()\n",
+        tests=("tests/test_doctor.py::test_x_bidi_tools_refuse_controls_at_either_end_too",),
+    ),
+    Mutant(
+        # 자기 세션의 git · 서비스 Python 을 Ctrl-C 때 거두지 않는다 — `Popen.__exit__` 가 0.25초
+        # 뒤 두고 가서 그 손자가 doctor 뒤에 남는다(batch 10 재확인 Ctrl-C 자식)
+        name="gitops-run-process-ctrl-c-leaves-group",
+        path="src/remote_ci_monitor/gitops.py",
+        old="        except BaseException:\n",
+        new="        except subprocess.TimeoutExpired:\n",
+        tests=(
+            "tests/test_doctor_cli.py::test_x_ctrlc_run_process_takes_its_group_down_on_ctrl_c",
+            "tests/test_doctor_cli.py::"
+            "test_x_ctrlc_interrupting_doctor_leaves_no_git_or_service_python_behind",
+        ),
+    ),
+    Mutant(
+        # 서비스의 Python 이 CLT shim 인지 보지 않고 돌린다 — CLT 없는 Mac 에서 doctor 가 설치 창을
+        # 띄운다(batch 10 재확인 X-python shim)
+        name="doctor-service-python-shim-runs",
+        path="src/remote_ci_monitor/doctor.py",
+        old="        if runner.tool_blocked(python):\n",
+        new="        if False:\n",
+        tests=(
+            "tests/test_doctor_cli.py::"
+            "test_x_python_a_service_python_that_is_a_clt_shim_is_never_run",
+        ),
+    ),
+    Mutant(
+        # 시험의 운영 보호 가드가 루프백 이름으로 가는 8787 만 막는다(옛 규칙) — 운영 서버는
+        # 0.0.0.0 에 묶여 LAN 주소 · `.local` 이름으로도 닿는다(P6 GAP E7, batch 10 재확인 5)
+        name="test-guard-port-on-loopback-only",
+        path="tests/conftest.py",
+        old="    return isinstance(address, tuple) and len(address) >= 2 and address[1] == "
+        "PRODUCTION_PORT\n",
+        new="    return (\n"
+        "        isinstance(address, tuple)\n"
+        "        and len(address) >= 2\n"
+        "        and address[1] == PRODUCTION_PORT\n"
+        '        and address[0] in ("127.0.0.1", "::1", "localhost")\n'
+        "    )\n",
+        tests=(
+            "tests/test_doctor_cli.py::"
+            "test_the_production_guard_blocks_port_8787_on_any_address[192.168.0.10]",
+        ),
+    ),
+    Mutant(
+        # `rcm serve` 의 기동 점검이 git 을 `shutil.which` 로 찾는다 — CLT 없는 Mac 의 shim 을
+        # 있음으로 센다(P6 GAP R2, batch 10 재확인 6)
+        name="config-startup-git-shim-counted",
+        path="src/remote_ci_monitor/config.py",
+        old='        if runner.find_tool("git", path) is None:\n',
+        new='        if __import__("shutil").which("git", path=path) is None:\n',
+        tests=(
+            "tests/test_tool_shim.py::test_r2_server_startup_counts_a_blocked_git_shim_as_missing",
+        ),
+    ),
+    # ── M5t-a PR3 — 분배 전용 코디네이터 `lanes = 0` (docs/m5t-workplan.md §7 변이 검사) ──
+    Mutant(
+        # `lanes = 0` 에서 `@local` 을 살아 있다고 본다 — 레인이 없는 서버의 머신 목록이 로컬
+        # 머신을 받을 수 있는 자리로 보이고 머신 탭 · 점검 스위퍼가 그것을 믿는다(TL7)
+        name="m5t-lanes-zero-local-alive",
+        path="src/remote_ci_monitor/capabilities.py",
+        old="                alive=self._has_local_lanes(),\n",
+        new="                alive=True,\n",
+        tests=("tests/test_lanes_zero.py::test_tl7_at_local_is_not_alive",),
+    ),
+    Mutant(
+        # 기본 풀을 늘 뺀다 — 분배 전용 서버에서 기본 풀 워커가 다 죽어도 `pools_without_workers`
+        # 가 비어 `rcm check` 의 pools 경보가 꺼진다(TL13, batch 2 항목 3)
+        name="m5t-lanes-zero-default-pool-skipped",
+        path="src/remote_ci_monitor/remote_workers.py",
+        old="            if row.pool == DEFAULT_POOL and local_lanes:\n",
+        new="            if row.pool == DEFAULT_POOL:\n",
+        tests=(
+            "tests/test_lanes_zero.py::"
+            "test_tl13_pools_without_workers_counts_the_default_pool_only_without_local_lanes",
+        ),
+    ),
+    Mutant(
+        # 후보 함수가 `lanes = 0` 에서도 `@local` 을 남긴다 — 대기 잡이 로컬 레인을 기다리고
+        # 재시작 뒤에도 그렇다(TL4 · TL9, P5 G7)
+        name="m5t-lanes-zero-candidates-keep-local",
+        path="src/remote_ci_monitor/capabilities.py",
+        old='            views = [v for v in views if v.kind != "local"]  # 분배 전용',
+        new="            views = list(views)  # 분배 전용",
+        tests=(
+            "tests/test_lanes_zero.py::test_tl4_a_waiting_job_goes_to_the_worker_that_attaches",
+            "tests/test_lanes_zero.py::test_tl9_the_queue_survives_a_restart",
+        ),
+    ),
+    Mutant(
+        # `--machine @local` 을 분배 전용 서버에서도 받는다 — 409 대신 「machine @local is down
+        # — start rcm worker there」라는 엉뚱한 조언이 간다(TL2, P5 G7)
+        name="m5t-lanes-zero-machine-local-accepted",
+        path="src/remote_ci_monitor/server.py",
+        old="            if view.id == LOCAL_WORKER and not self._has_local_lanes():\n",
+        new="            if view.id == LOCAL_WORKER and False:\n",
+        tests=(
+            "tests/test_lanes_zero.py::"
+            "test_tl2_without_workers_a_job_waits_without_an_eta_and_at_local_is_409",
+        ),
+    ),
+    Mutant(
+        # 로컬 레인이 없어도 `@local` 의 프로브를 잰다 — 잰 보고가 있으면 `@local` 이 「받을 수
+        # 있다」로 보인다(TL8, P5 G7)
+        name="m5t-lanes-zero-local-probes-run",
+        path="src/remote_ci_monitor/capabilities.py",
+        old=(
+            "        if not self._has_local_lanes():\n"
+            "            return\n"
+            "        with self._measure_lock:\n"
+        ),
+        new="        with self._measure_lock:\n",
+        tests=("tests/test_lanes_zero.py::test_tl8_the_local_probes_do_not_run",),
+    ),
+    Mutant(
+        # 서버가 capacity 를 못 센(null) 답을 옛 서버처럼 읽어 행을 빼다 — 분배 전용 서버에서
+        # 갈 곳을 셀 수 없는데 `rcm check` 가 0 으로 끝난다(batch 2 항목 1, PLAN.md 「rcm check」)
+        name="m5t-lanes-zero-capacity-null-hidden",
+        path="src/remote_ci_monitor/cli.py",
+        old=(
+            '        return ("capacity", False if health.get("lanes") == 0 else None, '
+            "CAPACITY_UNKNOWN_TEXT)\n"
+        ),
+        new="        return None\n",
+        tests=(
+            "tests/test_lanes_zero.py::"
+            "test_tl3_rcm_check_draws_capacity_unknown_when_the_server_could_not_count",
+        ),
+    ),
+    Mutant(
+        # 분배 전용 서버의 `@local` 다시 점검이 MachineDown 으로 떨어진다 — 「start rcm worker
+        # there」라는 엉뚱한 조언(batch 2 항목 6 · P5 G6)
+        name="m5t-lanes-zero-recheck-local-down",
+        path="src/remote_ci_monitor/capabilities.py",
+        old=(
+            "        if view.id == LOCAL and not self._has_local_lanes():\n"
+            "            raise NoLocalLanes(view.id)\n"
+        ),
+        new="",
+        tests=(
+            "tests/test_lanes_zero.py::"
+            "test_tl7_recheck_on_at_local_says_this_server_has_no_local_lanes",
+        ),
+    ),
+    Mutant(
+        # `rcm check` 의 machines 행이 레인 없는 `@local` 을 센다 — 워커가 없는데 「1 machine」
+        # (batch 2 항목 6)
+        name="m5t-lanes-zero-machines-row-counts-local",
+        path="src/remote_ci_monitor/cli.py",
+        old=(
+            "    machines = [m for m in machines "
+            'if not (m.get("kind") == "local" and m.get("lanes") == 0)]\n'
+        ),
+        new="",
+        tests=(
+            "tests/test_lanes_zero.py::test_tl7_rcm_check_does_not_count_at_local_as_a_machine",
+        ),
+    ),
+    Mutant(
+        # 갈 곳 잃은 잡이 이유 메모 없이 돌아간다 — 화면이 「no capable machine · unknown」(P5 G5)
+        name="m5t-lanes-zero-no-local-lanes-note-dropped",
+        path="src/remote_ci_monitor/capabilities.py",
+        old="                if local is not None and not self._has_local_lanes():\n",
+        new="                if False:\n",
+        tests=("tests/test_lanes_zero.py::test_tl15_a_job_with_nowhere_to_go_says_no_local_lanes",),
+    ),
+    Mutant(
+        # 꼴이 깨진 capacity(문자열 · 빠진 키 · total 0 · reachable > total)를 옛 서버처럼 읽어
+        # 행을 빼다 — 분배 전용 서버의 `rcm check` 가 0 으로 끝난다(batch 3 항목 1, fail-open)
+        name="m5t-lanes-zero-capacity-malformed-hidden",
+        path="src/remote_ci_monitor/cli.py",
+        old='        return ("capacity", unknown_grade, CAPACITY_UNKNOWN_TEXT)\n',
+        new="        return None\n",
+        tests=(
+            "tests/test_lanes_zero.py::"
+            "test_tl3_rcm_check_fails_on_a_malformed_capacity_from_a_dispatch_only_server",
+            "tests/test_lanes_zero.py::test_tl3_a_malformed_capacity_draws_the_same_unknown_row_as_null",
+        ),
+    ),
+    Mutant(
+        # `/api/health` 가 불릴 때마다 같은 capacity 예외를 다시 남긴다 — `last_error` 의 다른
+        # 오류를 덮고 로그가 찬다(batch 3 항목 2)
+        name="m5t-lanes-zero-capacity-error-every-call",
+        path="src/remote_ci_monitor/server.py",
+        old="            if fresh:\n                self.record_error(err[0], detail=err[1])\n",
+        new="            if True:\n                self.record_error(err[0], detail=err[1])\n",
+        tests=(
+            "tests/test_lanes_zero.py::"
+            "test_tl3_a_capacity_error_is_logged_once_not_on_every_health_call",
         ),
     ),
 )

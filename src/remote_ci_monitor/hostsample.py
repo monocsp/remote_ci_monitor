@@ -27,6 +27,7 @@ from remote_ci_monitor.core.hostparse import (
     mac_memory,
     parse_ioreg_gpu,
     parse_nvidia_smi,
+    parse_os_release,
     parse_proc_loadavg,
     parse_proc_meminfo,
     parse_proc_stat_cpu,
@@ -35,9 +36,11 @@ from remote_ci_monitor.core.hostparse import (
     parse_top_cpu,
     parse_top_load,
     parse_vm_stat,
+    real_arch,
 )
 from remote_ci_monitor.core.model import HostSample
 from remote_ci_monitor.core.status import iso
+from remote_ci_monitor.runner import tool_blocked
 
 COMMAND_TIMEOUT = 8.0
 PROC_STAT_DELTA_SECONDS = 1.0
@@ -101,6 +104,111 @@ def hardware_id() -> str | None:
     return None
 
 
+# ── 호스트 사실 (M5t-a 결정 246 · `rcm doctor`) ──────────────────────────────
+
+#: doctor 가 호스트 사실을 재려고 부르는 명령. **코어에 드는 도구 이름은 이 목록과 아래 패키지
+#: 관리자뿐이다**(PLAN 이식성, 명세 §4.5 「툴체인 카탈로그」). 프리셋이 쓰는 도구의 이름은 서버
+#: 설정 템플릿의 주석에만 둔다.
+HOST_FACT_COMMANDS: dict[str, list[str]] = {
+    "os_version": ["sw_vers", "-productVersion"],
+    "machine": ["uname", "-m"],
+    "arm64": ["sysctl", "-n", "hw.optional.arm64"],
+    "translated": ["sysctl", "-n", "sysctl.proc_translated"],
+    "virt": ["systemd-detect-virt", "-c"],
+}
+#: 있는지만 본다(실행하지 않는다) — 설치 안내를 고르는 데 쓴다
+PACKAGE_MANAGERS = ("brew", "apt-get", "dnf", "pacman")
+#: 호스트 사실 명령에만 거는 로케일. 서버 · 워커의 `[[probes]]` 에는 걸지 않는다(TD54)
+HOST_FACT_ENV = {"LANG": "C", "LC_ALL": "C"}
+CONTAINER_MARKERS = ("/.dockerenv", "/run/.containerenv")
+#: 0 이 아닌 종료에도 stdout 이 답인 명령 — `systemd-detect-virt` 는 컨테이너가 아니면 `none` 을
+#: 찍고 1 로 끝난다. 그 답을 버리면 보통 리눅스 머신이 모두 「모름」이 된다
+ANSWER_ON_FAILURE = frozenset({"systemd-detect-virt"})
+#: 패키지 관리자를 찾는 PATH — 서비스 PATH 를 주지 않았을 때
+FACT_PATH = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+
+
+def _fact_command(argv: list[str], env: dict[str, str]) -> str | None:
+    """호스트 사실 명령 하나의 stdout. 없거나 실패하거나 멈추면 None."""
+    try:
+        proc = subprocess.run(
+            argv,
+            capture_output=True,
+            text=True,
+            timeout=COMMAND_TIMEOUT,
+            env=env,
+            stdin=subprocess.DEVNULL,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if proc.returncode == 0 or (argv[0] in ANSWER_ON_FAILURE and proc.stdout.strip()):
+        return proc.stdout
+    return None
+
+
+def host_facts(
+    *,
+    runner: Callable[[list[str], dict[str, str]], str | None] | None = None,
+    platform: str = sys.platform,
+    exists: Callable[[str], bool] = os.path.exists,
+    read_file: Callable[[str], str | None] | None = None,
+    euid: int | None = None,
+    which: Callable[[str], str | None] | None = None,
+    python: str | None = None,
+    path: str | None = None,
+) -> dict[str, Any]:
+    """OS 버전 · 실제 arch · Rosetta · 컨테이너 · root · 패키지 관리자 · Python(명세 §4.5).
+
+    명령은 `LANG=C` 로 돈다 — 로케일에 따라 바뀌는 출력을 읽지 않게. 실패한 칸은 None 이다.
+    Rosetta 와 컨테이너도 답을 못 얻으면 거짓이 아니라 None(모름)이다.
+    """
+    import platform as platform_mod
+
+    env = {"PATH": path or FACT_PATH, **HOST_FACT_ENV}
+    run = runner or _fact_command
+
+    def fact(key: str) -> str | None:
+        out = run(list(HOST_FACT_COMMANDS[key]), dict(env))
+        text = (out or "").strip()
+        return text or None
+
+    os_name = (
+        "darwin"
+        if platform.startswith("darwin")
+        else ("linux" if platform.startswith("linux") else platform)
+    )
+    machine = fact("machine")
+    os_like: str | None = None
+    rosetta: bool | None = None
+    container: bool | None = False
+    if os_name == "darwin":
+        release = fact("os_version")
+        arch, rosetta = real_arch(machine, fact("arm64"), fact("translated"))
+    else:
+        info = parse_os_release((read_file or _read_file)("/etc/os-release") or "")
+        release = " ".join(x for x in (info.get("ID"), info.get("VERSION_ID")) if x) or None
+        os_like = info.get("ID_LIKE") or None
+        arch = machine
+        container = any(exists(p) for p in CONTAINER_MARKERS)
+        if not container and os_name == "linux":
+            virt = fact("virt")
+            # 표지 파일이 없고 `systemd-detect-virt` 도 답하지 않으면 모른다(None)
+            container = None if virt is None else virt != "none"
+    find = which or (lambda name: shutil.which(name, path=env["PATH"]))
+    return {
+        "os": os_name,
+        "os_release": release,
+        "os_like": os_like,
+        "arch": arch,
+        "machine": machine,
+        "rosetta": rosetta,
+        "container": container,
+        "root": (os.geteuid() if euid is None else euid) == 0,
+        "package_manager": next((n for n in PACKAGE_MANAGERS if find(n)), None),
+        "python": python or platform_mod.python_version(),
+    }
+
+
 def run_probes(probes: Any, env: dict[str, str]) -> dict[str, Any]:
     """`[[probes]]` 를 **잡과 같은 환경**(서비스의 PATH)에서 돌린다 → 이름 → ProbeResult(설정 순서).
 
@@ -157,6 +265,8 @@ def _run_probe(probe: Any, env: dict[str, str]) -> Any:
         return normalize_probe_output(None, None, missing=True)
     if not os.path.isabs(exe):
         argv[0] = shutil.which(exe, path=path) or exe
+    if tool_blocked(argv[0]):  # CLT 없는 macOS 의 shim — 띄우면 설치 대화상자가 뜬다(결정 246)
+        return normalize_probe_output(None, None, missing=True)
     with _LIVE_LOCK:
         if _PROBES_CLOSED:  # 곧 exec 한다 — 띄우지 않는다
             return normalize_probe_output(None, None, timed_out=True)
