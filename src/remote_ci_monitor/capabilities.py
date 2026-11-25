@@ -45,6 +45,7 @@ from remote_ci_monitor.core.model import (
     PlacementNote,
     Preset,
 )
+from remote_ci_monitor.core.progress import clean_line
 from remote_ci_monitor.store import Claimant, MachineRow
 
 LOCAL = cap.LOCAL_WORKER
@@ -107,6 +108,45 @@ class _MachineView:
     report: CapabilityReport | None
     row: MachineRow | None
     lanes: int | None = None  # 로컬은 `[server] lanes`, 원격은 등록한 레인 수(`rcm machines` 의 칸)
+
+
+#: 워커가 등록 · 능력 보고 본문의 `host` 로 보내는 호스트 사실 — 이 키만 받는다(M5t-a §4.5). 서버는
+#: 메모리에만 두고 DB 에 넣지 않는다. 토큰 있는 `/api/machines` 응답에만 싣는다(TD31 · TD44)
+HOST_FACT_KEYS = (
+    "os",
+    "os_release",
+    "os_like",
+    "arch",
+    "rosetta",
+    "container",
+    "root",
+    "package_manager",
+    "python",
+)
+HOST_FACT_MAX = 64
+#: 참 · 거짓 · null 만 받는 칸 — 나머지는 문자열 · null 이다. 문자열 "false" 를 참으로 읽지 않게
+HOST_FACT_BOOLS = frozenset({"rosetta", "container", "root"})
+
+
+def clean_host_facts(raw: Any) -> dict[str, Any] | None:
+    """워커가 보낸 `host` → 허용 키만. `rosetta` · `container` · `root` 는 참 · 거짓만, 나머지는
+    문자열만 받고 `core/progress.clean_line` 의 규칙으로 제어문자 · bidi 제어를 지워 64자로
+    자른다. 모양이 틀린 값은 None(모름)이다. 객체가 아니면 None. 값은 `rcm machines` 의 터미널과
+    웹에 그대로 나간다."""
+    if not isinstance(raw, dict):
+        return None
+    out: dict[str, Any] = {}
+    for key in HOST_FACT_KEYS:
+        value = raw.get(key)
+        if key in HOST_FACT_BOOLS:
+            out[key] = value if isinstance(value, bool) else None
+        elif isinstance(value, str):
+            # 제어문자에 더해 줄 · 문단 구분자와 bidi 제어도 지운다 — `rcm machines` 의 터미널과
+            # 웹에서 줄을 나누거나 글자 순서를 뒤집는다(검증 사이클 2 의 1라운드 LOW)
+            out[key] = clean_line(value)[:HOST_FACT_MAX] or None
+        else:
+            out[key] = None
+    return out
 
 
 def _bare_view(worker: str, pool: str = DEFAULT_POOL) -> _MachineView:
@@ -256,6 +296,9 @@ class CapabilitiesMixin:
         # 읽는다 — 상태 요청마다 워커 수만큼 질의하지 않게)
         self._known_hosts: dict[str, str] | None = None
         self._check_errors: dict[tuple[str, str], str] = {}
+        # 워커 → 등록 · 능력 보고가 보낸 호스트 사실(M5t-a §4.5). 메모리에만 — 재시작하면 다음
+        # 보고가 다시 채운다(TD42)
+        self._host_facts: dict[str, dict[str, Any]] = {}
         self._cap_thread: threading.Thread | None = None
         # 로컬 측정은 한 번에 하나 — 기동 · reload(뒤에서) · 주기가 겹쳐도 앞 지문을 같이 읽지 않게
         self._measure_lock = threading.Lock()
@@ -272,7 +315,17 @@ class CapabilitiesMixin:
             self._reloads += 1
 
     def worker_spec(self) -> dict[str, Any]:
-        """`GET /worker/spec` — 프로브와 프리셋 요구 사항. claim payload 와 같은 범위만 싣는다."""
+        """`GET /worker/spec` — 프로브와 프리셋 요구 사항. claim payload 와 같은 범위만 싣는다.
+
+        M5t-a(§4.5 「대상 프리셋」 · TD15 · TD51)가 프리셋마다 `pool` · `pools` · `placement` ·
+        `checks` 와 `source_modes` · `repo`(git_ref 프리셋의 git 요구와 `repo_missing`, 위임 결정
+        6)를, 최상위에 `tools`(`[[tools]]`)를 더했다. 더하기만 하므로 옛 워커는 무시한다. doctor 는
+        `placement` 가 없는 명세를 옛 서버로 본다(TD5) — 키는 모든 항목에 싣는다.
+
+        `unreachable_checks` 는 그 프리셋의 `checks` 가운데 원격 워커에서 돌 수 없는 점검과 이유
+        코드다(TO18, 위임 결정 2). 서버의 후보 함수(`check_reachable`)가 채운다. 목록에 무엇이
+        빠졌는지로 짐작하게 두지 않는다 — 명세를 풀로 거르게 되면(M5t-c) 빠진 것의 뜻이 바뀐다."""
+        remote = _bare_view("")
         return {
             "generation": self.generation,
             "probe_interval_seconds": self.config.server.probe_interval_seconds,
@@ -288,9 +341,24 @@ class CapabilitiesMixin:
                     "requires": list(p.requires),
                     "env_passthrough": list(p.env_passthrough),
                     "env": dict(p.env),
+                    "pool": p.pool,
+                    "pools": list(p.pools),
+                    "placement": "any-capable" if p.placement == PLACEMENT_CAPABLE else "pool",
+                    "checks": list(p.checks),
+                    "source_modes": list(p.source_modes),
+                    "repo": p.repo or None,
+                    "unreachable_checks": [
+                        {"name": c, "code": CODE_CHECK_LOCAL_ONLY}
+                        for c in p.checks
+                        if not self.check_reachable(remote, c)
+                    ],
                 }
                 for p in self.config.presets
-                if self.machines_for(p, [_bare_view("")])
+                if self.machines_for(p, [remote])
+            ],
+            "tools": [
+                {"name": t.name, "docs": t.docs, "install": dict(t.install)}
+                for t in self.config.tools
             ],
         }
 
@@ -356,6 +424,21 @@ class CapabilitiesMixin:
             display_name=self.local_display_name(),
         )
 
+    def remember_host(self, worker: str, raw: Any, *, replace: bool = False) -> None:
+        """워커가 보낸 호스트 사실을 메모리에 둔다. `replace` 면(등록 = 새 프로세스) 안 보낸 것도
+        「모름」으로 바꾼다 — 옛 워커의 등록이 앞 프로세스의 사실을 물려받지 않게."""
+        facts = clean_host_facts(raw)
+        with self._cap_lock:
+            if facts is not None:
+                self._host_facts[worker] = facts
+            elif replace:
+                self._host_facts.pop(worker, None)
+
+    def host_facts_of(self, worker: str) -> dict[str, Any] | None:
+        with self._cap_lock:
+            facts = self._host_facts.get(worker)
+        return dict(facts) if facts is not None else None
+
     def receive_capabilities(self, worker: str, host_name: str | None, body: Any) -> None:
         """`POST /worker/capabilities` — 거절은 `CapabilityError`."""
         preset_names = {p.name for p in self.config.presets}
@@ -373,6 +456,8 @@ class CapabilitiesMixin:
             ),
             display_name=host_name or worker,
         )
+        if isinstance(body, dict) and "host" in body:
+            self.remember_host(worker, body["host"])
 
     def _accept_report(self, worker: str, build: Any, *, display_name: str) -> None:
         row = self.store.get_machine(worker)
@@ -703,7 +788,11 @@ class CapabilitiesMixin:
             )
         return out
 
-    def machine_json(self, view: _MachineView, now: datetime) -> dict[str, Any]:
+    def machine_json(
+        self, view: _MachineView, now: datetime, *, authenticated: bool = False
+    ) -> dict[str, Any]:
+        """머신 하나. `authenticated`(토큰이 있는 요청)일 때만, 그리고 그 워커가 보낸 적이 있을
+        때만 `host` 를 싣는다 — 익명 읽기의 범위를 넓히지 않는다(TD31 · TD44)."""
         report = view.report
         row = view.row
         previous = probes_from_json(row.previous_json) if row else None
@@ -743,7 +832,7 @@ class CapabilitiesMixin:
             accept_any = bool(self.config.server.local_accept_any)
         else:
             accept_any = report.accept_any if report else (row.accept_any if row else True)
-        return {
+        doc: dict[str, Any] = {
             "id": view.id,
             "display_name": view.display_name,
             "kind": view.kind,
@@ -759,12 +848,19 @@ class CapabilitiesMixin:
             },
             "checks": self._check_rows(view, records),
         }
+        host = self.host_facts_of(view.id) if authenticated else None
+        if host is not None:
+            doc["host"] = host
+        return doc
 
-    def machines_doc(self) -> dict[str, Any]:
+    def machines_doc(self, *, authenticated: bool = False) -> dict[str, Any]:
         now = self.now_fn()
         return {
             "generation": self.generation,
-            "machines": [self.machine_json(v, now) for v in self.machine_views(now)],
+            "machines": [
+                self.machine_json(v, now, authenticated=authenticated)
+                for v in self.machine_views(now)
+            ],
         }
 
     def machines_summary(self, now: datetime) -> list[dict[str, Any]]:
@@ -1229,6 +1325,30 @@ def _record_holds(state: str, record: cap.CheckRecord | None) -> bool:
         return True
     claimed = record is not None and record.job_state in _CLAIMED_JOB_STATES
     return state == cap.CHECK_RUNNING and claimed
+
+
+class _ConfigOnly:
+    """후보 함수의 정적인 절반을 설정만 가지고 부르는 자리 — App 없이 판정하는 `rcm doctor` 가
+    쓴다(docs/m5t-workplan.md §13 6-A-U1). `machines_for` · `_local_gap` · `check_reachable` 은
+    `self.config` 만 본다. 메서드를 그대로 불러 같은 규칙을 다시 쓰지 않는다."""
+
+    def __init__(self, config: Any):
+        self.config = config
+
+    def machines_for(self, *args: Any, **kwargs: Any) -> list[_MachineView]:
+        return CapabilitiesMixin.machines_for(self, *args, **kwargs)  # type: ignore[arg-type]
+
+    def _local_gap(self, *args: Any, **kwargs: Any) -> str | None:
+        return CapabilitiesMixin._local_gap(self, *args, **kwargs)  # type: ignore[arg-type]
+
+    def check_reachable(self, *args: Any, **kwargs: Any) -> bool:
+        return CapabilitiesMixin.check_reachable(self, *args, **kwargs)  # type: ignore[arg-type]
+
+
+def remote_can_take(config: Any, preset: Preset) -> bool:
+    """원격 머신이 그 프리셋의 후보가 될 수 있나 — 서버의 후보 함수 그대로(결정 254). 거짓이면
+    그 프리셋은 로컬 레인에서만 돈다(coordinator 진단의 「로컬 레인 필요」, TO6)."""
+    return bool(_ConfigOnly(config).machines_for(preset, [_bare_view("")]))
 
 
 def _local_only_head(preset: Preset) -> str:

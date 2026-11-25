@@ -77,6 +77,7 @@ from remote_ci_monitor.config import (
     server_base_url,
     supersede_skipped_presets,
     supersede_warnings,
+    tool_warnings,
 )
 from remote_ci_monitor.core import admission, jobenv, outcome
 from remote_ci_monitor.core import artifacts as art
@@ -610,7 +611,7 @@ class App(RemoteWorkersMixin, CapabilitiesMixin, ShelfAppMixin):
         self._driver_status_guard = threading.Lock()
         # 잡이 보게 될 환경을 **서버의 `os.environ` 으로** 잰 것(core/jobenv.py). 기동 때 한 번
         # 재고 health 가 그대로 싣는다 — `shutil.which` 를 요청마다 돌리지는 않는다.
-        self.preset_env: dict[str, dict[str, list[str]]] = {}
+        self.preset_env: dict[str, dict[str, Any]] = {}
         self._remote_init()
         self._capabilities_init()
         self._shelf_init()  # 보관함(M5p) — 전용 전송 슬롯 · zip hold · manifest 캐시
@@ -735,6 +736,8 @@ class App(RemoteWorkersMixin, CapabilitiesMixin, ShelfAppMixin):
         for warning in admission_warnings(s, self.config.host):
             self.log(warning)
         for warning in supersede_warnings(self.config):
+            self.log(warning)
+        for warning in tool_warnings(self.config):  # 아무 데도 안 나올 `[[tools]]` 안내(TD9)
             self.log(warning)
         self.responder = None
         if advertise_enabled(self.config.server):
@@ -5190,6 +5193,8 @@ class App(RemoteWorkersMixin, CapabilitiesMixin, ShelfAppMixin):
         self.log(f"reload: {reload_summary(changed)} · from {fresh.path}")
         for warning in supersede_warnings(fresh):
             self.log(warning)
+        for warning in tool_warnings(fresh):
+            self.log(warning)
         return {"reloaded": True, **files, **changed}
 
     def pause(self, token: TokenInfo) -> dict[str, Any]:
@@ -5340,10 +5345,11 @@ class App(RemoteWorkersMixin, CapabilitiesMixin, ShelfAppMixin):
         """
         import os
 
+        from remote_ci_monitor.core.doctor import preset_env_digest
         from remote_ci_monitor.runner import missing_tools, public_tool_name
 
         env_source = os.environ if environ is None else environ
-        measured: dict[str, dict[str, list[str]]] = {}
+        measured: dict[str, dict[str, Any]] = {}
         for preset in self.config.presets:
             if not preset.requires and not preset.env_passthrough:
                 continue
@@ -5358,6 +5364,9 @@ class App(RemoteWorkersMixin, CapabilitiesMixin, ShelfAppMixin):
                 "missing_tools": [
                     public_tool_name(name) for name in missing_tools(tuple(preset.requires), env)
                 ],
+                # 어느 정의를 쟀는지(M5t-a, P6 GAP E4) — `rcm doctor` 가 디스크의 설정과 견준다.
+                # 지문만 싣는다: 선언 경로 · env 값은 나가지 않는다
+                "digest": preset_env_digest(preset.requires, preset.env_passthrough, preset.env),
             }
         self.preset_env = measured
 
@@ -5815,7 +5824,12 @@ class Handler(ShelfHandlerMixin, BaseHTTPRequestHandler):
             self._only(method, "GET")
             self._read_only_ok()
             self._no_worker_token()
-            self._send_json(200, self.app.machines_doc())
+            # 새 호스트 사실은 토큰이 있는 응답에만(Bearer 나 basic 의 자격, M5t-a TD31 · TD44).
+            # 워커 토큰은 `_no_worker_token` 이 Bearer 만 막으므로 Basic 으로 올 수 있다 — 사람의
+            # 읽기가 아니므로 싣지 않는다(P3 2라운드 검증자 2 #2)
+            reader = self._read_token()
+            authenticated = reader is not None and reader.kind != TOKEN_WORKER
+            self._send_json(200, self.app.machines_doc(authenticated=authenticated))
             return
         m = _RECHECK_RE.match(path)
         if m:

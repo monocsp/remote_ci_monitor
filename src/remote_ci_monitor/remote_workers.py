@@ -421,6 +421,8 @@ class RemoteWorkersMixin:
         # 등록 = 새 프로세스. 옛 프로세스의 능력 보고는 이 프로세스의 것이 아니다 — 새로 잴 때까지
         # 이 워커는 「보고 없음」이고 any-capable 잡을 안 받는다(M5n 결정 91, fail-closed)
         self.forget_report(token.name)  # type: ignore[attr-defined]
+        # 호스트 사실(M5t-a §4.5) — 메모리에만 둔다. 안 보낸 옛 워커면 「모름」으로 바꾼다
+        self.remember_host(token.name, body.get("host"), replace=True)  # type: ignore[attr-defined]
         self._mark_dirty()
         self._publish_server()
         return {
