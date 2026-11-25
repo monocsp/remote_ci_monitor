@@ -251,9 +251,57 @@ def test_td6_rosetta_reports_the_real_arch():
     native = {
         ("sw_vers", "-productVersion"): "15.6\n",
         ("uname", "-m"): "x86_64\n",
+        ("sysctl", "-n", "hw.optional.arm64"): "0\n",  # Intel Mac 의 답
     }
     intel, _ = mac_facts(native)
     assert intel["arch"] == "x86_64" and intel["rosetta"] is False, intel
+
+
+def test_rosetta_is_unknown_when_both_sysctl_answers_fail():
+    """`sysctl` 두 질문이 모두 실패하면(서비스 PATH 에 `/usr/sbin` 이 없다) Rosetta 를 모른다 —
+    거짓으로 적지 않는다(P3 1라운드 검증자 1 #5). `uname -m` 이 arm64 면 번역 중일 수 없다."""
+    unknown, _ = mac_facts({("uname", "-m"): "x86_64\n"})
+    assert unknown["rosetta"] is None and unknown["arch"] == "x86_64", unknown
+    native, _ = mac_facts({("uname", "-m"): "arm64\n"})
+    assert native["rosetta"] is False and native["arch"] == "arm64", native
+
+
+def linux_facts(outputs: dict[tuple[str, ...], str], *, marker: bool = False) -> dict[str, Any]:
+    return hostsample.host_facts(
+        runner=FakeRunner(outputs),
+        platform="linux",
+        exists=lambda p: marker and p == "/.dockerenv",
+        read_file=lambda _p: "ID=debian\nVERSION_ID=12\n",
+        euid=1000,
+        which=lambda _n: None,
+        python="3.12.3",
+    )
+
+
+def test_container_is_unknown_without_markers_or_an_answer():
+    """표지 파일이 없고 `systemd-detect-virt` 도 답하지 않으면 컨테이너인지 모른다(null).
+    `none` 이라는 답은 「컨테이너 아님」이다(P3 1라운드 검증자 1 #5)."""
+    virt = ("systemd-detect-virt", "-c")
+    assert linux_facts({})["container"] is None
+    assert linux_facts({virt: "none\n"})["container"] is False
+    assert linux_facts({virt: "docker\n"})["container"] is True
+    assert linux_facts({}, marker=True)["container"] is True
+
+
+def test_systemd_detect_virt_says_none_with_exit_1_and_that_is_an_answer(tmp_path: Path):
+    """`systemd-detect-virt -c` 는 컨테이너가 아니면 `none` 을 찍고 1 로 끝난다. 그 답을 버리면
+    보통 리눅스 머신이 모두 「모름」이 된다."""
+    d = tmp_path / "bin"
+    d.mkdir()
+    tool = d / "systemd-detect-virt"
+    tool.write_text("#!/bin/sh\necho none\nexit 1\n")
+    tool.chmod(0o755)
+    other = d / "uname"
+    other.write_text("#!/bin/sh\necho nope\nexit 1\n")
+    other.chmod(0o755)
+    env = {"PATH": str(d)}
+    assert hostsample._fact_command(["systemd-detect-virt", "-c"], env) == "none\n"
+    assert hostsample._fact_command(["uname", "-m"], env) is None
 
 
 def test_td54_host_fact_commands_run_with_lang_c():

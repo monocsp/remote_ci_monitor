@@ -427,13 +427,21 @@ def parse_os_release(text: str) -> dict[str, str]:
 
 def real_arch(
     machine: str | None, arm64: str | None, translated: str | None
-) -> tuple[str | None, bool]:
+) -> tuple[str | None, bool | None]:
     """(실제 arch, Rosetta 아래인가). Rosetta 아래서는 `uname -m` 이 x86_64 라서
-    `sysctl.proc_translated` 를 본다 — 1 이면 이 프로세스는 번역 중이고 기계는 arm64 다."""
-    if (translated or "").strip() == "1":
+    `sysctl.proc_translated` 를 본다 — 1 이면 이 프로세스는 번역 중이고 기계는 arm64 다.
+
+    Rosetta 를 모르면 None 이다 — `sysctl` 두 질문이 모두 답하지 않았고(서비스 PATH 에
+    `/usr/sbin` 이 없다) `uname -m` 도 arm64 가 아닐 때. 거짓으로 적으면 번역 중인 프로세스를
+    x86_64 기계로 보인다."""
+    t = (translated or "").strip()
+    a = (arm64 or "").strip()
+    if t == "1":
         return "arm64", True
     m = (machine or "").strip() or None
-    if m == "x86_64" and (arm64 or "").strip() == "1":
+    if m == "x86_64" and a == "1":
         # 번역 중이 아닌데 arm64 기계라고 답했다 — 실제 arch 는 arm64 다
         return "arm64", False
-    return m, False
+    if t == "0" or a == "0" or m == "arm64":
+        return m, False
+    return m, None

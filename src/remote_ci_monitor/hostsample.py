@@ -121,6 +121,9 @@ PACKAGE_MANAGERS = ("brew", "apt-get", "dnf", "pacman")
 #: 호스트 사실 명령에만 거는 로케일. 서버 · 워커의 `[[probes]]` 에는 걸지 않는다(TD54)
 HOST_FACT_ENV = {"LANG": "C", "LC_ALL": "C"}
 CONTAINER_MARKERS = ("/.dockerenv", "/run/.containerenv")
+#: 0 이 아닌 종료에도 stdout 이 답인 명령 — `systemd-detect-virt` 는 컨테이너가 아니면 `none` 을
+#: 찍고 1 로 끝난다. 그 답을 버리면 보통 리눅스 머신이 모두 「모름」이 된다
+ANSWER_ON_FAILURE = frozenset({"systemd-detect-virt"})
 #: 패키지 관리자를 찾는 PATH — 서비스 PATH 를 주지 않았을 때
 FACT_PATH = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
 
@@ -138,7 +141,9 @@ def _fact_command(argv: list[str], env: dict[str, str]) -> str | None:
         )
     except (OSError, subprocess.TimeoutExpired):
         return None
-    return proc.stdout if proc.returncode == 0 else None
+    if proc.returncode == 0 or (argv[0] in ANSWER_ON_FAILURE and proc.stdout.strip()):
+        return proc.stdout
+    return None
 
 
 def host_facts(
@@ -155,6 +160,7 @@ def host_facts(
     """OS 버전 · 실제 arch · Rosetta · 컨테이너 · root · 패키지 관리자 · Python(명세 §4.5).
 
     명령은 `LANG=C` 로 돈다 — 로케일에 따라 바뀌는 출력을 읽지 않게. 실패한 칸은 None 이다.
+    Rosetta 와 컨테이너도 답을 못 얻으면 거짓이 아니라 None(모름)이다.
     """
     import platform as platform_mod
 
@@ -174,7 +180,7 @@ def host_facts(
     machine = fact("machine")
     os_like: str | None = None
     rosetta: bool | None = None
-    container = False
+    container: bool | None = False
     if os_name == "darwin":
         release = fact("os_version")
         arch, rosetta = real_arch(machine, fact("arm64"), fact("translated"))
@@ -186,7 +192,8 @@ def host_facts(
         container = any(exists(p) for p in CONTAINER_MARKERS)
         if not container and os_name == "linux":
             virt = fact("virt")
-            container = virt not in (None, "none")
+            # 표지 파일이 없고 `systemd-detect-virt` 도 답하지 않으면 모른다(None)
+            container = None if virt is None else virt != "none"
     find = which or (lambda name: shutil.which(name, path=env["PATH"]))
     return {
         "os": os_name,
