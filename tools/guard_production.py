@@ -796,6 +796,10 @@ def decide(
 # ── 발견 (I/O) ───────────────────────────────────────────────────────────────
 
 
+def unit_name(label: str) -> str:
+    return ""
+
+
 def _venv_candidates() -> list[Path]:
     """서비스 venv 후보를 순서대로: 문서의 자리 → 설치된 서비스 유닛이 적은 `rcm` → PATH 의
     `rcm`·`remote-ci-monitor` 전부. 심링크(`~/.local/bin/rcm`)는 실제 파일로 푼다."""
