@@ -1646,7 +1646,10 @@ to start, so upgrade every server that reads the preset first, `include` files i
 **Checks.** A `local_only` check preset runs only on `@local`. On a remote worker, a preset that
 needs it shows `check_local_only`, the check's row in `rcm machines` shows `local_only` and asks
 for no recheck, the sweeper does not submit it there, and `rcm recheck <remote> <check>` is 409.
-`rcm recheck <remote>` without names skips that check with `error_code: local_only`.
+`rcm recheck <remote>` without names submits the other checks and answers 200; the skipped one is
+listed apart from `jobs`, as `skipped: [{"preset": "<check>", "code": "local_only"}]`, and is not a
+failure. A check that already passed on a remote worker before the mark was added keeps counting
+there until that machine's fingerprint changes; after that it cannot be run there again.
 
 ### Concurrency groups across machines: `concurrency_scope`
 
