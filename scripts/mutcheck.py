@@ -3440,6 +3440,24 @@ MUTANTS = (
             "test_tr20_the_plain_shapes_reach_the_resolver_and_pass",
         ),
     ),
+    # ── M5t-a PR4 P5 GAP (batch 7) — setup 의 출력 · 조회 · 스캔 ──
+    Mutant(
+        # launchctl 의 0 아닌 종료를 모두 「올라가지 않음」으로 읽는다 — 도메인이 없는 머신에서
+        # 「모름」 경고 없이 시작 명령을 찍는다(P5 A-E2)
+        name="setup-launchd-unknown-read-as-absent",
+        path="src/remote_ci_monitor/setup.py",
+        old="        return False if LAUNCHD_NO_SERVICE in text else None\n",
+        new="        return False\n",
+        tests=("tests/test_setup.py::test_s7_launchd_only_a_missing_service_is_not_loaded",),
+    ),
+    Mutant(
+        # systemctl 의 버스 실패(1)도 「올라가지 않음」으로 읽는다(P5 A-E2)
+        name="setup-systemd-unknown-read-as-absent",
+        path="src/remote_ci_monitor/setup.py",
+        old="    return False if active is not None and active[0] == SYSTEMD_INACTIVE else None\n",
+        new="    return False\n",
+        tests=("tests/test_setup.py::test_s7_systemd_only_an_inactive_unit_is_not_loaded",),
+    ),
     # ── M5t-a PR3 — 분배 전용 코디네이터 `lanes = 0` (docs/m5t-workplan.md §7 변이 검사) ──
     Mutant(
         # `lanes = 0` 에서 `@local` 을 살아 있다고 본다 — 레인이 없는 서버의 머신 목록이 로컬

@@ -120,37 +120,56 @@ def port_in_use(host: str, port: int) -> bool | None:
     return False
 
 
-def _query(argv: list[str]) -> int | None:
+def _query(argv: list[str]) -> tuple[int, str] | None:
+    """(종료 코드, stdout + stderr). 실행하지 못했거나 시한을 넘기면 None."""
     try:
         done = subprocess.run(
             argv,
             stdin=subprocess.DEVNULL,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
+            capture_output=True,
+            text=True,
+            errors="replace",
             timeout=QUERY_TIMEOUT,
             check=False,
         )
     except (OSError, subprocess.SubprocessError):
         return None
-    return done.returncode
+    return done.returncode, (done.stdout or "") + (done.stderr or "")
+
+
+#: `launchctl print` 이 그 라벨이 없다고 답하는 말 — 이 Mac(macOS 26)에서 잰 값은 종료 113 과
+#: `Could not find service "<label>" in domain for user gui: <uid>` 다. 도메인이 없으면 112 와
+#: `Could not find domain …`, 권한이 없으면 1 과 `Could not print domain …` 이다 — 그쪽은 모른다
+LAUNCHD_NO_SERVICE = "Could not find service"
+#: `systemctl is-active` 의 「active 아님」 — systemctl(1) 「Exit status」 표의 3(LSB 의 「program
+#: is not running」). 버스에 닿지 못하면(`Failed to connect to bus`) 1 이다 — 그쪽은 모른다
+SYSTEMD_INACTIVE = 3
 
 
 def service_loaded(manager: str, label: str) -> bool | None:
-    """같은 라벨이 이미 로드돼 있나 — 읽기 전용 조회만 한다(TR36). 모르면 None."""
+    """같은 라벨이 이미 로드돼 있나 — 읽기 전용 조회만 한다(TR36). 0 아닌 종료가 모두
+    「없음」은 아니다(P5 A-E2): 서비스 관리자가 「그런 서비스는 없다」고 답한 것만 False 이고,
+    도메인 · 버스에 닿지 못한 것은 모른다(None)."""
     if manager == core.LAUNCHD:
         exe = shutil.which("launchctl")
         if exe is None:
             return None
-        code = _query([exe, "print", f"gui/{os.getuid()}/{label}"])
-        return None if code is None else code == 0
+        answer = _query([exe, "print", f"gui/{os.getuid()}/{label}"])
+        if answer is None:
+            return None
+        code, text = answer
+        if code == 0:
+            return True
+        return False if LAUNCHD_NO_SERVICE in text else None
     exe = shutil.which("systemctl")
     if exe is None:
         return None
     unit = core.unit_name(label)
     answers = [_query([exe, "--user", word, unit]) for word in ("is-active", "is-enabled")]
-    if any(code == 0 for code in answers):
+    if any(answer is not None and answer[0] == 0 for answer in answers):
         return True
-    return None if all(code is None for code in answers) else False
+    active = answers[0]
+    return False if active is not None and active[0] == SYSTEMD_INACTIVE else None
 
 
 def host_facts() -> dict[str, Any]:
@@ -730,10 +749,12 @@ def _service(args: argparse.Namespace, ask: _Ask | None, world: World, plan: Pla
             f"a service labelled {label} is already loaded — setup leaves it alone; the copy "
             "below does not replace it (pass --label to set up another one)"
         )
-    elif loaded is None:  # 서비스 관리자가 답하지 않았다(P3 v1-5)
+    elif loaded is None:  # 서비스 관리자가 답하지 않았다(P3 v1-5 · P5 A-E2)
+        tool = "launchctl" if manager == core.LAUNCHD else "systemctl --user"
         plan.warnings.append(
-            f"could not tell whether a service labelled {label} is already loaded — "
-            f"{'launchctl' if manager == core.LAUNCHD else 'systemctl'} did not answer"
+            f"could not tell whether a service labelled {label} is already loaded — {tool} "
+            "did not answer for this user; the start command printed below may fail on this "
+            "machine (no user session or service manager to reach)"
         )
 
 

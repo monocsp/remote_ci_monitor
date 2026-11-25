@@ -675,17 +675,23 @@ def test_tr36_the_copy_command_never_overwrites_and_bootstrap_waits_for_an_equal
         assert start.startswith(f"cmp -s {staged} {installed} && ")
 
 
-def _stub(bin_dir: Path, name: str, code: int, log: Path) -> None:
+def _stub(bin_dir: Path, name: str, code: int, log: Path, say: str = "") -> None:
     bin_dir.mkdir(exist_ok=True)
     stub = bin_dir / name
-    stub.write_text(f'#!/bin/sh\necho "$@" >> {log}\nexit {code}\n', encoding="utf-8")
+    said = f"echo '{say}' >&2\n" if say else ""
+    stub.write_text(f'#!/bin/sh\necho "$@" >> {log}\n{said}exit {code}\n', encoding="utf-8")
     stub.chmod(0o755)
 
 
-@pytest.mark.parametrize(("code", "loaded"), [(0, True), (113, False)])
-def test_tr36_launchd_loaded_check_is_a_read_only_print(tmp_path, monkeypatch, code, loaded):
+#: `launchctl print` 이 없는 라벨에 답하는 말(이 Mac 에서 잰 값, 종료 113)
+NO_SERVICE = 'Could not find service "test.rcm.server" in domain for user gui: 501'
+
+
+@pytest.mark.parametrize(("code", "say", "loaded"), [(0, "", True), (113, NO_SERVICE, False)])
+def test_tr36_launchd_loaded_check_is_a_read_only_print(tmp_path, monkeypatch, code, say, loaded):
+    # P5 A-E2 에서 113 만으로는 「없음」이 아니게 됐다 — 「Could not find service」 를 같이 답한다
     log = tmp_path / "calls.log"
-    _stub(tmp_path / "bin", "launchctl", code, log)
+    _stub(tmp_path / "bin", "launchctl", code, log, say)
     monkeypatch.setenv("PATH", str(tmp_path / "bin"))
     assert setup.service_loaded("launchd", "test.rcm.server") is loaded
     assert log.read_text().splitlines() == [f"print gui/{os.getuid()}/test.rcm.server"]
@@ -1252,3 +1258,81 @@ def test_tr20_where_takes_the_user_lookup_and_the_case_rule_from_its_caller(tmp_
         assert found.config == Path("/users/bob/w.toml")
         assert (found.install_place is not None) is placed, fold
     assert seen == ["~bob/w.toml", "~bob/w.toml"]
+
+
+# ── P5 GAP (batch 7): 출력 순서 · 제거 · 서비스 관리자의 답 · 설정 스캔 · --bind ──
+
+WORKER_ARGV = [
+    "--role",
+    "worker",
+    "--server",
+    "http://10.0.0.5:18790",
+    "--pool",
+    "p1",
+    "--lanes",
+    "1",
+    "--label",
+    "test.rcm.worker",
+    "--yes",
+]
+
+
+def _lines(fake: Fake) -> list[str]:
+    return [line.strip() for line in fake.err.getvalue().splitlines()]
+
+
+def _at(lines: list[str], text: str) -> int:
+    found = [i for i, line in enumerate(lines) if line == text]
+    assert found, (text, lines)
+    return found[0]
+
+
+def _manager_stub(bin_dir: Path, name: str, script: str) -> None:
+    bin_dir.mkdir(exist_ok=True)
+    stub = bin_dir / name
+    stub.write_text("#!/bin/sh\n" + script, encoding="utf-8")
+    stub.chmod(0o755)
+
+
+@pytest.mark.parametrize(
+    ("script", "loaded"),
+    [
+        ("exit 0\n", True),
+        (
+            'echo "Could not find service \\"x\\" in domain for user gui: 501" >&2\nexit 113\n',
+            False,
+        ),
+        ('echo "Could not find domain for user gui: 99999" >&2\nexit 112\n', None),
+        ('echo "Could not print domain: 1: Operation not permitted" >&2\nexit 1\n', None),
+        ("exit 113\n", None),
+    ],
+)
+def test_s7_launchd_only_a_missing_service_is_not_loaded(tmp_path, monkeypatch, script, loaded):
+    # A-E2: launchctl print 의 「Could not find service」 만 「없음」이다. 도메인이 없거나 다른
+    # 실패는 「모름」이다. 이 Mac 에서 잰 값: 없는 라벨은 113 과 Could not find service, 없는
+    # 도메인은 112 와 Could not find domain
+    _manager_stub(tmp_path / "bin", "launchctl", script)
+    monkeypatch.setenv("PATH", str(tmp_path / "bin"))
+    assert setup.service_loaded("launchd", "test.rcm.server") is loaded
+
+
+@pytest.mark.parametrize(
+    ("active", "enabled", "loaded"),
+    [(0, 1, True), (3, 0, True), (3, 1, False), (1, 1, None), (4, 1, None)],
+)
+def test_s7_systemd_only_an_inactive_unit_is_not_loaded(
+    tmp_path, monkeypatch, active, enabled, loaded
+):
+    # systemctl is-active 의 3 은 「active 아님」(systemctl(1) Exit status), 1 은 「Failed to
+    # connect to bus」 같은 실패다 — 모름
+    script = f'case "$2" in is-active) exit {active};; *) exit {enabled};; esac\n'
+    _manager_stub(tmp_path / "bin", "systemctl", script)
+    monkeypatch.setenv("PATH", str(tmp_path / "bin"))
+    assert setup.service_loaded("systemd", "test.rcm.server") is loaded
+
+
+def test_s7_an_unknown_answer_warns_that_the_start_may_fail(cfg, tmp_path):
+    fake = Fake(loaded=None)
+    assert go(fake, *coordinator_args(tmp_path / "data")) == 0
+    err = fake.err.getvalue()
+    assert "could not tell" in err and "start command" in err and "may fail" in err
