@@ -489,6 +489,23 @@ def test_tr20_the_net_lets_plain_setup_help_and_unrelated_commands_through():
     assert judge(f"sudo -u op rcm {PROD_SETUP}", prod=guard.Production()) is None
 
 
+@pytest.mark.parametrize(
+    "head",
+    [
+        "/usr/bin/env rcm",
+        "/usr/bin/nohup rcm",
+        "python -u -m remote_ci_monitor",
+        "python3 -X dev -W ignore -m remote_ci_monitor.cli",
+    ],
+)
+def test_tr20_a_wrapper_path_with_a_test_home_is_read_not_caught_by_the_net(head):
+    # 그물이 생긴 뒤에도 감싸기 경로 · python 플래그는 세그먼트 파서가 풀어야 한다 — 시험 HOME 의
+    # setup 은 막지 않는다(그물에 걸리면 과잉 차단이다)
+    tail = "setup --role worker --server http://10.0.0.5:18790 --pool p --lanes 1 --yes"
+    command = f"HOME=/home/op/rcm-devtest/home {head} {tail} --label test.rcm.worker"
+    assert judge(command) is None, head
+
+
 # ── P3 3라운드: 따라가지 못한 `cd` 뒤의 상대 경로 ──
 
 

@@ -3135,6 +3135,9 @@ MUTANTS = (
         tests=(
             "tests/test_guard_production_setup.py::"
             "test_tr20_a_wrapper_path_or_interpreter_flag_still_reaches_setup",
+            # P3 3라운드: 그물이 생긴 뒤에는 막는 쪽만으로는 이 변이를 못 본다 — 허용 칸이 본다
+            "tests/test_guard_production_setup.py::"
+            "test_tr20_a_wrapper_path_with_a_test_home_is_read_not_caught_by_the_net",
         ),
     ),
     Mutant(
@@ -3209,6 +3212,110 @@ MUTANTS = (
         old='        text = text.replace("$", "$$")\n',
         new="        text = text\n",
         tests=("tests/test_setup.py::test_tr11_execstart_writes_a_dollar_twice",),
+    ),
+    # ── M5t-a PR4 P3 3라운드 — setup 규칙의 「운영」을 집의 정의 하나로(batch-5) ──
+    Mutant(
+        # setup 규칙이 운영 설정 폴더만 「운영」으로 본다 — 체크아웃 · 서비스 venv · data_dir 에
+        # 쓰는 setup 이 지나간다(P3 3라운드 v1-1, 근본 원인)
+        name="guard-setup-narrow-production-list",
+        path="tools/guard_production.py",
+        old="            hit = production_root(target, prod)\n",
+        new="            hit = production_root(target, Production(config_dir=prod.config_dir))\n",
+        tests=(
+            "tests/test_guard_production_setup.py::"
+            "test_tr20_setup_may_not_write_its_config_into_any_production_root",
+            "tests/test_guard_production_setup.py::"
+            "test_tr20_the_setup_rule_and_the_edit_rule_share_one_production_list",
+        ),
+    ),
+    Mutant(
+        # setup 이 서비스 관리자가 읽는 자리 안의 `--config` 를 쓴다 — 운영 서비스 파일을
+        # `--force config` 로 덮는다(P3 3라운드 v1-1)
+        name="setup-config-in-install-place-written",
+        path="src/remote_ci_monitor/setup.py",
+        old="    place = core.install_place_of(found.config, home, fold_case=fold)\n",
+        new="    place = None\n",
+        tests=("tests/test_setup.py::test_tr24_setup_refuses_a_config_inside_an_install_place",),
+    ),
+    Mutant(
+        # 닫는 쪽의 그물이 없다 — `sudo -u` · `if …; then` · `python -Im` 뒤의 setup 이 setup 규칙을
+        # 거치지 않는다(P3 3라운드 v1-2 · v1-3 · v2-3)
+        name="guard-setup-unread-call-allowed",
+        path="tools/guard_production.py",
+        old=(
+            "        if net and _SETUP_WORD.search(_unquoted(segment)) and _rcm_subcommand(argv) "
+            '!= "setup":\n'
+        ),
+        new="        if False:\n",
+        tests=(
+            "tests/test_guard_production_setup.py::"
+            "test_tr20_a_setup_the_hook_cannot_read_as_a_plain_call_is_denied",
+        ),
+    ),
+    Mutant(
+        # 따라가지 못한 `cd` 뒤에도 짐작한 cwd 를 믿는다 — `cd -P <운영>/.. && rcm setup
+        # --data-dir rcm` 이 지나간다(P3 3라운드 v1-4)
+        name="guard-setup-unknown-cd-trusted",
+        path="tools/guard_production.py",
+        old=(
+            "                moves = not cwd_known and places != _resolve(core, call, ns, "
+            "_OTHER_CWD, manager)\n"
+        ),
+        new="                moves = False\n",
+        tests=(
+            "tests/test_guard_production_setup.py::"
+            "test_tr33_a_relative_path_after_a_cd_the_hook_cannot_follow_is_denied",
+        ),
+    ),
+    Mutant(
+        # mutcheck 가 문법 오류인 변이를 「잡혔다」로 센다 — 들여쓰기를 잃은 변이가 시험 없이
+        # 통과했다(P3 3라운드 v2-1)
+        name="mutcheck-syntax-error-counted-as-caught",
+        path="scripts/mutcheck.py",
+        old="    problem = syntax_problem(m.path, changed)\n",
+        new="    problem = None\n",
+        tests=(
+            "tests/test_guard_production_setup.py::"
+            "test_mutcheck_reports_a_mutant_that_does_not_parse_as_a_failure",
+        ),
+    ),
+    Mutant(
+        # 파일을 다 쓴 뒤 보고 중의 Ctrl-C 가 130 이다 — 쓴 설정을 실패로 알린다(§4.1, P3
+        # 3라운드 v2-2)
+        name="setup-report-interrupt-exit-130",
+        path="src/remote_ci_monitor/setup.py",
+        old=(
+            "        return EXIT_OK\n"
+            "    except Exception as e:  # noqa: BLE001 — 파일은 이미 다 썼다\n"
+        ),
+        new=(
+            "        return EXIT_INTERRUPTED\n"
+            "    except Exception as e:  # noqa: BLE001 — 파일은 이미 다 썼다\n"
+        ),
+        tests=("tests/test_setup.py::test_tr28_ctrl_c_while_reporting_after_writing_is_exit_zero",),
+    ),
+    Mutant(
+        # 해석기가 `~user` 를 제 손으로 passwd 에서 읽는다 — core 의 순수성이 깨진다(P3 3라운드
+        # v1-5)
+        name="setup-resolver-reads-passwd",
+        path="src/remote_ci_monitor/core/setup.py",
+        old="        text = expand_user(raw)\n",
+        new="        text = os.path.expanduser(raw)\n",
+        tests=(
+            "tests/test_setup.py::test_tr20_the_resolver_reads_nothing_from_the_machine",
+            "tests/test_setup.py::"
+            "test_tr20_where_takes_the_user_lookup_and_the_case_rule_from_its_caller",
+        ),
+    ),
+    Mutant(
+        # setup 판정 중 훅이 터지면 허용한다(fail open, P3 3라운드)
+        name="guard-setup-crash-allowed",
+        path="tools/guard_production.py",
+        old="        if not _about_setup(payload):\n",
+        new="        if True:\n",
+        tests=(
+            "tests/test_guard_production_setup.py::test_tr20_a_crash_while_judging_setup_is_a_deny",
+        ),
     ),
     # ── M5t-a PR3 — 분배 전용 코디네이터 `lanes = 0` (docs/m5t-workplan.md §7 변이 검사) ──
     Mutant(
