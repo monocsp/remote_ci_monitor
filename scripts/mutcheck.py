@@ -2346,6 +2346,19 @@ MUTANTS = (
         ),
     ),
     Mutant(
+        # `/worker/spec` 의 `unreachable_checks` 를 늘 빈 목록으로 낸다 — 원격 워커의 doctor 가
+        # 영영 안 오는 `local_only` 점검을 「점검 필요」로 읽는다(TO18, 위임 결정 2)
+        name="doctor-spec-unreachable-checks-empty",
+        path="src/remote_ci_monitor/capabilities.py",
+        old="                        if not self.check_reachable(remote, c)\n",
+        new="                        if False\n",
+        tests=(
+            "tests/test_doctor_cli.py::"
+            "test_to18_worker_spec_names_the_checks_a_remote_worker_cannot_reach",
+            "tests/test_doctor_cli.py::test_to18_doctor_reads_the_real_servers_unreachable_checks",
+        ),
+    ),
+    Mutant(
         # 후보 함수가 `local_only` 프리셋에서 원격 머신을 빼지 않는다 — 배치 · ETA · 제출 · 점검 ·
         # `/worker/spec` · claim · `/api/machines` 가 모두 원격을 후보로 본다(M5t-a 결정 254, TO15)
         name="m5t-local-only-remote-kept",
