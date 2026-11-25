@@ -2858,8 +2858,8 @@ MUTANTS = (
         # guard 가 운영 data_dir(그 안 포함)을 고르는 `rcm setup` 을 막지 않는다(TR33)
         name="guard-setup-production-data-dir-allowed",
         path="tools/guard_production.py",
-        old="        if inside(data, prod.data_dir):\n",
-        new="        if False:\n",
+        old="            if inside(data, prod.data_dir):\n",
+        new="            if False:\n",
         tests=(
             "tests/test_guard_production_setup.py::test_tr33_setup_on_the_production_data_dir_is_denied",
             "tests/test_guard_production_setup.py::"
@@ -2890,6 +2890,138 @@ MUTANTS = (
             "tests/test_setup.py::"
             "test_tr24_doctor_finds_the_installed_copy_of_a_custom_label_service",
         ),
+    ),
+    # ── M5t-a PR4 P3 1라운드 — guard · setup 의 규칙마다 하나(v2-5 · v1-4) ──
+    Mutant(
+        # guard 가 운영 설정 폴더에 쓰는 `rcm setup` 을 막지 않는다(TR20 규칙 1)
+        name="guard-setup-production-config-allowed",
+        path="tools/guard_production.py",
+        old="        if inside(target, prod.config_dir):\n",
+        new="        if False:\n",
+        tests=(
+            "tests/test_guard_production_setup.py::test_tr20_setup_that_would_write_the_production_config_folder_is_denied",
+            "tests/test_guard_production_setup.py::test_tr20_a_config_written_with_a_shell_variable_is_denied",
+        ),
+    ),
+    Mutant(
+        # guard 가 운영 라벨의 서비스 파일을 쓰는 `rcm setup` 을 막지 않는다(TR20 규칙 2)
+        name="guard-setup-production-label-allowed",
+        path="tools/guard_production.py",
+        old="            if label in SETUP_STANDARD_LABELS or unit_name(label) in units:\n",
+        new="            if False:\n",
+        tests=(
+            "tests/test_guard_production_setup.py::test_tr20_setup_that_would_write_a_production_label_is_denied",
+            "tests/test_guard_production_setup.py::test_tr20_no_label_means_the_standard_one_and_is_denied_but_a_client_has_none",
+        ),
+    ),
+    Mutant(
+        # guard 가 셸 변수를 펼치지 않는다 — `--data-dir $HOME/.local/share/rcm` 이 운영으로
+        # 간다(P3 v2-1)
+        name="guard-setup-shell-variables-unexpanded",
+        path="tools/guard_production.py",
+        old="    words = [raw, _expand_variables(raw, shell), _expand_variables(raw, segment)]\n",
+        new="    words = [raw]\n",
+        tests=(
+            "tests/test_guard_production_setup.py::test_tr33_a_data_dir_written_with_a_shell_variable_is_denied",
+            "tests/test_guard_production_setup.py::test_tr20_a_config_written_with_a_shell_variable_is_denied",
+        ),
+    ),
+    Mutant(
+        # guard 가 운영 서비스 파일 자리를 가리키는 `--service-file` 을 막지 않는다(P3 v1-2)
+        name="guard-setup-service-place-allowed",
+        path="tools/guard_production.py",
+        old="        place = _service_place(target, env)\n",
+        new="        place = None\n",
+        tests=(
+            "tests/test_guard_production_setup.py::test_tr20_a_service_file_on_a_production_service_place_is_denied",
+            "tests/test_guard_production_setup.py::test_tr20_every_production_service_unit_is_a_place_setup_may_not_write",
+        ),
+    ),
+    Mutant(
+        # setup 이 줄인 옵션을 받는다 — guard 가 못 본 경로에 쓴다(P3 v1-1 · v2-2)
+        name="setup-abbreviated-options-accepted",
+        path="src/remote_ci_monitor/setup.py",
+        old='PARSER_OPTIONS: dict[str, Any] = {"allow_abbrev": False}\n',
+        new='PARSER_OPTIONS: dict[str, Any] = {"allow_abbrev": True}\n',
+        tests=("tests/test_setup.py::test_tr20_setup_takes_no_abbreviated_option",),
+    ),
+    Mutant(
+        # setup 이 설치 자리(~/Library/LaunchAgents …)에 서비스 파일을 쓴다(§4.1, P3 v1-2)
+        name="setup-install-place-written",
+        path="src/remote_ci_monitor/setup.py",
+        old="    place = core.install_place_of(staged, home)\n",
+        new="    place = None\n",
+        tests=("tests/test_setup.py::test_tr24_setup_refuses_a_service_file_on_an_install_place",),
+    ),
+    Mutant(
+        # setup 이 있는 파일을 `--force` 없이 덮는다(TR6)
+        name="setup-existing-file-overwritten",
+        path="src/remote_ci_monitor/setup.py",
+        old="    blocked = [f for f in plan.files if f.path.exists() and f.kind not in forced]\n",
+        new="    blocked = []\n",
+        tests=(
+            "tests/test_setup.py::test_tr6_an_existing_file_is_kept_and_only_the_forced_kind_is_replaced",
+            "tests/test_setup.py::test_tr6_an_existing_service_file_is_kept_without_force_and_nothing_else_is_written",
+        ),
+    ),
+    Mutant(
+        # setup 이 쓰다 멈춘 뒤 이미 쓴 파일을 되돌리지 않는다 — 반쪽 설정이 남는다(TR7)
+        name="setup-partial-write-not-rolled-back",
+        path="src/remote_ci_monitor/setup.py",
+        old="        for written, old, mode in reversed(done):\n",
+        new="        for written, old, mode in []:\n",
+        tests=("tests/test_setup.py::test_tr7_a_failure_part_way_leaves_no_half_written_config",),
+    ),
+    Mutant(
+        # 인자 없는 `rcm` 이 터미널이 아닌데도 첫 실행 질문을 띄운다(TR1, 결정 240)
+        name="setup-first-run-asks-without-a-terminal",
+        path="src/remote_ci_monitor/setup.py",
+        old="    if not world.interactive():\n        return None\n",
+        new="    if False:\n        return None\n",
+        tests=("tests/test_setup_cli.py::test_tr1_without_a_terminal_bare_rcm_never_asks",),
+    ),
+    Mutant(
+        # 대화형 숫자를 `isdigit()` 로 받는다 — `²` 에서 traceback(P3 v2-3)
+        name="setup-non-ascii-digit-accepted",
+        path="src/remote_ci_monitor/setup.py",
+        old="    if answer.isascii() and answer.isdecimal():\n",
+        new="    if answer.isdigit():\n",
+        tests=("tests/test_setup.py::test_tr22_a_digit_that_is_not_ascii_is_asked_again",),
+    ),
+    Mutant(
+        # setup 의 맨 바깥 경계가 없다 — 예상 못 한 예외가 traceback 으로 나온다(P3 v2-3)
+        name="setup-boundary-missing",
+        path="src/remote_ci_monitor/setup.py",
+        old="    except Exception as e:  # noqa: BLE001 — setup 의 맨 바깥 경계\n",
+        new="    except ZeroDivisionError as e:  # noqa: BLE001 — setup 의 맨 바깥 경계\n",
+        tests=("tests/test_setup.py::test_tr28_an_unexpected_error_is_one_line_and_exit_one",),
+    ),
+    Mutant(
+        # systemd 유닛의 `%` 를 지정자로 둔다 — `%h` 가 든 경로가 다른 경로로 읽힌다(P3 v2-4)
+        name="setup-unit-percent-unescaped",
+        path="src/remote_ci_monitor/core/setup.py",
+        old='    return value.replace("%", "%%")\n',
+        new="    return value\n",
+        tests=("tests/test_setup.py::test_tr11_a_systemd_unit_keeps_odd_paths_whole",),
+    ),
+    Mutant(
+        # 서버 서비스 파일의 PATH 맨 앞에 rcm 의 venv bin 을 둔다 — 프리셋의 `python` 이 rcm 의
+        # 것으로 바뀐다(TR11)
+        name="setup-service-path-starts-with-the-venv",
+        path="src/remote_ci_monitor/setup.py",
+        old="            path=cli.WORKER_SERVICE_PATH,\n",
+        new='            path=f"{rcm.parent}:{cli.WORKER_SERVICE_PATH}",\n',
+        tests=(
+            "tests/test_setup.py::test_tr11_the_written_service_file_path_does_not_start_with_the_venv",
+        ),
+    ),
+    Mutant(
+        # LAN bind 의 경고가 없는 읽기 인증 모드(`read_auth`)를 권한다(TR10, Q14)
+        name="setup-bind-warning-offers-read-auth",
+        path="src/remote_ci_monitor/core/setup.py",
+        old="        return [READ_OPEN, DHCP_NOTE]\n",
+        new='        return [READ_OPEN, DHCP_NOTE, "set read_auth = token to close reads"]\n',
+        tests=("tests/test_setup.py::test_tr10_the_interactive_run_never_offers_a_read_auth_mode",),
     ),
     # ── M5t-a PR3 — 분배 전용 코디네이터 `lanes = 0` (docs/m5t-workplan.md §7 변이 검사) ──
     Mutant(
