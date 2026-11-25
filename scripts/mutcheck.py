@@ -204,6 +204,7 @@
 from __future__ import annotations
 
 import argparse
+import ast
 import os
 import re
 import shutil
@@ -2896,8 +2897,8 @@ MUTANTS = (
         # guard 가 운영 설정 폴더에 쓰는 `rcm setup` 을 막지 않는다(TR20 규칙 1)
         name="guard-setup-production-config-allowed",
         path="tools/guard_production.py",
-        old="        if inside(target, prod.config_dir):\n",
-        new="        if False:\n",
+        old="            hit = production_root(target, prod)\n",
+        new="            hit = None\n",
         tests=(
             "tests/test_guard_production_setup.py::test_tr20_setup_that_would_write_the_production_config_folder_is_denied",
             "tests/test_guard_production_setup.py::test_tr20_a_config_written_with_a_shell_variable_is_denied",
@@ -2932,10 +2933,11 @@ MUTANTS = (
         name="guard-setup-service-place-allowed",
         path="tools/guard_production.py",
         old="            place = _service_place(target, session_home)\n",
-        new="        place = None\n",
+        new="            place = None\n",
         tests=(
             "tests/test_guard_production_setup.py::test_tr20_a_service_file_on_a_production_service_place_is_denied",
             "tests/test_guard_production_setup.py::test_tr20_every_production_service_unit_is_a_place_setup_may_not_write",
+            "tests/test_guard_production_setup.py::test_tr20_setup_may_not_write_its_config_into_any_production_root",
         ),
     ),
     Mutant(
@@ -2950,7 +2952,7 @@ MUTANTS = (
         # setup 이 설치 자리(~/Library/LaunchAgents …)에 서비스 파일을 쓴다(§4.1, P3 v1-2)
         name="setup-install-place-written",
         path="src/remote_ci_monitor/core/setup.py",
-        old="        place = install_place_of(service, home)\n",
+        old="        place = install_place_of(service, home, fold_case=fold_case)\n",
         new="        place = None\n",
         tests=("tests/test_setup.py::test_tr24_setup_refuses_a_service_file_on_an_install_place",),
     ),
@@ -3055,7 +3057,7 @@ MUTANTS = (
         # 쓴다(P3 2라운드)
         name="setup-install-place-case-not-folded",
         path="src/remote_ci_monitor/core/setup.py",
-        old="    if FOLD_CASE:\n",
+        old="    if fold_case:\n",
         new="    if False:\n",
         tests=("tests/test_setup.py::test_tr24_an_install_place_in_another_case_is_refused",),
     ),
@@ -3448,6 +3450,18 @@ def run_mutant(m: Mutant, keep: bool) -> tuple[bool | None, str]:
     return ok, info
 
 
+def syntax_problem(path: str, text: str) -> str | None:
+    """변이를 넣은 `.py` 가 파이썬으로 읽히지 않으면 그 까닭. 문법 오류인 변이는 시험을 빨갛게
+    만들어도 감지가 아니다 — 들여쓰기를 잃은 `new` 가 「잡혔다」로 세어졌다(P3 3라운드 v2-1)."""
+    if not path.endswith(".py"):
+        return None
+    try:
+        ast.parse(text)
+    except SyntaxError as e:
+        return f"the mutant does not parse as Python ({e.msg}, line {e.lineno}) — fix its `new`"
+    return None
+
+
 def _run_in_copy(m: Mutant, tmp: Path, env: dict[str, str]) -> tuple[bool, str]:
     # `.rcm` — 시험이 레포의 `.rcm/ci.toml` 을 읽는다(R15)
     for name in ("src", "tests", "tools", "scripts", ".rcm", "pyproject.toml"):
@@ -3460,6 +3474,10 @@ def _run_in_copy(m: Mutant, tmp: Path, env: dict[str, str]) -> tuple[bool, str]:
     text = target.read_text(encoding="utf-8")
     if text.count(m.old) != 1:
         return False, f"pattern not found exactly once in {m.path}: {m.old!r}"
+    changed = text.replace(m.old, m.new)
+    problem = syntax_problem(m.path, changed)
+    if problem is not None:
+        return False, problem
     if m.runner == "node":
         node = shutil.which("node")
         if node is None:
@@ -3473,7 +3491,7 @@ def _run_in_copy(m: Mutant, tmp: Path, env: dict[str, str]) -> tuple[bool, str]:
         return False, f"control run timed out: {' '.join(cmd)}"
     if control[0] != 0:
         return False, f"control run is RED without the mutant (exit {control[0]})\n{control[2]}"
-    _write_mutant(target, text.replace(m.old, m.new))
+    _write_mutant(target, changed)
     mutated = _pytest(cmd, tmp, env)
     if mutated is None:
         return False, f"mutant run timed out: {' '.join(cmd)}"
