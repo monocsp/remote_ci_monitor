@@ -13,12 +13,14 @@
 
 from __future__ import annotations
 
+import json
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
 import pytest
 
+from remote_ci_monitor import server as server_module
 from remote_ci_monitor.config import ConfigError, load_server_config
 from remote_ci_monitor.core.model import (
     PLACEMENT_CAPABLE,
@@ -36,6 +38,7 @@ LOCAL = "@local"
 REMOTE = "build-02"  # 기본 풀의 원격 워커
 OTHER = "mbp"  # mac2 풀의 원격 워커
 FAKE_TOOL = "rcm-m5t-faketool"  # 어느 PATH 에도 없는 이름
+REL_ENV = "kept-on-the-server"  # `rel` 의 env 값 — 원격 워커의 명세 어디에도 없어야 한다
 
 
 def block(name: str, *lines: str) -> str:
@@ -46,12 +49,18 @@ def block(name: str, *lines: str) -> str:
 GIT = 'source_modes = ["git_ref"]\nrepo = "app"'
 
 #: gate · gateany 는 표식 없음. rel* · localcheck 는 `local_only`.
-#: qa 는 표식 없이 로컬 전용 점검을 쓴다
+#: qa(mac2 풀) · qadef(기본 풀)는 표식 없이 로컬 전용 점검을 쓴다
 PRESETS = "".join(
     [
         block("gate", "expected_seconds = 600"),
         block("gateany", 'placement = "any-capable"', "expected_seconds = 600"),
-        block("rel", "local_only = true", 'pools = ["mac2"]', "expected_seconds = 600"),
+        block(
+            "rel",
+            "local_only = true",
+            'pools = ["mac2"]',
+            "expected_seconds = 600",
+            f'env = {{ RCM_LO_MARK = "{REL_ENV}" }}',
+        ),
         block("relany", "local_only = true", 'placement = "any-capable"'),
         block(
             "relneed",
@@ -66,6 +75,7 @@ PRESETS = "".join(
         block("simcheck", GIT),
         block("localcheck", "local_only = true", GIT),
         block("qa", 'pool = "mac2"', 'checks = ["localcheck"]'),
+        block("qadef", 'checks = ["localcheck"]'),
         block("relgit", GIT, 'pools = ["mac2"]'),
     ]
 )
@@ -80,6 +90,7 @@ NAMES = [
     "simcheck",
     "localcheck",
     "qa",
+    "qadef",
     "relgit",
 ]
 LOCAL_ONLY = {"rel", "relany", "relneed", "relq", "relgated", "localcheck"}
@@ -291,24 +302,67 @@ def test_to10_a_local_only_submission_to_another_pool_is_409(lo_ready):
     assert job_count(lo_ready) == before  # 잡이 큐에 들지 않는다
 
 
-def test_to13_the_409_comes_before_joining_and_superseding(tmp_path):
-    """합류할 같은 트리 잡과 치울 같은 브랜치 잡이 있어도 409 가 먼저다 — 기존 잡은 그대로다."""
-    presets = PRESETS.replace(
-        'name = "rel"\nargv = ["sh", "-c", "echo rel"]\n',
-        'name = "rel"\nargv = ["sh", "-c", "echo rel"]\nsupersede = "all"\n',
-    )
-    assert 'supersede = "all"' in presets
-    s = ready(server(tmp_path, presets=presets))
+SHA_A, SHA_B, SHA_C = ("a" * 40, "b" * 40, "c" * 40)
+
+
+def submissions(s: M5nServer) -> int:
+    return int(s.store._conn().execute("SELECT count(*) AS n FROM submissions").fetchone()["n"])
+
+
+@pytest.mark.parametrize("marked", [False, True], ids=["control", "marked"])
+def test_to13_the_409_comes_before_joining_and_superseding(tmp_path, monkeypatch, marked):
+    """합류할 잡과 치울 잡을 둘 다 세워 두고 같은 두 제출을 낸다. 표식이 없으면(control) 앞의
+    제출은 합류하고 뒤의 제출은 옛 잡을 치운다 — 대상이 진짜다. 표식이 있으면 둘 다 409 이고
+    기존 잡은 그대로다. git_ref 잡은 제출하는 순간 supersede 하므로 그 순서가 보인다."""
+    sha = {"now": SHA_A}
+    monkeypatch.setattr(server_module, "resolve_ref", lambda *a, **k: sha["now"])
+    unmarked = PRESETS + block("relsup", GIT, 'pools = ["mac2"]', 'supersede = "all"')
+    s = ready(server(tmp_path, presets=unmarked))
+
+    def submit(at: str, **extra: Any):
+        sha["now"] = at
+        body = {
+            "preset": "relsup",
+            "inputs": {},
+            "source": {"mode": "git_ref", "ref": "main"},
+            "requester_label": "alice@host",
+            "pool": "mac2",
+            **extra,
+        }
+        return s.req("POST", "/jobs", token="alice", json_body=body)
+
     try:
-        first = queued(s, "rel", join=True)
-        subs = s.store._conn().execute("SELECT count(*) AS n FROM submissions").fetchone()["n"]
-        status, body = post(s, "rel", pool="mac2", join=True)
-        assert status == 409, body
-        assert body.get("joined") is None and "job_id" not in body
-        job = s.store.get_job(first)
-        assert job.state == QUEUED  # 치워지지 않았다
-        after = s.store._conn().execute("SELECT count(*) AS n FROM submissions").fetchone()["n"]
-        assert after == subs  # 합류하지 않았다
+        status, a = submit(SHA_A)
+        assert status == 201, a
+        status, b = submit(SHA_B, supersede=False)  # 옛 잡 A 를 남긴다 — 치울 대상이다
+        assert status == 201, b
+        old, target = int(a["job_id"]), int(b["job_id"])
+        assert s.store.get_job(old).state == QUEUED
+        if marked:
+            s.write(
+                PROBES
+                + unmarked.replace('supersede = "all"', 'supersede = "all"\nlocal_only = true')
+            )
+            status, body = s.req("POST", "/reload", token="admin", json_body={})
+            assert status == 200, body
+            assert s.app.config.preset("relsup").local_only is True
+        jobs, subs = job_count(s), submissions(s)
+        # 합류: 같은 sha 는 B 와 같은 잡이다(합류 키는 풀을 보지 않는다)
+        status, joined = submit(SHA_B, join=True)
+        # supersede: 같은 브랜치의 새 sha 는 A · B 를 치운다
+        status2, newer = submit(SHA_C)
+        if not marked:
+            assert status == 200 and joined["joined"] is True, joined
+            assert joined["job_id"] == target
+            assert status2 == 201, newer
+            assert s.store.get_job(old).state == "cancelled"
+            assert s.store.get_job(target).state == "cancelled"
+            return
+        assert (status, status2) == (409, 409), (joined, newer)
+        assert joined["error_code"] == newer["error_code"] == "no_capable_machine"
+        assert job_count(s) == jobs and submissions(s) == subs  # 합류도 새 잡도 없다
+        assert s.store.get_job(old).state == QUEUED  # 치워지지 않았다
+        assert s.store.get_job(target).state == QUEUED
     finally:
         s.close()
 
@@ -348,6 +402,24 @@ def test_to16_a_local_only_preset_whose_tool_is_missing_on_the_local_lanes_is_40
     assert job_count(lo_ready) == before
 
 
+@pytest.mark.parametrize("report_state", ["unmeasured", "stale"])
+@pytest.mark.parametrize("preset", ["relany", "relneed"])
+def test_to16_an_unmeasured_or_stale_local_report_is_not_a_409(lo, preset, report_state):
+    """6-A-M5 — 409 는 정적인 넷과 `@local` 의 `tool_missing` 뿐이다. `@local` 의 보고가 없거나
+    낡아 `eligible_now` 가 비어도 거절하지 않는다(§4.3). 도구가 빠진 `relneed` 도 보고가 낡은
+    동안에는 모른다 — 「eligible 이 아니면 409」로 바꾸면 빨개진다."""
+    if report_state == "stale":
+        lo.app.measure_capabilities()
+        lo.clock.advance(3 * lo.app.config.server.probe_interval_seconds + 60)
+    before = job_count(lo)
+    status, body = post(lo, preset)
+    assert status == 201, body
+    assert LOCAL not in body["placement"]["eligible_now"], body["placement"]
+    codes = {b["worker"]: b["code"] for b in body["placement"]["blocked"]}
+    assert codes.get(LOCAL) in ("report_missing", "report_stale"), body["placement"]
+    assert job_count(lo) == before + 1
+
+
 def test_to16_a_local_only_preset_waiting_for_a_local_check_queues_with_the_check_reason(
     lo_ready,
 ):
@@ -365,6 +437,35 @@ def test_to16_a_local_only_preset_waiting_for_a_local_check_queues_with_the_chec
     assert lo_ready.row(jid)["reason"] == "check_failed"
     status, again = post(lo_ready, "relgated")
     assert status == 201, again  # 점검 실패도 409 가 아니다
+
+
+@pytest.mark.parametrize("case", ["other-pool", "no-local-accept-any"])
+def test_to10_to16_rcm_eta_has_no_estimate_when_no_local_lane_can_take_it(tmp_path, case):
+    """후보가 빈 `local_only` 프리셋의 `/api/eta` — 원격 레인으로 시각을 지어내지 않고
+    `no_capable_machine` 과 ETA null 이다(§4.3 의 새 분기). 비교 행은 같은 자리의 표식 없는
+    프리셋이고, 살아 있는 원격이 받으므로 0초다."""
+    extra = "local_accept_any = false\n" if case == "no-local-accept-any" else ""
+    s = ready(server(tmp_path, extra=extra))
+    try:
+        report(s, OTHER, host_key=HOST_C)  # mac2 풀에도 살아 있는 원격이 있다
+        if case == "other-pool":
+            marked, control = (
+                {"preset": "rel", "pool": "mac2"},
+                {"preset": "relgit", "pool": "mac2"},
+            )
+        else:
+            marked, control = {"preset": "relany"}, {"preset": "gateany"}
+        status, doc = s.req("POST", "/api/eta", token="alice", json_body=control)
+        assert status == 200, doc
+        assert doc["job"]["estimate"]["wait_seconds"] == 0, doc["job"]
+        status, doc = s.req("POST", "/api/eta", token="alice", json_body=marked)
+        assert status == 200, doc
+        job = doc["job"]
+        assert job["reason"] == "no_capable_machine", job
+        assert job["estimate"]["wait_seconds"] is None, job
+        assert job["estimate"]["finish_at"] is None, job
+    finally:
+        s.close()
 
 
 # ── TO3 · TO7 로컬 레인과 표식 없는 프리셋 ───────────────────────────────────
@@ -443,6 +544,34 @@ def _auto_check(s: M5nServer, monkeypatch) -> None:
     assert ("simcheck", REMOTE) not in calls
 
 
+def _auto_local_only_check(s: M5nServer, monkeypatch) -> None:
+    """`checks` 의 점검이 `local_only` 면(qadef → localcheck) 스위퍼는 그 점검을 `@local` 에만 건다.
+    원격 `build-02` 는 qadef 를 받을 자리(기본 풀)에 있고 보고도 「다 있음」이다."""
+    calls = record_checks(s, monkeypatch)
+    s.app.sweep_checks()
+    assert ("localcheck", LOCAL) in calls
+    assert ("localcheck", REMOTE) not in calls
+
+
+def _stalled_checks(s: M5nServer) -> None:
+    """점검 정체 판정(`_stalled_checks` · `_why_none`) — `checks` 가 있는 `local_only` 잡의 이유와
+    `placement_detail` 은 `@local` 만으로 정한다. 원격의 「점검 필요」가 끼어들지 않는다."""
+    for preset in ("relq", "relgated"):
+        row = s.row(queued(s, preset))
+        workers = {n["worker"] for n in row["placement_detail"]}
+        assert REMOTE not in workers, (preset, row["placement_detail"])
+        assert LOCAL in workers, (preset, row["placement_detail"])
+        assert row["reason"] == "check_pending", (preset, row["reason"])
+
+
+def _could_receive(s: M5nServer) -> None:
+    """수신 가능 판정 `_could_receive` — 원격은 `local_only` 프리셋을 받을 자리가 아니다."""
+    views = {v.id: v for v in s.app.machine_views(s.clock())}
+    for name in sorted(LOCAL_ONLY):
+        assert not s.app._could_receive(views[REMOTE], s.app.config.preset(name)), name
+    assert s.app._could_receive(views[REMOTE], s.app.config.preset("gate"))  # 비교: 표식 없음
+
+
 def _recheck(s: M5nServer, monkeypatch) -> None:
     calls = record_checks(s, monkeypatch)
     status, body = s.req(
@@ -457,7 +586,10 @@ def _worker_spec(s: M5nServer) -> None:
     assert status == 200, spec
     names = [p["name"] for p in spec["presets"]]
     assert LOCAL_ONLY.isdisjoint(names), names
-    assert {"gate", "gateany", "simcheck", "qa", "relgit"} <= set(names)
+    assert {"gate", "gateany", "simcheck", "qa", "qadef", "relgit"} <= set(names)
+    # env 도 함께 빠진다 — 값도 이름도 명세 어디에도 없다
+    text = json.dumps(spec)
+    assert REL_ENV not in text and "RCM_LO_MARK" not in text
 
 
 def _claim_pool(s: M5nServer) -> None:
@@ -503,6 +635,9 @@ ENTRIES: dict[str, Callable[..., None]] = {
     "eta-capable": _eta_capable,
     "eligible-now": _eligible_now,
     "auto-check": _auto_check,
+    "auto-local-only-check": _auto_local_only_check,
+    "stalled-checks": _stalled_checks,
+    "could-receive": _could_receive,
     "recheck": _recheck,
     "worker-spec": _worker_spec,
     "claim-pool": _claim_pool,
@@ -517,14 +652,18 @@ ENTRIES: dict[str, Callable[..., None]] = {
 def test_to15_no_entry_point_offers_a_local_only_preset_to_a_remote_machine(
     lo_ready, monkeypatch, entry
 ):
-    # 명세가 이 시험 하나로 묶은 행들(§7 TO 표 「TO15 로 묶었다」)
-    # TO2
-    # TO5
-    # TO8
-    # TO11
-    # TO14
+    # 명세가 이 시험 하나로 묶은 행들(§7 TO 표 「TO15 로 묶었다」). 각 행의 내용은 넷째 판의
+    # TO 표(§13 4라운드 · 5라운드 표가 묶은 이유를 적었다)이고, 아래가 그 행을 맡은 진입점이다.
+    # TO2 원격 claim 에서 빠진다, capable 잡도 — claim-pool · claim-capable
+    #     (`--machine` 원격 지정의 409 는 test_to16_pinning_… 이 맡는다)
+    # TO5 `/worker/spec` 에서 env 와 함께 빠진다 — worker-spec(env 값과 이름이 명세에 없다)
+    # TO8 대기 계산과 제출 판정 — placement-pool(pool 갈래) · eligible-now(`submission_placement`
+    #     와 `eligible_now`) · could-receive(`_could_receive`)
+    # TO11 `local_only` 점검은 `@local` 만 겨냥한다 — auto-local-only-check(스위퍼) · recheck(409)
+    # TO14 원격 claim 의 네 갈래 — claim-target · claim-pool · claim-capable · claim-excluded,
+    #     `known` 갈래와 WHERE 전체는 test_to15_the_claim_sql_… 이 맡는다
     fn = ENTRIES[entry]
-    if fn in (_auto_check, _recheck):
+    if fn in (_auto_check, _auto_local_only_check, _recheck):
         fn(lo_ready, monkeypatch)
     else:
         fn(lo_ready)
@@ -533,6 +672,7 @@ def test_to15_no_entry_point_offers_a_local_only_preset_to_a_remote_machine(
 @pytest.mark.parametrize("branch", ["target", "pool", "capable", "known"])
 def test_to15_the_claim_sql_drops_excluded_presets_on_every_branch(tmp_path, branch):
     """claim 에 넘기는 제외 목록은 네 갈래 모두에 걸린다 — 제외가 없으면 같은 잡을 집는다."""
+    # TO14 네 갈래(지정 · pool · capable · known) 모두, 거르기는 WHERE 전체에 걸린다
     store = Store(tmp_path / "rcm.sqlite3")
     try:
         cols: dict[str, Any] = {
