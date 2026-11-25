@@ -4574,6 +4574,45 @@ def test_x_mdns_worker_check_cleans_the_name_too(env, srv, monkeypatch, capsys, 
         assert not any(c in line for c in "\x1b\r\n‮"), repr(line)
 
 
+@pytest.mark.parametrize(
+    "who,count,want",
+    [
+        ("client", 1, ""),
+        ("client", 2, ""),
+        ("worker", 1, ""),
+        ("worker", 2, ""),
+        ("worker", 2, "td-nobody"),
+    ],
+    ids=["client-found", "client-several", "worker-found", "worker-several", "worker-no-match"],
+)
+def test_x_mdns_the_found_line_and_server_lists_clean_the_name(
+    monkeypatch, capsys, who, count, want
+):
+    """모든 명령의 찾기 줄(`server: found …`)과 「서버가 여럿」 · 「그 이름의 서버가 없다」 문구도
+    mDNS 의 이름 · 호스트를 한 줄로 정리한다 — LAN 의 TXT 레코드가 터미널의 줄을 지우거나 가짜
+    줄을 만들지 못하게(batch 10 triage, P6 GAP X-mdns 의 남은 자리)."""
+    from types import SimpleNamespace
+
+    from remote_ci_monitor.config import ConfigError
+
+    many = tuple(found(f"{IMPOSTOR}{i}", "127.0.0.1", 9 + i) for i in range(count))
+    monkeypatch.setattr(cli, "discover", FakeDiscover(many))
+    monkeypatch.setattr(cli, "_DISCOVERY", None)
+    monkeypatch.setattr(cli, "_FOUND_SAID", False)
+    said: list[str] = []
+    try:
+        if who == "client":
+            cli._resolve_server(SimpleNamespace(wants_discovery=True, server="", discovered=None))
+        else:
+            cli._pick_worker_server(SimpleNamespace(server_name=want))
+    except ConfigError as e:
+        said.append(str(e))
+    said += capsys.readouterr().err.splitlines()
+    assert any("evil" in s for s in said), said
+    for line in said:
+        assert not any(c in line for c in "\x1b\r\n‮"), repr(line)
+
+
 # ── P6 GAP X-ctrlc: Ctrl-C 면 프로브를 내리고 130 ─────────────────────────────────────
 
 

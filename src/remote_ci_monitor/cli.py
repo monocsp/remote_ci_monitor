@@ -412,6 +412,20 @@ _DISCOVERY: list[Any] | None = None
 _FOUND_SAID = False
 
 
+def _found_where(f: Any) -> str:
+    """mDNS 로 찾은 서버 하나의 「이름 (주소)」 — 한 줄로 정리한다. 이름 · 호스트는 LAN 의 TXT ·
+    SRV 레코드에서 온다: ESC · 줄바꿈 · bidi 가 남으면 터미널의 줄을 지우거나 가짜 줄을 만든다
+    (`doctor.Run.found_where` 와 같은 규칙, batch 10 triage)."""
+    return f"{doctor_core.clean_text(f.name, 64)} ({doctor_core.clean_text(f.address, 200)})"
+
+
+def _found_line(f: Any) -> str:
+    """찾기 줄 `server: found 이름 (ip:port) on this network` — 이름과 주소를 정리한다."""
+    ip = f.ips[0] if f.ips else f.host.rstrip(".")
+    where = doctor_core.clean_text(f"{ip}:{f.port}", 200)
+    return f"server: found {doctor_core.clean_text(f.name, 64)} ({where}) on this network"
+
+
 def _discover_once(timeout: float) -> list[Any]:
     global _DISCOVERY
     if _DISCOVERY is None:
@@ -430,14 +444,13 @@ def _resolve_server(cfg: Any, *, timeout: float = 1.5) -> Any:
     if len(found) == 1:
         cfg.server = found[0].address
         cfg.discovered = found[0]
-        ip = found[0].ips[0] if found[0].ips else found[0].host.rstrip(".")
         if not _FOUND_SAID:
             _FOUND_SAID = True
-            _info(f"server: found {found[0].name} ({ip}:{found[0].port}) on this network")
+            _info(_found_line(found[0]))
         return cfg
     if not found:
         raise ConfigError(f"{NO_SERVER_HINT} — {DISCOVER_NONE_HINT}")
-    names = ", ".join(f"{f.name} ({f.address})" for f in found)
+    names = ", ".join(_found_where(f) for f in found)
     raise ConfigError(
         f"several rcm servers on this network: {names} — pick one with --server or client.toml"
     )
@@ -4414,12 +4427,11 @@ def _pick_worker_server(cfg: Any, *, timeout: float = 1.5) -> str:
     picks = [f for f in found if f.name == want] if want else list(found)
     if len(picks) == 1:
         f = picks[0]
-        ip = f.ips[0] if f.ips else f.host.rstrip(".")
-        _info(f"server: found {f.name} ({ip}:{f.port}) on this network")
+        _info(_found_line(f))
         return f.address
     if not found:
         raise ConfigError(f"worker needs a server — {DISCOVER_NONE_HINT}")
-    names = ", ".join(f"{f.name} ({f.address})" for f in found)
+    names = ", ".join(_found_where(f) for f in found)
     if want:
         raise ConfigError(
             f"no rcm server named {want!r} on this network (found: {names}) — "
