@@ -504,6 +504,39 @@ def test_x_bidi_tools_refuse_line_separators_and_bidi_controls(tmp_path, char):
     assert "[[tools]]" in str(e.value) and "control" in str(e.value), e.value
 
 
+#: `str.strip()` 이 지우는 제어 글자 — 앞뒤에 있으면 `clean_line(v) == v.strip()` 비교를 지나간다
+STRIP_CONTROLS = "\r\n\t\x0b\x0c\x1c\x1d\x1e\x1f\x85  "
+
+
+@pytest.mark.parametrize("where", ["front", "middle", "back"])
+@pytest.mark.parametrize("char", list(STRIP_CONTROLS), ids=lambda c: f"U+{ord(c):04X}")
+def test_x_bidi_tools_refuse_controls_at_either_end_too(tmp_path, char, where):
+    """`[[tools]]` 의 글자 검사는 앞 · 가운데 · 뒤 어디의 제어 글자도 거절한다. `str.strip()` 은
+    `\\r` · `\\n` · `\\t` · `\\x1c`–`\\x1f` · `\\x85` · U+2028 · U+2029 도 지우므로, 끝에 붙은
+    「\\rFAKE」 · 「brew install x\\n」이 그대로 저장되면 안 된다(batch 10 재확인 X-bidi)."""
+    from remote_ci_monitor.config import ConfigError, load_server_config
+
+    escaped = f"\\u{ord(char):04x}"
+    text = {
+        "front": f"{escaped}FAKE",
+        "middle": f"brew {escaped}x",
+        "back": f"brew install x{escaped}",
+    }[where]
+    tools = f'[[tools]]\nname = "rcm-td-fvm"\ndocs = "{text}"\n'
+    with pytest.raises(ConfigError) as e:
+        load_server_config(_server_toml(tmp_path, tools), check_tools=False)
+    assert "[[tools]]" in str(e.value) and "control" in str(e.value), e.value
+
+
+def test_x_bidi_tools_keep_plain_spaces_at_either_end(tmp_path):
+    """과잉 교정 막기: 앞뒤의 보통 공백은 제어 글자가 아니다 — 전처럼 받아들인다."""
+    from remote_ci_monitor.config import load_server_config
+
+    tools = '[[tools]]\nname = "rcm-td-fvm"\n[tools.install]\ndarwin = "  brew install x  "\n'
+    cfg = load_server_config(_server_toml(tmp_path, tools), check_tools=False)
+    assert cfg.tools[0].install["darwin"] == "  brew install x  "
+
+
 def test_x_python_the_service_interpreter_is_read_from_the_rcm_script(tmp_path):
     """rcm 콘솔 스크립트의 `#!` 줄 · pip 의 sh 트램펄린 · `env python3` 에서 서비스의 Python 을
     읽는다. 읽을 수 없으면 None(다른지 모른다)이다(P6 GAP X-python)."""

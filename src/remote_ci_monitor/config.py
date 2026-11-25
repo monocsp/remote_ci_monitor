@@ -1074,12 +1074,16 @@ TOOL_NAME_MAX = 64
 def _tool_text(where: str, value: Any) -> str:
     """한 줄 문자열, 300자 이하, 제어문자 없음 — 워커가 그대로 터미널에 찍는 글이다. 거절하는
     글자는 doctor 가 찍기 전에 지우는 글자와 같다(`core/progress.clean_line`: C0 · C1 제어문자, 줄 ·
-    문단 구분자, bidi 제어, 폭 없는 글자 — P6 GAP X-bidi)."""
+    문단 구분자, bidi 제어, 폭 없는 글자 — P6 GAP X-bidi). 위치는 가리지 않는다. `clean_line` 은
+    끝에서 `str.strip()` 을 하는데 그것은 `\r` · `\n` · `\t` · U+2028 같은 제어 글자도 지운다 —
+    그래서 값의 앞뒤에 보통 글자를 하나씩 붙여 견준다. 그러면 앞뒤의 제어 글자도 가운데처럼
+    걸리고, 앞뒤의 공백은 전처럼 받아들인다(batch 10 재확인 X-bidi)."""
     from remote_ci_monitor.core.progress import clean_line
 
     if not isinstance(value, str):
         raise ConfigError(f"{where} must be a string")
-    if clean_line(value) != value.strip():
+    fenced = f"|{value}|"
+    if clean_line(fenced) != fenced:
         raise ConfigError(
             f"{where} has a control character (one line of text, no escapes or bidi controls)"
         )

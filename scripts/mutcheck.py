@@ -2775,6 +2775,15 @@ MUTANTS = (
             "test_the_production_guard_fails_a_test_that_reaches_production[home]",
         ),
     ),
+    Mutant(
+        # `[[tools]]` 의 글자 검사가 `str.strip()` 한 값과 견준다 — 앞뒤의 `\r` · `\n` · U+2028 이
+        # 거절되지 않고 그대로 저장된다(batch 10 재확인 X-bidi)
+        name="config-tool-text-ends-unchecked",
+        path="src/remote_ci_monitor/config.py",
+        old='    fenced = f"|{value}|"\n',
+        new="    fenced = value.strip()\n",
+        tests=("tests/test_doctor.py::test_x_bidi_tools_refuse_controls_at_either_end_too",),
+    ),
 )
 
 
