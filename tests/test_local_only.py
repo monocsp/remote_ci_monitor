@@ -789,18 +789,43 @@ def test_to19_rechecking_a_local_only_check_on_a_remote_machine_is_409(lo, monke
 
 
 def test_to19_rechecking_every_check_skips_the_local_only_one(lo, monkeypatch):
-    """이름 없이 다시 걸면 걸 수 있는 점검만 건다 — 로컬 전용 점검은 이유 코드로 남긴다."""
+    """이름 없이 다시 걸면 걸 수 있는 점검만 건다. 로컬 전용 점검은 실패 항목(`jobs` 의 번호 없는
+    항목)이 아니라 `skipped` 에 정책 코드로 남는다 — CLI 와 웹은 번호 없는 `jobs` 항목을 실패로
+    부른다(위임 결정 4)."""
     report(lo, OTHER, host_key=HOST_C)
     calls = record_checks(lo, monkeypatch)
     status, body = lo.req("POST", f"/machines/{OTHER}/recheck", token="admin", json_body={})
     assert status == 200, body
-    items = {j["preset"]: j for j in body["jobs"]}
-    assert items["localcheck"] == {
-        "preset": "localcheck",
-        "job_id": None,
-        "error_code": "local_only",
-    }
+    assert [j["preset"] for j in body["jobs"]] == ["simcheck"], body
+    assert body["skipped"] == [{"preset": "localcheck", "code": "local_only"}], body
     assert ("simcheck", OTHER) in calls and ("localcheck", OTHER) not in calls
+    # `@local` 에서는 건너뛸 것이 없다 — 키는 늘 있고 비어 있다
+    lo.app.measure_capabilities()
+    status, body = lo.req("POST", f"/machines/{LOCAL}/recheck", token="admin", json_body={})
+    assert status == 200, body
+    assert sorted(j["preset"] for j in body["jobs"]) == ["localcheck", "simcheck"], body
+    assert body["skipped"] == [], body
+
+
+def test_to19_rechecking_a_machine_whose_only_check_is_local_only_submits_nothing(
+    tmp_path, monkeypatch
+):
+    """건너뛴 것만 있고 낸 것이 없을 때의 모양 — 200, `jobs: []`, `skipped` 에 그 점검(위임 결정
+    4). 실패가 아니다: 「걸 수 있는 것을 다 걸었다」가 맞는 답이다."""
+    only_local = PRESETS.replace('checks = ["simcheck"]', "expected_seconds = 60")
+    assert only_local != PRESETS
+    s = server(tmp_path, presets=only_local)
+    try:
+        assert s.app.check_preset_names() == ["localcheck"]
+        report(s, OTHER, host_key=HOST_C)
+        calls = record_checks(s, monkeypatch)
+        before = job_count(s)
+        status, body = s.req("POST", f"/machines/{OTHER}/recheck", token="admin", json_body={})
+        assert status == 200, body
+        assert body == {"jobs": [], "skipped": [{"preset": "localcheck", "code": "local_only"}]}
+        assert calls == [] and job_count(s) == before
+    finally:
+        s.close()
 
 
 def test_to19_removing_the_mark_leaves_no_local_only_code_on_the_check(lo, monkeypatch):
@@ -810,8 +835,7 @@ def test_to19_removing_the_mark_leaves_no_local_only_code_on_the_check(lo, monke
     record_checks(lo, monkeypatch)
     status, body = lo.req("POST", f"/machines/{OTHER}/recheck", token="admin", json_body={})
     assert status == 200, body
-    items = {j["preset"]: j for j in body["jobs"]}
-    assert items["localcheck"]["error_code"] == "local_only"
+    assert body.get("skipped") == [{"preset": "localcheck", "code": "local_only"}], body
     head = 'name = "localcheck"\nargv = ["sh", "-c", "echo localcheck"]\n'
     unmarked = PRESETS.replace(head + "local_only = true\n", head)
     assert unmarked != PRESETS
@@ -834,6 +858,7 @@ def test_to19_removing_the_mark_leaves_no_local_only_code_on_the_check(lo, monke
     )
     assert status == 200, body
     assert body["jobs"][0]["job_id"] is not None, body
+    assert body["skipped"] == [], body  # 표식을 뗐다 — 이제 건너뛰지 않는다
     assert not [m for m in logs if "ref_unresolved" in m], logs
 
 
