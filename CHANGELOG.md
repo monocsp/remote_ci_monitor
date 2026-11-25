@@ -41,7 +41,9 @@ of a key bumps that number and is listed here.
   `PATH` is not guessed (exit 3), an unreachable `[[repos]]` entry or a `git_ref` preset whose
   repository is missing from the worker's `[[repos]]` is a failure, and `--role coordinator`
   lists `local_only` presets as needing a local lane. `rcm doctor` never follows the server's
-  version.
+  version. `GET /worker/spec` now also carries each preset's `pool`, `pools`, `placement`,
+  `checks`, `source_modes`, repository name (no URL) and `unreachable_checks` (the checks a remote
+  worker cannot run, with a reason code), and the `[[tools]]` table; older workers ignore them.
 - **`[[tools]]` in `server.toml` gives a tool an install hint.** `name`, `docs` and
   `[tools.install]` lines for `darwin`, `linux` or `any`; shown by `rcm doctor` next to a missing
   tool, never run. Control characters, lines over 300 characters, an unknown key or a name given

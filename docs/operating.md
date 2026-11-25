@@ -114,8 +114,12 @@ check` (its tools are there and rcm runs its check presets once after the worker
 there is one), or `unknown`. An `any-capable` preset that misses a tool is "not coming to this
 machine" — a warning, not a failure. A preset for another pool is listed and left out. On a remote
 worker, a preset whose `checks` name a `local_only` check is "not coming (check is local-only)",
-not "needs check": that check never runs there. `rcm doctor --role coordinator` lists every
-`local_only` preset as "needs a local lane", judged by the same rule the server places jobs with.
+not "needs check": that check never runs there. The server names those checks for each preset in
+`GET /worker/spec` (`unreachable_checks`), and `rcm doctor` reads only that key; it does not guess
+from which presets the spec leaves out. Against a server that does not send the key, a preset with
+`checks` is `unknown` (code `check_unknown`) and the report exits 3. `rcm doctor --role
+coordinator` lists every `local_only` preset as "needs a local lane", judged by the same rule the
+server places jobs with.
 The coordinator's `[[tools]]` hints show for the server's own lane too.
 
 The service file is found in this order: `--service-file`; the standard places
