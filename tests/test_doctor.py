@@ -12,6 +12,8 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+import pytest
+
 from remote_ci_monitor import doctor, hostsample
 from remote_ci_monitor.config import Probe
 from remote_ci_monitor.core import capability as cap
@@ -300,3 +302,75 @@ def test_td55_service_file_env_is_read_with_names_and_values_kept_apart(tmp_path
     su = doctor.read_service_file(unit)
     assert (su.manager, su.command, su.nofile) == ("systemd", "worker", 1024)
     assert su.env == {"PATH": "/svc/bin", "SECRET_TOKEN": "td55 value"}
+
+
+# ── 설치 안내 `[[tools]]` (TD9) ──────────────────────────────────────────────
+
+
+def _server_toml(tmp_path: Path, tools: str, *, probes: str = "") -> Path:
+    p = tmp_path / "server.toml"
+    p.write_text(
+        f"""[server]
+data_dir = "{tmp_path / "data"}"
+
+[[presets]]
+name = "app"
+argv = ["true"]
+requires = ["/opt/td/bin/rcm-td-fvm", "rcm-td-node"]
+{probes}
+{tools}"""
+    )
+    return p
+
+
+def test_td9_tools_are_read_with_their_os_hints(tmp_path):
+    from remote_ci_monitor.config import load_server_config
+
+    cfg = load_server_config(
+        _server_toml(
+            tmp_path,
+            """[[tools]]
+name = "rcm-td-fvm"
+docs = "https://example.invalid/fvm"
+[tools.install]
+darwin = "brew install td-fvm"
+any = "see the docs"
+""",
+        ),
+        check_tools=False,
+    )
+    (hint,) = cfg.tools
+    assert (hint.name, hint.docs) == ("rcm-td-fvm", "https://example.invalid/fvm")
+    assert hint.install == {"darwin": "brew install td-fvm", "any": "see the docs"}
+
+
+@pytest.mark.parametrize(
+    "tools,needle",
+    [
+        ('[[tools]]\nname = "rcm-td-fvm"\ndocs = "a\\u0007b"\n', "control"),
+        ('[[tools]]\nname = "rcm-td-fvm"\n[tools.install]\ndarwin = "a\\nb"\n', "control"),
+        (f'[[tools]]\nname = "rcm-td-fvm"\ndocs = "{"x" * 301}"\n', "300"),
+        ('[[tools]]\nname = "rcm-td-fvm"\n[tools.install]\nwindows = "choco"\n', "windows"),
+        ('[[tools]]\nname = "rcm-td-fvm"\n\n[[tools]]\nname = "rcm-td-fvm"\n', "twice"),
+        ('[[tools]]\nname = "rcm-td-fvm"\nrun = "x"\n', "run"),
+    ],
+)
+def test_td9_bad_tools_refuse_to_start(tmp_path, tools, needle):
+    from remote_ci_monitor.config import ConfigError, load_server_config
+
+    with pytest.raises(ConfigError) as e:
+        load_server_config(_server_toml(tmp_path, tools), check_tools=False)
+    assert "[[tools]]" in str(e.value) and needle in str(e.value), e.value
+
+
+def test_td9_a_tool_nobody_uses_is_a_warning_but_a_probe_argv0_is_not(tmp_path):
+    from remote_ci_monitor import config
+
+    probes = '[[probes]]\nname = "flutter"\nargv = ["/opt/td/rcm-td-flutter", "--version"]\n'
+    tools = "".join(
+        f'[[tools]]\nname = "{n}"\n'
+        for n in ("rcm-td-fvm", "rcm-td-node", "rcm-td-flutter", "rcm-td-orphan")
+    )
+    cfg = config.load_server_config(_server_toml(tmp_path, tools, probes=probes), check_tools=False)
+    warnings = config.tool_warnings(cfg)
+    assert len(warnings) == 1 and "rcm-td-orphan" in warnings[0], warnings

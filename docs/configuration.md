@@ -962,6 +962,30 @@ The row carries **names, never values**. `/api/health` is readable without a tok
 configuration, so it says `JAVA_HOME` and never what `JAVA_HOME` is, and a tool declared as an
 absolute path is named by its basename — the same rule the job log and `local preset tools` follow.
 
+### Install hints: `[[tools]]`
+
+`requires` says a tool is missing; `[[tools]]` says how to get it. When `rcm doctor` finds a tool
+missing on a machine, it prints the hint for that machine's OS next to it, with the docs link:
+
+```toml
+[[tools]]                       # shown, never run
+name = "fvm"                    # the basename in requires, or a probe's argv[0]
+docs = "https://example.org/fvm/install"
+[tools.install]                 # darwin · linux · any (used when the OS has no line)
+darwin = "brew install fvm"
+linux = "see the docs"
+```
+
+The text is shown as written. rcm never runs it and never installs anything with `sudo`; whether
+the text is right is up to whoever runs the coordinator. Each string is one line of at most 300
+characters without control characters, the install keys are `darwin`, `linux` and `any`, and a
+name appears once. Anything else is a config error at start. A name that no preset `requires` and
+no probe runs is a warning at start and at `rcm reload`, because its hint would never show.
+
+Workers get the table with the rest of the spec (`GET /worker/spec`, a worker token). It is not in
+`/api/status` or `/api/machines`, which may be readable without a token. A worker strips control
+characters once more before it prints a hint.
+
 ### Naming what failed
 
 The `failed: …` lines, `failed_step` and the history above come from one place: the

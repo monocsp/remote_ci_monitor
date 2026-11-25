@@ -77,6 +77,7 @@ from remote_ci_monitor.config import (
     server_base_url,
     supersede_skipped_presets,
     supersede_warnings,
+    tool_warnings,
 )
 from remote_ci_monitor.core import admission, jobenv, outcome
 from remote_ci_monitor.core import artifacts as art
@@ -735,6 +736,8 @@ class App(RemoteWorkersMixin, CapabilitiesMixin, ShelfAppMixin):
         for warning in admission_warnings(s, self.config.host):
             self.log(warning)
         for warning in supersede_warnings(self.config):
+            self.log(warning)
+        for warning in tool_warnings(self.config):  # 아무 데도 안 나올 `[[tools]]` 안내(TD9)
             self.log(warning)
         self.responder = None
         if advertise_enabled(self.config.server):
@@ -5189,6 +5192,8 @@ class App(RemoteWorkersMixin, CapabilitiesMixin, ShelfAppMixin):
         self._publish_server()
         self.log(f"reload: {reload_summary(changed)} · from {fresh.path}")
         for warning in supersede_warnings(fresh):
+            self.log(warning)
+        for warning in tool_warnings(fresh):
             self.log(warning)
         return {"reloaded": True, **files, **changed}
 

@@ -170,6 +170,16 @@ class Probe:
     timeout_seconds: int = 10
 
 
+@dataclass(frozen=True)
+class ToolHint:
+    """`[[tools]]` 하나 — 도구 이름에 묶인 설치 안내(M5t-a 결정 246). 표시 전용이라 rcm 은 이
+    문자열을 실행하지 않고 sudo 로 설치하지도 않는다. `install` 의 키는 `TOOL_OS_KEYS` 다."""
+
+    name: str
+    docs: str = ""
+    install: dict[str, str] = field(default_factory=dict)
+
+
 @dataclass
 class EstimateSection:
     sample_days: int = 45
@@ -304,6 +314,8 @@ class ServerConfig:
     presets: tuple[Preset, ...] = ()
     notify: tuple[NotifyRule, ...] = ()
     probes: tuple[Probe, ...] = ()
+    #: `[[tools]]` — doctor 가 빠진 도구 옆에 찍는 설치 안내. `/worker/spec` 으로만 나간다
+    tools: tuple[ToolHint, ...] = ()
     path: Path | None = None
     #: `include = [...]` 로 들인 파일들, 적힌 순서대로(M5o 결정 121). 경로는 펼친 절대 경로
     includes: tuple[Path, ...] = ()
@@ -1049,6 +1061,75 @@ def parse_probes(raw: Any, origin: str = "config") -> tuple[Probe, ...]:
     return tuple(out)
 
 
+#: `[tools.install]` 의 키 — OS 계열 둘과 대체값. 패키지 관리자별 키는 아직 두지 않는다(§4.5)
+TOOL_OS_KEYS = ("darwin", "linux", "any")
+_TOOL_KEYS = frozenset({"name", "docs", "install"})
+TOOL_TEXT_MAX = 300
+_TOOL_CONTROL_RE = re.compile(r"[\x00-\x1f\x7f-\x9f]")
+
+
+def _tool_text(where: str, value: Any) -> str:
+    """한 줄 문자열, 300자 이하, 제어문자 없음 — 워커가 그대로 터미널에 찍는 글이다."""
+    if not isinstance(value, str):
+        raise ConfigError(f"{where} must be a string")
+    if _TOOL_CONTROL_RE.search(value):
+        raise ConfigError(f"{where} has a control character (one line of text, no escapes)")
+    if len(value) > TOOL_TEXT_MAX:
+        raise ConfigError(f"{where} is longer than {TOOL_TEXT_MAX} characters")
+    return value
+
+
+def parse_tools(raw: Any, origin: str = "config") -> tuple[ToolHint, ...]:
+    """`[[tools]]` 배열 → ToolHint 들. 같은 이름 두 번 · 모르는 OS 키 · 제어문자 · 300자 초과는
+    기동 실패다(M5t-a §4.5 「설치 안내」 · TD9)."""
+    if not isinstance(raw, list):
+        raise ConfigError(f"{origin}: [[tools]] must be an array of tables")
+    out: list[ToolHint] = []
+    for item in raw:
+        if not isinstance(item, dict):
+            raise ConfigError("[[tools]]: each entry must be a table")
+        name = item.get("name")
+        if not isinstance(name, str) or not name.strip() or "/" in name:
+            raise ConfigError(
+                f"[[tools]]: 'name' must be a tool name (the basename in requires or a probe's "
+                f"argv[0]), got {name!r}"
+            )
+        where = f"[[tools]] '{name}'"
+        _tool_text(f"{where} name", name)
+        unknown = sorted(set(item) - _TOOL_KEYS)
+        if unknown:
+            raise ConfigError(f"{where}: unknown key(s): {', '.join(unknown)}")
+        docs = _tool_text(f"{where} docs", item.get("docs", ""))
+        install = item.get("install", {})
+        if not isinstance(install, dict):
+            raise ConfigError(f"{where}: install must be a table of {', '.join(TOOL_OS_KEYS)}")
+        bad = sorted(set(install) - set(TOOL_OS_KEYS))
+        if bad:
+            raise ConfigError(
+                f"{where}: unknown install key(s): {', '.join(bad)} (use {', '.join(TOOL_OS_KEYS)})"
+            )
+        texts = {k: _tool_text(f"{where} install.{k}", v) for k, v in install.items()}
+        out.append(ToolHint(name=name, docs=docs, install=texts))
+    names = [t.name for t in out]
+    dupes = sorted({n for n in names if names.count(n) > 1})
+    if dupes:
+        raise ConfigError(f"[[tools]]: {', '.join(dupes)} named twice")
+    return tuple(out)
+
+
+def tool_warnings(cfg: ServerConfig) -> list[str]:
+    """`requires` 항목의 basename 에도 프로브 argv[0] 의 basename 에도 없는 `[[tools]]` 이름 —
+    그 안내는 아무 데도 안 나온다. 기동 · reload 의 warning 줄이다(TD9)."""
+    used = {os.path.basename(r) for p in cfg.presets for r in p.requires}
+    used |= {os.path.basename(p.argv[0]) for p in cfg.probes if p.argv}
+    return [
+        f"[[tools]] '{t.name}': no preset requires it and no probe runs it — its hint is never "
+        "shown"
+        for t in cfg.tools
+        if t.name not in used
+    ]
+
+
 def _validate_checks(presets: tuple[Preset, ...]) -> tuple[Preset, ...]:
     """`checks` 의 이름이 있고 git_ref 를 받고 순환이 없는지(결정 94). `sample` 기본값을 정한다.
 
@@ -1082,7 +1163,7 @@ def _validate_checks(presets: tuple[Preset, ...]) -> tuple[Preset, ...]:
 # ── 서버 설정 ────────────────────────────────────────────────────────────────
 
 _SECTIONS = ("server", "estimate", "host", "display")
-_TOP_KEYS = set(_SECTIONS) | {"repos", "presets", "notify", "probes", "include"}
+_TOP_KEYS = set(_SECTIONS) | {"repos", "presets", "notify", "probes", "include", "tools"}
 #: 들인 파일이 가질 수 있는 최상위 키(M5o 결정 121). 저장소 토큰 · 비밀 · 바인드 주소는
 #: server.toml 에만 있다 — 들인 파일을 쓸 수 있는 사람이 그것까지 정하면 안 된다
 _INCLUDE_KEYS = frozenset({"presets"})
@@ -1465,6 +1546,7 @@ def load_server_config(
             raise ConfigError(f"{found}: [[notify]] must be an array of tables")
         cfg.notify = tuple(parse_notify(n) for n in notify)
         cfg.probes = parse_probes(raw.get("probes", []), str(found))
+        cfg.tools = parse_tools(raw.get("tools", []), str(found))
         cfg.path = found
     saved = None
     if environ is not None:
