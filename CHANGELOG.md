@@ -17,7 +17,9 @@ of a key bumps that number and is listed here.
   `local_only` pool preset must use the default pool, or the server does not start; an older
   server does not know the key, so upgrade every server that reads the preset first.
   `POST /machines/{id}/recheck` without names lists a check a remote worker cannot run under a
-  new `skipped` key instead of as a failed job.
+  new `skipped` key instead of as a failed job. `rcm run` exits 2 on these refusals, as no job
+  was made. For a `local_only` preset no local lane can take, `POST /api/eta` now answers
+  `ahead: null`; `ahead` was always a number before.
   ([#266](https://github.com/monocsp/remote_ci_monitor/pull/266))
 
 ## [0.10.0] - 2026-11-23

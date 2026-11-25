@@ -1621,7 +1621,9 @@ Everything that chooses a machine uses that one list, so a remote worker never s
 - `rcm machines` and `/api/machines` show it as `local_only` on every remote worker, and it is not
   counted in their `eligible` number;
 - the waiting row, `rcm eta` and the `POST /jobs` answer (`placement.eligible_now`) count only
-  `@local`.
+  `@local`. When no local lane can take the job, `POST /api/eta` answers `ahead: null` with no
+  estimate. `ahead` was always a number before, so a script that reads it must accept `null`.
+  Otherwise `ahead` counts only the jobs that compete for the server's lanes.
 
 The server's lanes take the job exactly as before. A `local_only` `pool` preset must use the
 default pool — the server's lanes serve no other — or the server does not start. Extra `pools` are
@@ -1633,7 +1635,8 @@ local lanes (local_only) — machine mbp cannot take it`), `--pool` names a pool
 `default`, the preset is `any-capable` while `[server] local_accept_any = false`, or it is
 `any-capable` and the server's lanes miss a `requires` tool. The reason code is
 `no_capable_machine`, or `tool_missing` for the last case. This check runs before joining an
-identical job and before superseding older ones. A preset whose check has not passed (or failed)
+identical job and before superseding older ones. `rcm run` prints the server's reason and exits 2,
+since no job was made. A preset whose check has not passed (or failed)
 on `@local` is not refused: the job waits with `check pending` or `check failed`, as any other.
 Nor is one submitted while `@local` has no report yet, or a stale one.
 
