@@ -164,6 +164,19 @@ def test_tl4_a_waiting_job_goes_to_the_worker_that_attaches(lz):
     assert lz.store.get_job(jid).worker_name == REMOTE
 
 
+def test_tl4_tl12_a_default_pool_job_runs_on_the_attached_worker_and_its_result_returns(lz):
+    # TL12 는 실기(PR7)다 — 여기서는 단위 · e2e 로 닿는 데까지: 분배 전용 서버에 기본 풀 워커를
+    # 붙이고, 배치를 바꾸지 않은 기본 풀 프리셋을 그 워커가 집어 끝내면 요청자가 결과를 읽는다
+    jid = queued(lz, "gate")
+    report(lz, REMOTE)
+    assert lz.claimed(REMOTE) == jid
+    status, body = lz.finish(REMOTE, jid, "succeeded", exit_code=0)
+    assert status == 200, body
+    view = lz.view(jid, token="alice")
+    assert view["state"] == "succeeded", view
+    assert view["worker"] == REMOTE, view
+
+
 def test_tl9_the_queue_survives_a_restart(tmp_path):
     s = zero(tmp_path)
     jobs = [queued(s, "gate"), queued(s, "gateany")]
