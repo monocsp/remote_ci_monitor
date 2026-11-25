@@ -7,6 +7,13 @@ of a key bumps that number and is listed here.
 
 ## [Unreleased]
 
+### Breaking changes
+- **`rcm worker --check` asks before it uses a server found on the network.** With
+  `server = "auto"` it shows the server's name and address and waits for a yes in a terminal;
+  without a terminal it exits 3 and sends nothing, where it used to go on with exit 0. Pass
+  `--server URL` in scripts. The package now needs Python 3.11.4 or newer (`requires-python`),
+  as 3.11.0–3.11.3 lack the safe `tarfile` filter rcm already required at run time.
+
 ### Added
 - **`local_only = true` keeps a preset on the server's own lanes.** A remote worker never gets it:
   it is left out of `GET /worker/spec`, no remote claim hands it out, and `rcm machines` shows it
@@ -29,12 +36,30 @@ of a key bumps that number and is listed here.
   needs (Python 3.11.4+, git, the host sampler's commands), and exits 0, 1 (something is missing
   or nothing would come here), 2 (usage) or 3 (could not decide). Roles: `worker`,
   `coordinator-worker`, `coordinator` and `client`; `--json`, `--shell-path`, `--offline`,
-  `--service-file`. It sends nothing to the server and opens no database.
+  `--service-file`. It sends the server only read requests and opens no database. `--json` always
+  carries every key (`null` when unknown) under `doctor_version: 1`. A systemd unit without
+  `PATH` is not guessed (exit 3), an unreachable `[[repos]]` entry or a `git_ref` preset whose
+  repository is missing from the worker's `[[repos]]` is a failure, and `--role coordinator`
+  lists `local_only` presets as needing a local lane. `rcm doctor` never follows the server's
+  version.
+- **`[[tools]]` in `server.toml` gives a tool an install hint.** `name`, `docs` and
+  `[tools.install]` lines for `darwin`, `linux` or `any`; shown by `rcm doctor` next to a missing
+  tool, never run. Control characters, lines over 300 characters, an unknown key or a name given
+  twice stop the server from starting; a name no preset or probe uses is a warning.
+- **Workers report host facts, and `rcm machines --machine ID` shows them.** OS version, real
+  arch and Rosetta, container, root, package manager and Python come with registration and every
+  capability report, are kept in memory only, and appear in `GET /api/machines` (new `host` key)
+  only for a request with a token.
 - **`rcm worker --check` shows a `version` row and a last line with the number of missing
   tools.** A different server version is a warning when registering will follow it and FAIL when
-  this install cannot follow; the existing rows are unchanged.
+  this install cannot follow; the missing line is ok only when nothing is missing and never fails
+  the check; the existing rows are unchanged.
 
 ### Fixed
+- **`rcm recheck` names the checks it skipped, and `rcm eta --job` no longer counts a line for a
+  job no machine can take.** A `local_only` check a remote worker cannot run prints
+  `<check> skipped on <machine> [local_only]` and is not a failure; a `no capable machine` job
+  shows no `ahead` count, as `POST /api/eta` already did.
 - **macOS Command Line Tools shims are no longer run when the tools are not installed.** A file
   directly in `/usr/bin/` that links `libxcselect` counts as missing (`needs Command Line Tools`)
   in the job's `requires` check, the server's tool measurements, `rcm check` and worker probes,
