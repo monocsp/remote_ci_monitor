@@ -2728,6 +2728,16 @@ MUTANTS = (
             "test_e3_a_closed_pipe_keeps_the_verdict_and_prints_no_traceback",
         ),
     ),
+    Mutant(
+        # git_ref 잡의 git 이 shim 규칙을 건너뛴다 — CLT 없는 Mac 에서 잡마다 설치 창이 뜬다
+        # (P6 GAP R2)
+        name="gitops-git-shim-runs",
+        path="src/remote_ci_monitor/gitops.py",
+        old='    return shutil.which("git", path=path) is not None and '
+        'runner.find_tool("git", path) is None\n',
+        new="    return False\n",
+        tests=("tests/test_tool_shim.py::test_r2_git_ref_jobs_never_run_a_blocked_git_shim",),
+    ),
 )
 
 

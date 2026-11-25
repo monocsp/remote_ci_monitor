@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import os
 import shlex
+import shutil
 import signal
 import subprocess
 import threading
@@ -23,6 +24,7 @@ from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import Any
 
+from remote_ci_monitor import runner
 from remote_ci_monitor.core.gitref import is_full_sha, pick_sha, short_sha
 
 LogFn = Callable[[str], None]
@@ -121,6 +123,15 @@ def git_env(
     return env
 
 
+def git_blocked(env: Mapping[str, str]) -> bool:
+    """`env` 의 PATH 가 부를 git 이 CLT 없는 Mac 의 `/usr/bin/git` shim 인가 — 실행하면 설치
+    대화상자가 뜬다. 헤드리스 서비스에서는 git_ref 잡마다 그 창이 다시 뜬다. 판별은
+    `runner.find_tool` 의 shim 규칙 하나다(M5t-a 결정 246, P6 GAP R2). PATH 에 git 이 아예 없는
+    것은 여기서 보지 않는다 — 실행이 FileNotFoundError 로 알려 준다."""
+    path = env.get("PATH", "")
+    return shutil.which("git", path=path) is not None and runner.find_tool("git", path) is None
+
+
 def _mirror_lock(mirror: Path) -> threading.Lock:
     # 키는 미러가 생기기 전후로 같아야 한다 — `resolve()` 는 생긴 뒤에만 심볼릭 링크
     # (/var → /private/var)를 풀어 다른 키를 주므로 존재 여부와 무관한 절대 경로를 쓴다
@@ -179,9 +190,14 @@ def _run_git(
             kind="no_credential",
             op=what,
         )
+    env = git_env(credential=credential)
+    if git_blocked(env):
+        raise GitError(
+            f"git is not installed on the build machine ({runner.CLT_NOTE})", kind="no_git", op=what
+        )
     kwargs: dict[str, Any] = {
         "cwd": str(cwd) if cwd is not None else None,
-        "env": git_env(credential=credential),
+        "env": env,
         "stdin": subprocess.DEVNULL,
         "capture_output": True,
         "text": True,
@@ -366,7 +382,7 @@ def fetch_all(
 
 def _git_query(mirror: Path, argv: list[str], *, timeout: float = 30) -> str | None:
     """미러 안 읽기 전용 질의. 실패(없는 ref · 미러 없음 · git 없음)는 None — 문구는 안 만든다."""
-    if not (mirror / "HEAD").is_file():
+    if not (mirror / "HEAD").is_file() or git_blocked(git_env()):
         return None
     try:
         proc = subprocess.run(
@@ -394,7 +410,7 @@ def is_ancestor(mirror: Path, ancestor: str, descendant: str) -> bool | None:
     """`git merge-base --is-ancestor <a> <b>` — 둘 다 40 hex 여야 한다. 답을 못 내면 None."""
     if not (is_full_sha(ancestor) and is_full_sha(descendant)):
         return None
-    if not (mirror / "HEAD").is_file():
+    if not (mirror / "HEAD").is_file() or git_blocked(git_env()):
         return None
     try:
         proc = subprocess.run(
@@ -454,7 +470,7 @@ def tags_matching(mirror: Path, prefix: str, limit: int = 5) -> list[dict[str, A
 
 def has_commit(mirror: Path, sha: str) -> bool:
     """미러에 그 커밋이 있는가. sha 는 40 hex 여야 한다."""
-    if not is_full_sha(sha) or not (mirror / "HEAD").is_file():
+    if not is_full_sha(sha) or not (mirror / "HEAD").is_file() or git_blocked(git_env()):
         return False
     try:
         subprocess.run(

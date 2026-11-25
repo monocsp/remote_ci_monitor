@@ -148,3 +148,64 @@ def test_td52_xcode_select_itself_is_never_a_shim(shimdir, tmp_path, monkeypatch
     env = {"PATH": str(shimdir)}
     assert runner.missing_tools(("xcode-select",), env) == []
     assert runner.measure_tools(("xcode-select",), env) == ([], [])
+
+
+# ── P6 GAP R2: 서버 기동 점검과 git_ref 잡의 git 도 같은 규칙 ──────────────────────
+
+
+def test_r2_server_startup_counts_a_blocked_git_shim_as_missing(shimdir, tmp_path, monkeypatch):
+    """`rcm serve` 의 기동 점검(`check_tools=True`)은 `[[repos]]` 가 있으면 git 을 찾는다. CLT 없는
+    Mac 의 `/usr/bin/git` shim 은 있음이 아니다 — 없음으로 기동을 멈춘다(P6 GAP R2)."""
+    from remote_ci_monitor.config import ConfigError, load_server_config
+
+    no_clt(tmp_path, monkeypatch)
+    # shim 이 돌면 표지를 남기도록 `touch` 가 있는 폴더도 뒤에 둔다
+    monkeypatch.setenv("PATH", f"{shimdir}{os.pathsep}/usr/bin{os.pathsep}/bin")
+    cfg = tmp_path / "server.toml"
+    cfg.write_text(
+        f'[server]\ndata_dir = "{tmp_path / "data"}"\n\n'
+        '[[repos]]\nname = "app"\nurl = "https://example.invalid/app.git"\n'
+    )
+    with pytest.raises(ConfigError, match="git") as e:
+        load_server_config(cfg, check_tools=True)
+    assert "Command Line Tools" in str(e.value), e.value
+    assert not (tmp_path / "shim-ran").exists(), "the shim was executed"
+
+
+def test_r2_git_ref_jobs_never_run_a_blocked_git_shim(shimdir, tmp_path, monkeypatch):
+    """git_ref 잡과 미러 질의(`gitops`)가 부르는 git 이 막힌 shim 이면 실행하지 않는다 — 헤드리스
+    Mac 에서 잡마다 설치 창이 다시 뜨지 않게. 잡은 「git 없음(CLT 필요)」으로 실패한다
+    (P6 GAP R2)."""
+    from remote_ci_monitor import gitops
+
+    no_clt(tmp_path, monkeypatch)
+    # shim 이 돌면 표지를 남기도록 `touch` 가 있는 폴더도 뒤에 둔다
+    monkeypatch.setenv("PATH", f"{shimdir}{os.pathsep}/usr/bin{os.pathsep}/bin")
+    mirror = tmp_path / "mirror.git"
+    mirror.mkdir()
+    (mirror / "HEAD").write_text("ref: refs/heads/main\n")
+    with pytest.raises(gitops.GitError) as e:
+        gitops.resolve_ref("https://example.invalid/app.git", "main", timeout=5)
+    assert e.value.kind == "no_git" and "Command Line Tools" in str(e.value), e.value
+    with pytest.raises(gitops.GitError) as e:
+        gitops.fetch_all(mirror, "https://example.invalid/app.git", timeout=5)
+    assert e.value.kind == "no_git", e.value
+    assert gitops.ref_sha(mirror, "main") is None
+    assert gitops.is_ancestor(mirror, "a" * 40, "b" * 40) is None
+    assert gitops.has_commit(mirror, "a" * 40) is False
+    assert gitops.branch_log(mirror, "main") == []
+    assert not (tmp_path / "shim-ran").exists(), "the shim was executed"
+
+
+def test_r2_a_real_git_still_runs(shimdir, tmp_path, monkeypatch):
+    """과잉 교정 막기: CLT 가 깔린 Mac 의 shim 과 PATH 의 보통 git 은 그대로 돈다."""
+    from remote_ci_monitor import gitops
+
+    with_clt(tmp_path, monkeypatch)
+    # shim 이 돌면 표지를 남기도록 `touch` 가 있는 폴더도 뒤에 둔다
+    monkeypatch.setenv("PATH", f"{shimdir}{os.pathsep}/usr/bin{os.pathsep}/bin")
+    mirror = tmp_path / "mirror.git"
+    mirror.mkdir()
+    (mirror / "HEAD").write_text("ref: refs/heads/main\n")
+    gitops.ref_sha(mirror, "main")
+    assert (tmp_path / "shim-ran").exists(), "a usable git was not run"

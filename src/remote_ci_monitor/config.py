@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import os
 import re
-import shutil
 import stat
 import tomllib
 import zoneinfo
@@ -1492,8 +1491,16 @@ def _validate_server(cfg: ServerConfig, *, check_tools: bool = True) -> None:
         dupes = sorted({n for n in names if names.count(n) > 1})
         raise ConfigError(f"[[presets]] duplicate preset name(s): {', '.join(dupes)}")
     _validate_repos(cfg.repos)
-    if check_tools and cfg.repos and shutil.which("git") is None:
-        raise ConfigError("[[repos]] configured but git is not on PATH")
+    if check_tools and cfg.repos:
+        # CLT 없는 Mac 의 `/usr/bin/git` shim 은 있음이 아니다 — 실행하면 설치 창이 뜬다. 판별은
+        # `runner.find_tool` 하나다(M5t-a 결정 246, P6 GAP R2). 늦게 들여 순환을 피한다
+        from remote_ci_monitor import runner
+
+        path = os.environ.get("PATH", "")
+        if runner.find_tool("git", path) is None:
+            note = runner.missing_note("git", {"PATH": path})
+            where = f"git is {note}" if note else "git is not on PATH"
+            raise ConfigError(f"[[repos]] configured but {where}")
     resolved: list[Preset] = []
     for p in cfg.presets:
         if "git_ref" in p.source_modes:
