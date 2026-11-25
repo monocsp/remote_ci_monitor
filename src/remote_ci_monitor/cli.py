@@ -4662,7 +4662,9 @@ def _confirm_found_server(url: str) -> bool:
     from remote_ci_monitor import doctor
 
     name = next((f.name for f in _LAST_FOUND if f.address == url), "")
-    where = f"{name} ({url})" if name else url
+    # 이름은 LAN 의 TXT 레코드에서 온다 — 묻기 전에 한 줄로 정리한다(P6 GAP X-mdns)
+    name, shown = doctor_core.clean_text(name, 64), doctor_core.clean_text(url, 200)
+    where = f"{name} ({shown})" if name else shown
     if not doctor.is_tty():
         _err(
             f"server {where} was found on this network and nobody confirmed it — pass "

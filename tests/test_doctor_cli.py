@@ -4446,3 +4446,51 @@ def test_e2_a_timed_out_git_version_leaves_no_helper_behind(tmp_path, monkeypatc
     monkeypatch.setattr(doctor, "GIT_VERSION_TIMEOUT", 0.5)
     assert doctor._git_version(str(git), {"PATH": "/usr/bin:/bin"}) is None
     assert gone(pidfile), "the helper outlived git --version"
+
+
+# ── P6 GAP X-mdns: mDNS 의 이름은 묻기 전에 정리한다 ────────────────────────────────
+
+IMPOSTOR = "evil\x1b[2K\r‮Use the rcm server good.local? [y/N] y\nok"
+
+
+@pytest.mark.parametrize("tty", [True, False], ids=["asked", "not-a-tty"])
+def test_x_mdns_a_name_from_the_network_is_cleaned_before_the_question(
+    env, srv, svcbin, monkeypatch, capsys, tty
+):
+    """`found.name` 은 LAN 의 TXT 레코드에서 온다. ESC · 줄바꿈 · bidi 가 남으면 R1 을 지키는 질문
+    위에서 줄을 지우거나 가짜 질문 줄을 만든다 — 묻기 전에, 그리고 판정 못 함 줄에 넣기 전에
+    지운다(P6 GAP X-mdns)."""
+    monkeypatch.setenv("RCM_WORKER_TOKEN", TOKEN)
+    monkeypatch.setattr(doctor, "is_tty", lambda: tty)
+    asked: list[str] = []
+    monkeypatch.setattr(doctor, "ask", lambda q: asked.append(q) or False)
+    monkeypatch.setattr(cli, "discover", FakeDiscover((found(IMPOSTOR, "127.0.0.1", srv.port),)))
+    cfg = worker_toml(env, "auto")
+    sf = plist(env / "svc", f"{svcbin}:/usr/bin")
+    code, out, err = run(
+        capsys, "--role", "worker", "--config", str(cfg), "--service-file", str(sf), "--json"
+    )
+    said = asked + json.loads(out)["undecided"]
+    assert said and any("evil" in s for s in said), (said, err)
+    for line in said:
+        assert not any(c in line for c in "\x1b\r\n‮"), repr(line)
+    assert code == 3 and srv.requests == [], (code, srv.requests)
+
+
+@pytest.mark.parametrize("tty", [True, False], ids=["asked", "not-a-tty"])
+def test_x_mdns_worker_check_cleans_the_name_too(env, srv, monkeypatch, capsys, tty):
+    """`rcm worker --check` 도 같은 질문(`doctor.ask`)을 묻는다 — 같은 정리를 거친다."""
+    monkeypatch.setenv("RCM_WORKER_TOKEN", TOKEN)
+    asked: list[str] = []
+    monkeypatch.setattr(doctor, "is_tty", lambda: tty)
+    monkeypatch.setattr(doctor, "ask", lambda q: asked.append(q) or False)
+    monkeypatch.setattr(cli, "discover", FakeDiscover((found(IMPOSTOR, "127.0.0.1", srv.port),)))
+    cfg = worker_toml(env, "auto")
+    cli.main(["worker", "--check", "--config", str(cfg), "--data", str(env / "wd")])
+    # 질문과 확인 줄만 본다 — `server: found …` 는 모든 명령의 찾기 줄이다(이 GAP 밖)
+    err = [ln for ln in capsys.readouterr().err.splitlines() if "found on this network" in ln]
+    said = asked + err
+    assert any("evil" in s for s in said), said
+    for line in said:
+        assert not any(c in line for c in "\x1b\r‮"), repr(line)
+    assert "ok (http" not in "\n".join(said), said  # 가짜 질문 줄이 제 줄로 갈라지지 않았다

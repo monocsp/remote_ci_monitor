@@ -1237,9 +1237,16 @@ class _Run:
             )
         )
 
+    @staticmethod
+    def found_where(found: Any) -> str:
+        """mDNS 로 찾은 서버의 이름과 주소 — 한 줄로 정리한다. 이름은 LAN 의 TXT 레코드에서 온다:
+        ESC · 줄바꿈 · bidi 가 남으면 R1 을 지키는 질문 위에서 줄을 지우거나 가짜 질문 줄을 만든다
+        (P6 GAP X-mdns)."""
+        return f"{dc.clean_text(found.name, 64)} ({dc.clean_text(found.address, 200)})"
+
     def confirm(self, found: Any) -> bool:
         """mDNS 로 찾은 서버 — 사람이 확인하기 전에는 어떤 요청도 보내지 않는다(TD10 · TD28)."""
-        where = f"{found.name} ({found.address})"
+        where = self.found_where(found)
         if not is_tty():
             self.undecided.append(
                 f"server {where} was found on this network and nobody confirmed it — "
@@ -1259,7 +1266,7 @@ class _Run:
             self.undecided.append("no rcm server found on this network — pass --server URL")
             return None
         if len(picks) > 1:
-            names = ", ".join(f"{f.name} ({f.address})" for f in picks)
+            names = ", ".join(self.found_where(f) for f in picks)
             raise DoctorUsage(f"several rcm servers on this network: {names} — pass --server URL")
         return picks[0] if self.confirm(picks[0]) else None
 
