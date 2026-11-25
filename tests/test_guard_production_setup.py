@@ -910,3 +910,75 @@ def test_g2_bare_rcm_under_a_pty_launcher_is_denied(command):
 def test_g2_rcm_with_a_subcommand_or_without_a_pty_passes(command):
     # 하위 명령이 글자 그대로 있거나 pty 런처가 없으면(이 세션의 Bash 는 터미널이 아니다) 조용하다
     assert judge(command, environ=TEST_XDG) is None, command
+
+
+# ── P3 5라운드 G3: 링크된 워크트리를 editable 로 설치한 서비스 ──
+
+
+def _service_venv(root: Path, source: Path) -> Path:
+    """`pyvenv.cfg` · `bin/rcm` · `source` 를 가리키는 editable `direct_url.json` 이 있는 venv."""
+    (root / "bin").mkdir(parents=True)
+    (root / "pyvenv.cfg").write_text("home = /usr/bin\n")
+    launcher = root / "bin" / "rcm"
+    launcher.write_text("#!/bin/sh\n")
+    launcher.chmod(0o755)
+    info = root / "lib" / "python3.11" / "site-packages" / "remote_ci_monitor-0.11.0.dist-info"
+    info.mkdir(parents=True)
+    (info / "direct_url.json").write_text(
+        '{"dir_info": {"editable": true}, "url": "file://' + str(source) + '"}'
+    )
+    return root
+
+
+def _linked_service_home(tmp_path: Path, monkeypatch, how: str) -> dict[str, Path]:
+    """이 Mac 의 운영 꼴: 서비스가 실행하는 venv 의 editable 원본이 링크된 워크트리
+    (`remote_ci_monitor-service`, `.git` 이 파일)다. venv 는 문서의 자리나 서비스 유닛이 적은
+    자리에 있다."""
+    home = tmp_path / "home"
+    main = home / "src" / "remote_ci_monitor"
+    (main / ".git" / "worktrees" / "service").mkdir(parents=True)
+    service = home / "src" / "remote_ci_monitor-service"
+    service.mkdir(parents=True)
+    (service / ".git").write_text(f"gitdir: {main}/.git/worktrees/service\n")
+    if how == "documented":
+        venv = _service_venv(home / ".local" / "share" / "rcm-venv", service)
+    else:
+        venv = _service_venv(home / "venvs" / "rcm-service", service)
+        unit = home / "Library" / "LaunchAgents" / "com.remote-ci-monitor.server.plist"
+        unit.parent.mkdir(parents=True)
+        unit.write_text(f"<array><string>{venv}/bin/rcm</string><string>serve</string></array>")
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("PATH", "/usr/bin:/bin")
+    return {"home": home, "service": service, "venv": venv}
+
+
+@pytest.mark.parametrize("how", ["documented", "unit"])
+def test_g3_a_service_venv_that_installs_a_linked_worktree_is_production(
+    tmp_path, monkeypatch, how
+):
+    # P3 5라운드 v1-3: 서비스가 실행하는 venv 의 원본이 링크된 워크트리여도 그 워크트리가 운영
+    # 체크아웃이다 — 편집 규칙과 setup 규칙이 같은 `production_root` 로 그것을 막는다
+    fake = _linked_service_home(tmp_path, monkeypatch, how)
+    prod = guard.find_production()
+    assert prod.checkout == fake["service"] and prod.venv == fake["venv"], prod
+    inside = str(fake["service"] / "src" / "x.py")
+    edit = guard.decide("Edit", {"file_path": inside}, prod, tmp_path)
+    assert edit is not None and edit.decision == "deny", edit
+    setup_cmd = f"{FREE_SERVER} --data-dir /tmp/d --config {fake['service']}/s.toml"
+    verdict = guard.decide("Bash", {"command": setup_cmd}, prod, tmp_path, environ=TEST_XDG)
+    assert verdict is not None and verdict.decision == "deny", verdict
+    assert "production checkout" in verdict.reason, verdict.reason
+
+
+def test_g3_a_path_venv_that_installs_a_linked_worktree_is_still_not_production(
+    tmp_path, monkeypatch
+):
+    # 경계: PATH 에서만 찾은 venv 는 서비스가 실행한다는 근거가 없다 — 원본이 링크된 워크트리면
+    # 지금처럼 운영이 아니다(tests/test_guard_production.py 의 같은 꼴)
+    fake = _linked_service_home(tmp_path, monkeypatch, "documented")
+    elsewhere = fake["home"] / "venvs" / "dev"
+    elsewhere.parent.mkdir(parents=True)
+    fake["venv"].rename(elsewhere)
+    monkeypatch.setenv("PATH", f"{elsewhere}/bin:/usr/bin:/bin")
+    prod = guard.find_production()
+    assert prod.checkout is None and prod.venv is None, prod

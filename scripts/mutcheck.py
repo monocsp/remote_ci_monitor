@@ -3353,6 +3353,18 @@ MUTANTS = (
             "tests/test_guard_production_setup.py::test_g2_bare_rcm_under_a_pty_launcher_is_denied",
         ),
     ),
+    Mutant(
+        # 서비스가 실행하는 venv 의 원본이 링크된 워크트리면 운영에서 뺀다 — 워크트리에서 도는
+        # 운영 서비스의 체크아웃 · venv 를 편집 · setup 규칙이 모른다(P3 5라운드 v1-3)
+        name="guard-linked-worktree-service-dropped",
+        path="tools/guard_production.py",
+        old="        if _is_linked_worktree(checkout) and not runs:\n",
+        new="        if _is_linked_worktree(checkout):\n",
+        tests=(
+            "tests/test_guard_production_setup.py::"
+            "test_g3_a_service_venv_that_installs_a_linked_worktree_is_production",
+        ),
+    ),
     # ── M5t-a PR3 — 분배 전용 코디네이터 `lanes = 0` (docs/m5t-workplan.md §7 변이 검사) ──
     Mutant(
         # `lanes = 0` 에서 `@local` 을 살아 있다고 본다 — 레인이 없는 서버의 머신 목록이 로컬

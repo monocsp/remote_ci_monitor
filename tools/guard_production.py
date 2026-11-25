@@ -1490,29 +1490,30 @@ def decide(
 # ── 발견 (I/O) ───────────────────────────────────────────────────────────────
 
 
-def _venv_candidates() -> list[Path]:
+def _venv_candidates() -> list[tuple[Path, bool]]:
     """서비스 venv 후보를 순서대로: 문서의 자리 → 설치된 서비스 유닛이 적은 `rcm` → PATH 의
-    `rcm`·`remote-ci-monitor` 전부. 심링크(`~/.local/bin/rcm`)는 실제 파일로 푼다."""
-    out: list[Path] = []
+    `rcm`·`remote-ci-monitor` 전부. 심링크(`~/.local/bin/rcm`)는 실제 파일로 푼다. 둘째 값은
+    서비스가 그 venv 를 실행한다는 근거가 있나다 — 문서의 자리와 유닛은 있고, PATH 는 짐작이다."""
+    out: list[tuple[Path, bool]] = []
 
-    def add(launcher: Path | None) -> None:
+    def add(launcher: Path | None, runs: bool) -> None:
         if launcher is None:
             return
         real = Path(os.path.realpath(launcher))
         venv = _norm(real.parent.parent)
-        if venv not in out and (venv / "pyvenv.cfg").exists():
-            out.append(venv)
+        if all(venv != seen for seen, _ in out) and (venv / "pyvenv.cfg").exists():
+            out.append((venv, runs))
 
     documented = Path(SERVICE_VENV).expanduser()
     if (documented / "pyvenv.cfg").exists():
-        out.append(_norm(documented))
+        out.append((_norm(documented), True))
     for unit in SERVICE_UNITS:
-        add(_launcher_in_unit(Path(unit).expanduser()))
+        add(_launcher_in_unit(Path(unit).expanduser()), True)
     for directory in os.environ.get("PATH", "").split(os.pathsep):
         for name in ("rcm", "remote-ci-monitor"):
             launcher = Path(directory) / name
             if directory and launcher.is_file():
-                add(launcher)
+                add(launcher, False)
     return out
 
 
@@ -1550,11 +1551,16 @@ def _is_linked_worktree(checkout: Path) -> bool:
 
 
 def _service_install() -> tuple[Path | None, Path | None]:
-    """(서비스 venv, 운영 체크아웃). editable 원본이 본 체크아웃이고 venv 가 그 밖에 있는 첫
-    후보 — 워크트리 `.venv` 는 원본이 링크된 워크트리이고 venv 가 그 안에 있어 둘 다에 걸린다."""
-    for venv in _venv_candidates():
+    """(서비스 venv, 운영 체크아웃). editable 원본이 있고 venv 가 그 밖에 있는 첫 후보 — 워크트리
+    `.venv` 는 venv 가 원본 안에 있어 빠진다. 원본이 링크된 워크트리면 서비스가 그 venv 를
+    실행한다는 근거(문서의 자리 · 설치된 유닛)가 있을 때만 운영이다: 서비스를 워크트리
+    (`remote_ci_monitor-service`)에서 돌리는 머신이 있다(P3 5라운드 v1-3). PATH 에서만 찾은
+    venv 의 원본이 링크된 워크트리면 개발 빌드로 본다."""
+    for venv, runs in _venv_candidates():
         checkout = _editable_source(venv)
-        if checkout is None or _is_linked_worktree(checkout) or inside(venv, checkout):
+        if checkout is None or inside(venv, checkout):
+            continue
+        if _is_linked_worktree(checkout) and not runs:
             continue
         return venv, checkout
     return None, None
