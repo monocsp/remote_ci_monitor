@@ -26,6 +26,8 @@ from remote_ci_monitor.core.model import (
     PLACEMENT_CAPABLE,
     PLACEMENT_POOL,
     QUEUED,
+    RETRIED,
+    SCHEDULED,
     Requester,
     Source,
 )
@@ -812,6 +814,61 @@ def test_to17_waiting_jobs_have_no_capable_machine_once_the_preset_is_local_only
         s.app.tick_schedule()
         assert s.store.get_job(later).state == QUEUED
         assert s.row(later)["reason"] == "no_capable_machine"
+    finally:
+        s.close()
+
+
+#: 반복 정책이 있는 기본 풀 git_ref 프리셋 — 표식 없음. `[presets.retry]` 는 블록의 맨 끝이다
+_RETRY_HEAD = 'name = "relgitretry"\nargv = ["sh", "-c", "echo relgitretry"]\n'
+RETRY = block(
+    "relgitretry",
+    GIT,
+    "[presets.retry]\non_exit = 75\ninterval_seconds = 60\nmax_attempts = 3",
+)
+RETRY_MARKED = RETRY.replace(_RETRY_HEAD, _RETRY_HEAD + "local_only = true\n")
+
+
+def _next_attempt(s: M5nServer, jid: int) -> int:
+    """`jid` 가 `retried` 로 닫혀 만든 다음 시도 — 간격이 지나 `queued` 가 된 뒤의 번호."""
+    done = s.store.get_job(jid)
+    assert done.state == RETRIED and done.exit_code == 75, done
+    nxt = int(done.retried_as)
+    assert s.store.get_job(nxt).state == SCHEDULED
+    s.clock.advance(61)
+    s.app.tick_schedule()
+    assert s.store.get_job(nxt).state == QUEUED
+    return nxt
+
+
+@pytest.mark.parametrize("where", ["pinned", "pool"])
+def test_e1_a_remote_run_finishes_after_the_mark_and_its_retry_stays_off_remote(tmp_path, where):
+    """# E1 — 원격 워커가 돌던 잡은 표식을 단 뒤에도 그대로 끝나 결과를 보고한다(claim 이 이미
+    RUNNING 으로 바꿨고 heartbeat · finish 는 `local_only` 를 보지 않는다). 그 잡의 재시도는 새
+    시도라 표식을 따른다: 그 워커를 지정한 시도는 `no_capable_machine` · ETA null 로 기다리고,
+    기본 풀의 시도는 원격이 아니라 로컬 레인이 집는다."""
+    assert RETRY_MARKED != RETRY
+    s = ready(server(tmp_path, presets=PRESETS + RETRY))
+    try:
+        jid = queued(s, "relgitretry", token="admin", machine=REMOTE if where == "pinned" else None)
+        assert s.claimed(REMOTE) == jid
+        _mark_by_reload(s, PRESETS + RETRY_MARKED)
+        assert s.app.config.preset("relgitretry").local_only is True
+        status, body = s.heartbeat(REMOTE, jobs=[jid])
+        assert status == 200 and body["cancel"] == [], body
+        status, body = s.finish(REMOTE, jid, "failed", exit_code=75)
+        assert status == 200, body
+        nxt = _next_attempt(s, jid)
+        assert s.claim(REMOTE)[0] == 204  # 다음 시도는 원격에 가지 않는다
+        if where == "pinned":
+            row = s.row(nxt)
+            assert row["reason"] == "no_capable_machine", row
+            assert row["estimate"]["finish_at"] is None, row
+            assert row["estimate"]["wait_seconds"] is None, row
+            assert s.store.get_job(nxt).state == QUEUED  # 실패로 닫지 않는다
+        else:
+            now = s.clock()
+            got = s.store.claim(1, now, claimant=s.app.local_claimant(now))
+            assert got is not None and got.id == nxt and got.worker_name is None
     finally:
         s.close()
 
