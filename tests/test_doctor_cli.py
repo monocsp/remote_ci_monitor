@@ -2909,3 +2909,28 @@ def test_a_token_file_doctor_cannot_read_is_unknown_not_unreachable(
     assert any("repos" in u and "token_file" in u for u in doc["undecided"]), doc["undecided"]
     assert str(env / "home") not in json.dumps(doc)
     assert code == 3, doc
+
+
+def test_a_git_version_rcm_cannot_read_is_unknown_not_a_fail(env):
+    """`token_file` 에는 git 2.31+ 가 필요하다. 버전을 읽지 못한 것은 「낮다」가 아니라 모름이다."""
+    d = env / "gitbin"
+    d.mkdir()
+    script(d / "git", "echo 'not a version'")
+    got = doctor.git_requirement(
+        {"PATH": str(d)}, token_file=True, platform="linux", package_manager=None, root=False
+    )
+    assert got["state"] == "unknown", got
+
+
+def test_repos_with_an_unknown_service_path_are_unknown_not_unreachable(
+    env, srv, monkeypatch, capsys
+):
+    """서비스 PATH 를 모르면(PATH 없는 systemd 유닛) git 을 찾을 수 없다 — 저장소는 「닿지
+    않음」(종료 1)이 아니라 재지 못함이다."""
+    monkeypatch.setenv("RCM_WORKER_TOKEN", TOKEN)
+    (env / "svc").mkdir()
+    sf = env / "svc" / "rcm-worker.service"
+    sf.write_text("[Service]\nExecStart=/x/rcm worker\n")
+    code, doc = run_worker(capsys, env, srv, sf, toml_extra=REPO)
+    assert req(doc, "repos")["state"] == "unknown", doc["rcm_requirements"]
+    assert doc["problems"] == [] and code == 3, doc
