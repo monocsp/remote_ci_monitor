@@ -6,6 +6,8 @@
 못 찾으면 그 자체로 실패다(코드가 바뀌어 감시가 풀린 것).
 
 변이 목록(개수는 `MUTANTS` 가 정본이다 — 문서의 숫자는 머지마다 썩는다):
+  M5t-a PR1 — `m5t-local-only-remote-kept`: 후보 함수가 `local_only` 프리셋의 원격 머신을 안 뺌
+     (`capabilities.py`, `docs/m5t-workplan.md` §4.3 · TO15 — 진입점 14 경우가 모두 빨개진다)
   M5s C — `action-*` 다섯: 도는 행의 표식을 이유가 무시 · code 어휘 검사 제거 · note 제어문자를
      안 지움 · 플래그 없이 4 · 취소 중에도 4 + `clean-line-keeps-bidi`(note · 실패 이름이 bidi 를
      남김) (`docs/m5s-workplan.md` §4.3 · 결정 213 · 234 · #251 격리 검증)
@@ -2321,6 +2323,20 @@ MUTANTS = (
         old="        fcntl.flock(handle, fcntl.LOCK_EX)\n",
         new="        pass\n",
         tests=("tests/test_dev_batch.py::test_concurrent_adds_keep_every_bundle",),
+    ),
+    Mutant(
+        # 후보 함수가 `local_only` 프리셋에서 원격 머신을 빼지 않는다 — 배치 · ETA · 제출 · 점검 ·
+        # `/worker/spec` · claim · `/api/machines` 가 모두 원격을 후보로 본다(M5t-a 결정 254, TO15)
+        name="m5t-local-only-remote-kept",
+        path="src/remote_ci_monitor/capabilities.py",
+        old='        views = [v for v in views if v.kind == "local"]  # 원격 제외',
+        new="        pass  # 원격 제외",
+        tests=(
+            "tests/test_local_only.py::"
+            "test_to15_no_entry_point_offers_a_local_only_preset_to_a_remote_machine",
+            "tests/test_local_only.py::"
+            "test_to18_a_remote_machine_does_not_wait_for_a_check_that_runs_only_locally",
+        ),
     ),
 )
 
