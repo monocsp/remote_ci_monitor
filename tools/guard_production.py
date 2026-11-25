@@ -31,23 +31,30 @@ stdin 으로 받아 판정 JSON 을 stdout 으로 낸다.
 `uv run` · `$(…)` 안의 명령은 보지 않는다. 심링크 별칭(`/tmp` ↔ `/private/tmp`, 운영 data_dir
 로 가는 링크)은 못 본다 — 경로는 `normpath` 로만 비교한다. `$VAR` 은 훅 프로세스의 환경으로
 펼치고, 같은 명령줄 앞 조각의 `VAR=…; …` 정의는 못 본다. `pushd` 는 `cd` 가 아니다. `rcm setup`
-의 값은 셸이 펼쳤을 때와 setup 이 글자 그대로 받았을 때를 모두 후보로 본다(`_setup_request`).
+은 다르다: 셸 단계(따옴표 · `$VAR` · `~` · 리다이렉션)를 훅이 하고, 어디에 쓰는지는 setup 의
+해석기(`remote_ci_monitor.core.setup.where`)를 들여와 묻는다. 셸 단계로 다 펼칠 수 없는 값
+(`${VAR:-x}` · `$(…)` · 훅의 환경에 없는 변수)과 해석기를 못 들여오는 경우는 막는다(fail closed).
+macOS 에서는 경로를 대소문자 구분 없이 견준다(`FOLD_CASE`).
 
 훅 자체가 터지면 막지 않고 경고만 남긴다. 모든 Bash 를 막는 가드는 가드가 아니라 고장이다.
 """
 
 from __future__ import annotations
 
+import importlib
 import json
 import os
 import re
 import shlex
 import shutil
 import sys
+import unicodedata
 import urllib.parse
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
+from types import ModuleType
+from typing import Any
 
 try:
     import tomllib
@@ -136,8 +143,13 @@ SETUP_ROLE_LABELS = {
     "coordinator-worker": SETUP_STANDARD_LABELS[0],
     "worker": SETUP_STANDARD_LABELS[1],
 }
-#: 명령 앞에서 떼어 내는 감싸기 — 뒤의 명령을 그대로 실행한다.
+#: 명령 앞에서 떼어 내는 감싸기 — 뒤의 명령을 그대로 실행한다. 이름(basename)으로 본다
+#: (`/usr/bin/env`).
 WRAPPERS = frozenset({"sudo", "env", "exec", "command", "nohup", "time", "builtin"})
+#: 대소문자를 가리지 않는 파일시스템으로 보나 — macOS 의 기본 볼륨(APFS · HFS+)은 가리지 않는다.
+#: 볼륨마다 재는 길을 파이썬이 내주지 않으므로 darwin 이면 늘 접는다(막는 쪽). setup 의
+#: `core.setup.FOLD_CASE` 와 같은 규칙이다. 시험이 바꿔 끼운다
+FOLD_CASE = sys.platform == "darwin"
 #: 맨 이름(`rcm`)을 실행 파일로 푸는 함수 — 테스트가 바꿔 끼운다.
 _which = shutil.which
 
@@ -194,12 +206,21 @@ def _as_path(token: str, cwd: Path) -> Path | None:
     return _norm(candidate if candidate.is_absolute() else cwd / candidate)
 
 
+def _key(path: Path) -> Path:
+    """견줄 때의 경로 — `normpath`, 대소문자를 가리지 않는 디스크면 접은 것(유니코드 정규화도)."""
+    text = os.path.normpath(str(path))
+    if FOLD_CASE:
+        text = unicodedata.normalize("NFC", text).casefold()
+    return Path(text)
+
+
 def inside(path: Path | None, parent: Path | None) -> bool:
-    """`parent` 안에 있나. 이름이 겹치는 형제 폴더(`…-dev`)는 밖이다."""
+    """`parent` 안에 있나. 이름이 겹치는 형제 폴더(`…-dev`)는 밖이다. macOS 에서는
+    `~/.config/RCM` 도 `~/.config/rcm` 안이다(`FOLD_CASE`)."""
     if path is None or parent is None:
         return False
     try:
-        _norm(path).relative_to(_norm(parent))
+        _key(path).relative_to(_key(parent))
     except ValueError:
         return False
     return True
@@ -292,8 +313,8 @@ def _strip_prefix(tokens: list[str]) -> tuple[list[str], dict[str, str], set[str
     index = 0
     while index < len(tokens):
         head = tokens[index]
-        if head in WRAPPERS:
-            in_env = head == "env"
+        if _name(head) in WRAPPERS:
+            in_env = _name(head) == "env"
             index += 1
             continue
         if in_env and head in ("-i", "--ignore-environment", "-"):
@@ -349,21 +370,10 @@ def _is_pip(argv: list[str]) -> bool:
 
 
 def _rcm_subcommand(argv: list[str]) -> str | None:
-    """`rcm serve` 처럼 이 도구를 실행하는 조각이면 하위 명령을 돌려준다."""
-    if not argv:
-        return None
-    head = _name(argv[0])
-    rest = argv[1:]
-    if head.startswith("python") and rest[:1] == ["-m"]:
-        if rest[1:2] not in (["remote_ci_monitor.cli"], ["remote_ci_monitor"]):
-            return None
-        rest = rest[2:]
-    elif head not in ("rcm", "remote-ci-monitor"):
-        return None
-    for token in rest:
-        if not token.startswith("-"):
-            return token
-    return None
+    """`rcm serve` 처럼 이 도구를 실행하는 조각이면 하위 명령을 돌려준다. `python -u -m
+    remote_ci_monitor` 처럼 인터프리터 플래그가 있어도 같다(`_subcommand_index`)."""
+    index = _subcommand_index(argv)
+    return None if index is None else argv[index]
 
 
 def _option_value(argv: list[str], names: tuple[str, ...]) -> str | None:
@@ -441,7 +451,7 @@ def _bash_verdict(
                 local_config = (cwd / "rcm.toml").exists()
             continue
         env = _env_of(segment, session)
-        verdict = _segment_verdict(argv, cwd, prod, local_config, env=env)
+        verdict = _segment_verdict(argv, cwd, prod, local_config, env=env, segment=segment)
         if verdict is not None:
             return verdict
     return None
@@ -453,7 +463,10 @@ def _segment_verdict(
     prod: Production,
     local_config: bool,
     env: SegmentEnv | None = None,
+    segment: str = "",
 ) -> Verdict | None:
+    """조각 하나의 판정. `segment` 는 따옴표가 남은 원래 글자다 — `rcm setup` 은 셸 단계를 그
+    글자로 다시 한다(`_setup_calls`)."""
     head = _name(argv[0])
     env = env or SegmentEnv({})
 
@@ -520,7 +533,7 @@ def _segment_verdict(
 
     subcommand = _rcm_subcommand(argv)
     if subcommand == "setup" and not _wants_help(argv):
-        verdict = _setup_verdict(argv, cwd, prod, env)
+        verdict = _setup_verdict(segment or shlex.join(argv), cwd, prod, env)
         if verdict is not None:
             return verdict
     if subcommand in ("serve", "worker") and not _wants_help(argv):
@@ -802,6 +815,11 @@ def _server_verdict(
 
 
 # ── `rcm setup` (M5t-a §4.1, TR20 · TR33) ────────────────────────────────────
+#
+# 「setup 이 어디에 쓰나」는 setup 의 해석기 `remote_ci_monitor.core.setup.where` 가 정한다 — 훅은
+# 그것을 들여와 부른다. 훅이 하는 일은 셸 단계뿐이다: 따옴표를 풀고, 변수와 `~` 를 펼치고,
+# 리다이렉션과 주석을 뗀다. P3 1 · 2라운드의 HIGH 는 모두 훅이 setup 의 계산을 따로 다시 하다
+# 어긋난 것이었다(빈 값 · `${VAR:-x}` · 대소문자 · 줄인 옵션 · `--service-file`).
 
 
 def unit_name(label: str) -> str:
@@ -809,185 +827,425 @@ def unit_name(label: str) -> str:
     return f"{_STANDARD_UNITS.get(label, label)}.service"
 
 
-_VARIABLE = re.compile(r"\$(?:\{([A-Za-z_][A-Za-z0-9_]*)\}|([A-Za-z_][A-Za-z0-9_]*))")
+def _setup_core() -> ModuleType:
+    """setup 의 해석기 모듈. 이 레포의 `src` 를 앞에 둔다 — 훅은 패키지를 설치하지 않은
+    python3 로 돈다. 그 모듈은 표준 라이브러리만 쓴다."""
+    src = str(Path(__file__).resolve().parents[1] / "src")
+    if src not in sys.path:
+        sys.path.insert(0, src)
+    return importlib.import_module("remote_ci_monitor.core.setup")
 
 
-def _expand_variables(text: str, lookup: Mapping[str, str]) -> str:
-    """`$NAME` · `${NAME}` 를 펼친다. 모르는 이름은 그대로 둔다(`os.path.expandvars` 와 같다)."""
-
-    def one(match: re.Match[str]) -> str:
-        name = match.group(1) or match.group(2)
-        value = lookup.get(name)
-        return match.group(0) if value is None else value
-
-    return _VARIABLE.sub(one, text)
+class _Unreadable(Exception):
+    """셸 단계를 다 해도 setup 이 받을 글자를 모른다 — 운영으로 본다."""
 
 
-def _shell_words(raw: str, env: SegmentEnv, cwd: Path) -> list[str]:
-    """setup 이 받을 수 있는 값들. shlex 가 따옴표를 이미 떼어 냈으므로 셸이 `$VAR` 를 펼쳤는지
-    모른다 — 펼치지 않은 글자, 셸이 제 변수로 펼친 값(`VAR=` 앞머리는 명령에만 가고 셸이 펼치는
-    인자에는 닿지 않는다. `$PWD` 는 그 조각의 작업 폴더다), 앞머리를 먼저 본 값을 모두 후보로
-    둔다. 하나라도 운영이면 막는 쪽이 훅에게 안전한 방향이다."""
-    shell = {**env.session, "PWD": str(cwd)}
-    segment = {**shell, **env.vars}
-    words = [raw, _expand_variables(raw, shell), _expand_variables(raw, segment)]
-    return list(dict.fromkeys(words))
+#: 리다이렉션 — `2>&1` · `>>log` · `&>x` · `<in`. 단어의 맨 앞에서만 본다
+_REDIRECT = re.compile(r"(\d*|&)(>>|>&|<&|<<<|<<-|<<|<>|>\||>|<)")
+#: 훅이 펼칠 수 있는 변수 참조 — `$NAME` · `${NAME}` 뿐이다. 나머지 `$` 는 모른다
+_REF = re.compile(r"\$(?:\{([A-Za-z_][A-Za-z0-9_]*)\}|([A-Za-z_][A-Za-z0-9_]*))")
+_ASSIGNMENT = re.compile(r"[A-Za-z_][A-Za-z0-9_]*=")
+#: 따옴표 밖에서 셸이 단어를 바꾸는 글자 — 글롭과 중괄호 펼치기
+_GLOB = frozenset("*?[{")
+
+#: 단어 하나 — (종류, 글자) 조각들. 종류는 `bare`(따옴표 밖), `dq`(큰따옴표 안), `lit`(작은따옴표
+#: 안이나 백슬래시로 escape 한 글자 — 펼치지 않는다)
+_Word = list[tuple[str, str]]
 
 
-def _command_home(env: SegmentEnv, cwd: Path) -> Path:
-    """그 명령(setup)이 보는 HOME — 조각 앞의 `HOME=…` 가 세션의 것을 이긴다(그 값은 셸이 세션
-    변수로 펼친다). 없으면(`env -i`) 이 사용자의 홈이다(`Path.home()` 이 passwd 로 찾는 것과
-    같다)."""
-    if "HOME" in env.vars:
-        value = _expand_variables(env.vars["HOME"], {**env.session, "PWD": str(cwd)})
-        return Path(value) if value else Path.home()
-    home = env.get("HOME")
-    return Path(home) if home else Path.home()
-
-
-def _shell_home(env: SegmentEnv) -> Path:
-    """셸 자신의 HOME — 인자의 `~` 는 셸이 이것으로 펼친다(앞머리 `HOME=` 는 명령에만 간다)."""
-    home = env.session.get("HOME")
-    return Path(home) if home else Path.home()
-
-
-def _setup_paths(raw: str, env: SegmentEnv, cwd: Path) -> list[Path]:
-    """경로 값 하나가 가리킬 수 있는 자리들. 셸이 펼친 `~` 는 셸의 HOME, 따옴표로 감싸 setup 에
-    그대로 간 `~` 는 그 명령의 HOME(`os.path.expanduser`)으로 푼다. `~user` 는 그 사용자의 홈,
-    상대 경로는 작업 폴더 기준이다(`os.path.abspath`)."""
-    out: list[Path] = []
-    for word in _shell_words(raw.strip(), env, cwd):
-        if not word:
-            continue
-        if word == "~" or word.startswith("~/"):
-            texts = [str(home) + word[1:] for home in (_shell_home(env), _command_home(env, cwd))]
-        elif word.startswith("~"):
-            texts = [os.path.expanduser(word)]
+def _group_trimmed(segment: str) -> str:
+    """조각을 감싼 `(` · `{` 와 짝 `)` · `}`, 끝의 `&`(백그라운드)를 뗀다."""
+    text = segment.strip()
+    while text[:1] in ("(", "{"):
+        text = text[1:].strip()
+    while True:
+        bare = text.rstrip(" \t;")
+        if bare.endswith("&") and not bare.endswith(("&&", ">&", "<&")):
+            text = bare[:-1]
+        elif bare.endswith(")") and bare.count("(") < bare.count(")"):
+            text = bare[:-1]
+        elif bare.endswith("}") and bare[-2:-1] in ("", " ", "\t", ";"):
+            text = bare[:-1]
         else:
-            texts = [word]
-        for text in texts:
-            path = Path(text)
-            out.append(_norm(path if path.is_absolute() else cwd / path))
-    return list(dict.fromkeys(out))
+            return bare
 
 
-def _option_values(argv: list[str], name: str) -> list[str]:
-    """그 옵션의 값 전부(`--name VALUE` · `--name=VALUE`). argparse 는 마지막 것을 쓰지만 훅은
-    모두 본다. 이름은 정확히 같아야 한다 — setup 의 파서는 줄인 옵션을 받지 않는다
-    (`allow_abbrev=False`), 그래서 줄인 이름이 든 명령은 아무것도 쓰지 않고 종료 2 로 끝난다."""
+def _lex(text: str) -> list[_Word]:
+    """셸이 나누는 대로 단어를 나눈다. 리다이렉션과 그 대상, `#` 주석은 뺀다. 명령 치환
+    (`$(…)` · 백틱), `$'…'`, 단어 속의 `<` · `>` · `(` · `|` · `&` 처럼 훅이 읽지 못하는 것은
+    `_Unreadable` 이다."""
+    words: list[_Word] = []
+    parts: _Word = []
+    started = False
+    target = False  # 다음 단어는 리다이렉션의 대상이다
+    i, n = 0, len(text)
+
+    def push(kind: str, chunk: str) -> None:
+        if parts and parts[-1][0] == kind:
+            parts[-1] = (kind, parts[-1][1] + chunk)
+        else:
+            parts.append((kind, chunk))
+
+    def end() -> None:
+        nonlocal parts, started, target
+        if started:
+            if target:
+                target = False
+            else:
+                words.append(parts)
+        parts, started = [], False
+
+    while i < n:
+        c = text[i]
+        if c in " \t\n":
+            end()
+            i += 1
+            continue
+        if not started:
+            if c == "#":
+                break
+            m = _REDIRECT.match(text, i)
+            if m:
+                i = m.end()
+                if m.group(2) in (">&", "<&"):
+                    j = i
+                    while j < n and (text[j].isdigit() or text[j] == "-"):
+                        j += 1
+                    if j > i:  # `2>&1` · `>&-` — 대상이 파일이 아니다
+                        i = j
+                        continue
+                target = True
+                continue
+        started = True
+        if c == "\\":
+            push("lit", text[i + 1 : i + 2])
+            i += 2
+        elif c == "'":
+            j = text.find("'", i + 1)
+            if j < 0:
+                raise _Unreadable("an unclosed single quote")
+            push("lit", text[i + 1 : j])
+            i = j + 1
+        elif c == '"':
+            i += 1
+            while True:
+                if i >= n:
+                    raise _Unreadable("an unclosed double quote")
+                c = text[i]
+                if c == '"':
+                    i += 1
+                    break
+                if c == "\\" and text[i + 1 : i + 2] in ("$", "`", '"', "\\"):
+                    push("lit", text[i + 1])
+                    i += 2
+                    continue
+                push("dq", c)
+                i += 1
+        elif c == "$" and text[i + 1 : i + 2] in ("'", '"'):
+            raise _Unreadable("$'…' or $\"…\" quoting")
+        elif c in "`|&;<>()":
+            raise _Unreadable(f"{c!r} inside a word")
+        else:
+            push("bare", c)
+            i += 1
+    end()
+    return words
+
+
+def _plain(word: _Word) -> str:
+    """따옴표만 푼 글자(shlex 와 같다) — 명령 이름과 감싸기를 찾을 때 쓴다."""
+    return "".join(chunk for _, chunk in word)
+
+
+def _expand(chunk: str, kind: str, lookup: Mapping[str, str]) -> str:
+    """조각 하나의 `$NAME` · `${NAME}` 를 펼친다. 그 밖의 `$`(`${X:-y}` · `${X%y}` · `$1` · `$$`
+    · `$(…)`), 백틱, 훅의 환경에 없는 변수, 따옴표 밖의 글롭 · 중괄호와 단어를 쪼갤 값은
+    모른다(`_Unreadable`)."""
+    if kind == "lit":
+        return chunk
     out: list[str] = []
-    for index, token in enumerate(argv):
-        if token == name and index + 1 < len(argv):
-            out.append(argv[index + 1])
-        elif token.startswith(name + "="):
-            out.append(token.split("=", 1)[1])
-    return out
+    pos = 0
+    for m in _REF.finditer(chunk):
+        out.append(chunk[pos : m.start()])
+        name = m.group(1) or m.group(2)
+        value = lookup.get(name)
+        if value is None:
+            raise _Unreadable(f"${name} is not set in the hook's environment")
+        if kind == "bare" and (any(c.isspace() for c in value) or _GLOB & set(value)):
+            raise _Unreadable(f"${name} would be split or globbed by the shell")
+        out.append(value)
+        pos = m.end()
+    out.append(chunk[pos:])
+    rest = _REF.sub("", chunk)
+    if "$" in rest or "`" in rest:
+        raise _Unreadable(f"{chunk!r} needs the shell to expand it")
+    if kind == "bare" and _GLOB & set(rest):
+        raise _Unreadable(f"{chunk!r} would be globbed or brace-expanded by the shell")
+    return "".join(out)
+
+
+def _expand_word(word: _Word, lookup: Mapping[str, str], home: Path, *, start: int = 0) -> str:
+    """단어 하나를 셸처럼 펼친다. `start` 는 할당(`NAME=value`)의 값이 시작하는 자리다 — 값의
+    맨 앞 `~` 도 펼친다. `~` · `~/…` 는 `home`, `~user` 는 그 사용자의 홈이다."""
+    parts = list(word)
+    if start:
+        kind, chunk = parts[0]
+        parts[0] = (kind, chunk[start:])
+    kind, chunk = parts[0] if parts else ("lit", "")
+    if kind == "bare" and chunk.startswith("~"):
+        prefix, slash, rest = chunk.partition("/")
+        if not slash and len(parts) > 1:
+            raise _Unreadable(f"{_plain(word)!r} mixes a ~ prefix with quotes")
+        if prefix in ("~+", "~-"):
+            raise _Unreadable(f"{prefix} needs the shell's directory stack")
+        head = str(home) if prefix == "~" else os.path.expanduser(prefix)
+        parts[0:1] = [("lit", head), ("bare", slash + rest)]
+    return "".join(_expand(chunk, kind, lookup) for kind, chunk in parts)
+
+
+#: `core.where` 가 읽는 환경 — 앞머리 할당의 값을 모르면 setup 이 쓸 자리도 모른다
+_WHERE_ENV = ("HOME", "XDG_CONFIG_HOME")
+
+
+def _python_module_end(argv: list[str]) -> int | None:
+    """`python [플래그…] -m remote_ci_monitor[.cli]` 이면 모듈 이름 다음 자리. 인터프리터
+    플래그(`-u` · `-E` · `-I` · `-X dev` · `-W x`)는 건너뛴다."""
+    i = 1
+    while i < len(argv):
+        token = argv[i]
+        if token == "-m":
+            module, i = (argv[i + 1] if i + 1 < len(argv) else None), i + 2
+        elif token.startswith("-m"):
+            module, i = token[2:], i + 1
+        elif token in ("-W", "-X"):
+            i += 2
+            continue
+        elif token.startswith("-") and token not in ("-", "--") and not token.startswith("-c"):
+            i += 1
+            continue
+        else:
+            return None
+        return i if module in ("remote_ci_monitor", "remote_ci_monitor.cli") else None
+    return None
+
+
+def _subcommand_index(argv: list[str]) -> int | None:
+    """`rcm serve` 처럼 이 도구를 실행하는 argv 면 하위 명령의 자리. 실행 파일과 python 은
+    이름(basename)으로 본다."""
+    if not argv:
+        return None
+    head = _name(argv[0])
+    if head.startswith("python"):
+        start = _python_module_end(argv)
+        if start is None:
+            return None
+    elif head in ("rcm", "remote-ci-monitor"):
+        start = 1
+    else:
+        return None
+    for index in range(start, len(argv)):
+        if not argv[index].startswith("-"):
+            return index
+    return None
 
 
 @dataclass(frozen=True)
-class SetupRequest:
-    """`rcm setup` 명령줄을 setup 과 셸이 보는 대로 푼 것. 값마다 후보가 여럿일 수 있다."""
+class SetupCall:
+    """셸이 setup 에 넘길 것 하나 — `setup` 뒤의 인자, 그 명령의 환경, 그 명령의 HOME."""
 
-    roles: tuple[str | None, ...]
-    labels: tuple[str, ...]
-    #: 쓰는 자리 — 설정 파일과 옆의 `service/`(또는 설정 폴더), `--service-file`
-    targets: tuple[Path, ...]
-    service_files: tuple[Path, ...]
-    data_dirs: tuple[Path, ...]
+    args: tuple[str, ...]
+    environ: Mapping[str, str]
+    home: Path
 
 
-def _setup_request(argv: list[str], cwd: Path, env: SegmentEnv) -> SetupRequest:
-    """setup 명령줄을 푸는 함수 하나 — 세 규칙이 모두 이것만 읽는다. setup 과 같은 규칙으로
-    계산한다: `--config` 가 있으면 그 파일과 옆의 `service/`, 없으면 설정 폴더
-    (`$XDG_CONFIG_HOME/rcm`, 없으면 `$HOME/.config/rcm`, config.py `user_config_dir`)."""
-    roles: list[str | None] = [None]
-    given = _option_values(argv, "--role")
-    if given:
-        roles = [word for raw in given for word in _shell_words(raw, env, cwd)]
-    labels = [
-        word for raw in _option_values(argv, "--label") for word in _shell_words(raw, env, cwd)
-    ]
-    targets: list[Path] = []
-    configs = _option_values(argv, "--config")
-    for raw in configs:
-        for path in _setup_paths(raw, env, cwd):
-            targets += [path, path.parent / "service"]
-    if not configs:
-        xdg = env.get("XDG_CONFIG_HOME")
-        bases = _setup_paths(xdg, env, cwd) if xdg else []
-        for base in bases or [_command_home(env, cwd) / ".config"]:
-            targets.append(_norm(base / "rcm"))
-    service_files = [
-        path
-        for raw in _option_values(argv, "--service-file")
-        for path in _setup_paths(raw, env, cwd)
-    ]
-    data = _option_values(argv, "--data-dir")
-    if data:
-        data_dirs = [path for raw in data for path in _setup_paths(raw, env, cwd)]
-    else:
-        # 템플릿 기본값은 setup 이 제 HOME 으로 푼다 — 셸은 보지 않는다
-        home = _command_home(env, cwd)
-        data_dirs = [_norm(home / DEFAULT_DATA_DIR.removeprefix("~/"))]
-    return SetupRequest(
-        tuple(dict.fromkeys(roles)),
-        tuple(dict.fromkeys(labels)),
-        tuple(dict.fromkeys(targets + service_files)),
-        tuple(service_files),
-        tuple(dict.fromkeys(data_dirs)),
-    )
+def _setup_calls(
+    segment: str, cwd: Path, session: Mapping[str, str], core: ModuleType
+) -> list[SetupCall]:
+    """셸 단계: 조각 하나를 셸처럼 풀어 setup 이 받을 인자와 환경을 만든다.
+
+    셸은 인자의 `$VAR` 와 `~` 를 제 환경(세션 + 그 조각의 `$PWD`)으로 펼치고, 앞머리
+    `VAR=value` 는 명령에만 준다. 셸마다 앞머리 할당이 뒤의 펼치기에 닿는지가 다르므로 앞머리를
+    먼저 본 펼치기도 후보로 둔다. 둘이 같으면 하나다."""
+    words = _lex(_group_trimmed(segment))
+    plain = [_plain(word) for word in words]
+    shell = {**session, "PWD": str(cwd)}
+    shell_home = Path(session["HOME"]) if session.get("HOME") else Path.home()
+    calls: list[SetupCall] = []
+    for prefix_first in (False, True):
+        assigned: dict[str, str] = {}
+        unknown: set[str] = set()
+        unset: set[str] = set()
+        cleared = in_env = False
+        index = 0
+        while index < len(words):
+            head = plain[index]
+            if _name(head) in WRAPPERS:
+                in_env = _name(head) == "env"
+            elif in_env and head in ("-i", "--ignore-environment", "-"):
+                cleared = True
+            elif in_env and head in ("-u", "--unset"):
+                unset.add(plain[index + 1] if index + 1 < len(plain) else "")
+                index += 1
+            elif in_env and head.startswith("--unset="):
+                unset.add(head.split("=", 1)[1])
+            elif in_env and head == "--":
+                in_env = False
+            elif _ASSIGNMENT.match(head) and (
+                in_env or (words[index][0][0] == "bare" and _ASSIGNMENT.match(words[index][0][1]))
+            ):
+                name = head.split("=", 1)[0]
+                lookup = {**shell, **assigned} if prefix_first else shell
+                home = (
+                    Path(assigned["HOME"]) if prefix_first and assigned.get("HOME") else shell_home
+                )
+                try:
+                    assigned[name] = _expand_word(words[index], lookup, home, start=len(name) + 1)
+                    unknown.discard(name)
+                except _Unreadable:
+                    unknown.add(name)
+            else:
+                break
+            index += 1
+        found = _subcommand_index(plain[index:])
+        if found is None or plain[index + found] != "setup":
+            raise _Unreadable("the shell words do not read as `rcm setup`")
+        if unknown & set(_WHERE_ENV):
+            raise _Unreadable(f"{', '.join(sorted(unknown & set(_WHERE_ENV)))} before the command")
+        environ = {} if cleared else {k: v for k, v in session.items() if k not in unset}
+        environ.update(assigned)
+        command_home = core.home_of(environ, Path.home())
+        lookup = {**shell, **assigned} if prefix_first else shell
+        tilde = command_home if prefix_first else shell_home
+        args = tuple(_expand_word(word, lookup, tilde) for word in words[index + found + 1 :])
+        call = SetupCall(args, environ, command_home)
+        if call not in calls:
+            calls.append(call)
+    return calls
 
 
-def _service_place(path: Path, env: SegmentEnv) -> Path | None:
+#: 반복할 수 있는 setup 의 값 플래그 — setup 은 마지막 값을 쓰지만 훅은 앞의 값도 본다(막는 쪽)
+_SETUP_VALUE_FLAGS = ("--role", "--config", "--label", "--service-file", "--data-dir")
+
+
+def _with_earlier_values(args: tuple[str, ...]) -> list[list[str]]:
+    """그대로의 인자와, 반복한 값 플래그마다 앞의 값이 마지막이 되게 뒤의 것을 뺀 인자들."""
+    out = [list(args)]
+    for flag in _SETUP_VALUE_FLAGS:
+        spots = [i for i, t in enumerate(args) if t == flag or t.startswith(flag + "=")]
+        for keep in spots[:-1]:
+            drop: set[int] = set()
+            for spot in spots:
+                if spot > keep:
+                    drop |= {spot, spot + 1} if args[spot] == flag else {spot}
+            out.append([t for i, t in enumerate(args) if i not in drop])
+    return out
+
+
+def _service_place(path: Path, home: Path) -> Path | None:
     """서비스 관리자가 읽는 자리(`SETUP_SERVICE_PLACES`) 안이면 그 자리. `~` 는 이 사용자의 홈
     (세션의 HOME)이다 — 운영 서비스는 명령 앞의 `HOME=` 으로 옮겨 가지 않는다."""
-    home = str(_shell_home(env))
     for place in SETUP_SERVICE_PLACES:
-        root = Path(home + place[1:]) if place.startswith("~") else Path(place)
+        root = Path(str(home) + place[1:]) if place.startswith("~") else Path(place)
         if inside(path, root):
             return _norm(root)
     return None
 
 
-def _setup_verdict(argv: list[str], cwd: Path, prod: Production, env: SegmentEnv) -> Verdict | None:
+def _setup_verdict(segment: str, cwd: Path, prod: Production, env: SegmentEnv) -> Verdict | None:
     """`rcm setup` 의 세 규칙. setup 은 DB 를 열지 않지만 운영 자리에 설정 · 서비스 파일을 쓰거나
     운영 `data_dir` 을 고른 서버 설정을 만들 수 있다 — 그 서비스는 setup 을 돌린 빌드로 운영 DB 를
-    연다. 명령줄은 `_setup_request` 하나로 푼다(셸 변수 · `~` · 반복한 옵션).
+    연다. 자리는 setup 의 해석기 `core.where` 가 정한다(셸 단계는 `_setup_calls`).
 
-    1. 쓸 자리(설정 파일 · `service/` · `--service-file`)가 운영 설정 폴더 안이거나,
-       `--service-file` 이 서비스 관리자가 읽는 자리(`SETUP_SERVICE_PLACES` — 운영 서비스 파일이
-       있는 곳) 안이면 거절한다.
+    1. 쓸 자리(설정 파일 · 서비스 파일)가 운영 설정 폴더 안이거나, 서비스 파일이 서비스 관리자가
+       읽는 자리(`SETUP_SERVICE_PLACES` — 운영 서비스 파일이 있는 곳) 안이면 거절한다.
     2. 서비스 라벨이 운영 라벨이면 거절한다. `--label` 이 없으면 역할의 표준 라벨이다. 역할을 안
-       주면 setup 이 물을 수 있으니 표준 라벨로 본다. client 는 서비스 파일이 없다.
-    3. 역할 2 · 4(또는 역할 없음)의 `data_dir` — `--data-dir`, 없으면 템플릿 기본값을 그 명령의
-       HOME 으로 푼 것 — 이 운영 `data_dir` 이거나 그 안이면 거절한다(6-A-L4 · 6-B-V5)."""
+       주면 setup 이 물을 수 있으니 모든 역할로 본다. client 는 서비스 파일이 없다.
+    3. 역할 2 · 4 의 `data_dir` 이 운영 `data_dir` 이거나 그 안이면 거절한다(6-A-L4 · 6-B-V5).
+
+    모르면 운영으로 본다(fail closed): 해석기를 못 들여오거나, 셸 단계를 다 해도 글자가 남거나,
+    setup 의 파서 · 해석기가 거절할 명령줄이면 거절한다."""
     if not prod.known:
         return None
-    request = _setup_request(argv, cwd, env)
-    for target in request.targets:
-        if inside(target, prod.config_dir):
-            return Verdict(
-                "deny",
-                f"`rcm setup` here would write {target}, inside the server's config directory "
-                f"({prod.config_dir}). Give it a test HOME or XDG_CONFIG_HOME, or `--config` and "
-                f"`--service-file` paths of its own. See {DOCS}.",
-            )
-    for target in request.service_files:
-        place = _service_place(target, env)
-        if place is not None:
-            return Verdict(
-                "deny",
-                f"`rcm setup --service-file {target}` would write inside {place}, where the "
-                "service manager reads service files — the production service's files live "
-                "there. Let setup write under its config folder's `service/` and copy the file "
-                f"yourself. See {DOCS}.",
-            )
+    try:
+        core = _setup_core()
+    except Exception as e:  # noqa: BLE001 — 해석기를 못 들여오면 setup 을 막는다(fail closed)
+        return Verdict(
+            "deny",
+            "`rcm setup` is refused: the hook could not load remote_ci_monitor.core.setup, which "
+            f"decides where setup writes ({type(e).__name__}: {e}). Run the hook from a checkout "
+            f"with src/ on Python 3.9 or newer. See {DOCS}.",
+        )
+    try:
+        calls = _setup_calls(segment, cwd, env.session, core)
+    except _Unreadable as e:
+        return Verdict(
+            "deny",
+            f"`rcm setup` here has a value the hook cannot read the way the shell will ({e}), so "
+            "it cannot tell whether setup would write to the production install. Write the paths, "
+            f"role and label out, or quote them. See {DOCS}.",
+        )
+    session_home = Path(env.session["HOME"]) if env.session.get("HOME") else Path.home()
     units = {unit_name(standard) for standard in SETUP_STANDARD_LABELS}
-    for role in request.roles:
-        if role == "client":
-            continue
-        labels = request.labels or (SETUP_ROLE_LABELS.get(role or "", SETUP_STANDARD_LABELS[0]),)
-        for label in labels:
+    manager = core.manager_of(sys.platform)
+    for call in calls:
+        for args in _with_earlier_values(call.args):
+            try:
+                ns = core.parse_args(args)
+                roles = [ns.role] if ns.role else list(core.ROLES)
+                places = [
+                    core.where(
+                        role,
+                        environ=call.environ,
+                        cwd=cwd,
+                        home=call.home,
+                        manager=manager,
+                        config=ns.config,
+                        label=ns.label,
+                        service_file=ns.service_file,
+                        data_dir=ns.data_dir,
+                    )
+                    for role in roles
+                ]
+            except (core.SetupArgError, core.SetupValueError) as e:
+                return Verdict(
+                    "deny",
+                    f"`rcm setup {shlex.join(args)}` is not a command setup reads ({e}) — the hook "
+                    f"cannot tell where it would write, so it refuses it. See {DOCS}.",
+                )
+            verdict = _setup_place_verdict(places, prod, session_home, units)
+            if verdict is not None:
+                return verdict
+    return None
+
+
+def _setup_place_verdict(
+    places: list[Any], prod: Production, session_home: Path, units: set[str]
+) -> Verdict | None:
+    """`core.where` 의 답 하나하나에 세 규칙을 댄다."""
+    for found in places:
+        for target in (found.config, found.service_file):
+            if target is None:
+                continue
+            if inside(target, prod.config_dir):
+                return Verdict(
+                    "deny",
+                    f"`rcm setup` here would write {target}, inside the server's config directory "
+                    f"({prod.config_dir}). Give it a test HOME or XDG_CONFIG_HOME, or `--config` "
+                    f"and `--service-file` paths of its own. See {DOCS}.",
+                )
+        if found.service_file is not None:
+            target = found.service_file
+            place = _service_place(target, session_home)
+            if place is not None:
+                return Verdict(
+                    "deny",
+                    f"`rcm setup --service-file {target}` would write inside {place}, where the "
+                    "service manager reads service files — the production service's files live "
+                    "there. Let setup write under its config folder's `service/` and copy the "
+                    f"file yourself. See {DOCS}.",
+                )
+        label = found.label
+        if label is not None:
             if label in SETUP_STANDARD_LABELS or unit_name(label) in units:
                 return Verdict(
                     "deny",
@@ -995,8 +1253,8 @@ def _setup_verdict(argv: list[str], cwd: Path, prod: Production, env: SegmentEnv
                     "production service's label on this machine. Pass `--label` with a test "
                     f"label. See {DOCS}.",
                 )
-    if any(role is None or role in SETUP_SERVER_ROLES for role in request.roles):
-        for data in request.data_dirs:
+        if found.role in SETUP_SERVER_ROLES and found.data_dir is not None:
+            data = found.data_dir
             if inside(data, prod.data_dir):
                 return Verdict(
                     "deny",
