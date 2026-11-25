@@ -119,7 +119,10 @@ not "needs check": that check never runs there. The server names those checks fo
 from which presets the spec leaves out. Against a server that does not send the key, a preset with
 `checks` is `unknown` (code `check_unknown`) and the report exits 3. `rcm doctor --role
 coordinator` lists every `local_only` preset as "needs a local lane", judged by the same rule the
-server places jobs with.
+server places jobs with. A preset the server does not place — an older server that sends no
+`placement`, a placement rcm does not know, or no `pool`, `pools` or `checks` where the judgement
+needs them — is `unknown` with `applies: unknown`: it is never read as a `pool` preset, so a tool
+it misses does not exit 1, and "nothing would come to this machine" is not claimed while it might.
 The coordinator's `[[tools]]` hints show for the server's own lane too.
 
 The service file is found in this order: `--service-file`; the standard places
@@ -137,9 +140,12 @@ can change `PATH` (`EnvironmentFile=` always can), the service `PATH` is unknown
 measured. Write `PATH` out in full in an `Environment=` line. A `$` is kept as written: systemd does
 not expand variables in `Environment=`. A service file rcm cannot
 read (XML cut short, a plist whose top level is not a dictionary, a unit line it cannot parse) is
-named with the reason, never its values, and the report exits 3; one found in the standard places
-is left out and the search goes on, one given with `--service-file` leaves the service `PATH`
-unknown. `--shell-path` measures
+named with the reason, never its values, and the report exits 3. One found in the standard places
+is left out and the other files in that place are tried; if none of them can be read, the search
+stops there rather than going on to `~/.config/rcm/service/`, since the service manager reads the
+installed file, not that copy. The service `PATH` is then unknown and no tool is measured, as it is
+for a file given with `--service-file` that cannot be read. The worker's default `PATH` is used
+only when no candidate file was found at all. `--shell-path` measures
 once more in your shell and marks the presets whose result differs.
 
 rcm's own needs are rows of their own: Python 3.11.4+; git, when a `git_ref` preset comes to this
@@ -147,7 +153,11 @@ machine (2.31+ with `token_file`); every `[[repos]]` entry reachable with `git l
 since `git_ref` jobs cannot run without it); for a worker, the repository of each `git_ref` preset
 in its `[[repos]]` (a FAIL naming the repository, else the job fails with `repo_missing`); the host
 sampler's commands on the service `PATH`; and a warning when the rcm install's own `bin` folder
-is on that `PATH`. On macOS it also reminds you of Local Network permission and of keeping the
+is on that `PATH`. A `[[repos]]` entry with `token_file` is checked the way the worker calls git,
+with a credential helper that reads only that file. A row rcm cannot measure is `unknown`, not a
+FAIL, and the report exits 3: a git version it cannot read, a `token_file` the user running
+`rcm doctor` cannot read (run it as the service's user), repositories when the service `PATH` is
+unknown. On macOS it also reminds you of Local Network permission and of keeping the
 machine awake; rcm checks neither.
 
 | exit | meaning |
@@ -155,7 +165,7 @@ machine awake; rcm checks neither.
 | 0 | every preset that comes to this machine is `ready` or `needs check`, and rcm's own needs are met; warnings allowed |
 | 1 | a tool is missing, rcm's own needs fail (Python 3.11.4+, git 2.31+ for `token_file`, an unreachable or missing repository), or nothing would come to this machine |
 | 2 | usage: a bad flag, a config file that does not exist, is not UTF-8 or TOML, or whose `[server]` is not a table, a server URL that does not start with `http://` or `https://`, several roles or service files to choose from |
-| 3 | could not decide: the server is down or older, an answer from it that is not the JSON rcm expects (an HTML page from the wrong port or a proxy, an empty body, a field of the wrong type), a probe timed out, no token or a refused one, a server found on the network that nobody confirmed, a systemd unit without `PATH` or with a line rcm does not follow, a service file it cannot read |
+| 3 | could not decide: the server is down or older, an answer from it that is not the JSON rcm expects (an HTML page from the wrong port or a proxy, an empty body, a field of the wrong type, a field rcm needs that is missing or `null`, such as `ok` and `version` in `/api/health`, `kind` in `/api/whoami`, `presets` and each preset's `name` in `/worker/spec`, `machines` in `/api/machines`), a preset the server does not place, a row rcm cannot measure, a probe timed out, no token or a refused one, a server found on the network that nobody confirmed, a systemd unit without `PATH` or with a line rcm does not follow, a service file it cannot read |
 
 1 wins over 3, and 3 over 0. `rcm check` keeps its own exit codes. An error rcm did not expect
 ends the report with exit 3 and one line, `could not decide: <kind>: <message>` (home folder as
@@ -178,15 +188,15 @@ ones you do not know.
 | `doctor_version` · `role` · `exit` | `1`, the role measured, the exit code |
 | `measured_in` | `clean_service_env` (worker), `server_service_env` (coordinator-worker: the server's own measurement), `none` |
 | `host` | `os` `os_release` `os_like` `arch` `machine` `rosetta` `container` `root` `package_manager` `python` `rcm`; `rosetta` and `container` are `null` when rcm could not tell |
-| `server` | `url` `found_by` (`flag`, `config`, `mdns`) `state` (`ok`, `not ok` when the server answers `ok: false`, `unreachable`, `token refused`, `unreadable answer`, `not confirmed`, `—`) `generation` `version` |
+| `server` | `url` `found_by` (`flag`, `config`, `mdns`) `state` (`ok`, `not ok` when the server answers `ok: false`, `unreachable`, `token refused`, `unreadable answer`, `not confirmed`, `—`) `generation` `version` (`null` when the server does not say) |
 | `service` | `file` `manager` `path` `env_names` (names only); `null` for `client` |
 | `shell` | `{"path"}` with `--shell-path`, else `null` |
-| `rcm_requirements` | rows of `name` `state` (`ok` `warn` `fail` `info`) `detail` `needed_for` `install` |
-| `presets` | rows of `name` `applies` `state` `missing` (`tool` `install` `docs`) `checks` `code` `tools` `warn` `note` `shell_differs` |
+| `rcm_requirements` | rows of `name` `state` (`ok` `warn` `fail` `info` `unknown`) `detail` `needed_for` `install` |
+| `presets` | rows of `name` `applies` (`pool` `any-capable` `not_coming` `other_pool` `local_lane_only` `unknown`) `state` `missing` (`tool` `install` `docs`) `checks` `code` `tools` `warn` `note` `shell_differs` |
 | `probes` | probe name → `state` `value` |
-| `remote_machines` | coordinator roles: rows of `name` `pool` `alive` `eligible` `presets`; else `null` |
+| `remote_machines` | coordinator roles: rows of `name` `pool` `alive` `eligible` `presets`, each `null` when the server does not say; else `null` |
 | `summary` | counts of `ready` `needs_check` `missing` `unknown` among presets that come to this machine |
-| `problems` · `undecided` · `warnings` | the lines behind exit 1, exit 3 and the warnings |
+| `problems` · `undecided` · `warnings` | the lines behind exit 1, exit 3 and the warnings; every `unknown` preset that might come, `unknown` probe and `unknown` row of rcm's own needs has its line in `undecided` |
 
 macOS Command Line Tools shims: `/usr/bin/git`, `make`, `xcrun` and the other tools that only
 forward to the Command Line Tools open an install dialog when the tools are not installed. rcm
@@ -380,7 +390,8 @@ them but does not delete them), and a job number handed out after the backup wil
 this only when the new build cannot run at all; otherwise fix forward.
 
 Before you roll back below 0.11.0, remove `local_only = true` from every preset, `include` files
-included: an older server does not know the key and refuses to start.
+included, and the top-level `[[tools]]` tables: an older server does not know either key and
+refuses to start.
 
 ### From a git checkout
 

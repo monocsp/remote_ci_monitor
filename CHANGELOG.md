@@ -46,15 +46,23 @@ of a key bumps that number and is listed here.
   `could not decide: <kind>: <message>` (exit 3) rather than a traceback, an unreachable
   `[[repos]]` entry or a `git_ref` preset whose repository is missing from the worker's
   `[[repos]]` is a failure, and `--role coordinator` lists `local_only` presets as needing a local
-  lane. `rcm doctor` never follows the server's
+  lane. What it cannot know stays unknown and exits 3, never 0 or 1: an answer missing a field it
+  needs (`ok` or `version` from `/api/health`, a preset's `name`), a preset the server does not
+  place (an older server without `placement` is not read as `pool`), a service file it cannot read
+  (the default `PATH` is used only when there is no candidate file at all), a `token_file` or a
+  git version it cannot read. A `token_file` repository is checked with the worker's own
+  credential helper. Unknown values are `null` in `--json`, never the word `None`. `rcm doctor`
+  never follows the server's
   version. `GET /worker/spec` now also carries each preset's `pool`, `pools`, `placement`,
   `checks`, `source_modes`, repository name (no URL) and `unreachable_checks` (the checks a remote
   worker cannot run, with a reason code), and the `[[tools]]` table; older workers ignore them.
   ([#268](https://github.com/monocsp/remote_ci_monitor/pull/268))
 - **`[[tools]]` in `server.toml` gives a tool an install hint.** `name`, `docs` and
   `[tools.install]` lines for `darwin`, `linux` or `any`; shown by `rcm doctor` next to a missing
-  tool, never run. Control characters, lines over 300 characters, an unknown key or a name given
-  twice stop the server from starting; a name no preset or probe uses is a warning.
+  tool, never run. Control characters, lines over 300 characters, an unknown key, a name given
+  twice, longer than 64 characters or with spaces around it stop the server from starting; a name
+  no preset or probe uses is a warning. An older server does not know the table, so remove it
+  before rolling back below 0.11.0.
   ([#268](https://github.com/monocsp/remote_ci_monitor/pull/268))
 - **Workers report host facts, and `rcm machines --machine ID` shows them.** OS version, real
   arch and Rosetta, container, root, package manager and Python come with registration and every
