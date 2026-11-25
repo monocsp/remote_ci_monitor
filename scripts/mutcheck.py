@@ -3365,6 +3365,81 @@ MUTANTS = (
             "test_g3_a_service_venv_that_installs_a_linked_worktree_is_production",
         ),
     ),
+    Mutant(
+        # 감싸기를 이름(basename)이 아니라 글자로 본다 — `/usr/bin/env rcm token --config <운영>`
+        # · `/usr/bin/nohup rcm serve` 가 지나간다(P3 5라운드 v2-1)
+        name="guard-wrapper-path-missed",
+        path="tools/guard_production.py",
+        old="        if _name(head) in WRAPPERS:\n",
+        new="        if head in WRAPPERS:\n",
+        tests=(
+            "tests/test_guard_production_setup.py::"
+            "test_g4_a_wrapper_named_by_its_path_does_not_hide_rcm",
+        ),
+    ),
+    Mutant(
+        # 반복한 값 플래그의 앞 값을 보지 않는다 — `--data-dir <운영> --data-dir /tmp/d` 처럼 앞에
+        # 둔 운영 값이 빠진다(P3 5라운드 v2-3)
+        name="guard-setup-earlier-values-skipped",
+        path="tools/guard_production.py",
+        old="    for flag in _SETUP_VALUE_FLAGS:\n",
+        new="    return out\n    for flag in _SETUP_VALUE_FLAGS:\n",
+        tests=(
+            "tests/test_guard_production_setup.py::"
+            "test_g6_an_earlier_value_of_a_repeated_flag_is_judged_too",
+        ),
+    ),
+    Mutant(
+        # 앞머리의 상대 HOME · XDG_CONFIG_HOME 을 받는다 — 작업 폴더에 기댄 자리를 훅이 믿는다
+        # (P3 5라운드 v2-3)
+        name="guard-setup-relative-home-allowed",
+        path="tools/guard_production.py",
+        old=(
+            '        if value and not (value.startswith("/") or (name in _ENV_TILDE_OK and '
+            "_anchored(value))):\n"
+        ),
+        new="        if False:\n",
+        tests=(
+            "tests/test_guard_production_setup.py::"
+            "test_tr33_a_relative_home_or_config_home_in_front_is_denied",
+        ),
+    ),
+    Mutant(
+        # 앞머리 값의 맨 앞이 아닌 `~`(`a:~/b`)를 받는다 — 셸은 펼치고 훅은 글자로 본다(P3 5라운드
+        # v2-3)
+        name="guard-setup-inner-tilde-allowed",
+        path="tools/guard_production.py",
+        old='        if "~" in value[1:]:\n',
+        new="        if False:\n",
+        tests=(
+            "tests/test_guard_production_setup.py::"
+            "test_g6_a_tilde_past_the_start_of_a_prefix_value_is_not_the_plain_shape",
+        ),
+    ),
+    Mutant(
+        # 경로 값의 `~` 를 셸(세션의 HOME)로 푸는 갈래를 뺀다 — `HOME=<시험> rcm setup --data-dir
+        # ~/.local/share/rcm` 이 운영 data_dir 을 겨눠도 지나간다(P3 5라운드 v2-3)
+        name="guard-setup-session-tilde-skipped",
+        path="tools/guard_production.py",
+        old="            options.append(_home_joined(session_home, value))\n",
+        new="            pass\n",
+        tests=(
+            "tests/test_guard_production_setup.py::"
+            "test_tr33_the_shell_expands_tilde_and_variables_with_its_own_home_not_the_prefix",
+        ),
+    ),
+    Mutant(
+        # 허용 모양의 `--help` 도 해석기에 넘긴다 — 해석기가 거절해 평범한 `rcm setup --help` 가
+        # 막힌다(P3 5라운드 v2-3)
+        name="guard-setup-help-judged",
+        path="tools/guard_production.py",
+        old="    if _wants_help(list(plain.args)):\n        return None\n",
+        new="",
+        tests=(
+            "tests/test_guard_production_setup.py::"
+            "test_tr20_the_plain_shapes_reach_the_resolver_and_pass",
+        ),
+    ),
     # ── M5t-a PR3 — 분배 전용 코디네이터 `lanes = 0` (docs/m5t-workplan.md §7 변이 검사) ──
     Mutant(
         # `lanes = 0` 에서 `@local` 을 살아 있다고 본다 — 레인이 없는 서버의 머신 목록이 로컬

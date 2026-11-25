@@ -912,6 +912,25 @@ def test_g2_rcm_with_a_subcommand_or_without_a_pty_passes(command):
     assert judge(command, environ=TEST_XDG) is None, command
 
 
+# ── P3 5라운드 G4: 감싸기를 경로로 써도 setup 이 아닌 규칙이 본다 ──
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "/usr/bin/env rcm token --config /home/op/.config/rcm/server.toml list",
+        "/usr/bin/nohup rcm serve --config /home/op/.config/rcm/server.toml",
+        "/usr/bin/nohup rcm serve --data-dir /home/op/.local/share/rcm",
+        "/usr/bin/time rcm worker --config /home/op/.config/rcm/worker.toml",
+    ],
+)
+def test_g4_a_wrapper_named_by_its_path_does_not_hide_rcm(command):
+    # P3 5라운드 v2-1: `_strip_prefix` 는 감싸기를 이름(basename)으로 본다 — `/usr/bin/env` 도
+    # `env` 다. setup 이 아닌 규칙(DB 를 여는 명령 · 서버)이 이것으로 잠긴다
+    verdict = judge(command)
+    assert verdict is not None and verdict.decision == "deny", command
+
+
 # ── P3 5라운드 G3: 링크된 워크트리를 editable 로 설치한 서비스 ──
 
 
@@ -982,3 +1001,30 @@ def test_g3_a_path_venv_that_installs_a_linked_worktree_is_still_not_production(
     monkeypatch.setenv("PATH", f"{elsewhere}/bin:/usr/bin:/bin")
     prod = guard.find_production()
     assert prod.checkout is None and prod.venv is None, prod
+
+
+# ── P3 5라운드 G6: 변이 없던 허용 목록 규칙 ──
+
+
+@pytest.mark.parametrize(
+    "prefix", ["XDG_CONFIG_HOME=/tmp/a:~/b", "HOME=/tmp/h:~", "XDG_CONFIG_HOME=~/a:~/b"]
+)
+def test_g6_a_tilde_past_the_start_of_a_prefix_value_is_not_the_plain_shape(prefix):
+    # 할당에서 셸은 `:` 뒤의 `~` 도 펼친다 — 훅은 맨 앞 `~` 만 펼치므로 그런 값은 허용 모양 밖이다
+    verdict = judge(f"{prefix} {FREE_SERVER} --data-dir /tmp/d", environ=TEST_XDG)
+    assert verdict is not None and verdict.decision == "deny", prefix
+    assert PLAIN_MESSAGE in verdict.reason, prefix
+
+
+@pytest.mark.parametrize(
+    "flags",
+    [
+        "--data-dir /home/op/.local/share/rcm --data-dir /tmp/d --label test.rcm.server",
+        "--data-dir /tmp/d --label rcm-server --label test.rcm.server",
+        "--data-dir /tmp/d --label test.rcm.server --config=/home/op/.config/rcm/s.toml "
+        "--config /tmp/s.toml",
+    ],
+)
+def test_g6_an_earlier_value_of_a_repeated_flag_is_judged_too(flags):
+    # argparse 는 마지막 값을 쓰지만 훅은 앞의 값도 본다(막는 쪽) — 앞에 운영 값이 있으면 막는다
+    assert denied(f"{SERVER} {flags}", environ=TEST_XDG), flags
