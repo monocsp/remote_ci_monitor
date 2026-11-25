@@ -117,7 +117,8 @@ machine" — a warning, not a failure. A preset for another pool is listed and l
 The service file is found in this order: `--service-file`; the standard places
 (`~/Library/LaunchAgents/com.remote-ci-monitor.*.plist`, `~/.config/systemd/user/rcm-*.service`);
 `~/.config/rcm/service/`. Only files that start the role's command (`rcm worker` or `rcm serve`)
-count. Two in the same place need `--service-file` (exit 2 without a terminal). With none, the
+count. A file given with `--service-file` is used as given; if it starts another role's command
+the report warns. Two in the same place need `--service-file` (exit 2 without a terminal). With none, the
 worker's default service `PATH` is used and the report says so. `--shell-path` measures once more
 in your shell and marks the presets whose result differs.
 
@@ -130,13 +131,32 @@ in your shell and marks the presets whose result differs.
 
 1 wins over 3, and 3 over 0. `rcm check` keeps its own exit codes.
 
-What it never does: it sends nothing to the server (no registration, no capability report — the
-server's judgement stays the server's), opens no database, runs no install hint and never uses
+What it never does: it sends the server only read requests (no registration, no capability
+report — the server's judgement stays the server's), opens no database, runs no install hint and never uses
 `sudo` (as root, as in a container, rcm's own hints drop it; the coordinator's `[[tools]]` text is
 shown as written, after control characters are removed). It prints no home folder (`~` instead),
 no preset `env` value and no value from the service file, only the names. A server found by mDNS
 gets no request before you confirm it in a terminal; `--server URL` skips the question.
 `--offline` skips `git ls-remote` for `[[repos]]` and still asks the coordinator.
+
+`--json` prints one document with these keys, always all of them; a value rcm does not know is
+`null`, never a missing key. `doctor_version` is `1`; a later version only adds keys, so ignore the
+ones you do not know.
+
+| key | what it holds |
+|---|---|
+| `doctor_version` · `role` · `exit` | `1`, the role measured, the exit code |
+| `measured_in` | `clean_service_env` (worker), `server_service_env` (coordinator-worker: the server's own measurement), `none` |
+| `host` | `os` `os_release` `os_like` `arch` `machine` `rosetta` `container` `root` `package_manager` `python` `rcm` |
+| `server` | `url` `found_by` (`flag`, `config`, `mdns`) `state` `generation` `version` |
+| `service` | `file` `manager` `path` `env_names` (names only); `null` for `client` |
+| `shell` | `{"path"}` with `--shell-path`, else `null` |
+| `rcm_requirements` | rows of `name` `state` (`ok` `warn` `fail` `info`) `detail` `needed_for` `install` |
+| `presets` | rows of `name` `applies` `state` `missing` (`tool` `install` `docs`) `checks` `code` `tools` `warn` `note` `shell_differs` |
+| `probes` | probe name → `state` `value` |
+| `remote_machines` | coordinator roles: rows of `name` `pool` `alive` `eligible` `presets`; else `null` |
+| `summary` | counts of `ready` `needs_check` `missing` `unknown` among presets that come to this machine |
+| `problems` · `undecided` · `warnings` | the lines behind exit 1, exit 3 and the warnings |
 
 macOS Command Line Tools shims: `/usr/bin/git`, `make`, `xcrun` and the other tools that only
 forward to the Command Line Tools open an install dialog when the tools are not installed. rcm

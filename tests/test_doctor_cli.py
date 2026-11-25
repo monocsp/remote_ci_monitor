@@ -299,10 +299,12 @@ def test_td35_no_token_or_401_exits_3_and_says_a_token_is_needed(
     assert str(env / "home") not in out + err
 
 
-# ── 서버에 아무것도 보내지 않는다 · 비밀 · 서버가 보낸 문구 ───────────────────
+# ── 서버에는 읽기 요청만 · 비밀 · 서버가 보낸 문구 ────────────────────────────
 
 
-def test_td12_doctor_sends_nothing_to_the_server(worker, srv, capsys):
+def test_td12_doctor_sends_only_read_requests_to_the_server(worker, srv, capsys):
+    """진단은 조언이다 — GET 만 보내고 등록도 능력 보고도 하지 않는다(위임 결정 E2: 「아무것도
+    보내지 않는다」가 아니라 「읽기 요청만 보낸다」가 사실이다)."""
     worker(capsys)
     assert srv.requests, "doctor never asked the server"
     assert {r.method for r in srv.requests} == {"GET"}, [(r.method, r.path) for r in srv.requests]
@@ -943,3 +945,67 @@ def test_eta_job_counts_no_line_for_a_job_no_machine_can_take(client_env, capsys
     assert code == 0, (cap.out, cap.err)
     assert "ahead" not in cap.out, cap.out
     assert "no capable machine" in cap.out or "no_capable_machine" in cap.out, cap.out
+
+
+# ── JSON 의 모양 (위임 결정 J · 2) · 명시한 서비스 파일의 역할 (E1) ────────────
+
+TOP_KEYS = {
+    "doctor_version",
+    "role",
+    "measured_in",
+    "host",
+    "server",
+    "service",
+    "shell",
+    "rcm_requirements",
+    "presets",
+    "probes",
+    "remote_machines",
+    "summary",
+    "problems",
+    "undecided",
+    "warnings",
+    "exit",
+}
+
+
+def test_json_keys_are_always_there_and_unknown_values_are_null(worker, env, srv, capsys):
+    """위임 결정 J: 모르는 값은 키를 빼지 않고 null 이다 — `--shell-path` 를 안 줬으면 `shell` 이
+    null, 워커 진단에는 `remote_machines` 가 null. 서버 칸도 같은 키 다섯을 늘 싣는다."""
+    code, doc = worker(capsys)
+    assert set(doc) == TOP_KEYS, set(doc) ^ TOP_KEYS
+    assert doc["doctor_version"] == 1
+    assert doc["shell"] is None and doc["remote_machines"] is None, doc
+    assert set(doc["server"]) == {"url", "found_by", "state", "generation", "version"}
+    assert set(doc["service"]) == {"file", "manager", "path", "env_names"}
+    # 닿지 못한 서버 — 버전 · 세대는 모르니 null 이고 키는 그대로 있다
+    cfg = worker_toml(env, f"http://127.0.0.1:{free_port()}")
+    sf = plist(env / "svc", "/usr/bin:/bin")
+    code, doc = run_json(
+        capsys, "--role", "worker", "--config", str(cfg), "--service-file", str(sf)
+    )
+    assert set(doc) == TOP_KEYS
+    assert doc["server"]["version"] is None and doc["server"]["generation"] is None, doc["server"]
+
+
+def test_json_keys_for_the_client_and_coordinator_roles(env, coordinator, monkeypatch, capsys):
+    monkeypatch.setenv("RCM_TOKEN", CLIENT_TOKEN)
+    code, doc = run_json(capsys, "--role", "client", "--server", coordinator.url)
+    assert set(doc) == TOP_KEYS, set(doc) ^ TOP_KEYS
+    assert doc["service"] is None and doc["remote_machines"] is None, doc
+    cfg = server_toml(env, coordinator.port)
+    code, doc = run_json(capsys, "--role", "coordinator", "--config", str(cfg))
+    assert set(doc) == TOP_KEYS, set(doc) ^ TOP_KEYS
+
+
+def test_e1_an_explicit_service_file_for_another_role_is_used_with_a_warning(worker, env, capsys):
+    """위임 결정 E1: `--service-file` 은 사람이 고른 파일이라 거르지 않는다. 그 역할의 명령을
+    띄우지 않으면 warn 하고 그 파일로 잰다."""
+    cfg = worker_toml(env, worker.srv.url)
+    sf = plist(env / "svc", f"{worker.svcbin}:/usr/bin:/bin", command="serve")
+    code, doc = run_json(
+        capsys, "--role", "worker", "--config", str(cfg), "--service-file", str(sf)
+    )
+    assert doc["service"]["file"] is not None and doc["service"]["path"].startswith("~/svcbin")
+    assert any("rcm serve" in w and "rcm worker" in w for w in doc["warnings"]), doc["warnings"]
+    assert code == 0, doc

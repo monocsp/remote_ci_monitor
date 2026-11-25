@@ -7,7 +7,7 @@
   기본 변수와 서비스 파일의 환경 변수만. 셸의 `JAVA_HOME` 이 새지 않는다.
 - **서버.** 워커는 `/api/health` · `/api/whoami` · `/worker/spec` 을, coordinator 계열은 로컬
   `server.toml` 의 bind · port 로 `/api/health` · `/api/machines` 를 GET 으로만 읽는다. DB 는 열지
-  않고 서버에 아무것도 보내지 않는다(조언일 뿐이다).
+  않고 서버에는 읽기 요청만 보낸다 — 등록도 능력 보고도 없다(조언일 뿐이다, 위임 결정 E2).
 - **mDNS 로 찾은 서버**에는 사람이 확인하기 전에 어떤 요청도 보내지 않는다. 비TTY 면 종료 3.
 - **출력**에는 홈 경로 · 프리셋 env 값 · 서비스 파일의 환경 변수 값이 없다.
 """
@@ -533,6 +533,8 @@ class _Run:
             f"{r['name']}: {r['detail']}" for r in self.requirements if r["state"] == "warn"
         ]
         code = dc.decide_exit(problems, self.undecided)
+        # 키는 늘 있다 — 모르는 값은 키를 빼지 않고 null 이다(위임 결정 J). 읽는 쪽은 모르는 키를
+        # 무시한다(docs/operating.md)
         doc: dict[str, Any] = {
             "doctor_version": dc.DOCTOR_VERSION,
             "role": self.role,
@@ -540,19 +542,17 @@ class _Run:
             "host": self.host,
             "server": self.server,
             "service": self.service,
+            "shell": self.shell,
             "rcm_requirements": self.requirements,
             "presets": [r.to_json() for r in rows],
             "probes": self.probes,
+            "remote_machines": self.remote,
             "summary": dc.summary(rows),
             "problems": problems,
             "undecided": list(self.undecided),
             "warnings": warnings,
             "exit": code,
         }
-        if self.shell is not None:
-            doc["shell"] = self.shell
-        if self.remote is not None:
-            doc["remote_machines"] = self.remote
         return doc
 
     # ── 서비스 환경 ──
@@ -580,6 +580,13 @@ class _Run:
             "env_names": sf.env_names if sf else [],
         }
         self._service_file = sf
+        want = ROLE_COMMANDS.get(self.role)
+        if self.opts.service_file and sf is not None and want and sf.command != want:
+            # 사람이 고른 파일이라 거르지 않는다 — 그 파일로 재되 다른 역할의 파일이라고 알린다(E1)
+            self.warnings.append(
+                f"{self.service['file']} starts rcm {sf.command or '(no command)'}, not rcm "
+                f"{want} — measured with it as given"
+            )
         if self.opts.shell_path:
             self.shell = {"path": self.mask(self.ctx.environ.get("PATH", ""))}
         return env
@@ -677,7 +684,7 @@ class _Run:
     def measure(
         self, spec: Mapping[str, Any], env: dict[str, str], *, pool: str, accept_any: bool
     ) -> None:
-        """명세대로 깨끗한 환경에서 잰다 — 서버에는 아무것도 보내지 않는다(TD12)."""
+        """명세대로 깨끗한 환경에서 잰다 — 잰 것을 서버에 보내지 않는다(TD12)."""
         from remote_ci_monitor.config import Probe
 
         probes = []
