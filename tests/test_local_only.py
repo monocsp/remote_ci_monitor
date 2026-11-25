@@ -1078,3 +1078,25 @@ def test_to1_the_configuration_guide_and_the_changelog_name_local_only():
     assert "local_only = true" in changelog
     assert "`rcm run` exits 2 on these refusals" in changelog
     assert "`ahead: null`" in changelog
+
+
+def test_to10_to16_the_readme_exit_code_paragraph_names_the_local_only_409s():
+    """README 두 판의 종료 코드 문단이 `rcm run` 의 2 를 고르는 409 를 다 적는다. `local_only`
+    거절의 `no_capable_machine` · `tool_missing` 은 `cli.py` 의 `_REFUSED_CODES` 에 있어 2 다(P3
+    2라운드). M5s 가 잠근 구절(`tests/test_docs_m5s.py`)은 그대로 남는다."""
+    from test_docs_m5 import README, README_KO, read
+
+    en = " ".join(read(README).split())
+    assert (
+        "a 409 whose code is `schedule_exists` or `release_route_required`, and a 409 "
+        "`no_capable_machine` or `tool_missing` for a "
+        "[`local_only`](docs/configuration.md#keeping-a-preset-on-the-server-local_only) preset"
+    ) in en
+    assert "any other 409 is 3" in en
+    ko = " ".join(read(README_KO).split())
+    assert (
+        "`schedule_exists` · `release_route_required` 인 409 와, "
+        "[`local_only`](docs/configuration.md#keeping-a-preset-on-the-server-local_only) "
+        "프리셋을 서버 레인이 받을 수 없을 때의 409 `no_capable_machine` · `tool_missing` 이 그렇다"
+    ) in ko
+    assert "그 밖의 409 는 작업이 생겼는지 알 수 없으므로 3 이다" in ko
