@@ -719,3 +719,41 @@ def test_tr37_one_systemd_unit_name_rule_for_setup():
     assert core.unit_name("test.rcm.server") == "test.rcm.server.service"
     assert core.service_file_name(SERVER_LABEL, "systemd") == "rcm-server.service"
     assert core.service_file_name(SERVER_LABEL, "launchd") == f"{SERVER_LABEL}.plist"
+
+
+def test_tr24_doctor_finds_the_installed_copy_of_a_custom_label_service(
+    cfg, home, tmp_path, monkeypatch
+):
+    """6-B-V1: setup 이 `--label` 로 쓴 서비스를 사람이 출력된 명령대로 설치하면 doctor 는 그 설치
+    자리의 파일을 읽는다 — setup 자리의 사본이 아니라 서비스 관리자가 읽는 파일이다(6-B-V2)."""
+    from remote_ci_monitor import doctor
+
+    monkeypatch.setattr(doctor, "SYSTEM_UNIT_DIR", tmp_path / "system-units")
+    monkeypatch.setattr(doctor, "LAUNCH_DAEMONS_DIR", tmp_path / "launch-daemons")
+    data = tmp_path / "data"
+    for platform, role, argv in (
+        ("darwin", "coordinator-worker", coordinator_args(data)),
+        ("linux", "coordinator-worker", coordinator_args(data, "--force")),
+        (
+            "darwin",
+            "worker",
+            ["--role", "worker", "--server", "http://10.0.0.5:18790", "--pool", "p1"]
+            + ["--lanes", "1", "--label", "test.rcm.worker", "--yes", "--force"],
+        ),
+    ):
+        fake = Fake(platform=platform)
+        assert go(fake, *argv) == 0, fake.text
+        manager = "launchd" if platform == "darwin" else "systemd"
+        label = "test.rcm.worker" if role == "worker" else "test.rcm.server"
+        name = core.service_file_name(label, manager)
+        staged = cfg / "service" / name
+        installed = core.install_dir(manager, home) / name
+        assert f"cp -n {staged} {installed}" in fake.err.getvalue()
+        # 설치하기 전: setup 자리의 사본을 읽는다
+        found = doctor.pick_service_file(None, role, home=home, config_dir=cfg)
+        assert found is not None and found.path == staged, (platform, role)
+        installed.parent.mkdir(parents=True, exist_ok=True)
+        installed.write_bytes(staged.read_bytes())
+        found = doctor.pick_service_file(None, role, home=home, config_dir=cfg)
+        assert found is not None and found.path == installed, (platform, role, found)
+        installed.unlink()
