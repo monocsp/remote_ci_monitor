@@ -1065,8 +1065,15 @@ class _Run:
             )
 
     def local_lane(self, cfg: Any, health: Mapping[str, Any], local: Mapping[str, Any]) -> None:
-        """로컬 레인은 서버가 자기 서비스 환경에서 잰 값으로 본다(`preset_env`, G7 · TD30)."""
-        measured = health.get("preset_env") if isinstance(health.get("preset_env"), dict) else {}
+        """로컬 레인은 서버가 자기 서비스 환경에서 잰 값으로 본다(`preset_env`, G7 · TD30).
+
+        서버가 그 프리셋을 재지 않았으면(키가 없는 옛 서버, 항목이 없음) `requires` 가 있는
+        프리셋은 「모름」이다 — 빈 「빠진 도구」로 읽어 ready 라 부르지 않는다. 서버는 `requires` 와
+        `env_passthrough` 가 둘 다 없는 프리셋은 재지 않으므로 그 프리셋은 항목이 없어도 된다.
+        """
+        raw = health.get("preset_env")
+        measured: dict[str, Any] | None = raw if isinstance(raw, dict) else None
+        blind: list[str] = []
         verdicts = local.get("presets") if isinstance(local.get("presets"), dict) else {}
         os_name = "darwin" if PLATFORM.startswith("darwin") else "linux"
         # 로컬 레인 행도 워커와 같은 `[[tools]]` 안내를 쓴다(위임 결정 E3)
@@ -1074,7 +1081,8 @@ class _Run:
             [{"name": t.name, "docs": t.docs, "install": dict(t.install)} for t in cfg.tools]
         )
         for p in cfg.presets:
-            facts = measured.get(p.name) if isinstance(measured.get(p.name), dict) else {}
+            got = (measured or {}).get(p.name)
+            facts = got if isinstance(got, dict) else {}
             entry = {
                 "name": p.name,
                 "requires": list(p.requires),
@@ -1095,6 +1103,10 @@ class _Run:
             verdict = verdicts.get(p.name)
             if isinstance(verdict, dict) and isinstance(verdict.get("code"), str):
                 row.code = dc.clean_text(verdict["code"], 64)
+            if not isinstance(got, dict) and p.requires and row.counts:
+                row.state, row.code = dc.UNKNOWN, "tools_unknown"
+                row.note = "the server did not say what it measured for this preset"
+                blind.append(p.name)
             unset = [str(v) for v in facts.get("missing_passthrough") or []]
             if unset and row.applies != dc.APPLIES_OTHER_POOL:
                 self.warnings.append(
@@ -1102,6 +1114,12 @@ class _Run:
                 )
             self.rows.append(row)
         self.judged = True
+        if blind:
+            why = "older rcm" if measured is None else "no preset_env entry"
+            self.undecided.append(
+                f"the server did not report its own tool measurements ({why}) — cannot judge "
+                f"{', '.join(blind)}"
+            )
 
     # ── 역할: client ──
 
