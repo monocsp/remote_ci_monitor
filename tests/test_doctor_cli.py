@@ -4576,3 +4576,73 @@ def test_x_linger_without_a_known_user_is_unknown(worker, env, srv, svcbin, monk
     linger = [r for r in doc["rcm_requirements"] if r["name"] == "linger"]
     assert linger and linger[0]["state"] == "unknown", doc["rcm_requirements"]
     assert code == 3, doc
+
+
+# ── P6 GAP X-python: 어느 Python 을 잰 것인지 밝히고 서비스의 Python 도 잰다 ───────────
+
+
+def service_plist(env: Path, args: list[str], svcbin: Path) -> Path:
+    p = env / "svc" / "com.remote-ci-monitor.worker.plist"
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_bytes(
+        plistlib.dumps(
+            {
+                "Label": p.stem,
+                "ProgramArguments": args,
+                "EnvironmentVariables": {"PATH": f"{svcbin}:/usr/bin:/bin"},
+            }
+        )
+    )
+    return p
+
+
+def test_x_python_the_row_names_the_python_that_ran_doctor(worker, capsys):
+    """`python` 행은 doctor 를 실행한 Python 을 잰 것이다 — 그렇다고 적는다(P6 GAP X-python)."""
+    code, doc = worker(capsys)
+    py = next(r for r in doc["rcm_requirements"] if r["name"] == "python")
+    assert "the Python that ran rcm doctor" in py["detail"], py
+
+
+@pytest.mark.parametrize("how", ["python-program", "rcm-shebang", "unreadable"])
+def test_x_python_a_service_on_another_python_is_measured_or_unknown(
+    worker, env, srv, svcbin, monkeypatch, capsys, how
+):
+    """서비스가 다른 Python 으로 rcm 을 띄우면 그 Python 을 잰다 — 3.11.4 미만이거나 tarfile data
+    filter 가 없으면 FAIL(종료 1). 잴 수 없으면(실행 파일이 없다) 모름(종료 3)이다."""
+    cfg = worker_toml(env, srv.url)
+    old = script(svcbin / "python3.10", 'echo "3 10 2 False"')
+    if how == "python-program":
+        args = [str(old), "-m", "remote_ci_monitor.cli", "worker", "--config", str(cfg)]
+    else:
+        target = old if how == "rcm-shebang" else env / "no-such-python3"
+        rcm = svcbin.parent / "venv-bin" / "rcm"
+        rcm.parent.mkdir()
+        rcm.write_text(f"#!{target}\nimport sys\n")
+        rcm.chmod(0o755)
+        args = [str(rcm), "worker", "--config", str(cfg)]
+    sf = service_plist(env, args, svcbin)
+    code, doc = run_json(
+        capsys, "--role", "worker", "--config", str(cfg), "--service-file", str(sf)
+    )
+    row = req(doc, "service python")
+    assert row is not None, doc["rcm_requirements"]
+    if how == "unreadable":
+        assert row["state"] == "unknown" and code == 3, (row, code)
+    else:
+        assert row["state"] == "fail" and "3.10.2" in row["detail"], row
+        assert code == 1, doc
+
+
+def test_x_python_the_same_python_adds_no_row(worker, env, srv, svcbin, capsys):
+    """과잉 교정 막기: 서비스의 rcm 이 doctor 와 같은 Python 이면 행을 더하지 않는다."""
+    cfg = worker_toml(env, srv.url)
+    rcm = svcbin.parent / "same-bin" / "rcm"
+    rcm.parent.mkdir()
+    rcm.write_text(f"#!{sys.executable}\nimport sys\n")
+    rcm.chmod(0o755)
+    sf = service_plist(env, [str(rcm), "worker", "--config", str(cfg)], svcbin)
+    code, doc = run_json(
+        capsys, "--role", "worker", "--config", str(cfg), "--service-file", str(sf)
+    )
+    assert req(doc, "service python") is None, doc["rcm_requirements"]
+    assert code == 0, doc

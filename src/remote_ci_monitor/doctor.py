@@ -168,6 +168,17 @@ def requirement(
     }
 
 
+#: `python` 행이 잰 Python — doctor 를 실행한 것이다(P6 GAP X-python)
+DOCTOR_PYTHON = "the Python that ran rcm doctor"
+SERVICE_PYTHON = "the Python the service runs"
+#: 서비스의 Python 을 재는 시한(초)
+SERVICE_PYTHON_TIMEOUT = 10.0
+_PYTHON_PROBE = "import sys, tarfile; print(*sys.version_info[:3], hasattr(tarfile, 'data_filter'))"
+#: pip 이 긴 경로의 콘솔 스크립트에 쓰는 sh 트램펄린의 둘째 줄 — 작은따옴표 셋, `exec`, 작은따옴표
+#: 하나 뒤에 따옴표로 감싼 Python 경로가 온다
+_TRAMPOLINE = re.compile(r"^'{3}exec' \"?([^\" ]+)")
+
+
 def python_requirement(
     version: tuple[int, ...],
     has_filter: bool,
@@ -175,15 +186,77 @@ def python_requirement(
     platform: str,
     package_manager: str | None,
     root: bool = False,
+    name: str = "python",
+    who: str = DOCTOR_PYTHON,
 ) -> dict[str, Any]:
-    """Python 3.11.4+ 와 `tarfile.data_filter`(산출물 · 트리를 안전하게 푼다). 미달이면 FAIL."""
+    """Python 3.11.4+ 와 `tarfile.data_filter`(산출물 · 트리를 안전하게 푼다). 미달이면 FAIL. 어느
+    Python 을 잰 것인지(`who`)를 적는다(P6 GAP X-python)."""
     shown = ".".join(str(x) for x in version[:3])
     ok = tuple(version[:3]) >= MIN_PYTHON and has_filter
     if ok:
-        return requirement("python", "ok", f"{shown} · tarfile data filter", "every role")
-    detail = f"{shown} — rcm needs Python 3.11.4+ with the tarfile data filter; use 3.12+"
+        return requirement(name, "ok", f"{shown} · tarfile data filter ({who})", "every role")
+    detail = f"{shown} ({who}) — rcm needs Python 3.11.4+ with the tarfile data filter; use 3.12+"
     hint = install_hint("python", platform=platform, package_manager=package_manager, root=root)
-    return requirement("python", "fail", detail, "every role", hint)
+    return requirement(name, "fail", detail, "every role", hint)
+
+
+def service_interpreter(program: str | None, path: str | None) -> str | None:
+    """서비스가 rcm 을 띄우는 Python — 실행 파일이 Python 이면 그것, rcm 콘솔 스크립트면 그 `#!`
+    줄(pip 의 sh 트램펄린 포함)의 Python. 어느 Python 인지 모르면 None 이다(다른지도 모른다)."""
+    if not program:
+        return None
+    base = os.path.basename(program)
+    if base.startswith("python"):
+        candidate = program
+    elif base == "rcm" and os.path.isabs(program):
+        try:
+            with open(program, "rb") as fh:
+                head = fh.read(4096).decode("utf-8", "replace").splitlines()
+        except OSError:
+            return None
+        words = head[0][2:].split() if head and head[0].startswith("#!") else []
+        if not words:
+            return None
+        if os.path.basename(words[0]) == "sh":
+            m = _TRAMPOLINE.match(head[1]) if len(head) > 1 else None
+            if m is None:
+                return None
+            candidate = m.group(1)
+        elif os.path.basename(words[0]) == "env" and len(words) > 1:
+            candidate = words[1]
+        else:
+            candidate = words[0]
+    else:
+        return None
+    if os.path.isabs(candidate):
+        return candidate
+    import shutil
+
+    return shutil.which(candidate, path=path) if path is not None else None
+
+
+def measure_python(python: str, env: Mapping[str, str]) -> tuple[tuple[int, ...], bool] | None:
+    """그 Python 의 (버전, data filter 유무). 실행하지 못하거나 답을 못 읽으면 None(모름)."""
+    import subprocess
+
+    from remote_ci_monitor.gitops import _run_process
+
+    try:
+        proc = _run_process(
+            [python, "-c", _PYTHON_PROBE],
+            capture_output=True,
+            text=True,
+            timeout=SERVICE_PYTHON_TIMEOUT,
+            stdin=subprocess.DEVNULL,
+            env=dict(env),
+            start_new_session=True,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    parts = (proc.stdout or "").split()
+    if proc.returncode != 0 or len(parts) != 4 or not all(p.isdigit() for p in parts[:3]):
+        return None
+    return tuple(int(p) for p in parts[:3]), parts[3] == "True"
 
 
 def _git_version(git: str, env: Mapping[str, str]) -> tuple[int, int] | None:
@@ -1233,14 +1306,39 @@ class _Run:
     def host_facts(self, path: str | None) -> None:
         self.host = {**hostsample.host_facts(path=path), "rcm": __version__}
 
-    def base_requirements(self) -> None:
+    def base_requirements(self, env: Mapping[str, str] | None = None) -> None:
+        """rcm 자신의 요구. `python` 행은 doctor 를 실행한 Python 이다. 서비스 파일이 다른 Python
+        으로 rcm 을 띄우면 그 Python 도 `service python` 행으로 잰다 — 못 재면 모름이다(P6 GAP
+        X-python)."""
+        platform: dict[str, Any] = {
+            "platform": PLATFORM,
+            "package_manager": self.host.get("package_manager"),
+            "root": bool(self.host.get("root")),
+        }
+        self.requirements.append(
+            python_requirement(python_version(), hasattr(tarfile, "data_filter"), **platform)
+        )
+        sf = self._service_file
+        if sf is None or env is None:
+            return
+        python = service_interpreter(sf.program, env.get("PATH") if self.path_known else None)
+        if python is None or os.path.realpath(python) == os.path.realpath(sys.executable):
+            return
+        got = measure_python(python, env)
+        if got is None:
+            self.requirements.append(
+                requirement(
+                    "service python",
+                    "unknown",
+                    f"cannot run {self.mask(python)} to read its version ({SERVICE_PYTHON})",
+                    "every role",
+                )
+            )
+            return
+        version, has_filter = got
         self.requirements.append(
             python_requirement(
-                python_version(),
-                hasattr(tarfile, "data_filter"),
-                platform=PLATFORM,
-                package_manager=self.host.get("package_manager"),
-                root=bool(self.host.get("root")),
+                version, has_filter, name="service python", who=SERVICE_PYTHON, **platform
             )
         )
 
@@ -1789,7 +1887,7 @@ class _Run:
         env = self.service_env()
         self.measured_in = "clean_service_env"
         self.host_facts(env.get("PATH"))
-        self.base_requirements()
+        self.base_requirements(env)
         try:
             cfg = self.worker_config(env)
         except ConfigUnknown as e:
@@ -2018,7 +2116,7 @@ class _Run:
         # 서버의 측정을 실제로 읽었을 때만 `server_service_env` 다(`local_lane`)
         self.measured_in = "none"
         self.host_facts(env.get("PATH"))
-        self.base_requirements()
+        self.base_requirements(env)
         self.requirements.append(sqlite_requirement())
         self.requirements.append(fd_requirement(self._service_file))
         try:

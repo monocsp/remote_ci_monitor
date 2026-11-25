@@ -502,3 +502,28 @@ def test_x_bidi_tools_refuse_line_separators_and_bidi_controls(tmp_path, char):
     with pytest.raises(ConfigError) as e:
         load_server_config(_server_toml(tmp_path, tools), check_tools=False)
     assert "[[tools]]" in str(e.value) and "control" in str(e.value), e.value
+
+
+def test_x_python_the_service_interpreter_is_read_from_the_rcm_script(tmp_path):
+    """rcm 콘솔 스크립트의 `#!` 줄 · pip 의 sh 트램펄린 · `env python3` 에서 서비스의 Python 을
+    읽는다. 읽을 수 없으면 None(다른지 모른다)이다(P6 GAP X-python)."""
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    py = bindir / "python3.12"
+    py.write_text("#!/bin/sh\n")
+    py.chmod(0o755)
+
+    def rcm(body: str) -> str:
+        p = tmp_path / "rcm"
+        p.write_text(body)
+        return str(p)
+
+    assert doctor.service_interpreter(rcm(f"#!{py}\n"), None) == str(py)
+    trampoline = f"#!/bin/sh\n'''exec' \"{py}\" \"$0\" \"$@\"\n' '''\n"
+    assert doctor.service_interpreter(rcm(trampoline), None) == str(py)
+    assert doctor.service_interpreter(rcm("#!/usr/bin/env python3.12\n"), str(bindir)) == str(py)
+    assert doctor.service_interpreter(rcm("#!/usr/bin/env python3.12\n"), None) is None
+    assert doctor.service_interpreter(rcm("no shebang\n"), None) is None
+    assert doctor.service_interpreter(str(tmp_path / "missing" / "rcm"), None) is None
+    assert doctor.service_interpreter(str(py), None) == str(py)
+    assert doctor.service_interpreter("/usr/bin/env", None) is None
