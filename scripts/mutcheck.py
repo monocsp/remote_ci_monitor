@@ -13,6 +13,7 @@
      (`capabilities.py`, P6 GAP X1)
      + `m5t-check-local-only-claimed-ignored`: 그 머신이 집은 점검도 check_local_only 로 냄
      (`capabilities.py`, batch 7 T3)
+     + `m5t-claim-excluded-sql-dropped`: claim SQL 이 제외 목록을 안 씀(`store.py`, batch 7 T5)
   M5s C — `action-*` 다섯: 도는 행의 표식을 이유가 무시 · code 어휘 검사 제거 · note 제어문자를
      안 지움 · 플래그 없이 4 · 취소 중에도 4 + `clean-line-keeps-bidi`(note · 실패 이름이 bidi 를
      남김) (`docs/m5s-workplan.md` §4.3 · 결정 213 · 234 · #251 격리 검증)
@@ -2382,6 +2383,21 @@ MUTANTS = (
             "test_x1_a_remote_check_record_follows_the_mark_unless_that_machine_is_running_it",
             "tests/test_local_only.py::"
             "test_t4_a_remote_check_being_cancelled_stays_running_until_it_ends",
+        ),
+    ),
+    Mutant(
+        # claim SQL 의 제외 조건만 지운다(바인딩 값도 함께 빼 SQL 은 그대로 돈다) — 후보 함수가
+        # 뺀 `local_only` 프리셋을 원격 claim 이 네 갈래 어디서든 집는다(M5t-a P3, batch 7 T5)
+        name="m5t-claim-excluded-sql-dropped",
+        path="src/remote_ci_monitor/store.py",
+        old=(
+            """        excluded_sql = f" AND c.preset NOT IN ({','.join('?' * len(excluded))})" """
+            """if excluded else ""\n"""
+        ),
+        new='        excluded, excluded_sql = (), ""\n',
+        tests=(
+            "tests/test_local_only.py::"
+            "test_to15_the_claim_sql_drops_excluded_presets_on_every_branch",
         ),
     ),
 )
