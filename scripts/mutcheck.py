@@ -2494,6 +2494,97 @@ MUTANTS = (
         ),
     ),
     Mutant(
+        # 설정 파일이 어디에도 없는 coordinator 를 기본값(프리셋 없음 · 8787)으로 잰다 — 그 포트의
+        # 아무 서버에 묻고 0 이나 「프리셋 없음」(1)으로 끝난다(P3 4라운드 HIGH)
+        name="doctor-coordinator-defaults-trusted",
+        path="src/remote_ci_monitor/doctor.py",
+        old="        if cfg.path is None:\n",
+        new="        if False:\n",
+        tests=(
+            "tests/test_doctor_cli.py::"
+            "test_a_coordinator_role_without_a_server_config_is_a_usage_error",
+            "tests/test_doctor_cli.py::test_every_input_doctor_did_not_read_ends_in_2_or_3",
+        ),
+    ),
+    Mutant(
+        # 서비스 파일의 실행 인자(`--config` · `--port`)를 읽지 않는다 — 서비스가 X 로 떠도 표준
+        # 자리나 기본값으로 잰다(P3 4라운드 HIGH)
+        name="doctor-service-launch-ignored",
+        path="src/remote_ci_monitor/doctor.py",
+        old="        if sf.launch is None or sf.command != ROLE_COMMANDS.get(self.role):\n",
+        new="        if True:\n",
+        tests=(
+            "tests/test_doctor_cli.py::"
+            "test_the_service_files_config_argument_is_the_config_doctor_reads",
+            "tests/test_doctor_cli.py::"
+            "test_the_servers_service_arguments_and_environment_choose_the_port",
+        ),
+    ),
+    Mutant(
+        # 같은 자리에 못 읽은 형제 파일이 있어도 읽히는 파일로 잰다(P3 4라운드 LOW)
+        name="doctor-unreadable-sibling-ignored",
+        path="src/remote_ci_monitor/doctor.py",
+        old="        if len(skipped) > before:\n",
+        new="        if False:\n",
+        tests=(
+            "tests/test_doctor_cli.py::"
+            "test_a_readable_file_next_to_an_unreadable_one_is_not_chosen",
+        ),
+    ),
+    Mutant(
+        # 실행 명령을 rcm 의 하위 명령으로 풀지 못한 서비스 파일을 조용히 뺀다(P3 4라운드 LOW)
+        name="doctor-unresolved-command-dropped",
+        path="src/remote_ci_monitor/doctor.py",
+        old="        if sf.launch is None:\n",
+        new="        if False:\n",
+        tests=(
+            "tests/test_doctor_cli.py::"
+            "test_a_service_file_whose_rcm_command_rcm_cannot_tell_is_named",
+        ),
+    ),
+    Mutant(
+        # `git ls-remote` 의 시한 초과 · 실행 실패를 「닿지 않음」(FAIL, 종료 1)으로 단정한다
+        # (P3 4라운드 MED)
+        name="doctor-ls-remote-unsure-is-unreachable",
+        path="src/remote_ci_monitor/doctor.py",
+        old="    if isinstance(result, dc.Unsure):\n",
+        new="    if False:\n",
+        tests=(
+            "tests/test_doctor_cli.py::"
+            "test_a_git_ls_remote_that_times_out_or_cannot_run_is_unknown_not_unreachable",
+        ),
+    ),
+    Mutant(
+        # 모름인 프리셋 행이 「판정 못 함」 줄을 내지 않는다 — 옛 서버의 프리셋이 종료 0 이 된다
+        # (3라운드에 생긴 규칙, P3 4라운드 검증자 1 #9)
+        name="doctor-unknown-rows-not-undecided",
+        path="src/remote_ci_monitor/doctor.py",
+        old="        undecided += dc.unknown_rows(rows)\n",
+        new="        undecided += []\n",
+        tests=(
+            "tests/test_doctor_cli.py::test_td5_an_older_server_with_a_missing_tool_exits_3_not_1",
+        ),
+    ),
+    Mutant(
+        # 읽지 못한 git 버전을 「낮다」(FAIL)로 단정한다(3라운드에 생긴 규칙, 검증자 1 #9)
+        name="doctor-git-version-unknown-fails",
+        path="src/remote_ci_monitor/doctor.py",
+        old='            return requirement("git", "unknown", detail, needed)\n',
+        new='            return requirement("git", "fail", detail, needed)\n',
+        tests=(
+            "tests/test_doctor_cli.py::test_a_git_version_rcm_cannot_read_is_unknown_not_a_fail",
+        ),
+    ),
+    Mutant(
+        # 오는지 모르는 프리셋이 있어도 「아무것도 오지 않는다」(종료 1)로 단정한다(3라운드에 생긴
+        # 규칙, 검증자 1 #9)
+        name="doctor-no-jobs-ignores-unknown",
+        path="src/remote_ci_monitor/core/doctor.py",
+        old="    if any(r.counts or r.applies == APPLIES_UNKNOWN for r in rows):\n",
+        new="    if any(r.counts for r in rows):\n",
+        tests=("tests/test_doctor.py::test_no_jobs_reason_does_not_fire_while_a_preset_may_come",),
+    ),
+    Mutant(
         # 후보 함수가 `local_only` 프리셋에서 원격 머신을 빼지 않는다 — 배치 · ETA · 제출 · 점검 ·
         # `/worker/spec` · claim · `/api/machines` 가 모두 원격을 후보로 본다(M5t-a 결정 254, TO15)
         name="m5t-local-only-remote-kept",
