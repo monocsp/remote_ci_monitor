@@ -7,6 +7,16 @@ of a key bumps that number and is listed here.
 
 ## [Unreleased]
 
+### Added
+- **`local_only = true` keeps a preset on the server's own lanes.** A remote worker never gets it:
+  it is left out of `GET /worker/spec`, no remote claim hands it out, and `rcm machines` shows it
+  as `local_only` on every remote worker. A submission the server's lanes cannot take — pinned to
+  a remote worker, sent to another pool, `any-capable` with `local_accept_any = false`, or missing
+  a required tool there — is refused with 409 before it joins or supersedes anything. Jobs already
+  waiting when the mark is added show `no capable machine` with no ETA instead of being failed. A
+  `local_only` pool preset must use the default pool, or the server does not start; an older
+  server does not know the key, so upgrade every server that reads the preset first.
+
 ## [0.10.0] - 2026-11-23
 
 A job can now wait for a time you name (`rcm run --at` / `--in`, the new states `scheduled` and
