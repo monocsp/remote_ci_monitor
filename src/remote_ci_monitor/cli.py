@@ -2454,7 +2454,11 @@ def cmd_eta(args: argparse.Namespace) -> int:
             busy_others = sum(
                 1 for r in queue if r.get("id") != args.job and r.get("position") is None
             )
-            ahead = busy_others + (row["position"] - 1) if row.get("position") else 0
+            ahead: int | None = busy_others + (row["position"] - 1) if row.get("position") else 0
+            if row.get("reason") == "no_capable_machine":
+                # 갈 레인이 없는 잡 — 앞선 잡을 세면 없는 순서를 지어낸다. `/api/eta` 의 `ahead`
+                # null 과 같다(M5t-a 위임 결정 7)
+                ahead = None
             if args.json:
                 _print_json(row)
             else:
@@ -2895,8 +2899,14 @@ def cmd_recheck(args: argparse.Namespace) -> int:
             return _usage(f"recheck: unknown machine '{args.machine}' (or an older server)")
         return _client_fail(client, "recheck", e)
     jobs = [j for j in ((resp or {}).get("jobs") or []) if isinstance(j, dict)]
+    # 그 머신에서는 못 도는 점검(`local_only`) — 건너뛴 것이지 실패가 아니다(M5t-a 위임 결정 4)
+    skipped = [j for j in ((resp or {}).get("skipped") or []) if isinstance(j, dict)]
+    for j in skipped:
+        code = follow.clean(j.get("code") or "skipped")
+        print(f"{follow.clean(j.get('preset'))} skipped on {args.machine} [{code}]")
     if not jobs:
-        print(f"nothing to recheck on {args.machine}")
+        if not skipped:
+            print(f"nothing to recheck on {args.machine}")
         return 0
     failed = 0
     for j in jobs:

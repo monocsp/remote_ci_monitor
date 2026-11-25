@@ -875,3 +875,71 @@ def test_td28_worker_check_asks_and_goes_on_once_confirmed(env, srv, monkeypatch
     assert code == 0, (cap.out, cap.err)
     assert asked and "macmini" in asked[0], asked
     assert srv.calls("GET", "/worker/spec")
+
+
+# ── PR1(#266) 이 넘긴 것: recheck 의 skipped · eta --job 의 앞선 잡 ─────────────
+
+
+@pytest.fixture
+def client_env(env, monkeypatch) -> Iterator[FakeRcm]:
+    s = FakeRcm()
+    monkeypatch.setenv("RCM_SERVER", s.url)
+    monkeypatch.setenv("RCM_TOKEN", CLIENT_TOKEN)
+    yield s
+    s.close()
+
+
+def test_recheck_names_the_skipped_local_only_checks_and_does_not_count_them(client_env, capsys):
+    """서버가 `skipped` 에 실은 점검(그 머신에서는 못 도는 `local_only`)을 이름으로 보인다 —
+    실패가 아니므로 종료 코드에 넣지 않는다(PR1 Remaining findings (i), 위임 결정 4)."""
+    client_env.route(
+        "POST",
+        "/machines/mbp/recheck",
+        {
+            "jobs": [{"preset": "sim-check", "job_id": 3651}],
+            "skipped": [{"preset": "store-check", "code": "local_only"}],
+        },
+    )
+    code = cli.main(["recheck", "mbp"])
+    cap = capsys.readouterr()
+    assert code == 0, (cap.out, cap.err)
+    assert "#3651" in cap.out, cap.out
+    assert "store-check skipped on mbp [local_only]" in cap.out + cap.err, (cap.out, cap.err)
+
+
+def test_recheck_with_only_skipped_checks_says_so_instead_of_nothing(client_env, capsys):
+    client_env.route(
+        "POST",
+        "/machines/mbp/recheck",
+        {"jobs": [], "skipped": [{"preset": "store-check", "code": "local_only"}]},
+    )
+    code = cli.main(["recheck", "mbp"])
+    cap = capsys.readouterr()
+    assert code == 0, (cap.out, cap.err)
+    assert "store-check skipped on mbp [local_only]" in cap.out + cap.err, (cap.out, cap.err)
+    assert "nothing to recheck" not in cap.out, cap.out
+
+
+def test_eta_job_counts_no_line_for_a_job_no_machine_can_take(client_env, capsys):
+    """`no_capable_machine` 잡은 갈 레인이 없다 — 「N ahead」를 세면 없는 순서를 지어낸다.
+    `/api/eta` 의 `ahead` null 과 같이 그 칸을 찍지 않는다(PR1 Remaining findings (ii))."""
+    waiting = {
+        "id": 7,
+        "preset": "rel",
+        "state": "queued",
+        "position": 2,
+        "reason": "no_capable_machine",
+        "estimate": {"wait_seconds": None, "expected_seconds": 600, "finish_at": None},
+    }
+    busy = {"id": 3, "preset": "gate", "state": "running", "position": None, "estimate": {}}
+    ahead_of_it = {**busy, "id": 5, "state": "queued", "position": 1, "reason": None}
+    client_env.route(
+        "GET",
+        "/api/status",
+        {"pools": [{"name": "default", "queue": [busy, ahead_of_it, waiting]}]},
+    )
+    code = cli.main(["eta", "--job", "7"])
+    cap = capsys.readouterr()
+    assert code == 0, (cap.out, cap.err)
+    assert "ahead" not in cap.out, cap.out
+    assert "no capable machine" in cap.out or "no_capable_machine" in cap.out, cap.out

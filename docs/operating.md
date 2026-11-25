@@ -320,6 +320,9 @@ finished since then are gone from the database while their `jobs/<id>/` logs and
 them but does not delete them), and a job number handed out after the backup will be reused. Do
 this only when the new build cannot run at all; otherwise fix forward.
 
+Before you roll back below 0.11.0, remove `local_only = true` from every preset, `include` files
+included: an older server does not know the key and refuses to start.
+
 ### From a git checkout
 
 The service's virtual environment can point at a working copy instead of a released wheel:
