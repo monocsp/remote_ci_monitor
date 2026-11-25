@@ -1462,7 +1462,8 @@ each job to a worker that can take it. What changes:
   counts every live lane of its pool whatever the verdict, as placement does. `rcm check` draws a
   `capacity` row: FAIL when no preset has a machine, warn with the names when some have none
   (a deploy preset no machine runs can be normal), no row without presets. When the server
-  could not count (`capacity: null`, the reason is in the server log) the row says
+  could not count (`capacity: null`, the reason is in the server log once, not on every
+  health call) or sends counts that do not add up, the row says
   `server could not count capacity`: FAIL on a `lanes = 0` server, warn on one with lanes. An
   older server that does not send the key gets no row.
 - `pools_without_workers` in `/api/health` now lists the default pool too when all its workers

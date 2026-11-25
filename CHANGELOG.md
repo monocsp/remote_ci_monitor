@@ -23,9 +23,9 @@ of a key bumps that number and is listed here.
   `/api/health` gains `capacity` (presets with a live machine to run on now, out of all, and the
   names of the rest) without changing its status code; `rcm check` draws it as a `capacity` row
   (FAIL when no preset has a machine, warn when some have none, and `server could not count
-  capacity` when the server sends `null` — FAIL on such a server), and
-  `rcm doctor --role coordinator` ends on it and names `pool` presets a capable worker in another
-  pool could take. `pools_without_workers` counts the default pool on such a server. `rcm top`,
+  capacity` when the server sends `null` or counts that do not add up — FAIL on such a server),
+  and `rcm doctor --role coordinator` ends on it and names `pool` presets a capable worker in
+  another pool could take. `pools_without_workers` counts the default pool on such a server. `rcm top`,
   `rcm machines` and the web page say `no local lanes` / `runs no jobs` instead of `lanes 0/0 busy`
   and `down`.
   ([#271](https://github.com/monocsp/remote_ci_monitor/pull/271))
