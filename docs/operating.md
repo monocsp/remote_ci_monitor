@@ -111,11 +111,20 @@ rcm doctor --role coordinator-worker --json   # the server's own service measure
 Without `--config`, `rcm doctor` reads the config the service reads. When a service file is found,
 its command line is read with rcm's own parser: `--config` there names the file (`--config=X` and
 shortened options too), and its `--server`, `--pool` and `--lanes` (worker) or `--bind` and
-`--port` (server) apply as they do for the service; for a server, `RCM_CONFIG` and `RCM_SERVER_*`
-in the service file's environment count, your shell's do not. Without a service file, the
-standard places are used (`~/.config/rcm/worker.toml`; `$RCM_CONFIG`, `./rcm.toml`,
-`~/.config/rcm/server.toml`). `--config` and `--server` given to `rcm doctor` win, with a warning
-when the service starts with another `--config`. A `coordinator` or `coordinator-worker` report
+`--port` (server) apply as they do for the service. A server service started without `--config`
+reads `RCM_CONFIG` from the service file's environment, then `rcm.toml` in the service's working
+directory (`WorkingDirectory`; without it launchd starts the service in `/` and a systemd user
+unit in the home folder), then `server.toml` in the service's config folder; a worker service
+started without `--config` reads `worker.toml` from the service's config folder (the service's
+`XDG_CONFIG_HOME`, else `~/.config/rcm`). `RCM_SERVER_*` count only from the service file's
+environment. Your shell's `RCM_CONFIG`, `RCM_SERVER_*` and `XDG_CONFIG_HOME`, and the folder you
+run `rcm doctor` in, never decide what the service reads. When rcm cannot tell the working
+directory (a systemd unit outside `~/.config/systemd/user/` without `WorkingDirectory=`) and an
+`rcm.toml` may be there, the report exits 3. Without a service file, the places `rcm init` writes
+are read (`~/.config/rcm/worker.toml`, `~/.config/rcm/server.toml`); pass `--config` for a file
+anywhere else. `--config` and `--server` given to `rcm doctor` win, with a warning when the
+service starts with another `--config` (or a relative one, which depends on the service's working
+directory and is not compared). A `coordinator` or `coordinator-worker` report
 with no server config anywhere is a usage error (exit 2): it does not ask whatever answers on port
 8787 with the built-in defaults. When the service file cannot be read and no `--config` is given,
 or the config the service names cannot be read, rcm does not know what the service runs with: the
@@ -141,16 +150,24 @@ The coordinator's `[[tools]]` hints show for the server's own lane too.
 The service file is found in this order: `--service-file`; the standard places
 (`~/Library/LaunchAgents/com.remote-ci-monitor.*.plist`, `~/.config/systemd/user/rcm-*.service`);
 `~/.config/rcm/service/`. Only files that start the role's command (`rcm worker` or `rcm serve`)
-count; a file in those places whose command rcm cannot resolve to one of its own (`env rcm
-worker`, `sh -c`, arguments rcm would refuse) is named as unreadable, since it may be this role's
-service. A file given with `--service-file` is used as given; if it starts another role's command
-the report warns. Two in the same place need `--service-file` (exit 2 without a terminal). With none, the
-worker's default service `PATH` is used and the report says so. A launchd plist without `PATH`
+count; a file in those places that looks like rcm's but whose command rcm cannot resolve to one of
+its own (`env rcm worker`, `sh -c "exec rcm worker"`, arguments rcm would refuse, a label ending in
+`worker` or `server` that starts something else) is named as unreadable, since it may be this
+role's service. A file there that plainly starts something else — no `rcm` executable or
+`remote_ci_monitor` module in its command, and a label that does not end in `worker` or `server`,
+like the `rcm-ci-connect` watcher `com.remote-ci-monitor.ci-watch.plist` — is not a candidate. A
+file given with `--service-file` is used as given; if it starts another role's command the report
+warns, and if rcm cannot resolve its command, the `PATH` and config of what it starts are unknown
+(exit 3). Two in the same place need `--service-file` (exit 2 without a terminal). With none,
+the worker's default service `PATH` is used and the report says so. A launchd plist without `PATH`
 gets launchd's default, `/usr/bin:/bin:/usr/sbin:/sbin`. A systemd unit without
 `Environment=PATH=…` is not guessed — the default differs between distributions — so the report
 shows no `PATH`, measures no tool and exits 3 until the unit sets one. A unit line rcm does not
-follow (`EnvironmentFile=`, `PassEnvironment=`, `UnsetEnvironment=`) and an `Environment=` value with
-a systemd specifier such as `%h` are named by line and key, and the report exits 3; when the line
+follow (`EnvironmentFile=`, `PassEnvironment=`, `UnsetEnvironment=`) and an `Environment=` or
+`ExecStart=` value with a systemd specifier rcm does not expand are named by line and key, and the
+report exits 3. `%h` in a user unit (`~/.config/systemd/user/`, `~/.config/rcm/service/`) is your
+home folder and is expanded; any other specifier, and `%h` in a unit given with `--service-file`
+from another folder (it may be a system unit, where `%h` is `/root`), is not. When the line
 can change `PATH` (`EnvironmentFile=` always can), the service `PATH` is unknown and no tool is
 measured. Write `PATH` out in full in an `Environment=` line. A `$` is kept as written: systemd does
 not expand variables in `Environment=`. A service file rcm cannot

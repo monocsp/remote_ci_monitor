@@ -53,16 +53,22 @@ of a key bumps that number and is listed here.
   git version it cannot read, a `git ls-remote` that timed out or could not run, a config the
   service starts with that it cannot read, a missing home folder. Without `--config` it measures
   with the config the service reads: the service file's `--config`, `--pool`, `--port` and its
-  `RCM_SERVER_*` variables count; a coordinator role with no server config anywhere is a usage
-  error (exit 2) instead of asking port 8787 with the built-in defaults. A file in a standard
-  service place that it cannot read, or whose command it cannot resolve to rcm, leaves that place
-  unknown. `--json` `summary` counts presets that may come under `applies_unknown`. A
-  `token_file` repository is checked with the worker's own credential helper. Unknown values are
-  `null` in `--json`, never the word `None`, and `rcm worker --check` shows a `/worker/spec` that
-  is not rcm's as a FAIL line instead of a traceback. `rcm doctor` never follows the server's
-  version. `GET /worker/spec` now also carries each preset's `pool`, `pools`, `placement`,
-  `checks`, `source_modes`, repository name (no URL) and `unreachable_checks` (the checks a remote
-  worker cannot run, with a reason code), and the `[[tools]]` table; older workers ignore them.
+  `RCM_CONFIG` and `RCM_SERVER_*` variables count, then `rcm.toml` in the service's working
+  directory and the service's config folder; your shell's `RCM_CONFIG`, `RCM_SERVER_*` and
+  `XDG_CONFIG_HOME` and the folder you run it in never do. A coordinator role with no server config
+  anywhere is a usage error (exit 2) instead of asking port 8787 with the built-in defaults. A file
+  in a standard service place that it cannot read, or that looks like rcm's but whose command it
+  cannot resolve, leaves that place unknown; a file there that plainly starts something else (the
+  `rcm-ci-connect` watcher) is not a candidate. A `--service-file` whose command it cannot resolve
+  leaves `PATH` and config unknown. `%h` in a systemd user unit is the home folder; other
+  specifiers stay unknown. `--json` `summary` counts presets that may come under
+  `applies_unknown`. A `token_file` repository is checked with the worker's own credential
+  helper. Unknown values are `null` in `--json`, never the word `None`, and `rcm worker --check`
+  shows a `/worker/spec` that is not rcm's as a FAIL line instead of a traceback. `rcm doctor`
+  never follows the server's version. `GET /worker/spec` now also carries each preset's `pool`,
+  `pools`, `placement`, `checks`, `source_modes`, repository name (no URL) and
+  `unreachable_checks` (the checks a remote worker cannot run, with a reason code), and the
+  `[[tools]]` table; older workers ignore them.
   ([#268](https://github.com/monocsp/remote_ci_monitor/pull/268))
 - **`[[tools]]` in `server.toml` gives a tool an install hint.** `name`, `docs` and
   `[tools.install]` lines for `darwin`, `linux` or `any`; shown by `rcm doctor` next to a missing
@@ -76,12 +82,14 @@ of a key bumps that number and is listed here.
   capability report, are kept in memory only, and appear in `GET /api/machines` (new `host` key)
   only for a request with a client token (a worker token sent with Basic gets none). The server keeps only true or false for Rosetta, container
   and root, and a string of at most 64 characters without control characters for the rest;
-  anything else, and what the worker could not tell, is `null`.
+  anything else, and what the worker could not tell, is `null`. Line and paragraph separators and
+  bidirectional controls are removed too.
   ([#268](https://github.com/monocsp/remote_ci_monitor/pull/268))
 - **`rcm worker --check` shows a `version` row and a last line with the number of missing
   tools.** A different server version is a warning when registering will follow it and FAIL when
   this install cannot follow; the missing line is ok only when nothing is missing and never fails
-  the check; the existing rows are unchanged.
+  the check; the existing rows are unchanged, except that a `repos` row that timed out now reads
+  `git ls-remote timed out after 10s` instead of `unreachable: timed out after 10s`.
   ([#268](https://github.com/monocsp/remote_ci_monitor/pull/268))
 
 ### Fixed
