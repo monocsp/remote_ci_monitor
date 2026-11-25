@@ -202,7 +202,13 @@ def test_td13_all_ready_exits_0(worker, capsys):
     code, doc = worker(capsys)
     assert code == 0, doc
     assert row(doc, "build")["state"] == "ready"
-    assert doc["summary"] == {"ready": 1, "needs_check": 0, "missing": 0, "unknown": 0}
+    assert doc["summary"] == {
+        "ready": 1,
+        "needs_check": 0,
+        "missing": 0,
+        "unknown": 0,
+        "applies_unknown": 0,
+    }
     assert doc["role"] == "worker" and doc["measured_in"] == "clean_service_env"
 
 
@@ -1577,7 +1583,7 @@ def test_an_unreadable_plist_in_launch_agents_is_named_and_exits_3(
 ):
     """`--service-file` 없는 doctor 도 설치 자리의 plist 를 모두 읽는다. 깨진 파일 하나가
     traceback 을 내지 않는다 — 그 파일 이름과 이유를 「판정 못 함」에 적고 종료 3 이다. 함께 있는
-    읽히는 파일로는 그대로 잰다(그 파일이 이 역할의 것이었는지 모르므로 0 으로 끝내지 않는다)."""
+    읽히는 파일로도 재지 않는다(그 깨진 파일이 이 역할의 것이었는지 모른다)."""
     monkeypatch.setenv("RCM_WORKER_TOKEN", TOKEN)
     # 도구가 없는 프리셋 — 서비스 파일 없이 기본 PATH 로 재도 빠짐(종료 1)이 생기지 않게
     srv.route("GET", "/worker/spec", spec_doc(preset("build", requires=())))
@@ -1592,10 +1598,12 @@ def test_an_unreadable_plist_in_launch_agents_is_named_and_exits_3(
     said = [u for u in doc["undecided"] if "com.remote-ci-monitor.broken.plist" in u]
     assert said and "cannot read" in said[0], doc["undecided"]
     assert str(env / "home") not in out + err
-    good = plist(agents, f"{svcbin}:/usr/bin:/bin")
+    # 읽히는 파일이 함께 있어도 그것으로 재지 않는다 — 못 읽은 파일이 이 역할의 서비스였는지
+    # 모르므로 그 자리 전체가 모름이다(P3 4라운드 LOW, 검증자 1 #5)
+    plist(agents, f"{svcbin}:/usr/bin:/bin")
     code, doc = run_json(capsys, "--role", "worker", "--config", str(cfg))
-    assert doc["service"]["file"] == "~/Library/LaunchAgents/" + good.name, doc["service"]
-    assert row(doc, "build")["state"] == "ready", doc
+    assert doc["service"]["file"] is None and doc["service"]["path"] is None, doc["service"]
+    assert doc["presets"] == [], doc
     assert code == 3 and any("broken.plist" in u for u in doc["undecided"]), doc
 
 
@@ -2396,11 +2404,15 @@ def test_the_worker_and_the_server_agree_on_the_host_fact_keys():
 
 B = "baseline"  # 성한 답과 같은 종료 코드
 ANY = "any"  # 빈 그릇이 다른 확정 답인 칸 — 종료는 따지지 않고 None · 경계 · traceback 만 본다
-REQUIRED = {"drop": 3, "null": 3, "wrong": 3}  # 없으면 이 답을 알아볼 수 없거나 판정할 수 없다
+#: 없으면 이 답을 알아볼 수 없거나 판정할 수 없다. 이름 · 버전 · 종류 같은 필수 문자열은 비어도
+#: 없는 것과 같다(`blank`, P3 4라운드 LOW) — rcm 서버는 빈 문자열을 보내지 않는다
+REQUIRED = {"drop": 3, "null": 3, "wrong": 3, "blank": 3}
 OPTIONAL = {"drop": B, "null": B, "wrong": 3}  # 없으면 모르는 값으로 null — 판정은 그대로
+#: 필수가 아니지만 있으면 이름인 칸(풀) — 빈 문자열은 rcm 서버가 보내지 않는 값이다
+OPTIONAL_NAME = {**OPTIONAL, "blank": 3}
 FREE = {"drop": B, "null": B, "wrong": B}  # doctor 가 읽지 않는 칸
 #: 목록의 항목 — 빼는 것은 다른 확정 답이라 보지 않는다. 빈 객체는 필수 칸이 없는 항목이다
-ITEM = {"null": 3, "wrong": 3, "empty": 3}
+ITEM = {"null": 3, "wrong": 3, "empty": 3, "blank": 3}
 ENTRY = {"drop": B, "null": 3, "wrong": 3}  # 이름이 서버가 정한 객체의 값
 
 
@@ -2449,6 +2461,8 @@ def mutated(doc: Any, path: str, how: str) -> Any:
         parent[last] = None
     elif how == "wrong":
         parent[last] = wrong_value(parent[last])
+    elif how == "blank":
+        parent[last] = ""
     else:  # empty
         parent[last] = type(parent[last])()
     return out
@@ -2463,6 +2477,8 @@ def mutations(value: Any, rule: dict[str, Any], is_item: bool) -> list[tuple[str
         out = [(h, w) for h, w in out if h != "null"]
     if isinstance(value, (list, dict)) and value:
         out.append(("empty", rule.get("empty", B)))
+    if isinstance(value, str) and value:
+        out.append(("blank", rule.get("blank", B)))
     return out
 
 
@@ -2525,7 +2541,7 @@ GEN_SPEC_RULES: dict[str, dict[str, Any]] = {
     "presets[1].requires": {**REQUIRED, "empty": B},
     "presets[1].env_passthrough": REQUIRED,
     "presets[1].env": REQUIRED,
-    "presets[1].pool": OPTIONAL,  # any-capable 은 풀을 보지 않는다
+    "presets[1].pool": OPTIONAL_NAME,  # any-capable 은 풀을 보지 않는다
     "presets[1].pools": OPTIONAL,
     "presets[1].placement": REQUIRED,
     "presets[1].checks": {**REQUIRED, "empty": ANY},
@@ -2598,7 +2614,7 @@ for _i in (0, 1):
             f"machines[{_i}].id": REQUIRED,
             f"machines[{_i}].display_name": OPTIONAL,
             f"machines[{_i}].kind": REQUIRED,  # 로컬 레인인지 원격인지가 이것으로 정해진다
-            f"machines[{_i}].pool": OPTIONAL,
+            f"machines[{_i}].pool": OPTIONAL_NAME,
             f"machines[{_i}].lanes": FREE,
             f"machines[{_i}].alive": OPTIONAL,
             f"machines[{_i}].presets": OPTIONAL,
@@ -2990,3 +3006,477 @@ def test_worker_check_with_an_answer_that_is_not_an_object_does_not_crash(
     row_ = check_line(lines, "server" if route == "/api/health" else "token")
     assert row_ is not None and row_.startswith("FAIL") and "not rcm's" in row_, lines
     assert code == 1, lines
+
+
+# ── 열거: 읽지 못한 입력이 하나라도 있으면 0 · 1 이 아니다 (P3 4라운드 HIGH · 메타 루프) ──
+#
+# 같은 부류(읽지 못한 입력을 기본값으로 메워 사실처럼 판정한다)가 네 라운드 이어졌다. 입력 하나씩이
+# 아니라 역할마다 입력의 있음 · 없음 · 못 읽음을 모두 엮어 잠근다. 이 셋업에는 확정된 문제(빠진
+# 도구 · 낮은 Python)가 없다 — 그래서 모든 입력을 읽었으면 0, 하나라도 못 읽었으면 2 나 3 이다.
+
+#: 설정 파일: --config 로 줌 · 표준 자리 · 없음 · 못 읽음(--config) · 못 읽음(표준 자리) · 서비스
+#: 파일의 `--config` 가 가리킴 · 서비스 파일의 `--config` 가 가리키는 파일을 못 읽음
+INPUT_CONFIGS = (
+    "flag",
+    "standard",
+    "absent",
+    "unreadable-flag",
+    "unreadable-standard",
+    "service",
+    "service-unreadable",
+)
+INPUT_SERVICES = ("readable", "absent", "unreadable")
+INPUT_ROLES = ("worker", "coordinator", "coordinator-worker", "client")
+NOT_TOML = b"\xff\xfe not toml\n"
+
+
+def input_cases() -> Iterator[Any]:
+    for role in INPUT_ROLES:
+        # 클라이언트는 서비스 파일을 읽지 않는다
+        configs = INPUT_CONFIGS if role != "client" else INPUT_CONFIGS[:5]
+        services = INPUT_SERVICES if role != "client" else ("absent",)
+        for config in configs:
+            for service in services:
+                if config.startswith("service") and service != "readable":
+                    continue
+                for server in ("answers", "silent"):
+                    for token in ("token", "no-token"):
+                        yield pytest.param(
+                            role,
+                            config,
+                            service,
+                            server,
+                            token,
+                            id=f"{role}-config_{config}-service_{service}-{server}-{token}",
+                        )
+
+
+def unread_inputs(role: str, config: str, service: str, server: str, token: str) -> list[str]:
+    """doctor 가 그 실행에서 읽지 못한 입력. 워커 · 클라이언트는 설정 파일 없이도 된다(환경 변수와
+    `--server`, TD49). coordinator 계열은 설정 파일이 없으면 무엇을 잴지(프리셋 · 포트) 모른다."""
+    out = []
+    if config in ("unreadable-flag", "unreadable-standard", "service-unreadable"):
+        out.append("config")
+    if config == "absent" and role in ("coordinator", "coordinator-worker"):
+        out.append("config")
+    if service == "unreadable":
+        out.append("service file")
+    if server == "silent":
+        out.append("server")
+    if token == "no-token":
+        out.append("token")
+    return out
+
+
+def input_setup(
+    env: Path, svcbin: Path, monkeypatch, role: str, config: str, service: str, port: int
+) -> list[str]:
+    """그 칸의 입력을 깔고 `rcm doctor` 의 인자를 돌려준다."""
+    home = env / "home"
+    url = f"http://127.0.0.1:{port}"
+    std = home / ".config" / "rcm"
+    std.mkdir(parents=True, exist_ok=True)
+    kind = {"worker": "worker", "client": "client"}.get(role, "server")
+    if kind == "worker":
+        body = f'server = "{url}"\npool = "default"\n'
+    elif kind == "client":
+        body = f'server = "{url}"\n'
+    else:
+        body = (
+            f'[server]\nbind = "127.0.0.1"\nport = {port}\ndata_dir = "{env / "data"}"\n\n'
+            '[[presets]]\nname = "unit"\nargv = ["true"]\nrequires = ["sh"]\n'
+            'env_passthrough = ["PATH"]\n'
+        )
+    argv = ["--role", role]
+    elsewhere = env / "elsewhere"
+    elsewhere.mkdir(exist_ok=True)
+    named = elsewhere / f"{kind}.toml"  # 서비스 파일의 `--config` 가 가리키는 파일
+    if config == "flag":
+        p = env / f"{kind}.toml"
+        p.write_text(body)
+        p.chmod(0o600)
+        argv += ["--config", str(p)]
+    elif config == "standard":
+        (std / f"{kind}.toml").write_text(body)
+        (std / f"{kind}.toml").chmod(0o600)
+    elif config == "unreadable-flag":
+        p = env / f"{kind}.toml"
+        p.write_bytes(NOT_TOML)
+        argv += ["--config", str(p)]
+    elif config == "unreadable-standard":
+        (std / f"{kind}.toml").write_bytes(NOT_TOML)
+    elif config == "service":
+        named.write_text(body)
+        named.chmod(0o600)
+    elif config == "service-unreadable":
+        named.write_bytes(NOT_TOML)
+    if config == "absent" and kind in ("worker", "client"):
+        argv += ["--server", url]  # 설정 파일 없는 워커 · 클라이언트(TD49)
+    if kind != "client":
+        agents = home / "Library" / "LaunchAgents"
+        agents.mkdir(parents=True)
+        label = "worker" if kind == "worker" else "server"
+        sf = agents / f"com.remote-ci-monitor.{label}.plist"
+        command = "worker" if kind == "worker" else "serve"
+        args = ["/x/rcm", command]
+        if config.startswith("service"):
+            args += ["--config", str(named)]
+        if service == "readable":
+            sf.write_bytes(
+                plistlib.dumps(
+                    {
+                        "Label": sf.stem,
+                        "ProgramArguments": args,
+                        "EnvironmentVariables": {"PATH": f"{svcbin}:/usr/bin:/bin"},
+                    }
+                )
+            )
+        elif service == "unreadable":
+            sf.write_bytes(TRUNCATED_PLIST)
+    if kind == "server":
+        # 설정 파일이 없을 때 서버 설정의 기본 포트(8787)는 이 머신의 운영 서버일 수 있다 — 시험의
+        # 서버로 돌린다. 설정 파일이 있으면 같은 값이라 아무것도 바꾸지 않는다
+        monkeypatch.setenv("RCM_SERVER_PORT", str(port))
+    return argv
+
+
+def input_server() -> FakeRcm:
+    s = FakeRcm()
+    unit = {"missing_tools": [], "missing_passthrough": []}
+    s.route(
+        "GET", "/api/health", {"ok": True, "version": __version__, "preset_env": {"unit": unit}}
+    )
+    s.route("GET", "/api/machines", GEN_MACHINES)
+    s.route("GET", "/worker/spec", spec_doc(preset("build", requires=("sh",), pool="default")))
+    return s
+
+
+@pytest.mark.parametrize("role,config,service,server,token", list(input_cases()))
+def test_every_input_doctor_did_not_read_ends_in_2_or_3(
+    env, svcbin, monkeypatch, capsys, role, config, service, server, token
+):
+    """역할 넷 × 설정 파일(있음 · 없음 · 못 읽음, --config 줌 · 안 줌, 서비스 파일이 가리킴) ×
+    서비스 파일(있음 · 없음 · 못 읽음) × 서버(답함 · 안 답함) × 토큰(있음 · 없음). doctor 가 그
+    실행에서 읽지 못한 입력이 하나라도 있으면 종료는 2 나 3 이다 — 0 이나 1 의 근거가 될 수 없다.
+    모두 읽었으면 0 이다(이 셋업에는 확정된 문제가 없다)."""
+    monkeypatch.setattr(doctor, "PLATFORM", "darwin")
+    monkeypatch.setattr(cli, "discover", FakeDiscover(()))
+    s = input_server()
+    try:
+        port = s.port if server == "answers" else free_port()
+        kind = "worker" if role == "worker" else "client"
+        s.route("GET", "/api/whoami", {"name": "td", "admin": False, "kind": kind})
+        if token == "token":
+            monkeypatch.setenv("RCM_WORKER_TOKEN" if role == "worker" else "RCM_TOKEN", TOKEN)
+        argv = input_setup(env, svcbin, monkeypatch, role, config, service, port)
+        code, out, err = run_guarded(capsys, *argv, "--json")
+        assert code is not None and "Traceback" not in err, err
+        doc = json.loads(out) if out.strip() else None
+        unread = unread_inputs(role, config, service, server, token)
+        if unread:
+            assert code in (2, 3), (unread, code, doc and doc["problems"], err)
+        else:
+            assert doc is not None and code == 0, (code, doc, err)
+            assert doc["problems"] == [] and doc["undecided"] == [], doc
+    finally:
+        s.close()
+
+
+# ── 설정은 서비스가 읽는 것으로 — 기본값을 사실로 읽지 않는다 (P3 4라운드 HIGH) ──────
+
+
+@pytest.mark.parametrize("role", ["coordinator", "coordinator-worker"])
+def test_a_coordinator_role_without_a_server_config_is_a_usage_error(
+    env, coordinator, monkeypatch, capsys, role
+):
+    """`--config` 도 표준 자리의 server.toml 도 없으면 doctor 는 설정을 읽지 않았다. 기본값(프리셋
+    없음 · 8787)으로 그 포트의 아무 서버에 묻고 0 이나 「프리셋 없음」(1)로 끝내지 않는다 — 사용법
+    오류(2)이고 서버에는 아무것도 묻지 않는다."""
+    monkeypatch.setenv("RCM_TOKEN", CLIENT_TOKEN)
+    monkeypatch.setenv("RCM_SERVER_PORT", str(coordinator.port))  # 8787 로 가지 않게
+    code, out, err = run_guarded(capsys, "--role", role, "--json")
+    assert code == 2, (code, out, err)
+    assert "no server config" in err and "--config" in err, err
+    assert coordinator.requests == [], coordinator.requests
+
+
+def launch_agent(env: Path, args: list[str], path: str, extra: dict[str, str] | None = None):
+    agents = env / "home" / "Library" / "LaunchAgents"
+    agents.mkdir(parents=True, exist_ok=True)
+    name = "worker" if args[1] == "worker" else "server"
+    p = agents / f"com.remote-ci-monitor.{name}.plist"
+    doc = {"Label": p.stem, "ProgramArguments": args, "EnvironmentVariables": {"PATH": path}}
+    doc["EnvironmentVariables"].update(extra or {})
+    p.write_bytes(plistlib.dumps(doc))
+    return p
+
+
+def test_the_service_files_config_argument_is_the_config_doctor_reads(
+    env, srv, svcbin, monkeypatch, capsys
+):
+    """서비스가 `rcm worker --config X` 로 뜨면 그 서비스는 X 를 읽는다. `--config` 없는 doctor 도
+    X 로 잰다 — 기본값(서버 없음 · 풀 default)으로 재지 않는다. 인자는 rcm 자신의 파서로 읽으므로
+    `--config=X` 꼴도 같다."""
+    monkeypatch.setenv("RCM_WORKER_TOKEN", TOKEN)
+    monkeypatch.setattr(cli, "discover", FakeDiscover(()))
+    (env / "conf").mkdir()
+    x = env / "conf" / "w.toml"
+    x.write_text(f'server = "{srv.url}"\npool = "mbp"\n')
+    x.chmod(0o600)
+    launch_agent(env, ["/x/rcm", "worker", f"--config={x}"], f"{svcbin}:/usr/bin:/bin")
+    code, doc = run_json(capsys, "--role", "worker")
+    assert srv.calls("GET", "/worker/spec"), doc["undecided"]
+    assert row(doc, "build")["applies"] == "pool", doc["presets"]
+    assert code == 0, doc
+
+
+@pytest.mark.parametrize("state", ["missing", "not-toml"])
+def test_a_config_the_service_names_and_doctor_cannot_read_is_unknown(
+    env, srv, svcbin, monkeypatch, capsys, state
+):
+    """서비스 파일이 가리키는 설정을 doctor 가 못 읽으면 그 서비스가 무엇으로 도는지 모른다 —
+    사람이 준 `--config` 가 아니므로 사용법 오류(2)가 아니라 판정 못 함(3)이다. 기본값으로 재지
+    않고 서버에도 묻지 않는다."""
+    monkeypatch.setenv("RCM_WORKER_TOKEN", TOKEN)
+    monkeypatch.setattr(cli, "discover", FakeDiscover(()))
+    x = env / "home" / "conf" / "w.toml"
+    if state == "not-toml":
+        x.parent.mkdir(parents=True)
+        x.write_bytes(NOT_TOML)
+    launch_agent(env, ["/x/rcm", "worker", "--config", str(x)], f"{svcbin}:/usr/bin:/bin")
+    code, out, err = run_guarded(capsys, "--role", "worker", "--json")
+    assert_handled(code, out, err, "~/conf/w.toml", codes=(3,))
+    assert srv.requests == [], srv.requests
+    assert str(env / "home") not in out + err
+
+
+def test_the_servers_service_arguments_and_environment_choose_the_port(
+    env, coordinator, svcbin, monkeypatch, capsys
+):
+    """`rcm serve --port P` 나 서비스 환경의 `RCM_SERVER_PORT` 로 뜬 서버는 설정 파일의 포트가
+    아니라 P 에서 듣는다. doctor 도 P 에 묻는다 — 설정 파일의 포트로 남의 서버에 묻지 않는다."""
+    monkeypatch.setenv("RCM_TOKEN", CLIENT_TOKEN)
+    # 서비스 파일을 읽지 않는 doctor 가 기본 포트(8787, 이 머신의 운영 서버일 수 있다)로 가지 않게
+    monkeypatch.setenv("RCM_SERVER_PORT", str(free_port()))
+    cfg = server_toml(env, free_port())  # 서비스는 이 포트로 뜨지 않는다
+    path = f"{svcbin}:/usr/bin:/bin"
+    launch_agent(
+        env, ["/x/rcm", "serve", "--config", str(cfg), "--port", str(coordinator.port)], path
+    )
+    code, doc = run_json(capsys, "--role", "coordinator-worker")
+    assert doc["server"]["url"] == f"http://127.0.0.1:{coordinator.port}", doc["server"]
+    assert coordinator.calls("GET", "/api/machines"), doc["undecided"]
+    launch_agent(
+        env,
+        ["/x/rcm", "serve", "--config", str(cfg)],
+        path,
+        extra={"RCM_SERVER_PORT": str(coordinator.port)},
+    )
+    code, doc = run_json(capsys, "--role", "coordinator-worker")
+    assert doc["server"]["url"] == f"http://127.0.0.1:{coordinator.port}", doc["server"]
+
+
+# ── 재지 못한 것은 「닿지 않음」이 아니다 · 홈 · worker --check (P3 4라운드 MED) ────
+
+
+@pytest.mark.parametrize("how", ["timeout", "oserror"])
+def test_a_git_ls_remote_that_times_out_or_cannot_run_is_unknown_not_unreachable(
+    env, srv, svcbin, monkeypatch, capsys, how
+):
+    """`git ls-remote` 가 시한을 넘기거나 실행되지 못한 것은 저장소에 닿지 않는다는 사실이 아니다 —
+    프로브 시한 초과처럼 모름(종료 3)이다. 저장소 행은 FAIL 이 아니다."""
+    import subprocess
+
+    monkeypatch.setenv("RCM_WORKER_TOKEN", TOKEN)
+    script(svcbin / "git", "echo 'git version 2.45.0'")
+    real = subprocess.run
+
+    def fake(argv, *a, **kw):
+        if len(argv) > 1 and argv[1] == "ls-remote":
+            if how == "timeout":
+                raise subprocess.TimeoutExpired(argv, kw.get("timeout") or 10)
+            raise PermissionError(13, "Permission denied")
+        return real(argv, *a, **kw)
+
+    monkeypatch.setattr(subprocess, "run", fake)
+    sf = plist(env / "svc", f"{svcbin}:/usr/bin:/bin")
+    code, doc = run_worker(capsys, env, srv, sf, toml_extra=REPO)
+    repos = req(doc, "repos")
+    assert repos["state"] == "unknown", doc["rcm_requirements"]
+    assert doc["problems"] == [] and any("repos" in u for u in doc["undecided"]), doc
+    assert code == 3, doc
+
+
+def test_without_a_home_folder_doctor_says_so_and_exits_3(env, monkeypatch, capsys):
+    """HOME 이 없고 이 uid 에 passwd 항목도 없으면 홈 폴더를 모른다. 그러면 설정과 서비스 파일의
+    표준 자리를 찾을 수 없다 — traceback 이 아니라 그 이유를 말하고 종료 3 이다."""
+
+    def no_home() -> Path:
+        raise RuntimeError("Could not determine home directory.")
+
+    monkeypatch.delenv("HOME")
+    monkeypatch.setattr(Path, "home", staticmethod(no_home))
+    code, out, err = run_guarded(capsys, "--role", "worker", "--json")
+    assert_handled(code, out, err, "HOME", codes=(3,))
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        [],
+        "spec",
+        HTML_200,
+        {"presets": [], "probes": [{"name": "p", "argv": ["true"], "timeout_seconds": "soon"}]},
+    ],
+    ids=["list", "scalar", "html", "timeout-not-a-number"],
+)
+def test_worker_check_with_a_spec_rcm_cannot_read_is_a_fail_line(
+    env, srv, svcbin, monkeypatch, capsys, body
+):
+    """`rcm worker --check` 도 `/worker/spec` 이 rcm 의 명세가 아니면(목록 · 문자열 · HTML · 숫자가
+    아닌 시한) traceback 이 아니라 health · whoami 와 같은 FAIL 줄이다."""
+    import traceback
+
+    monkeypatch.setenv("RCM_WORKER_TOKEN", TOKEN)
+    srv.route("GET", "/worker/spec", body)
+    try:
+        code, lines = worker_check(capsys, env, srv)
+    except Exception:  # noqa: BLE001 — traceback 을 단언으로 보인다
+        raise AssertionError(traceback.format_exc()) from None
+    row_ = check_line(lines, "presets")
+    assert row_ is not None and row_.startswith("FAIL") and "not rcm's" in row_, lines
+    assert code == 1, lines
+
+
+def test_worker_check_never_prints_none_for_what_the_server_did_not_say(
+    env, srv, svcbin, monkeypatch, capsys
+):
+    """서버가 `version` 이나 토큰 `name` 을 말하지 않으면 `vNone` · `None (worker)` 가 아니다."""
+    monkeypatch.setenv("RCM_WORKER_TOKEN", TOKEN)
+    srv.route("GET", "/api/health", {"ok": True})
+    srv.route("GET", "/api/whoami", {"admin": False, "kind": "worker"})
+    _code, lines = worker_check(capsys, env, srv)
+    assert not any("None" in ln for ln in lines), lines
+
+
+# ── 서비스 파일 찾기의 systemd 절반 (P3 4라운드 시험 대조 WEAK · TD45) ───────────
+
+
+def test_td45_the_systemd_user_folder_is_the_installed_place_too(
+    env, srv, svcbin, monkeypatch, capsys
+):
+    """§4.5: 표준 라벨의 설치 자리는 launchd 의 `~/Library/LaunchAgents` 와 systemd 의
+    `~/.config/systemd/user/rcm-*.service` 다. systemd 쪽에서도 설치 자리가 setup 자리보다 먼저고,
+    다른 역할의 유닛(`rcm-server.service`)은 후보가 아니며, 고른 파일의 PATH 를 읽는다."""
+    monkeypatch.setenv("RCM_WORKER_TOKEN", TOKEN)
+    monkeypatch.setattr(doctor, "PLATFORM", "linux")
+    cfg = worker_toml(env, srv.url)
+    home = env / "home"
+    staged = home / ".config" / "rcm" / "service"
+    staged.mkdir(parents=True)
+    (staged / "worker.service").write_text(
+        "[Service]\nExecStart=/x/rcm worker\nEnvironment=PATH=/usr/bin:/bin\n"
+    )
+    code, doc = run_json(capsys, "--role", "worker", "--config", str(cfg))
+    assert doc["service"]["file"] == "~/.config/rcm/service/worker.service", doc["service"]
+    user = home / ".config" / "systemd" / "user"
+    user.mkdir(parents=True)
+    (user / "rcm-server.service").write_text(
+        "[Service]\nExecStart=/x/rcm serve\nEnvironment=PATH=/bin\n"
+    )
+    (user / "rcm-worker.service").write_text(
+        f"[Service]\nExecStart=/x/rcm worker\nEnvironment=PATH={svcbin}:/usr/bin:/bin\n"
+    )
+    code, doc = run_json(capsys, "--role", "worker", "--config", str(cfg))
+    assert doc["service"]["file"] == "~/.config/systemd/user/rcm-worker.service", doc["service"]
+    assert doc["service"]["manager"] == "systemd", doc["service"]
+    assert doc["service"]["path"] == "~/svcbin:/usr/bin:/bin", doc["service"]
+    assert row(doc, "build")["state"] == "ready" and code == 0, doc
+
+
+# ── 싼 LOW (P3 4라운드) ───────────────────────────────────────────────────────
+
+
+def test_a_readable_file_next_to_an_unreadable_one_is_not_chosen(
+    env, srv, svcbin, monkeypatch, capsys
+):
+    """같은 자리에 읽히는 파일과 못 읽는 파일이 함께 있으면, 못 읽은 파일이 이 역할의 서비스였는지
+    모른다. 읽히는 쪽으로 재서 종료 1 을 내지 않는다 — 그 자리 전체가 모름이다(종료 3)."""
+    monkeypatch.setenv("RCM_WORKER_TOKEN", TOKEN)
+    srv.route("GET", "/worker/spec", spec_doc(preset("build", requires=(LACK,))))
+    cfg = worker_toml(env, srv.url)
+    agents = env / "home" / "Library" / "LaunchAgents"
+    plist(agents, f"{svcbin}:/usr/bin:/bin")
+    (agents / "com.remote-ci-monitor.other.plist").write_bytes(TRUNCATED_PLIST)
+    code, doc = run_json(capsys, "--role", "worker", "--config", str(cfg))
+    assert doc["service"]["path"] is None and doc["presets"] == [], doc
+    assert doc["problems"] == [] and code == 3, doc
+
+
+@pytest.mark.parametrize(
+    "args",
+    [
+        ["/usr/bin/env", "rcm", "worker"],
+        ["/bin/sh", "-c", "exec rcm worker"],
+        ["/x/rcm", "worker", "--no-such-flag"],
+    ],
+    ids=["env", "sh-c", "rcm-refuses-the-arguments"],
+)
+def test_a_service_file_whose_rcm_command_rcm_cannot_tell_is_named(
+    env, srv, svcbin, monkeypatch, capsys, args
+):
+    """표준 자리에 있는데 띄우는 명령을 rcm 의 하위 명령으로 풀지 못한 파일(`env rcm worker` ·
+    `sh -c` · rcm 이 받지 않을 인자)은 조용히 빼지 않는다 — 이 역할의 서비스일 수 있으므로 못 읽은
+    파일로 이름을 보이고 종료 3 이다."""
+    monkeypatch.setenv("RCM_WORKER_TOKEN", TOKEN)
+    cfg = worker_toml(env, srv.url)
+    launch_agent(env, args, f"{svcbin}:/usr/bin:/bin")
+    code, out, err = run_guarded(capsys, "--role", "worker", "--config", str(cfg), "--json")
+    assert_handled(code, out, err, "com.remote-ci-monitor.", codes=(3,))
+    doc = json.loads(out)
+    assert doc["service"]["path"] is None, doc["service"]
+
+
+@pytest.mark.parametrize(
+    "doc_",
+    [
+        {"ProgramArguments": ["/x/rcm", "worker"], "EnvironmentVariables": {"PATH": 7}},
+        {"ProgramArguments": ["/x/rcm", "worker"], "EnvironmentVariables": {"PATH": True}},
+        {"ProgramArguments": ["/x/rcm", 3], "EnvironmentVariables": {"PATH": "/usr/bin"}},
+    ],
+    ids=["env-integer", "env-boolean", "argument-integer"],
+)
+def test_a_plist_value_that_is_not_a_string_is_unreadable(env, srv, monkeypatch, capsys, doc_):
+    """launchd 는 환경 변수 값과 인자를 문자열로만 받는다. 정수 · 참거짓을 `str()` 로 바꿔 「PATH 가
+    7」로 재지 않는다 — 그 파일을 못 읽은 것으로 둔다(종료 3)."""
+    monkeypatch.setenv("RCM_WORKER_TOKEN", TOKEN)
+    (env / "svc").mkdir()
+    sf = env / "svc" / "com.remote-ci-monitor.worker.plist"
+    sf.write_bytes(plistlib.dumps({"Label": "x", **doc_}))
+    cfg = worker_toml(env, srv.url)
+    argv = ["--role", "worker", "--config", str(cfg), "--service-file", str(sf), "--json"]
+    code, out, err = run_guarded(capsys, *argv)
+    assert_handled(code, out, err, "is not a string", codes=(3,))
+
+
+def test_the_summary_counts_presets_that_may_come_apart(worker, srv, capsys):
+    """요약은 오는 프리셋만 센다. 오는지 모르는 프리셋(`applies: unknown`)을 빼면 「0 unknown」인데
+    종료 3 이다 — 따로 센다."""
+    old = {"name": "build", "requires": [LACK], "env_passthrough": ["PATH"], "env": {}}
+    srv.route("GET", "/worker/spec", {"generation": "1:0", "probes": [], "presets": [old]})
+    code, doc = worker(capsys)
+    assert doc["summary"]["applies_unknown"] == 1, doc["summary"]
+    _code, out, _err = worker.text(capsys)
+    assert "1 may come (unknown)" in out, out
+
+
+def test_a_pool_preset_with_unknown_checks_is_unknown_even_with_a_missing_tool(worker, srv, capsys):
+    """`checks` 를 모르는 `pool` 프리셋은 빠진 도구가 있어도 종료 1 이 아니다. 그 점검이 이 머신에
+    닿지 않는 것(TO18)이면 이 프리셋은 오지 않고, 그러면 빠진 도구는 문제가 아니다 — 1 의 근거가
+    확정되지 않았다(P3 4라운드 검증자 1 #10 을 받지 않은 이유)."""
+    p = preset("build", requires=(LACK,))
+    p["checks"] = None
+    srv.route("GET", "/worker/spec", spec_doc(p))
+    code, doc = worker(capsys)
+    assert row(doc, "build")["state"] == "unknown" and doc["problems"] == [], doc
+    assert code == 3, doc

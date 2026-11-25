@@ -453,10 +453,19 @@ def test_no_jobs_reason_does_not_fire_while_a_preset_may_come():
     assert dc.no_jobs_reason([unknown], "mbp") is None
 
 
-def test_an_unreachable_checks_item_without_a_name_or_code_is_unknown_not_dropped():
-    """이름이나 이유 코드가 없는 항목을 조용히 버리면 그 점검이 「닿는다」로 읽힌다."""
-    assert dc.unreachable_checks({"unreachable_checks": [{"code": "check_local_only"}]}) is None
-    assert dc.unreachable_checks({"unreachable_checks": [{"name": "qa"}]}) is None
+@pytest.mark.parametrize("item", [{"code": "check_local_only"}, {"name": "qa"}, {}])
+def test_an_unreachable_checks_item_without_a_name_or_code_is_unknown_not_dropped(item):
+    """이름이나 이유 코드가 없는 항목을 조용히 버리면 그 점검이 「닿는다」로 읽힌다. 서버 답을 읽는
+    자리는 하나다(`doctor.reach` 가 쓰는 모양 검사) — 그 자리가 그 칸을 말하고 답 전체를
+    모름으로 둔다. 같은 일을 하던 `core.doctor.unreachable_checks` 는 쓰는 곳이 없어
+    지웠다(P3 4라운드 LOW)."""
+    from remote_ci_monitor import doctor
+
+    entry = {"name": "app", "requires": [], "env_passthrough": [], "env": {}}
+    answer = {"presets": [{**entry, "unreachable_checks": [item]}]}
+    problem = doctor.shape_problem(answer, doctor.ANSWER_SHAPES["/worker/spec"])
+    assert problem is not None and "presets[0].unreachable_checks[0]" in problem, problem
+    assert not hasattr(dc, "unreachable_checks")
 
 
 @pytest.mark.parametrize("name", [" rcm-td-fvm", "rcm-td-fvm ", "x" * 65])
