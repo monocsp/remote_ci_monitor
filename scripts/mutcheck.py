@@ -1298,8 +1298,11 @@ MUTANTS = (
         # `rcm serve` 가 따라간다 — 서버가 정본이다(§2.3)
         name="m5q-follow-serve-follows",
         path="src/remote_ci_monitor/follow.py",
-        old='    {"serve", "worker", "token", "init", "discover", "version", "skills", "doctor"}',
-        new='    {"worker", "token", "init", "discover", "version", "skills", "doctor"}',
+        old=(
+            '    {"serve", "worker", "token", "init", "discover", "version", "skills", "doctor", '
+            '"setup"}'
+        ),
+        new='    {"worker", "token", "init", "discover", "version", "skills", "doctor", "setup"}',
         tests=("tests/test_follow_rules.py",),
     ),
     Mutant(
