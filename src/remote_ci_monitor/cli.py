@@ -4741,16 +4741,23 @@ def _worker_check(cfg: Any, client: Any) -> int:
 
     rows: list[tuple[str, bool | None, str]] = [python_row()]
     health: dict[str, Any] | None = None
+    not_rcm = "the answer is not rcm's JSON object — check the URL and port"
     try:
         h = client.health()
         health = h if isinstance(h, dict) else None
-        # 서버가 보낸 문자열 — 제어 문자를 지우고 64자로 자른다(M5q §14.5, `rcm check` 와 같다)
-        server_v = follow.clean(h.get("version"))
-        rows.append(("server", bool(h.get("ok")), f"{client.server} · v{server_v}"))
+        if health is None:
+            # 틀린 포트 · 프록시의 답 — `.get` 으로 터지지 않고 FAIL 줄이다(P3 3라운드 LOW)
+            rows.append(("server", False, f"{client.server} · {not_rcm}"))
+        else:
+            # 서버가 보낸 문자열 — 제어 문자를 지우고 64자로 자른다(M5q §14.5, `rcm check` 와 같다)
+            server_v = follow.clean(health.get("version"))
+            rows.append(("server", bool(health.get("ok")), f"{client.server} · v{server_v}"))
     except ClientError as e:
         rows.append(("server", False, e.message if e.status else f"cannot reach {client.server}"))
     try:
         me = client.whoami()
+        if not isinstance(me, dict):
+            raise TypeError(not_rcm)
         kind = me.get("kind") or ("admin" if me.get("admin") else "client")
         ok = kind == "worker"
         rows.append(
@@ -4761,6 +4768,8 @@ def _worker_check(cfg: Any, client: Any) -> int:
                 + ("" if ok else " — worker token required: rcm token add NAME --worker"),
             )
         )
+    except TypeError as e:
+        rows.append(("token", False, str(e)))
     except ClientError as e:
         rows.append(("token", False, e.message if e.status else f"cannot reach {client.server}"))
     rows.append(("pool", True, f"{cfg.pool} · lanes {cfg.lanes}"))

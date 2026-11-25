@@ -1068,6 +1068,8 @@ def parse_probes(raw: Any, origin: str = "config") -> tuple[Probe, ...]:
 TOOL_OS_KEYS = ("darwin", "linux", "any")
 _TOOL_KEYS = frozenset({"name", "docs", "install"})
 TOOL_TEXT_MAX = 300
+#: 도구 이름의 길이 상한 — doctor 가 서버가 준 이름을 자르는 길이와 같다
+TOOL_NAME_MAX = 64
 _TOOL_CONTROL_RE = re.compile(r"[\x00-\x1f\x7f-\x9f]")
 
 
@@ -1092,10 +1094,19 @@ def parse_tools(raw: Any, origin: str = "config") -> tuple[ToolHint, ...]:
         if not isinstance(item, dict):
             raise ConfigError("[[tools]]: each entry must be a table")
         name = item.get("name")
-        if not isinstance(name, str) or not name.strip() or "/" in name:
+        # 앞뒤 공백 · 64자 초과는 거절한다 — doctor 는 서버가 준 이름을 strip 하고 64자로 잘라
+        # `requires` 의 이름과 맞추므로, 그런 이름의 안내는 어디에도 나오지 않는다
+        if (
+            not isinstance(name, str)
+            or not name.strip()
+            or name != name.strip()
+            or len(name) > TOOL_NAME_MAX
+            or "/" in name
+        ):
             raise ConfigError(
                 f"[[tools]]: 'name' must be a tool name (the basename in requires or a probe's "
-                f"argv[0]), got {name!r}"
+                f"argv[0], no surrounding spaces, at most {TOOL_NAME_MAX} characters), "
+                f"got {name!r}"
             )
         where = f"[[tools]] '{name}'"
         _tool_text(f"{where} name", name)
