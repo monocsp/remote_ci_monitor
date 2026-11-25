@@ -26,7 +26,10 @@ of a key bumps that number and is listed here.
   `rcm token` commands to run. `rcm` with no arguments, in a terminal on a machine with no config
   at all, asks whether to set it up; everywhere else it is the usage error (exit 2) it was.
   `rcm setup` does not follow the server's version, and `rcm doctor` finds a service installed
-  under a `--label` of your own.
+  under a `--label` of your own. It takes options by their whole name only, refuses a
+  `--service-file` inside a folder the service manager reads, and writes systemd unit paths with
+  spaces, `%` or `$` the way systemd reads them.
+  ([#272](https://github.com/monocsp/remote_ci_monitor/pull/272))
 - **`lanes = 0` runs a server that only hands jobs out.** It runs no job itself: `@local` is not
   alive and never a candidate, its probes do not run, `--machine @local`, `rcm recheck @local`
   and `local_only` submissions are refused with 409, and jobs that lost their place wait with

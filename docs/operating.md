@@ -101,7 +101,8 @@ templates `rcm init` uses:
 The role is not stored anywhere: rcm reads it back from the config files that exist, the same way
 `rcm doctor` does. In a terminal `rcm setup` asks for the role and for each value, with the
 template's defaults. `rcm setup --role ROLE --yes` asks nothing, and neither does a run without a
-terminal. Then these flags must be given, or it stops with exit 2 before writing anything:
+terminal. Then these flags must be given, or it stops with exit 2 before writing anything
+(options are taken by their whole name only: `--data-dir`, never `--data`):
 
 | role | needed with `--yes` | optional |
 |---|---|---|
@@ -127,7 +128,10 @@ file is a usage error, and nothing is asked.
 **Where it writes.** Config files go to `$XDG_CONFIG_HOME/rcm` (or `~/.config/rcm`), or to
 `--config PATH`. The service file goes next to them, in `<config dir>/service/<label>.plist` on
 macOS or `<config dir>/service/<unit>` on Linux, or to `--service-file PATH`. It does not go to
-`~/Library/LaunchAgents`: launchd would start anything there at the next login. The label is
+`~/Library/LaunchAgents`: launchd would start anything there at the next login. A `--service-file`
+inside a folder the service manager reads (`~/Library/LaunchAgents`, `/Library/LaunchAgents`,
+`/Library/LaunchDaemons`, `~/.config/systemd/user`, `/etc/systemd/user`, `/etc/systemd/system`)
+is refused with exit 2. The label is
 `com.remote-ci-monitor.server` or `com.remote-ci-monitor.worker` unless you pass `--label`; the
 systemd unit of a standard label is `rcm-server.service` or `rcm-worker.service`, and of any
 other label `<label>.service`. The server service file has the file-descriptor limit of 4096,
@@ -135,16 +139,18 @@ other label `<label>.service`. The server service file has the file-descriptor l
 named from the label: `server.log` and `worker.log` for the standard labels, `<label>.log`
 otherwise, under `~/Library/Logs/rcm` (launchd) or `~/.local/state/rcm` (systemd). It runs the
 `rcm` that ran setup by its absolute path; setup warns when it could only find an `rcm` on `PATH`.
+In a systemd unit a path with a space, `%` or `$` is written the way systemd reads it (quoted,
+`%%`, `$$`); a path with a line break or another control character is refused with exit 2.
 
 **It registers and starts nothing.** It prints the lines to run yourself, with absolute paths:
 
 ```sh
 mkdir -p <log folder> <LaunchAgents folder>
 cp -n <config dir>/service/<label>.plist <LaunchAgents folder>/<label>.plist
-cmp -s <config dir>/service/<label>.plist <LaunchAgents folder>/<label>.plist && launchctl bootstrap gui/$(id -u) <LaunchAgents folder>/<label>.plist
+cmp -s <config dir>/service/<label>.plist <LaunchAgents folder>/<label>.plist && launchctl bootstrap gui/$(id -u) <LaunchAgents folder>/<label>.plist || echo "not started: the installed file differs from the one setup wrote, or the start failed"
 ```
 
-On Linux the last line ends in `systemctl --user daemon-reload && systemctl --user enable --now
+On Linux the start is `systemctl --user daemon-reload && systemctl --user enable --now
 <unit>`, followed by `sudo loginctl enable-linger $USER` to keep the service running after you log
 out. `cp -n` never replaces a file already installed, and the start runs only when the installed
 file is the one setup just wrote. When a service with the same label is already loaded (setup only
@@ -170,6 +176,12 @@ it alone. Once the file is installed, `rcm doctor` reads the installed copy, `--
   `127.0.0.1` gets a warning that no other machine can connect.
 - A `coordinator-worker` on a machine that already has `worker.toml` gets a warning: the two run
   two sets of lanes on one host.
+- A flag the role does not use (`--lanes` for a coordinator, `--pool` or `--server` for a
+  coordinator, `--advertise` for a client) gets one warning line naming them.
+- When setup cannot tell whether the port is free, or whether a service with the label is already
+  loaded, it says so instead of staying quiet.
+- When a file cannot be put back after a failed write, the error names it (`could not restore
+  <path>`).
 
 **Tokens.** setup creates none, opens no database and prints no token. A coordinator prints the
 two commands to run once its service is up, with the same `rcm` the service runs, so that no other
@@ -182,8 +194,8 @@ worker token in `worker.toml` as `token = "…"`, because a service does not see
 **At the end** it runs the checks that need no server (Python, SQLite, the open-files limit of the
 service file it wrote, whether the config file reads, and the host) as advice that does not change
 the exit code, then says to start the service, add the token and run `rcm doctor --role <role>`.
-Exit codes: 0 written, 1 not written, 2 usage, 130 interrupted. `rcm setup` does not follow the
-server's version.
+Exit codes: 0 written, 1 not written (an unexpected error is one line, without a traceback, that
+says what is on disk), 2 usage, 130 interrupted. `rcm setup` does not follow the server's version.
 
 ## Check a machine before you use it: `rcm doctor`
 
