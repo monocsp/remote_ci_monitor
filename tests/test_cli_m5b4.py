@@ -215,7 +215,10 @@ def test_pools_row_fails_when_every_worker_of_a_pool_is_down(srv, env, capsys):
     code, out = check(capsys)
     assert code == 1, out
     assert row(out, "pools") == ("FAIL", f"{DEFAULT_1} · {POOL} ({WORKER} down)"), out
-    assert not_ok(out) == ["pools"], out  # 다른 행은 영향 없음
+    # 다른 행은 영향 없음 — capacity 만 같은 사실(linux 풀에 갈 머신이 없다)을 warn 으로 댄다
+    # (M5t-a TL14 · docs/m5t-workplan.md §4.2: 일부 프리셋만 0 이면 warn)
+    assert [n for n in not_ok(out) if n != "capacity"] == ["pools"], out
+    assert row(out, "capacity") is not None and row(out, "capacity")[0] == "warn", out
     for name in ("python", "server", "token", "presets", "timezone"):
         assert row(out, name) is not None and row(out, name)[0] == "ok", (name, out)
 
