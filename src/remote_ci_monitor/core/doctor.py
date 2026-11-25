@@ -472,7 +472,7 @@ def render(doc: Mapping[str, Any]) -> list[str]:
             lines.append(f"service  {service['file']} ({service.get('manager')}) · env {env}")
         else:
             lines.append("service  no service file found — measured with the default worker PATH")
-        lines.append(f"PATH     {service.get('path')}")
+        lines.append(f"PATH     {service.get('path') or 'unknown'}")
     shell = doc.get("shell")
     if shell:
         lines.append(f"shell    {shell.get('path')}")

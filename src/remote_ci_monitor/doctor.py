@@ -41,6 +41,9 @@ FD_WANTED = 4096
 #: 표준 라벨의 설치 자리(launchd · systemd 사용자 유닛)
 LAUNCH_AGENTS_GLOB = "com.remote-ci-monitor.*.plist"
 SYSTEMD_GLOB = "rcm-*.service"
+#: 서비스의 환경을 바꾸지만 rcm 이 따라가지 않는 systemd 줄(P3 2라운드 MED). `EnvironmentFile=` 의
+#: 값은 `Environment=` 를 덮으므로 PATH 도 모른다
+SYSTEMD_UNFOLLOWED = ("EnvironmentFile", "PassEnvironment", "UnsetEnvironment")
 #: 역할마다 서비스 파일이 띄워야 하는 `rcm` 하위 명령 — 후보를 이것으로 거른다(6-B-V2)
 ROLE_COMMANDS = {
     dc.ROLE_WORKER: "worker",
@@ -284,6 +287,10 @@ class ServiceFile:
     program: str | None = None  # 띄우는 실행 파일(argv[0]) — venv 의 bin 이 PATH 에 있는지 본다
     #: 읽지 못한 줄(systemd) — `line 3 (Environment=)` 처럼 줄 번호와 키만. 값은 담지 않는다
     unreadable_lines: list[str] = field(default_factory=list)
+    #: 읽었지만 rcm 이 따라가지 않는 줄(`EnvironmentFile=` · 풀지 않는 지정자 `%h`) — 줄과 이유
+    unfollowed: list[str] = field(default_factory=list)
+    #: 그 줄 때문에 서비스의 PATH 를 모른다
+    path_unknown: bool = False
 
     @property
     def env_names(self) -> list[str]:
@@ -348,6 +355,12 @@ def read_service_file(path: str | os.PathLike[str]) -> ServiceFile:
 
     systemd 유닛의 줄 하나를 못 읽으면(닫히지 않은 따옴표 · 숫자가 아닌 한도) 그 줄을 건너뛰되
     `unreadable_lines` 에 남긴다 — 조용히 버리면 「PATH 를 주지 않았다」 같은 틀린 안내가 나간다.
+
+    rcm 이 따라가지 않는 줄(`SYSTEMD_UNFOLLOWED`)과 systemd 가 풀 지정자(`%h` …)가 든
+    `Environment=` 값은 `unfollowed` 에 남긴다. 지정자가 든 값은 환경에 넣지 않는다 — 글자 그대로
+    재면 없는 「빠짐」(종료 1)을 지어낸다. PATH 에 닿으면 `path_unknown` 이다. `$` 는 남긴다:
+    systemd 는 `Environment=` 에서 변수를 펼치지 않으므로(systemd.exec 「Environment=」) 글자
+    그대로가 서비스가 실제로 받는 값이다.
     """
     p = Path(path)
     if p.suffix == ".plist":
@@ -363,15 +376,30 @@ def read_service_file(path: str | os.PathLike[str]) -> ServiceFile:
     program: str | None = None
     nofile_unit: int | None = None
     unreadable: list[str] = []
+    unfollowed: list[str] = []
+    path_unknown = False
     for number, raw in enumerate(text.splitlines(), 1):
         line = raw.strip()
         key, _, value = line.partition("=")
         try:
-            if key == "Environment":
+            if key in SYSTEMD_UNFOLLOWED:
+                unfollowed.append(f"line {number} ({key}=): rcm does not follow {key}=")
+                if key == "EnvironmentFile" or "PATH" in value.split():
+                    path_unknown = True
+            elif key == "Environment":
                 for item in shlex.split(value):
                     k, sep, v = item.partition("=")
-                    if sep:
-                        env[k] = v
+                    if not sep:
+                        continue
+                    if "%" in v.replace("%%", ""):
+                        unfollowed.append(
+                            f"line {number} ({key}=): rcm does not expand systemd specifiers "
+                            f"such as %h in {k}"
+                        )
+                        path_unknown = path_unknown or k == "PATH"
+                        env.pop(k, None)
+                        continue
+                    env[k] = v.replace("%%", "%")
             elif key == "ExecStart":
                 argv = shlex.split(value)
                 command = _rcm_command(argv)
@@ -381,7 +409,9 @@ def read_service_file(path: str | os.PathLike[str]) -> ServiceFile:
                 nofile_unit = 1 << 20 if first == "infinity" else int(first)
         except ValueError:
             unreadable.append(f"line {number} ({key}=)")
-    return ServiceFile(p, dc.SYSTEMD, command, env, nofile_unit, program, unreadable)
+    return ServiceFile(
+        p, dc.SYSTEMD, command, env, nofile_unit, program, unreadable, unfollowed, path_unknown
+    )
 
 
 def _matching(
@@ -853,6 +883,12 @@ class _Run:
                     f"cannot read {where} of the service file "
                     f"{self.mask(str(sf.path))} — fix that line"
                 )
+            for where in sf.unfollowed:
+                # 그 줄이 바꾸는 값을 모른다 — 판정 못 함이다(P3 2라운드 MED)
+                self.undecided.append(
+                    f"cannot read {where} (service file {self.mask(str(sf.path))}) — write the "
+                    "values out in Environment= lines"
+                )
         manager = sf.manager if sf else (dc.LAUNCHD if PLATFORM == "darwin" else dc.SYSTEMD)
         if broken is not None:
             # 사람이 준 파일을 못 읽었다 — 그 PATH 를 모르므로 기본 PATH 로 재지 않는다
@@ -861,6 +897,8 @@ class _Run:
             env.pop("PATH", None)
         elif sf is not None:
             env = dc.clean_env(manager, self.ctx.environ, sf.env)
+            if sf.path_unknown:
+                env.pop("PATH", None)
         else:
             env = dc.clean_env(
                 manager, self.ctx.environ, {}, default_path=self.ctx.worker_service_path
@@ -874,13 +912,13 @@ class _Run:
             "env_names": sf.env_names if sf else [],
         }
         self._service_file = sf
-        if not self.path_known and broken is None:
+        if not self.path_known and broken is None and not (sf and sf.path_unknown):
             # systemd 의 기본 PATH 는 배포판마다 다르다 — 추정해서 재면 없는 「빠짐」을 지어낸다
             self.undecided.append(
                 "the service file sets no PATH and systemd's default differs between "
                 "distributions — add Environment=PATH=… to the service file"
             )
-        elif sf is not None and sf.program and os.path.isabs(sf.program):
+        elif self.path_known and sf is not None and sf.program and os.path.isabs(sf.program):
             own_bin = os.path.dirname(sf.program)
             if own_bin in env["PATH"].split(":"):
                 self.warnings.append(
