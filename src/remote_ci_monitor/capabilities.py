@@ -474,10 +474,7 @@ class CapabilitiesMixin:
             if self.check_reachable(view, name):
                 continue
             state, record = cap.check_state([r for r in records if r.preset == name], fp)
-            if state == cap.CHECK_PASSED:
-                continue
-            claimed = record is not None and record.job_state in _CLAIMED_JOB_STATES
-            if state == cap.CHECK_RUNNING and claimed:
+            if _record_holds(state, record):
                 continue
             return Verdict(cap.INELIGIBLE, CODE_CHECK_LOCAL_ONLY, {"check": name})
         return v
@@ -681,6 +678,10 @@ class CapabilitiesMixin:
             state, record = cap.check_state([r for r in records if r.preset == name], fp)
             # 그 머신에서는 돌 수 없는 점검(`local_only`) — 스스로도, 다시 걸어도 안 온다(6-A-L5)
             reachable = self.check_reachable(view, name)
+            if not reachable and not _record_holds(state, record):
+                # 판정과 같은 규칙이다(batch 7 T1). 아무도 못 집는 대기 잡을 「점검 중」으로,
+                # 그 머신에서 고칠 수 없는 실패를 「실패」로 보이지 않는다. job_id 는 이력이다
+                state = cap.CHECK_NEEDED
             out.append(
                 {
                     "preset": name,
@@ -1216,6 +1217,18 @@ class CapabilitiesMixin:
                 from remote_ci_monitor.server import _safe
 
                 self.record_error(f"capabilities: {type(e).__name__}: {_safe(str(e))}")
+
+
+def _record_holds(state: str, record: cap.CheckRecord | None) -> bool:
+    """그 머신에서 다시 돌 수 없는 점검(`local_only`)의 기록을 그대로 셀까 — 판정(`_verdict`)과
+    점검 칸(`_check_rows`)이 같이 쓴다(batch 7 T1, 둘이 다시 갈라지지 않게).
+
+    둘뿐이다: 통과(지문이 같은 동안 유효)와 그 머신이 이미 집어 돌리는 잡(끝까지 돌고 결과를
+    센다). 대기 중인 점검 잡은 아무도 못 집고, 실패는 그 머신에서 다시 점검해 고칠 수 없다."""
+    if state == cap.CHECK_PASSED:
+        return True
+    claimed = record is not None and record.job_state in _CLAIMED_JOB_STATES
+    return state == cap.CHECK_RUNNING and claimed
 
 
 def _local_only_head(preset: Preset) -> str:
