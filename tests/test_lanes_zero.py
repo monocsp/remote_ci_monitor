@@ -220,6 +220,18 @@ def test_tl6_automatic_checks_never_target_at_local(tmp_path, monkeypatch):
         assert not [c for c in calls if c[1] == LOCAL], calls
     finally:
         s.close()
+    # 비교 행: 같은 프리셋 · 같은 원격에서 레인이 하나 있으면 스위퍼가 `@local` 도 겨냥한다 —
+    # 위의 「없음」이 스위퍼가 `@local` 을 원래 안 보는 탓이 아니라 lanes = 0 의 결과다
+    s = zero(tmp_path / "lanes1", lanes=1, presets=CHECKED)
+    try:
+        s.app.measure_capabilities()
+        report_all(s, REMOTE)
+        calls = record_checks(s, monkeypatch)
+        s.app.sweep_checks()
+        assert ("simcheck", LOCAL) in calls, calls
+        assert ("simcheck", REMOTE) in calls, calls
+    finally:
+        s.close()
 
 
 def test_tl7_at_local_is_not_alive(lz):
