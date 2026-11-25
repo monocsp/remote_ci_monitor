@@ -157,12 +157,18 @@ def python_requirement(
     return requirement("python", "fail", detail, "every role", hint)
 
 
-def _git_version(git: str) -> tuple[int, int] | None:
+def _git_version(git: str, env: Mapping[str, str]) -> tuple[int, int] | None:
+    """서비스 환경으로 돈다 — 셸의 환경(`GIT_EXEC_PATH` 같은 것)이 다른 답을 주지 않게."""
     import subprocess
 
     try:
         proc = subprocess.run(
-            [git, "--version"], capture_output=True, text=True, timeout=10, stdin=subprocess.DEVNULL
+            [git, "--version"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            stdin=subprocess.DEVNULL,
+            env=dict(env),
         )
     except (OSError, subprocess.TimeoutExpired):
         return None
@@ -187,7 +193,7 @@ def git_requirement(
         note = runner.missing_note("git", env) or "missing"
         return requirement("git", "fail", f"{note} on the service PATH", needed, hint)
     if token_file:
-        version = _git_version(git)
+        version = _git_version(git, env)
         if version is None or version < MIN_GIT_TOKEN_FILE:
             shown = ".".join(map(str, version)) if version else "unknown version"
             return requirement("git", "fail", f"{shown} — token_file needs git 2.31+", needed, hint)
