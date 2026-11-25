@@ -276,3 +276,117 @@ def test_tr20_guard_constants_match_the_setup_module():
     # 서비스 관리자가 읽는 자리 — guard 가 막는 자리와 setup 이 거절하는 자리가 같다
     places = {str(p).replace(str(HOME), "~", 1) for p in core.install_places(HOME)}
     assert set(guard.SETUP_SERVICE_PLACES) == places
+
+
+# ── P3 2라운드: guard 는 셸 단계만 하고 setup 의 해석기(`core.where`)를 그대로 쓴다 ──
+
+
+def test_tr20_an_empty_value_is_denied():
+    # P3 2라운드 v2-1: 빈 `--config` 는 옛 setup 에서 기본 자리(운영 설정 폴더)로 떨어졌다. 이제
+    # setup 이 종료 2 로 거절하고, 해석기가 거절하는 명령은 guard 도 막는다(fail closed)
+    worker = f"{WORKER} --label test.rcm.worker"
+    for flag in ("--config=", "--config ''", '--config "$UNSET_RCM_GUARD_TEST"', "--config ' '"):
+        verdict = judge(f"{worker} {flag}")
+        assert verdict is not None and verdict.decision == "deny", flag
+    command = f"{SERVER} --label test.rcm.server --data-dir ''"
+    assert denied(command, environ=TEST_XDG, cwd=HOME / ".local" / "share" / "rcm")
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "${XDG_DATA_HOME:-$HOME/.local/share}/rcm",
+        "${HOME%/}/.local/share/rcm",
+        '"$(echo /home/op/.local/share/rcm)"',
+        "`echo /home/op/.local/share/rcm`",
+        "$1/.local/share/rcm",
+        "$UNSET_RCM_GUARD_TEST/rcm",
+    ],
+)
+def test_tr33_a_value_the_hook_cannot_expand_is_denied(value):
+    # P3 2라운드 v2-1: 셸 단계를 다 한 뒤에도 `$` · 명령 치환이 남으면 setup 이 받을 값을 모른다
+    # — 운영으로 본다
+    verdict = judge(f"{SERVER} --label test.rcm.server --data-dir {value}", environ=TEST_XDG)
+    assert verdict is not None and verdict.decision == "deny", value
+
+
+def test_tr20_an_unknown_role_or_label_is_denied():
+    # P3 2라운드: 역할 · 라벨을 모르면 운영으로 본다
+    for flags in (
+        '--role "$UNSET_RCM_GUARD_TEST" --label test.rcm.server',
+        "--role bogus --label test.rcm.server",
+        "--role coordinator --label $'x\\n'",
+    ):
+        command = f"rcm setup {flags} --bind 127.0.0.1 --data-dir /tmp/d --yes"
+        verdict = judge(command, environ=TEST_XDG)
+        assert verdict is not None and verdict.decision == "deny", flags
+
+
+def test_tr20_a_production_path_in_another_case_is_denied_on_a_case_insensitive_disk(
+    monkeypatch,
+):
+    # P3 2라운드: macOS 의 기본 파일시스템은 대소문자를 가리지 않는다 — `~/.config/RCM` 은 운영
+    # 설정 폴더이고 `~/library/launchagents` 는 서비스 관리자가 읽는 자리다
+    monkeypatch.setattr(guard, "FOLD_CASE", True, raising=False)
+    monkeypatch.setattr(core, "FOLD_CASE", True, raising=False)
+    worker = f"{WORKER} --label test.rcm.worker"
+    assert denied(f"{worker} --config ~/.config/RCM/worker.toml", environ=TEST_XDG)
+    server = f"{SERVER} --label test.rcm.server"
+    assert denied(f"{server} --data-dir ~/.Local/Share/RCM", environ=TEST_XDG)
+    target = "~/library/launchagents/test.rcm.server.plist"
+    assert denied(f"{server} --data-dir /tmp/d --service-file {target}", environ=TEST_XDG)
+    # 대소문자를 가리는 디스크(Linux)에서는 다른 폴더다
+    monkeypatch.setattr(guard, "FOLD_CASE", False)
+    monkeypatch.setattr(core, "FOLD_CASE", False)
+    assert judge(f"{worker} --config ~/.config/RCM/worker.toml", environ=TEST_XDG) is None
+
+
+@pytest.mark.parametrize(
+    "head",
+    [
+        "/usr/bin/env rcm",
+        "/usr/bin/env -i HOME=/home/op rcm",
+        "/usr/bin/nohup rcm",
+        "python -u -m remote_ci_monitor",
+        "python3 -X dev -W ignore -m remote_ci_monitor.cli",
+        "/srv/x/.venv/bin/python3.11 -I -mremote_ci_monitor",
+        "python -m remote_ci_monitor --no-follow",
+    ],
+)
+def test_tr20_a_wrapper_path_or_interpreter_flag_still_reaches_setup(head):
+    # P3 2라운드: 감싸기와 python 은 이름(basename)으로 보고, python 의 플래그는 건너뛴다
+    tail = "setup --role worker --server http://10.0.0.5:18790 --pool p --lanes 1 --yes"
+    verdict = judge(f"{head} {tail} --label test.rcm.worker")
+    assert verdict is not None and verdict.decision == "deny", head
+
+
+def test_tr20_the_hook_refuses_setup_when_the_resolver_does_not_load(monkeypatch):
+    # P3 2라운드: 해석기(`remote_ci_monitor.core.setup`)를 못 들여오면 setup 이 어디에 쓸지 모른다
+    # — 거절하고 이유를 댄다(fail closed)
+    free = f"{SERVER} --data-dir /tmp/d --label test.rcm.server"
+    assert judge(free, environ=TEST_XDG) is None
+    monkeypatch.setitem(sys.modules, "remote_ci_monitor.core.setup", None)
+    verdict = judge(free, environ=TEST_XDG)
+    assert verdict is not None and verdict.decision == "deny"
+    assert "remote_ci_monitor.core.setup" in verdict.reason
+    # setup 이 아닌 명령은 그대로다
+    assert judge("ls /tmp", environ=TEST_XDG) is None
+
+
+def test_tr20_a_client_writes_no_service_file_so_its_service_file_flag_is_free():
+    # P3 2라운드 LOW: client 는 서비스 파일을 쓰지 않는다 — 해석기의 답에 없는 자리는 막지 않는다
+    target = "~/Library/LaunchAgents/com.remote-ci-monitor.server.plist"
+    client = "rcm setup --role client --server http://10.0.0.5:18790 --yes"
+    assert judge(f"{client} --service-file {target}", environ=TEST_XDG) is None
+
+
+def test_tr20_redirections_comments_and_quoting_read_as_the_shell_reads_them():
+    # 셸 단계의 잠금: 리다이렉션 · 주석은 setup 의 인자가 아니고, 작은따옴표 안의 `$` 는 글자다
+    free = f"{SERVER} --data-dir /tmp/d --label test.rcm.server"
+    for tail in ("> /tmp/log 2>&1", "2> /tmp/err # a note", "</dev/null &>/tmp/x", "&"):
+        assert judge(f"{free} {tail}", environ=TEST_XDG) is None, tail
+    quoted = f"{SERVER} --data-dir '/tmp/$HOME' --label test.rcm.server"
+    assert judge(quoted, environ=TEST_XDG) is None
+    # 반복한 옵션: setup 은 마지막 값을 쓰지만 guard 는 앞의 값도 본다(막는 쪽)
+    command = f"{SERVER} --data-dir /home/op/.local/share/rcm --data-dir /tmp/d --label t.s"
+    assert denied(command, environ=TEST_XDG)

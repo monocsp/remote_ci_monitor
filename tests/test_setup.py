@@ -1034,3 +1034,122 @@ def test_tr26_a_url_without_a_host_is_a_usage_error(cfg, tmp_path, url):
     assert go(fake, "--role", "client", "--server", url, "--yes") == 2
     assert "--server" in fake.err.getvalue()
     assert not (cfg / "client.toml").exists()
+
+
+# ── P3 2라운드: guard 와 setup 이 같은 해석기를 쓴다 ─────────────────────────
+
+
+def test_tr20_an_empty_path_or_label_is_a_usage_error(cfg, tmp_path):
+    # P3 2라운드 v2-1: 빈 `--config` 는 기본 자리(운영 설정 폴더일 수 있다)로 떨어졌다 — 빈 값 ·
+    # 공백뿐인 값은 사용법 오류(종료 2)이고 아무것도 쓰지 않는다
+    for extra in (
+        ["--config="],
+        ["--config", ""],
+        ["--config", "   "],
+        ["--service-file="],
+        ["--service-file", " "],
+        ["--data-dir", ""],
+        ["--data-dir=  "],
+        ["--label", ""],
+        ["--label", " "],
+    ):
+        fake = Fake()
+        code = go(fake, *coordinator_args(tmp_path / "data"), *extra)
+        assert code == 2, (extra, fake.text)
+        assert "empty" in fake.err.getvalue(), (extra, fake.text)
+        assert not cfg.exists(), extra
+        assert not (tmp_path / "data").exists(), extra
+
+
+def test_tr20_setup_writes_exactly_where_the_shared_resolver_says(home, tmp_path, monkeypatch):
+    # P3 2라운드 근본 원인: guard 는 setup 이 어디에 쓸지를 setup 과 따로 계산했다. 이제 둘 다
+    # `core.where` 하나를 쓴다 — setup 이 실제로 쓴 자리가 그 함수의 답과 같다(상대 경로 · `~` ·
+    # 상대 XDG · `--config` · `--service-file` · `--data-dir` 의 조합 전부)
+    import itertools
+
+    where = getattr(core, "where", None)
+    assert where is not None, "core.where — the one resolver guard and setup share"
+    monkeypatch.setenv("XDG_CONFIG_HOME", "rel-xdg")
+    roles = ("worker", "coordinator-worker", "client")
+    configs = (None, "c/s.toml", "~/c{n}/s.toml")
+    services = (None, "svc/f.x", "~/svc{n}/f.x")
+    datas = ("d", "~/d{n}")
+    for n, (role, config, service, data) in enumerate(
+        itertools.product(roles, configs, services, datas)
+    ):
+        work = tmp_path / f"w{n}"
+        work.mkdir()
+        monkeypatch.chdir(work)
+        given = {
+            "config": config and config.format(n=n),
+            "service_file": service and service.format(n=n),
+            "data_dir": data.format(n=n),
+        }
+        if role == "client":
+            argv = ["--role", role, "--server", "http://10.0.0.5:18790", "--yes"]
+            label = None
+        elif role == "worker":
+            argv = ["--role", role, "--server", "http://10.0.0.5:18790", "--pool", "p"]
+            argv += ["--lanes", "1", "--yes"]
+            label = f"test.rcm.w{n}"
+        else:
+            argv = ["--role", role, "--bind", "127.0.0.1", "--port", "18790", "--no-advertise"]
+            argv += ["--yes"]
+            label = f"test.rcm.s{n}"
+        if label:
+            argv += ["--label", label]
+        for flag, value in given.items():
+            if value is not None:
+                argv += [f"--{flag.replace('_', '-')}", value]
+        fake = Fake()
+        assert go(fake, *argv) == 0, (argv, fake.text)
+        want = where(
+            role,
+            config=given["config"],
+            label=label,
+            service_file=given["service_file"],
+            data_dir=given["data_dir"],
+            environ=dict(os.environ),
+            cwd=Path.cwd(),
+            home=Path.home(),
+            manager=core.LAUNCHD,
+        )
+        wrote = {Path(line) for line in fake.out.getvalue().splitlines()}
+        assert wrote == {p for p in (want.config, want.service_file) if p is not None}, argv
+        assert all(p.is_file() for p in wrote), argv
+        if role == "coordinator-worker":
+            assert read_toml(want.config)["server"]["data_dir"] == str(want.data_dir), argv
+
+
+def test_tr24_an_install_place_in_another_case_is_refused(cfg, home, tmp_path, monkeypatch):
+    # P3 2라운드: macOS 의 기본 파일시스템은 대소문자를 가리지 않는다 — `~/library/launchagents`
+    # 도 서비스 관리자가 읽는 자리다
+    monkeypatch.setattr(core, "FOLD_CASE", True, raising=False)
+    target = home / "library" / "launchagents" / "test.rcm.server.plist"
+    fake = Fake(platform="darwin")
+    argv = coordinator_args(tmp_path / "data", "--service-file", str(target))
+    assert go(fake, *argv) == 2, fake.text
+    assert "install" in fake.err.getvalue()
+    assert not target.exists()
+
+
+def test_tr20_a_label_with_a_trailing_line_break_is_a_usage_error(cfg, tmp_path):
+    # P3 2라운드 v1-5: 라벨 정규식은 끝까지 맞아야 한다 — `$` 는 끝 줄바꿈 앞에서도 맞는다
+    assert core.label_problem("test.rcm.server\n") is not None
+    fake = Fake()
+    argv = [*coordinator_args(tmp_path / "data"), "--label", "test.rcm.server\n"]
+    assert go(fake, *argv) == 2, fake.text
+    assert not cfg.exists()
+
+
+def test_tr28_a_report_that_fails_after_writing_is_exit_zero(cfg, tmp_path):
+    # P3 2라운드 v2-1(MED): 설정을 다 쓴 뒤 보고가 터지면 종료 0 이다(§4.1 「설정을 썼으면 0」)
+    def broken():
+        raise RuntimeError("facts\nsecond line")
+
+    fake = Fake(host_facts=broken)
+    assert go(fake, *coordinator_args(tmp_path / "data")) == 0, fake.text
+    err = fake.err.getvalue()
+    assert "files written; the report failed: RuntimeError: facts" in err
+    assert "second line" not in err and "Traceback" not in err
+    assert (cfg / "server.toml").is_file()
