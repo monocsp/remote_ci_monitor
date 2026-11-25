@@ -386,11 +386,11 @@ setup 은 PR4 에서 그 목록에 넣는다.
 | 설정 | `lanes = 0` 을 받는다 | C1 |
 | `@local` 머신 | lanes 0 이면 살아 있지 않다 | C5 |
 | `--machine @local` 제출 | 409 와 「이 서버에는 로컬 레인이 없다」 | C5 |
-| `local_only` 프리셋 제출 | 후보가 `@local` 하나인데 그 `@local` 이 살아 있지 않으므로 후보가 빈다. 409 와 사람용 이유 문장(4.3) | C5 |
+| `local_only` 프리셋 제출 | 후보가 `@local` 하나인데 `lanes = 0` 이라는 정적 조건 때문에 후보가 빈다. 409 와 사람용 이유 문장(4.3) | C5 |
 | 로컬 프로브 | 생략한다 | C6 |
 | `eligible_now` | `@local` 을 뺀다 | C7 |
 | 자동 점검 | `@local` 을 겨냥하지 않는다. `local_only` 점검 프리셋은 후보가 비므로(4.3) 「갈 곳 없음」으로 보이고 잡을 만들지 않는다 | C8 |
-| 기동 · reload | `lanes = 0` 이면 이미 대기 중인 `local_only` 잡과 `@local` 지정 잡이 갈 곳을 잃는다. lanes 를 1 이상에서 0 으로 바꿔 재시작했거나 reload 로 `local_only` 를 새로 단 경우다. 서버는 기동과 reload 때 그런 잡에 reason `no_capable_machine` 과 ETA null 을 단다. 실패로 닫지 않는다. `local_only` 잡은 후보 함수로 다시 계산되므로 따로 분기하지 않는다(4.3) | C5 |
+| 기동 · reload | `lanes = 0` 이면 이미 대기 중인 `local_only` 잡과 `@local` 지정 잡이 갈 곳을 잃는다. lanes 를 1 이상에서 0 으로 바꿔 재시작했거나 reload 로 `local_only` 를 새로 단 경우다. 서버는 기동과 reload 때 그런 잡에 reason `no_capable_machine` 과 ETA null 을 단다. 실패로 닫지 않는다. `local_only` 잡은 후보 함수로 다시 계산되므로 기동 · reload 전용 분기는 따로 두지 않는다(빈 후보의 분기는 4.3 의 것 하나다) | C5 |
 | `/api/health` | 프리셋 단위의 `capacity` 정보를 싣는다. HTTP 상태는 바꾸지 않는다. 다른 정보 항목처럼 503 조건이 아니다(⛔ Q5) | C4 |
 | `rcm check` | 갈 수 있는 프리셋이 하나도 없으면 FAIL 줄 `capacity` 를 낸다. `capacity` 가 0 인 프리셋 목록을 보인다. 일부 프리셋만 0 이면 FAIL 이 아니라 warn 으로 그 목록을 보인다(어느 머신도 못 돌리는 배포 프리셋은 정상일 수 있다). 프리셋이 0개면 `capacity` 행을 그리지 않는다 | C4 |
 | `rcm check` 의 `local preset tools` · `service preset tools` | 「이 머신은 잡을 돌리지 않는다」로 그린다. FAIL 이 아니다 | — |
@@ -443,11 +443,13 @@ setup 은 PR4 에서 그 목록에 넣는다.
 후보 함수는 정적인 조건만 본다. `local_only`, 프리셋의 풀, 서버의 `lanes`, `local_accept_any` 다. 살아 있음과 도구 판정은
 보지 않는다(그것은 지금처럼 갈래 안에서 본다). 후보가 비는 경우는 넷이다. `lanes = 0` 일 때, `local_accept_any = false`
 인데 프리셋이 `any-capable` 일 때, 프리셋이 기본 풀이 아닌 풀을 쓸 때, 원격 워커를 지정했을 때다. 지금 코드에서
-`no_capable_machine` 을 내는 곳은 capable 갈래뿐이고(`capabilities.py:783-784`) 지정 · pool 갈래는 빈 결과를 reason 없이
-돌려줘 큐가 `worker_down` 으로 그린다(`core/model.py:619-622`). 그래서 **새 분기를 둔다**. 세 갈래 모두 후보와 갈래 조건이
-겹치는 머신이 없으면 `Placement.reason = no_capable_machine` 이고 ETA 는 null 이다. 판정 때문에 비는 경우(`@local` 이 도구
-부족이나 점검 실패로 ineligible)는 지금의 `_why_none`(`check_failed` · `check_pending`)을 그대로 둔다. 제출 409 는 위의
-정적인 넷과 capable 갈래의 `tool_missing` 에만 건다. `eligible_now` 가 비었다는 것만으로는 409 가 아니다(reload 직후 보고가
+`no_capable_machine` 을 내는 곳은 capable 갈래(`capabilities.py:747-766`)와 checks 가 있는 pool 갈래(`_why_none`,
+`:785-789`)다. 지정 갈래와, 풀에 머신이 없거나 checks 가 없는 pool 갈래는 빈 결과를 reason 없이 돌려줘(`:783-784`) 큐가
+`worker_down` 으로 그린다(`core/model.py:619-622`). 그래서 **새 분기를 둔다**. 범위는 `local_only` 프리셋에서 **후보 함수가
+머신을 뺐기 때문에** 비었을 때뿐이다. 그때 세 갈래 모두 `Placement.reason = no_capable_machine` 이고 ETA 는 null 이다.
+`local_only` 가 아닌 프리셋의 동작(머신이 없는 풀의 pool 잡은 `worker_down`, C3)은 바꾸지 않는다. 판정 때문에 비는 경우(`@local` 이 도구
+부족이나 점검 실패로 ineligible)는 지금의 `_why_none`(`check_failed` · `check_pending`)을 그대로 둔다. 제출 409 는 `local_only`
+프리셋에서 위의 정적인 넷과 capable 갈래의 `tool_missing` 에만 건다(`local_only` 가 아닌 프리셋의 제출 동작은 바꾸지 않는다). `eligible_now` 가 비었다는 것만으로는 409 가 아니다(reload 직후 보고가
 낡은 동안에도 비기 때문이다). 409 는 사람용 문장과 기존 꼴의 이유 코드를 쓴다. `--machine` 으로 원격 워커를 지정하면 그 워커가
 후보에 없으므로 409 다. 기동이나 reload 때 이미 대기 중인 잡도 같은 후보 함수로 다시 계산된다. 그래서 원격 워커를 지정한
 잡, 기본 풀이 아닌 풀의 잡이 `no_capable_machine` 으로 보인다. 예약(`scheduled`) 잡은 큐 계산에 들지 않으므로(`core/model.py:35-45`) 시각이 되어 queued 가 된 뒤에 같은 규칙을 탄다.
@@ -920,9 +922,9 @@ TD36(토큰에 저장된 풀로 `/worker/spec` 거르기)은 M5t-c 로 넘겨서
 | TO12 | `checks` 에 쓰인 `local_only` 점검 프리셋과 `lanes = 0` 서버 | 「갈 곳 없음」으로 보이고 점검 잡을 만들지 않는다 | 단위 | PR3 |
 | TO13 | supersede 나 합류할 대상이 있는데 409 가 날 `local_only` 제출 | 409 검사가 supersede 와 합류보다 먼저 돈다 | 단위 | PR1 |
 | TO14 | TO15 로 묶었다 | — | — | — |
-| TO15 | `local_only` 프리셋과 그 풀의 살아 있는 원격 워커를 두고 한 시험에서 여러 진입점을 부른다. 배치(`placement_for` 의 지정 · capable · pool 갈래)와 ETA, 제출 응답의 `eligible_now`, `capacity`, 자동 점검과 recheck 의 대상과 점검 정체 판정, `/worker/spec`, 원격 claim 의 네 갈래(지정 · `pool` · `capable` · `known`) | 어느 진입점에서도 원격 머신이 그 프리셋의 후보에 나타나지 않는다. `/worker/spec` 에서는 프리셋이 env 와 함께 빠진다. 로컬 레인은 지금처럼 집는다. 후보 함수의 원격 제외를 지운 변이에서는 이 시험이 빨개진다 | 단위 | PR1(`capacity` 진입점은 PR3) |
-| TO16 | 후보가 빈 `local_only` 제출. `--machine` 으로 원격 워커를 지정, `local_accept_any = false` 인데 `any-capable`, `@local` 판정이 ineligible | 제출 때 409 와 사람용 문장으로 거절하고 이유 코드는 기존 꼴이다. 원격 워커를 지정한 제출의 문장은 「이 프리셋은 로컬 레인에서만 돈다」다. 잡이 큐에 들지 않는다 | 단위 | PR1 |
-| TO17 | 원격 워커를 지정한 잡, 기본 풀이 아닌 풀의 잡, 예약 잡이 대기 중일 때 reload 로 그 프리셋에 `local_only` 를 새로 달거나 서버를 재시작 | 같은 후보 함수로 다시 계산되어 모두 reason `no_capable_machine` 과 ETA null 로 보인다. 실패로 닫히지 않는다 | 단위 | PR1 |
+| TO15 | `local_only` 프리셋과 그 풀의 살아 있는 원격 워커를 두고 한 시험에서 여러 진입점을 부른다. 배치(`placement_for` 의 지정 · capable · pool 갈래)와 ETA, 제출 응답의 `eligible_now`, `capacity`, 자동 점검과 recheck 의 대상과 점검 정체 판정, `/worker/spec`, 원격 claim 의 네 갈래(지정 · `pool` · `capable` · `known`)와 claim 에 넘기는 제외 목록, `/api/eta` 의 pool 경로, `/api/machines` 의 판정과 `eligible_count` | 어느 진입점에서도 원격 머신이 그 프리셋의 후보에 나타나지 않는다. `/worker/spec` 에서는 프리셋이 env 와 함께 빠진다. 로컬 레인은 지금처럼 집는다. 후보 함수의 원격 제외를 지운 변이에서는 이 시험이 빨개진다 | 단위 | PR1(`capacity` 진입점은 PR3) |
+| TO16 | 후보가 빈 `local_only` 제출. `--machine` 으로 원격 워커를 지정, `local_accept_any = false` 인데 `any-capable`, capable 갈래에서 `@local` 이 `tool_missing`. 비교 행: `@local` 이 점검 판정(`check_failed` · `check_pending`)으로 ineligible | 앞의 셋은 제출 때 409 와 사람용 문장으로 거절하고 이유 코드는 기존 꼴이다. 점검 판정 행은 409 가 아니라 큐에 들고 `_why_none` 의 이유를 보인다. 원격 워커를 지정한 제출의 문장은 「이 프리셋은 로컬 레인에서만 돈다」다. 잡이 큐에 들지 않는다 | 단위 | PR1 |
+| TO17 | 원격 워커를 지정한 잡, 기본 풀이 아닌 풀의 잡이 대기 중이고 예약 잡이 시각을 기다릴 때 reload 로 그 프리셋에 `local_only` 를 새로 달거나 서버를 재시작 | 같은 후보 함수로 다시 계산되어 대기 잡은 reason `no_capable_machine` 과 ETA null 로 보인다. 예약 잡은 큐 계산 밖이라 시각이 되어 queued 가 된 뒤 같은 규칙을 탄다. 실패로 닫히지 않는다 | 단위 | PR1 |
 | TO18 | `local_only` 가 아닌 프리셋 P 의 `checks` 에 `local_only` 점검 프리셋 C 가 있고 원격 머신이 P 를 받을 자리에 있음 | 그 원격 머신에서 P 는 「오지 않음(점검이 로컬 전용)」이고 check_pending 이 아니다. doctor 는 「점검 필요」를 찍지 않는다 | 단위 | PR1 · PR2 |
 | TO19 | `rcm recheck <원격 머신> <C>`, C 는 `local_only` 점검 프리셋 | 409 | 단위 | PR1 |
 
@@ -1038,7 +1040,7 @@ TD36(토큰에 저장된 풀로 `/worker/spec` 거르기)은 M5t-c 로 넘겨서
 | 251 | 개발 방식 | 개발 루프 스킬로 돈다. 시나리오 표마다 `scenario-prefix` 표지(접두어 TR · TD · TL · TN · TO), 시험 이름에 ID, `tools/scenario_trace.py` 대조, PR 마다 라운드당 격리 검증 2명, `verify-round:` 댓글. 스킬 PR 이 먼저 머지된다는 전제이고 아니면 손으로 | 추천 | — |
 | 252 | 범위 나누기 | M5t 를 셋으로 나눈다. 이번 명세 PR 은 M5t-a(역할 · 첫 실행 setup · `lanes = 0` 분배 전용 · `rcm doctor` OS 진단 · 요청자 알림)만 담고 4라운드 검증을 받는다. M5t-b(결과 고리 프로토콜: 세션 · 로그 오프셋 · 끊김 유예)와 M5t-c(짝짓기 · 서버 신원 보안)는 상태 전이 표와 위협 모델부터 쓰는 별도 명세로 한다 | 오너가 정함(2026-11-25, 「셋으로 나눈다」) | — |
 | 253 | 끊김 정책 | 배포 · 스토어처럼 두 번 돌면 안 되는 프리셋에만 표식을 두고, 그 잡은 유예(약 10분)가 지나면 워커가 스스로 멈춘다. 결과는 「모름」(종료 3)이다. 게이트 · 시험 같은 나머지는 계속 돈다. M5t-b 가 구현한다 | 오너가 정함(2026-11-25, 「되돌릴 수 없는 것만 멈춤」) | — |
-| 254 | 원격 금지 표식 | 프리셋 설정에 `local_only = true` 를 두고 기본은 지금처럼 원격 허용. 이 레포를 쓰는 앱 프로젝트의 release-* · deploy-* 프리셋에 표식을 단다. DB 변경 없음. 정의는 한 문장이다. 「`local_only = true` 인 프리셋에게 이 서버의 머신 목록은 `@local` 하나뿐이다.」 서버는 프리셋별 후보 머신 함수 하나(예: `machines_for(preset)`)를 두고, 배치(`placement_for` 의 지정 · capable · pool 세 갈래) · 제출 판정(`submission_placement`, `eligible_now`) · `_could_receive` · `capacity` · 점검 정체 판정(`_stalled_checks` · `_why_none`) · 자동 점검과 recheck 의 대상 · `/worker/spec` 의 프리셋 목록 · 원격 claim 의 WHERE 가 모두 그 결과를 쓴다. 한 시험이 여러 진입점에서 이를 확인하고(TO15) 원격 제외를 지운 변이에서 빨개진다. `@local` 이 받을 수 없으면 후보가 비고, 후보가 빈 잡은 기존 「갈 곳 없음」(`no_capable_machine`, ETA null)을 따른다(새 분기 없음). 제출 때 후보가 비면 409 와 사람용 문장(이유 코드는 기존 꼴)이고 원격 워커 지정도 409. 기동 · reload 때 대기 잡도 같은 함수로 다시 계산. 설정 검증은 하나만 남긴다. `local_only` 인 `pool` 프리셋의 `pool` 은 기본 풀이어야 하고 `pools` 의 기본 풀이 아닌 항목은 제출 409 로 막는다. `local_only` 점검이 걸린 프리셋은 원격 머신에서 「오지 않음(점검이 로컬 전용)」이고 원격 recheck 는 409. 제출의 409 검사는 supersede · 합류보다 먼저. coordinator 진단은 「로컬 레인 필요」로 표시. M5t-a 의 PR1 이 구현하고 `lanes = 0` 쪽은 PR3 이 구현한다. 이 표식을 단 프리셋을 읽는 서버는 모두 v0.11.0 이상이어야 하므로 앱 프로젝트에 다는 일은 운영 반영 뒤이고, 달기 전에 그 서버 목록을 확인한다 | 오너가 정함(2026-11-25, 「프리셋에 명시 표식」). `lanes = 0` 제출의 409 는 결정 파일의 추천을 넷째 판이 정했다. 원격 워커 지정 제출의 409 와 나머지 세부는 4라운드 결정 파일이 정했다. 후보 함수 하나로 다시 세운 것은 5라운드 뒤 오너 답(「한 곳 필터로 재설계 후 diff 검증」)에 따른 6판의 결정이다 | 신설 |
+| 254 | 원격 금지 표식 | 프리셋 설정에 `local_only = true` 를 두고 기본은 지금처럼 원격 허용. 이 레포를 쓰는 앱 프로젝트의 release-* · deploy-* 프리셋에 표식을 단다. DB 변경 없음. 정의는 한 문장이다. 「`local_only = true` 인 프리셋에게 이 서버의 머신 목록은 `@local` 하나뿐이다.」 서버는 프리셋별 후보 머신 함수 하나(예: `machines_for(preset)`)를 두고, 배치(`placement_for` 의 지정 · capable · pool 세 갈래) · 제출 판정(`submission_placement`, `eligible_now`) · `_could_receive` · `capacity` · 점검 정체 판정(`_stalled_checks` · `_why_none`) · 자동 점검과 recheck 의 대상 · `/worker/spec` 의 프리셋 목록 · 원격 claim 의 WHERE 가 모두 그 결과를 쓴다. 한 시험이 여러 진입점에서 이를 확인하고(TO15) 원격 제외를 지운 변이에서 빨개진다. 후보 함수는 정적인 조건(`local_only` · 풀 · `lanes` · `local_accept_any`)만 본다. 후보 함수가 머신을 뺐기 때문에 비면 세 갈래 모두 새 분기로 `no_capable_machine` 과 ETA null 을 내고, 판정 때문에 비는 경우는 지금의 `_why_none` 을 둔다(§4.3). 제출 409 조건은 §4.3 의 것이다. 제출 때 후보가 비면 409 와 사람용 문장(이유 코드는 기존 꼴)이고 원격 워커 지정도 409. 기동 · reload 때 대기 잡도 같은 함수로 다시 계산. 설정 검증은 하나만 남긴다. `local_only` 인 `pool` 프리셋의 `pool` 은 기본 풀이어야 하고 `pools` 의 기본 풀이 아닌 항목은 제출 409 로 막는다. `local_only` 점검이 걸린 프리셋은 원격 머신에서 「오지 않음(점검이 로컬 전용)」이고 원격 recheck 는 409. 제출의 409 검사는 supersede · 합류보다 먼저. coordinator 진단은 「로컬 레인 필요」로 표시. M5t-a 의 PR1 이 구현하고 `lanes = 0` 쪽은 PR3 이 구현한다. 이 표식을 단 프리셋을 읽는 서버는 모두 v0.11.0 이상이어야 하므로 앱 프로젝트에 다는 일은 운영 반영 뒤이고, 달기 전에 그 서버 목록을 확인한다 | 오너가 정함(2026-11-25, 「프리셋에 명시 표식」). `lanes = 0` 제출의 409 는 결정 파일의 추천을 넷째 판이 정했다. 원격 워커 지정 제출의 409 와 나머지 세부는 4라운드 결정 파일이 정했다. 후보 함수 하나로 다시 세운 것은 5라운드 뒤 오너 답(「한 곳 필터로 재설계 후 diff 검증」)에 따른 6판의 결정이다 | 신설 |
 | 255 | 동시 세션 | 워커 이름당 살아 있는 세션은 하나다. 새 세션이 등록하면 옛 세션은 409 를 받고 잡을 멈춘 뒤 끝난다. M5t-b 가 구현한다 | 오너가 정함(2026-11-25, 「지원 안 함」) | — |
 | 244 · 245 · 248 a~d · g · 249 · 250 | 옮긴 결정 | 244(짝짓기 창과 서버 신원)와 245 의 풀 묶기(`tokens.pool`)는 M5t-c 로 간다. 248 a~d · g(결과 고리)와 250(프로토콜 호환)은 M5t-b 로 간다. 249(DB v26 · v27)는 세션 · 로그 칸은 M5t-b, 신원 비밀과 짝짓기 창과 `tokens.pool` 은 M5t-c 로 나뉜다. 245 의 「비밀이 필요한 프리셋은 원격에 주지 않는다」는 254 가 대신하고 245 의 진단 부분은 246 에 합쳤다 | — | — |
 
@@ -1319,7 +1321,7 @@ A-H1 · B-M2 로 정해졌다.
 | A-L1 | 원격 머신에 `local_only` 점검을 recheck 하면 409 다 | §4.3, TO19 |
 | A-M3 | `capacity` 는 후보 함수 결과 가운데 살아 있는 머신으로 센다. `checks` 없는 `pool` 프리셋은 판정과 상관없이 그 풀의 살아 있는 레인을 센다 | §4.2, §11 243, TL17 |
 | B-H2 · A-L3 | 설정 검증을 하나로 줄였다. `local_only` 인 `pool` 프리셋은 `pool` 이 기본 풀이어야 한다. `pools` 의 기본 풀이 아닌 항목은 제출 409 로 막고, 「OR/AND」가 모호하던 문장은 지웠다 | §4.3, TO1 · TO9 |
-| B-M1 | 기동 · reload 때 대기 잡도 후보 함수로 다시 계산되어 원격 지정 잡 · 기본 풀이 아닌 풀의 잡 · 예약 잡이 `no_capable_machine` 으로 보인다 | §4.2, §4.3, TO17 |
+| B-M1 | 기동 · reload 때 대기 잡도 후보 함수로 다시 계산되어 원격 지정 잡 · 기본 풀이 아닌 풀의 잡이 `no_capable_machine` 으로 보인다(예약 잡은 6판 diff 검증에서 「queued 가 된 뒤」로 고쳤다) | §4.2, §4.3, TO17 |
 | B-H1 | setup 은 고른 `data_dir` 에 DB 가 있으면 거절하고(`--reuse-data-dir`) 쓰는 중인 포트를 경고한다. guard 는 운영 `data_dir` 을 거절한다. 「Store 를 여는 일은 서비스와 같은 빌드가 한다」는 문장은 서비스 파일이 setup 을 실행한 빌드를 가리킨다는 사실로 고쳤다 | §4.1, §5 PR4, §9, §11 241, TR31~TR34 |
 | A-M1 · B-L2 · A-U1 | shim 판별을 함수 하나로 두고 `measure_tools` · `missing_tools` · `preset_env` · `rcm check` 도구 행이 함께 쓴다. `xcode-select` 자신은 판별에서 뺀다 | §4.5, §5 PR2, §11 246, TD52 |
 | A-M2 · B-L5 | `ran_on` 과 `RCM_MACHINE` 은 `started_at` 이 있을 때만 계산하고 시작하지 못한 잡은 null 이다 | §4.6, §11 248, TN11 |
@@ -1350,19 +1352,25 @@ HIGH 2(MED 5 · LOW 5 · unknown 1)였다. A 의 HIGH 둘은 이 판에서 고�
 
 | 지적 | 다룰 PR | 요지 |
 |---|---|---|
-| A-M1 | PR1 | `check_comes_by_itself` · `_flag_recheck` · `_check_rows` 도 후보 함수를 거친다. 로컬 전용 점검에 걸린 원격 프리셋의 이유 코드를 정한다 |
-| A-M3 | PR1 | TO15 를 진입점별로 파라미터화해 변이 하나에 진입점마다 빨개지는지 본다 |
-| A-M5 | PR1 | 409 조건은 위 §4.3 의 정적인 넷과 `tool_missing` 뿐이다 — 시험으로 잠근다 |
-| A-L2 · B-V14 | PR3 | `capacity` 의 「pool 프리셋은 판정을 보지 않는다」는 후보 함수 결과 안에서만이다 |
-| A-L3 | PR1 | 점검 잡 생성(`submit_internal_check`) 앞에서 후보를 확인한다(`recheck()` · `sweep_checks`) |
-| A-L4 · B-V5 | PR4 | guard 규칙 셋째는 `_effective_data_dir` 과 같은 순서로 경로를 풀고, 역할 2 · 4 와 「그 안」까지 본다 |
-| A-L5 | PR1 | 점검 프리셋의 「갈 곳 없음」을 그릴 자리와 값을 정한다 |
-| B-V1 | PR4 | systemd 유닛 이름 규칙 하나(표준 라벨은 `rcm-server` · `rcm-worker`, 다른 라벨은 `<label>.service`)를 setup · doctor · guard 에 같이 쓴다 |
-| B-V2 | PR2 | doctor 는 설치 자리를 먼저 보고, 후보를 역할의 라벨로 거른다 |
-| B-V3 | PR4 | `--reuse-data-dir` 이면 DB 헤더의 `user_version` 과 이 빌드의 `DB_VERSION` 을 비교해 경고한다 |
-| B-V4 | PR7 | 롤백 순서: 원격 워커를 pause 한 뒤 `local_only` 를 빼고 옛 판으로 기동을 확인한다 |
-| B-V6 · V7 · V8 · V9 · V10 | PR4 | `_this_rcm()` 이 PATH 로 떨어진 경우의 표시, 표준 라벨의 로그 이름 유지, `is-active` 확인과 덮지 않는 복사, 포트 사용 판정법, `--yes` 표의 빠진 플래그 |
-| B-V11 · V12 · V13 | PR2 | doctor `--server` 우선순위와 역할별 `--config`, PATH 만 값을 가려 찍기, `LANG=C` 범위 |
-| B-V15 · A-L1 | 이 판 | PLAN 문장을 맞췄다 |
-| B-U1 · U2 · A-U1 | PR2 · PR4 · PR1 | 서비스 관리자별 기본 변수 실측, `cp -n` 종료 코드, doctor 가 같은 후보 함수로 판정하는지 |
+| 6-A-M1 | PR1 | `check_comes_by_itself` · `_flag_recheck` · `_check_rows` 도 후보 함수를 거친다. 로컬 전용 점검에 걸린 원격 프리셋의 이유 코드를 정한다 |
+| 6-A-M2 | 이 판 | `/api/machines` 를 후보 함수 표와 TO15 에 더했다 |
+| 6-A-M3 | PR1 | TO15 를 진입점별로 파라미터화해 변이 하나에 진입점마다 빨개지는지 본다 |
+| 6-A-M4 | 이 판 | 예약 잡은 큐 계산 밖이라 queued 가 된 뒤 규칙을 탄다고 §4.3 · TO17 을 고쳤다 |
+| 6-A-M5 | PR1 | 409 조건은 위 §4.3 의 정적인 넷과 `tool_missing` 뿐이다 — 시험으로 잠근다 |
+| 6-A-L2 · 6-B-V14 | PR3 | `capacity` 의 「pool 프리셋은 판정을 보지 않는다」는 후보 함수 결과 안에서만이다 |
+| 6-A-L3 | PR1 | 점검 잡 생성(`submit_internal_check`) 앞에서 후보를 확인한다(`recheck()` · `sweep_checks`) |
+| 6-A-L4 · 6-B-V5 | PR4 | guard 규칙 셋째는 `_effective_data_dir` 과 같은 순서로 경로를 풀고, 역할 2 · 4 와 「그 안」까지 본다 |
+| 6-A-L5 | PR1 | 점검 프리셋의 「갈 곳 없음」을 그릴 자리와 값을 정한다 |
+| 6-B-V1 | PR4 | systemd 유닛 이름 규칙 하나(표준 라벨은 `rcm-server` · `rcm-worker`, 다른 라벨은 `<label>.service`)를 setup · doctor · guard 에 같이 쓴다 |
+| 6-B-V2 | PR2 | doctor 는 설치 자리를 먼저 보고, 후보를 역할의 라벨로 거른다 |
+| 6-B-V3 | PR4 | `--reuse-data-dir` 이면 DB 헤더의 `user_version` 과 이 빌드의 `DB_VERSION` 을 비교해 경고한다 |
+| 6-B-V4 | PR7 | 롤백 순서: 원격 워커를 pause 한 뒤 `local_only` 를 빼고 옛 판으로 기동을 확인한다 |
+| 6-B-V6 · V7 · V8 · V9 · V10 | PR4 | `_this_rcm()` 이 PATH 로 떨어진 경우의 표시, 표준 라벨의 로그 이름 유지, `is-active` 확인과 덮지 않는 복사, 포트 사용 판정법, `--yes` 표의 빠진 플래그 |
+| 6-B-V11 · V12 · V13 | PR2 | doctor `--server` 우선순위와 역할별 `--config`, PATH 만 값을 가려 찍기, `LANG=C` 범위 |
+| 6-B-V15 · 6-A-L1 | 이 판 | PLAN 문장을 맞췄다 |
+| 6-B-U1 · U2 · 6-A-U1 | PR2 · PR4 · PR1 | 서비스 관리자별 기본 변수 실측, `cp -n` 종료 코드, doctor 가 같은 후보 함수로 판정하는지 |
 
+고친 줄만 본 마지막 검증(검증자 한 명)은 254 행 · TO16 · TO17 · B-M1 이 새 §4.3 과 어긋난다는 것을 짚었다(HIGH 2 · MED 4 · LOW 3).
+같은 사실이 여러 곳에 적혀 있다는 근본 원인(§13 3라운드 R5)이 그대로 드러난 것이라, 그 자리를 모두 §4.3 에 맞췄다. 새 분기와
+제출 409 의 범위는 `local_only` 프리셋으로 한정했고(`local_only` 가 아닌 프리셋의 동작은 바꾸지 않는다), 인용을 `capabilities.py:747-766`
+과 `:785-789` 로 바로잡았으며, TO15 에 새 진입점 셋을 더했다.
