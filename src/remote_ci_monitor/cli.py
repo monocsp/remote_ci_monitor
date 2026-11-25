@@ -4642,9 +4642,11 @@ def _worker_check(cfg: Any, client: Any) -> int:
     """`rcm worker --check` — 서버 · 토큰(kind worker) · 풀 · repos 를 표로."""
     from remote_ci_monitor.client import ClientError
 
-    rows: list[tuple[str, bool, str]] = [python_row()]
+    rows: list[tuple[str, bool | None, str]] = [python_row()]
+    health: dict[str, Any] | None = None
     try:
         h = client.health()
+        health = h if isinstance(h, dict) else None
         # 서버가 보낸 문자열 — 제어 문자를 지우고 64자로 자른다(M5q §14.5, `rcm check` 와 같다)
         server_v = follow.clean(h.get("version"))
         rows.append(("server", bool(h.get("ok")), f"{client.server} · v{server_v}"))
@@ -4680,7 +4682,16 @@ def _worker_check(cfg: Any, client: Any) -> int:
     d = cfg.data_path
     writable = _dir_writable(d)
     rows.append(("data dir", writable, f"{d} ({'writable' if writable else 'not writable'})"))
-    rows.extend(_worker_capability_rows(cfg, client))
+    capability_rows, missing = _worker_capability_rows(cfg, client)
+    rows.extend(capability_rows)
+    version = _worker_version_row(health)
+    if version is not None:
+        rows.append(version)
+    # 끝 줄(M5t-a §4.5): 빠진 도구 수와 설치 안내를 볼 곳. 지금 줄들처럼 FAIL 이 되지 않는다
+    count = "—" if missing is None else f"{missing}"
+    rows.append(
+        ("missing", True, f"{count} missing · rcm doctor --role worker for what to install")
+    )
     ok_all = all(ok is not False for _, ok, _ in rows)
     for name, ok, detail in rows:
         mark = "ok " if ok else ("warn" if ok is None else "FAIL")
@@ -4693,11 +4704,38 @@ def _probe_summary(name: str, state: str, value: str | None) -> str:
     return f"{name} {probe_token(state, value)}"
 
 
-def _worker_capability_rows(cfg: Any, client: Any) -> list[tuple[str, bool | None, str]]:
+def _worker_version_row(health: dict[str, Any] | None) -> tuple[str, bool | None, str] | None:
+    """`version` 행(M5t-a §4.5 · TD18) — 지금은 버전이 다르면 등록할 때 409 를 받아야 안다.
+
+    같으면 ok. 다르면 버전 따라가기(M5q)로 맞출 수 있을 때 warn, editable · 고정 설치처럼 따라갈
+    수 없으면 FAIL 이다. 서버가 버전을 말하지 않으면 행을 그리지 않는다.
+    """
+    raw = (health or {}).get("version")
+    if not isinstance(raw, str) or not raw:
+        return None
+    server_v = follow.clean(raw)
+    if raw == __version__:
+        return ("version", True, f"{__version__} · the same as the server")
+    head = f"this worker runs v{__version__}, the server v{server_v}"
+    kind = follow.install_kind()
+    try:
+        setting, _warning = follow.setting_for(no_follow=False, environ=os.environ, kind=kind)
+    except ConfigError as e:
+        return ("version", False, f"{head} and cannot follow it ({e}) — install the same release")
+    if setting.mode == follow.MODE_FOLLOW and os.name == "posix":
+        return ("version", None, f"{head} — registering follows the server version")
+    why = "pinned" if setting.mode == follow.MODE_PIN else f"{kind} install"
+    return ("version", False, f"{head} and cannot follow it ({why}) — install the same release")
+
+
+def _worker_capability_rows(
+    cfg: Any, client: Any
+) -> tuple[list[tuple[str, bool | None, str]], int | None]:
     """`rcm worker --check` 의 `fingerprint` · `presets` — 서버의 명세를 받아 **여기서** 잰다.
 
     서버에 보고하지 않는다(등록도 capabilities 도 없다). 못 도는 프리셋은 사실이지 검사 실패가
-    아니다 — 두 행은 FAIL 이 되지 않는다.
+    아니다 — 두 행은 FAIL 이 되지 않는다. 둘째 값은 빠진 도구 수(서로 다른 이름) — 명세를 못
+    받았으면 None.
     """
     from remote_ci_monitor.client import ClientError
     from remote_ci_monitor.remote_worker import RemoteWorker
@@ -4706,7 +4744,7 @@ def _worker_capability_rows(cfg: Any, client: Any) -> list[tuple[str, bool | Non
         spec = client.spec()
     except ClientError as e:
         why = "server has no /worker/spec (older rcm)" if e.status == 404 else e.message
-        return [("fingerprint", None, f"— {why}"), ("presets", None, f"— {why}")]
+        return [("fingerprint", None, f"— {why}"), ("presets", None, f"— {why}")], None
     body = RemoteWorker(cfg, client=client, log=lambda _m: None).measure(spec)
     fp = " · ".join(
         _probe_summary(n, p.get("state", ""), p.get("value"))
@@ -4726,7 +4764,9 @@ def _worker_capability_rows(cfg: Any, client: Any) -> list[tuple[str, bool | Non
         reasons[key] = reasons.get(key, 0) + 1
     top = sorted(reasons.items(), key=lambda kv: (-kv[1], kv[0]))[:3]
     detail = " · ".join([f"{ok}/{total} ok", *(f"{n} {k}" for k, n in top)])
-    return [("fingerprint", True, fp or "no probes configured"), ("presets", True, detail)]
+    missing = {t for facts in body["presets"].values() for t in facts["missing_tools"]}
+    rows = [("fingerprint", True, fp or "no probes configured"), ("presets", True, detail)]
+    return rows, len(missing)
 
 
 def cmd_doctor(args: argparse.Namespace) -> int:
