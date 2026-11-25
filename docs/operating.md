@@ -108,7 +108,7 @@ rcm doctor --role coordinator-worker --json   # the server's own service measure
 |---|---|---|
 | `worker` | `worker.toml` (or `RCM_WORKER_TOKEN` and `--server`), the service file, and the server's `/worker/spec` | a tool missing for a `pool` preset of this machine's pool, rcm's own needs, or no preset that would come to this machine |
 | `coordinator-worker` | the local `server.toml` (never the database) and the server's `/api/health` and `/api/machines`, read with a client token | the same rules, for the server's own lane as its service measured it — for each preset only when the server measured the definition the `server.toml` on disk has |
-| `coordinator` | the same files and routes | rcm's own needs (the lane-free rules come with `lanes = 0`) |
+| `coordinator` | the same files and routes | rcm's own needs and `capacity` from `/api/health`: 1 when no preset has a machine to run on, a warning naming the presets that have none; a `pool` preset that a capable worker in another pool could take is named with that worker (changing it to `any-capable` is yours to decide; rcm changes no preset). With `lanes = 0` and a server that does not report `capacity`, exit 3 |
 | `client` | `client.toml` or `RCM_SERVER` / `RCM_TOKEN` | the server answers and the token works |
 
 Without `--config`, `rcm doctor` reads the config the service reads. When a service file is found,

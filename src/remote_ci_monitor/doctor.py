@@ -926,6 +926,7 @@ _STR = Shape((str,))
 _NAME = Shape((str,), nonempty=True)
 _NUMBER = Shape((int, float))
 _BOOL = Shape((bool,))
+_COUNT = Shape((int,))
 _STRS = Shape((list,), items=_STR)
 _NAMES = Shape((list,), items=_NAME)
 _GENERATION = Shape((str, int))
@@ -980,6 +981,15 @@ ANSWER_SHAPES: dict[str, Shape] = {
                         "digest": _STR,
                     },
                 ),
+            ),
+            # 갈 수 있는 머신이 있는 프리셋 수 / 전체(M5t-a 결정 243). 없으면 옛 서버다
+            "capacity": Shape(
+                (dict,),
+                {
+                    "total": _req(_COUNT),
+                    "reachable": _req(_COUNT),
+                    "unreachable": _req(_NAMES),
+                },
             ),
         },
     ),
@@ -1059,6 +1069,18 @@ class Health:
     version: str
     error: str | None
     preset_env: dict[str, PresetEnv] | None
+    #: 갈 수 있는 머신이 있는 프리셋(M5t-a 결정 243). None 이면 서버가 말하지 않았다(옛 서버)
+    capacity: Capacity | None = None
+
+
+@dataclass(frozen=True)
+class Capacity:
+    """`/api/health` 의 `capacity` — 지금 갈 수 있는 머신이 있는 프리셋 수 / 전체 프리셋 수와 갈
+    곳이 없는 프리셋 이름."""
+
+    total: int
+    reachable: int
+    unreachable: tuple[str, ...]
 
 
 @dataclass(frozen=True)
@@ -1149,7 +1171,14 @@ def parse_health(answer: dict[str, Any]) -> Health:
             for name, v in raw.items()
         }
     )
-    return Health(answer["ok"], answer["version"], answer.get("error"), preset_env)
+    cap = answer.get("capacity")
+    capacity = None
+    if cap is not None:
+        total, reachable, names = cap["total"], cap["reachable"], cap["unreachable"]
+        if not 0 <= reachable <= total or len(names) != total - reachable:
+            raise AnswerUnreadable("capacity does not add up")
+        capacity = Capacity(total, reachable, tuple(dc.clean_text(n, 64) for n in names))
+    return Health(answer["ok"], answer["version"], answer.get("error"), preset_env, capacity)
 
 
 def parse_whoami(answer: dict[str, Any]) -> Whoami:
@@ -2217,9 +2246,61 @@ class _Run:
             for m in machines.machines
             if m.kind != "local"
         ]
+        if self.role == dc.ROLE_COORDINATOR:
+            self.report_capacity(cfg, health, machines)
         if self.role == dc.ROLE_COORDINATOR_WORKER:
             local = next((m for m in machines.machines if m.kind == "local"), None)
             self.local_lane(cfg, health, local)
+
+    def report_capacity(self, cfg: Any, health: Health, machines: Machines) -> None:
+        """분배 전용 코디네이터의 판정은 「올 프리셋이 0개」가 아니라 `capacity` 다(TD38). 어느
+        머신도 못 돌리는 프리셋이 전부면 문제(종료 1), 일부면 warn 으로 그 목록을 보인다. 그 가운데
+        `pool` 배치라서 못 가는 프리셋은 받을 수 있는 다른 풀의 워커를 댄다(TD20). 배치를 바꿀지는
+        사람이 정한다 — doctor 는 설정을 고치지 않는다. 판정은 서버가 후보 함수로 센 것을 읽는다."""
+        from remote_ci_monitor.capabilities import remote_can_take
+        from remote_ci_monitor.core.model import PLACEMENT_CAPABLE
+
+        cap = health.capacity
+        if cap is None:
+            # 옛 서버다. `lanes = 0` 설정이면 그 판정이 capacity 뿐이라 모름이다. 레인이 있는
+            # 설정이면 capacity 는 덧붙이는 정보라 없어도 판정을 바꾸지 않는다
+            if cfg.server.lanes == 0:
+                self.undecided.append(
+                    "the server does not report capacity (older rcm) — cannot tell which "
+                    "presets a machine can take"
+                )
+            return
+        if cap.total == 0:
+            return  # 프리셋이 없다 — 그릴 것이 없다(`rcm check` 와 같다)
+        names = ", ".join(cap.unreachable)
+        if cap.reachable == 0:
+            self.problems.append(
+                f"capacity 0/{cap.total} — no machine can take any preset: {names}"
+            )
+        elif cap.unreachable:
+            self.warnings.append(
+                f"capacity {cap.reachable}/{cap.total} — no machine can take: {names}"
+            )
+        presets = {p.name: p for p in cfg.presets}
+        for name in cap.unreachable:
+            p = presets.get(name)
+            # any-capable 은 이미 아무 머신에나 간다. local_only 는 배치를 바꿔도 원격에 안 간다
+            if p is None or p.placement == PLACEMENT_CAPABLE or not remote_can_take(cfg, p):
+                continue
+            able = [
+                dc.clean_text(m.name, 64)
+                for m in machines.machines
+                if m.kind != "local"
+                and m.alive
+                and m.pool != p.pool
+                and (m.presets or {}).get(name, {}).get("state") == "eligible"
+            ]
+            if able:
+                self.warnings.append(
+                    f'{name}: placement = "pool" keeps it in pool {p.pool}, where no machine can '
+                    f"take it — capable worker(s) in other pools ({', '.join(able)}) would take "
+                    'it as placement = "any-capable" (rcm does not change the preset)'
+                )
 
     def local_lane_only(self, cfg: Any) -> None:
         """원격 머신이 후보가 아닌 프리셋을 「로컬 레인 필요」로 보인다(TO6). 판정은 서버의 후보
