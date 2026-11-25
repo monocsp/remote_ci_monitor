@@ -2949,6 +2949,19 @@ MUTANTS = (
         new="                if False:\n",
         tests=("tests/test_lanes_zero.py::test_tl15_a_job_with_nowhere_to_go_says_no_local_lanes",),
     ),
+    Mutant(
+        # 꼴이 깨진 capacity(문자열 · 빠진 키 · total 0 · reachable > total)를 옛 서버처럼 읽어
+        # 행을 빼다 — 분배 전용 서버의 `rcm check` 가 0 으로 끝난다(batch 3 항목 1, fail-open)
+        name="m5t-lanes-zero-capacity-malformed-hidden",
+        path="src/remote_ci_monitor/cli.py",
+        old='        return ("capacity", unknown_grade, CAPACITY_UNKNOWN_TEXT)\n',
+        new="        return None\n",
+        tests=(
+            "tests/test_lanes_zero.py::"
+            "test_tl3_rcm_check_fails_on_a_malformed_capacity_from_a_dispatch_only_server",
+            "tests/test_lanes_zero.py::test_tl3_a_malformed_capacity_draws_the_same_unknown_row_as_null",
+        ),
+    ),
 )
 
 

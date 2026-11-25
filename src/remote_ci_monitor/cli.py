@@ -3935,6 +3935,11 @@ NO_LOCAL_LANES_TEXT = "this machine runs no jobs (lanes = 0 — dispatch only)"
 CAPACITY_UNKNOWN_TEXT = "server could not count capacity"
 
 
+def _is_count(value: Any) -> bool:
+    """0 이상의 정수인가 — JSON 의 `true` 는 파이썬에서 `int` 라 따로 뺀다."""
+    return isinstance(value, int) and not isinstance(value, bool) and value >= 0
+
+
 def _capacity_row(health: Any, *, has_presets: bool) -> tuple[str, bool | None, str] | None:
     """`capacity` — 지금 갈 수 있는 머신이 있는 프리셋 수 / 전체 프리셋 수(`/api/health`).
 
@@ -3944,7 +3949,11 @@ def _capacity_row(health: Any, *, has_presets: bool) -> tuple[str, bool | None, 
 
     키가 있는데 null 이면 서버가 세다가 실패한 것이다. 못 모은 칸은 실패로 그린다(PLAN.md
     「rcm check」) — 분배 전용(`lanes = 0`)이면 이 칸이 「갈 곳이 있나」의 유일한 답이라 FAIL,
-    레인이 있는 서버는 로컬 레인이 받으므로 warn 이다. 키 없음(옛 서버)과는 구별한다."""
+    레인이 있는 서버는 로컬 레인이 받으므로 warn 이다. 키 없음(옛 서버)과는 구별한다.
+
+    꼴이 깨진 답(dict 가 아님 · `total` · `reachable` 이 없거나 정수가 아님 · `total <= 0` ·
+    `0 <= reachable <= total` 밖)도 null 과 같은 「못 셌다」다 — 옛 서버처럼 행을 빼면 분배 전용
+    서버의 `rcm check` 가 0 으로 끝난다(fail-open, P6 재확인)."""
     if not isinstance(health, dict) or "capacity" not in health:
         return None
     cap = health.get("capacity")
@@ -3953,10 +3962,13 @@ def _capacity_row(health: Any, *, has_presets: bool) -> tuple[str, bool | None, 
             return None
         return ("capacity", False if health.get("lanes") == 0 else None, CAPACITY_UNKNOWN_TEXT)
     if not isinstance(cap, dict):
-        return None
+        cap = {}  # 꼴이 깨진 답 — 아래에서 「못 셌다」로 떨어진다
     total, reachable = cap.get("total"), cap.get("reachable")
-    if not isinstance(total, int) or not isinstance(reachable, int) or total <= 0:
-        return None
+    if not (_is_count(total) and _is_count(reachable) and 0 < total and reachable <= total):
+        if not has_presets:
+            return None  # 프리셋이 없으면 셀 것도 없다(TL17)
+        unknown_grade = False if health.get("lanes") == 0 else None
+        return ("capacity", unknown_grade, CAPACITY_UNKNOWN_TEXT)
     none = [str(n) for n in cap.get("unreachable") or []]
     head = f"{reachable}/{total} presets have a machine to run on"
     if not none:

@@ -690,6 +690,52 @@ def test_tl3_an_old_server_without_the_capacity_key_draws_no_row():
     assert row == ("capacity", False, "server could not count capacity"), row
 
 
+#: 꼴이 깨진 `capacity` — 서버가 센 답으로 읽을 수 없다. null 과 같은 「못 셌다」다
+MALFORMED_CAPACITY = (
+    "lots",
+    [],
+    {},
+    {"total": 3},
+    {"reachable": 1},
+    {"total": "3", "reachable": 1},
+    {"total": 3, "reachable": None},
+    {"total": True, "reachable": 0},
+    {"total": 0, "reachable": 0},
+    {"total": -1, "reachable": 0},
+    {"total": 2, "reachable": 3},
+    {"total": 3, "reachable": -1},
+)
+
+
+@pytest.mark.parametrize("cap", MALFORMED_CAPACITY, ids=repr)
+def test_tl3_a_malformed_capacity_draws_the_same_unknown_row_as_null(cap):
+    """# TL3 · P6 재확인 — 꼴이 깨진 답(dict 가 아님 · `total` · `reachable` 이 없거나 정수가
+    아님 · `total <= 0` · 셀 수 없는 범위)을 옛 서버처럼 읽어 행을 빼면 분배 전용 서버의 `rcm
+    check` 가 0 으로 끝난다(fail-open). null 과 같은 「server could not count capacity」다.
+    비교 행: 프리셋이 없으면 행이 없고, 꼴이 맞는 답은 숫자를 그린다."""
+    from remote_ci_monitor.cli import CAPACITY_UNKNOWN_TEXT, _capacity_row
+
+    for lanes, grade in ((0, False), (1, None)):
+        row = _capacity_row({"lanes": lanes, "capacity": cap}, has_presets=True)
+        assert row == ("capacity", grade, CAPACITY_UNKNOWN_TEXT), (lanes, row)
+    assert _capacity_row({"lanes": 0, "capacity": cap}, has_presets=False) is None
+    good = {"total": 3, "reachable": 3, "unreachable": []}
+    row = _capacity_row({"lanes": 0, "capacity": good}, has_presets=True)
+    assert row == ("capacity", True, "3/3 presets have a machine to run on"), row
+
+
+def test_tl3_rcm_check_fails_on_a_malformed_capacity_from_a_dispatch_only_server(
+    lz, home, monkeypatch, capsys
+):
+    """# TL3 · P6 재확인 — 끝에서 끝: 분배 전용 서버가 꼴이 깨진 `capacity` 를 보내면 `rcm check`
+    는 FAIL 행을 그리고 1 로 끝난다."""
+    monkeypatch.setattr(lz.app, "capacity", lambda: {"total": "x"})
+    assert health(lz)[1]["capacity"] == {"total": "x"}
+    code, found = check(lz, monkeypatch, capsys)
+    assert found.get("capacity") == ("FAIL", "server could not count capacity"), found
+    assert code == 1
+
+
 def test_tl17_rcm_check_draws_no_capacity_row_without_presets(tmp_path, home, monkeypatch, capsys):
     s = zero(tmp_path / "none", presets="")
     try:
