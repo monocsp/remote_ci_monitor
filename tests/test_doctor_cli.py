@@ -4082,6 +4082,35 @@ def test_e3_a_closed_pipe_keeps_the_verdict_and_prints_no_traceback(env):
     assert proc.returncode == 3, (proc.returncode, text)
 
 
+@pytest.mark.parametrize(
+    "argv,verdict",
+    [
+        (("--role", "client", "--server", "ftp://td.invalid"), 2),
+        (("--role", "client", "--server", "http://127.0.0.1:1"), 3),
+    ],
+    ids=["usage", "unreachable"],
+)
+def test_e3_a_closed_stderr_keeps_the_verdict(env, argv, verdict):
+    """`rcm doctor 2>&-` 처럼 stderr 가 닫힌 파이프여도 사용법 · 판정 못 함 줄(`ctx.err`)을 쓰다
+    죽지 않는다 — stdout 의 경우(P6 GAP E3)와 같이 조용히 버리고 종료 코드는 판정 그대로다
+    (batch 10 triage). 읽는 쪽을 먼저 닫은 파이프를 stderr 로 준다."""
+    read_end, write_end = os.pipe()
+    os.close(read_end)
+    try:
+        proc = subprocess.run(
+            doctor_argv(*argv),
+            stdout=subprocess.PIPE,
+            stderr=write_end,
+            stdin=subprocess.DEVNULL,
+            env=doctor_child(env),
+            cwd=env,
+            timeout=60,
+        )
+    finally:
+        os.close(write_end)
+    assert proc.returncode == verdict, (proc.returncode, proc.stdout)
+
+
 @pytest.mark.parametrize("as_json", [False, True], ids=["text", "json"])
 def test_e3_a_stdout_that_is_not_utf8_keeps_the_verdict(env, as_json):
     """UTF-8 이 아닌 stdout(`PYTHONIOENCODING=ascii`)에서도 판정을 잃지 않는다(P6 GAP E3).

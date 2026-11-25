@@ -1258,7 +1258,7 @@ class Context:
     ls_remote: Callable[[str, str, Mapping[str, str]], str | None]
     worker_service_path: str
     out: Callable[[str], None] = print
-    err: Callable[[str], None] = lambda m: print(m, file=sys.stderr)
+    err: Callable[[str], None] = lambda m: say_err(m)
 
 
 class _Run:
@@ -2412,12 +2412,26 @@ def _silence_stdout() -> None:
     """읽는 쪽이 닫은 파이프(`rcm doctor | head`) — 남은 출력은 버린다. 파이썬이 끝날 때 다시
     flush 하다 `Exception ignored … BrokenPipeError` 와 종료 120 을 내지 않게 stdout 을 devnull 로
     돌린다(파이썬 문서 「Note on SIGPIPE」의 방법)."""
+    _silence(sys.stdout)
+
+
+def _silence(stream: Any) -> None:
     try:
         devnull = os.open(os.devnull, os.O_WRONLY)
-        os.dup2(devnull, sys.stdout.fileno())
+        os.dup2(devnull, stream.fileno())
         os.close(devnull)
-    except (OSError, ValueError, AttributeError):  # 파일이 아닌 stdout(시험의 capsys)
+    except (OSError, ValueError, AttributeError):  # 파일이 아닌 stream(시험의 capsys)
         pass
+
+
+def say_err(message: str) -> None:
+    """사용법 · 판정 못 함 한 줄을 stderr 로. stderr 가 닫힌 파이프(`rcm doctor 2>&-` 를 받은
+    쪽이 끝났다)면 stdout 처럼 조용히 버린다 — 종료 코드가 판정이다(P6 GAP E3, batch 10
+    triage)."""
+    try:
+        print(message, file=sys.stderr, flush=True)
+    except BrokenPipeError:
+        _silence(sys.stderr)
 
 
 def _deliver(opts: Options, ctx: Context, doc: dict[str, Any]) -> None:
