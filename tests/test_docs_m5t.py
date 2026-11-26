@@ -423,6 +423,22 @@ def test_template_lanes_comment_names_zero():
     assert re.search(r"\b0\b", line.split("#", 1)[1]), line
 
 
+SMOKE = ROOT / "scripts" / "smoke_install.sh"
+
+
+def test_install_smoke_checks_the_catalog_in_the_server_toml_it_wrote():
+    """설치 스모크(명세 §5 PR6)는 새 venv 에 휠로 깐 rcm 이 `rcm init server` 로 쓴 설정에
+    카탈로그가 실렸는지 본다. 템플릿이 휠에서 빠지거나 옛 판이 실리면 스모크가 그 자리에서
+    멈춘다."""
+    text = read(SMOKE)
+    init = text.index('CFG=$("$RCM" init server)')
+    check = re.search(
+        r"grep -q '\^" + re.escape(CATALOG_BEGIN) + r"' \"\$CFG\" \|\| \{[^}]*exit 1; \}", text
+    )
+    assert check, "smoke_install.sh does not check the catalog in the written server.toml"
+    assert check.start() > init, "the catalog check runs before rcm init server"
+
+
 # ── CHANGELOG ────────────────────────────────────────────────────────────────
 
 
