@@ -2257,3 +2257,138 @@ def test_b7_3_a_finish_sent_first_says_what_it_leaves_behind(tmp_path, fast):
         "#7 report: the finish goes first 300s after the job ended; not sent: the phase, the last"
         " 8 bytes of the log (log_complete is false)"
     ], w.logs
+
+
+# ── batch-8: 빚진 finish 대기의 상한 · 「not sent」 줄의 갈래 ─────────────────────────
+
+
+def test_b8_1_a_registration_does_not_wait_on_a_finish_whose_end_is_ahead_of_the_clock(
+    tmp_path, fast
+):
+    """# batch-8 #1 벽시계가 뒤로 가 D 큐의 `ended_at` 이 미래다. 그 잡의 나이는 음수라 finish 가
+    먼저 가지 않는다. 등록 상한은 「빚진 finish」를 기다리는데, 음수 나이를 빚으로 보면 시계가
+    따라잡을 때까지(여기서는 1년) 등록이 기다린다. 음수 나이는 빚진 finish 가 없다."""
+    clock = WClock()
+    fake = FakeServer(clock, tick=40)
+    w1 = wworker(tmp_path, fake, clock)
+    w1.prepare_sessions()
+    ended_queue(w1, 7, b"x\n")
+    sid = w1.session_id
+    die(w1)
+    clock.wall -= timedelta(days=365)  # 벽시계가 뒤로 갔다
+    fake.script["log"] = [http(503)] * 1000000
+    w2 = restart(tmp_path, fake, clock)
+    assert _run_bounded(w2.send_dead_queues, w2, 5), "registration waits for the clock"
+    assert "finish" not in fake.routes()
+    said = [x for x in w2.logs if "queue not delivered" in x]
+    assert said == [
+        f"dead session {sid[:8]} queue not delivered after 300s of server errors"
+        " — registering; job #7 will close as restarted-without-job"
+    ], w2.logs
+
+
+class _ClockStops(FakeServer):
+    """처음 `ticks` 번의 요청만 시계를 민다 — 그 뒤 벽시계가 서 있다. D 의 클라이언트는 사본이라
+    남은 횟수를 사본과 나눈다."""
+
+    def __init__(self, clock: WClock, *, tick: float, ticks: int) -> None:
+        super().__init__(clock, tick=tick)
+        self.left = [ticks]
+
+    def __copy__(self) -> _ClockStops:
+        other = _ClockStops.__new__(_ClockStops)
+        other.__dict__.update(self.__dict__)
+        return other
+
+    def _next(self, route: str) -> None:
+        with self.lock:
+            self.left[0] -= 1
+            if self.left[0] < 0:
+                self.tick = 0.0
+        super()._next(route)
+
+
+def test_b8_1_b_the_wait_for_an_owed_finish_has_a_fixed_cap(tmp_path, fast, monkeypatch):
+    """# batch-8 #1 등록 상한(300초)에 닿았을 때 끝난 잡의 나이가 0 과 300초 사이이고(시계가 조금
+    뒤로 갔다) 벽시계가 더 가지 않는다. finish 는 끝난 지 300초가 될 때까지 먼저 가지 않으니,
+    빚진 finish 를 기다리는 등록은 고정된 상한(`OWED_FINISH_WAIT_SECONDS`) 뒤에 끝나야 한다.
+    전에는 그 상한이 없어 시계가 따라잡을 때까지 기다렸다."""
+    monkeypatch.setattr(rw, "OWED_FINISH_WAIT_SECONDS", 0.3, raising=False)
+    clock = WClock()
+    fake = _ClockStops(clock, tick=40, ticks=10)  # 400초를 민 뒤 선다
+    w1 = wworker(tmp_path, fake, clock)
+    w1.prepare_sessions()
+    ended_queue(w1, 7, b"x\n")
+    sid = w1.session_id
+    die(w1)
+    clock.wall -= timedelta(seconds=350)  # 상한에서 잡의 나이는 50초쯤이다
+    fake.script["log"] = [http(503)] * 1000000
+    w2 = restart(tmp_path, fake, clock)
+    assert _run_bounded(w2.send_dead_queues, w2, 5), "registration waits on an owed finish"
+    assert "finish" not in fake.routes()
+    age = (clock.wall - T0W).total_seconds()
+    assert 0 < age < rw.FINISH_HOLD_SECONDS  # 끝난 지 300초가 안 됐다 — finish 는 아직 빚이다
+    said = [x for x in w2.logs if "queue not delivered" in x]
+    assert said == [
+        f"dead session {sid[:8]} queue not delivered after 300s of server errors"
+        " — registering; job #7 will close as restarted-without-job"
+    ], w2.logs
+
+
+def test_b8_1_c_the_owed_finish_wait_is_one_backoff_and_two_requests():
+    """# batch-8 #1 그 상한은 상한에 닿을 때 날아가던 요청 하나 · 백오프 한 번 · finish 요청 하나다
+    — 60초. 요청 시한은 워커 클라이언트의 기본값과 같은 상수다."""
+    from remote_ci_monitor import client as rc
+
+    req = getattr(rc, "WORKER_REQUEST_TIMEOUT_SECONDS", None)
+    assert req == rc.WorkerClient("http://fake", "t").timeout == 15
+    assert getattr(rw, "OWED_FINISH_WAIT_SECONDS", None) == rw.BACKOFF_MAX_SECONDS + 2 * req == 60
+
+
+def test_b8_3_a_finish_sent_first_behind_the_log_names_only_the_log(tmp_path, fast):
+    """# batch-8 #3 phase · 묶음 없이 로그만 5xx 로 밀렸다. finish 가 먼저 가며 남긴 로그 꼬리만
+    말한다."""
+    clock = WClock()
+    fake = FakeServer(clock, tick=60)
+    w, ob, s = live_sender(tmp_path, fake, clock)
+    ob.append(b"one\ntwo\n")
+    end_job(w, ob)
+    fake.script["log"] = [http(503)] * 100000
+    s.start()
+    try:
+        s.thread.join(5)
+        assert ob.done
+    finally:
+        s.halt.set()
+    assert [c[5]["log_bytes"] for c in fake.calls if c[0] == "finish"] == [8]
+    said = [x for x in w.logs if "not sent" in x]
+    assert said == [
+        "#7 report: the finish goes first 300s after the job ended; not sent: the last 8 bytes"
+        " of the log (log_complete is false)"
+    ], w.logs
+
+
+def test_b8_3_b_finish_sent_first_behind_the_bundle_names_only_the_bundle(tmp_path, fast):
+    """# batch-8 #3 로그는 다 갔고 산출물 묶음만 5xx 로 밀렸다. finish 가 먼저 가며 묶음만
+    말한다 — 처분은 `upload_failed` 다."""
+    clock = WClock()
+    fake = FakeServer(clock, tick=60)
+    w, ob, s = live_sender(tmp_path, fake, clock)
+    bundle = tmp_path / "bundle.tar"
+    bundle.write_bytes(b"tar")
+    ob.bundle = {"path": str(bundle), "state": "pending", "sha256": None}
+    end_job(w, ob, artifacts={"state": "ready", "file_count": 1, "total_bytes": 3})
+    fake.script["upload"] = [http(503)] * 100000
+    s.start()
+    try:
+        s.thread.join(5)
+        assert ob.done
+    finally:
+        s.halt.set()
+    fins = [c for c in fake.calls if c[0] == "finish"]
+    assert [c[5]["artifacts"]["reason_code"] for c in fins] == ["upload_failed"]
+    said = [x for x in w.logs if "not sent" in x]
+    assert said == [
+        "#7 report: the finish goes first 300s after the job ended; not sent: the bundle"
+        " (upload_failed)"
+    ], w.logs
