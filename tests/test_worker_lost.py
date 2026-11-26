@@ -28,6 +28,9 @@ from remote_ci_monitor.events import KIND_JOB_FINISHED, Event
 from remote_ci_monitor.server import App
 from test_worker_api import GRACE, HEARTBEAT, SAMPLE, T0, TIMEOUT, WorkerServer, at
 
+#: 끊김 유예(M5t-b 결정 263 · 266) — 시험 서버는 키를 안 적었다: max(600, L + 35) = 600
+G = 600
+
 
 @pytest.fixture
 def srv(tmp_path):
@@ -56,11 +59,10 @@ def states_of(srv: WorkerServer, name: str) -> list[str]:
 
 
 def test_worker_past_timeout_loses_its_running_job_and_shows_down(srv):
-    """§4: `now − last_seen_at > worker_timeout_seconds` 인 워커의 running 잡 → lost + summary
-    `worker <name> unreachable for <N>s`(N = 서버가 그 워커의 요청을 마지막으로 받은 뒤 지난 초)
-    + `job_finished` 이벤트. 워커 행은 남아 `server.workers[]` 에 down 으로, 그 풀의 `lanes` 는
-    살아 있는 레인 합(로컬 + 살아 있는 원격)이라 줄고, 그 풀의 queued 행은 `worker_down` 이 된다.
-    두 번 불러도 더 없다."""
+    """§4 · M5t-b(결정 253 · 266, docs/m5tb-workplan.md §7.3): `worker_timeout_seconds` 를 넘기면
+    레인은 down 이고 그 풀의 queued 행은 `worker_down` 이지만 **잡은 닫지 않는다**. 서버가 그 세션을
+    마지막으로 들은 뒤 끊김 유예 G 가 지나면 lost + summary `worker <name> unreachable for <N>s`
+    (N = 단조 경과) + `job_finished` 이벤트. 두 번 불러도 더 없다."""
     a = srv.queued_job()
     b = srv.queued_job(token="bob")
     c = srv.queued_job(token="admin", preset="lin")
@@ -81,6 +83,9 @@ def test_worker_past_timeout_loses_its_running_job_and_shows_down(srv):
     srv.clock.advance(80)
     assert states_of(srv, "build-02") == ["down", "down"]
     assert states_of(srv, "lin-01") == ["down"]
+    assert srv.app.mark_lost_workers(srv.clock.now) == []  # 유예 안 — 잡은 running
+    assert srv.store.get_job(a).state == RUNNING
+    srv.clock.advance(G - 80 + 1)  # 마지막으로 들은 뒤 G + 1
     sub = srv.app.bus.subscribe()
     try:
         assert srv.app.mark_lost_workers(srv.clock.now) == [a]
@@ -88,8 +93,8 @@ def test_worker_past_timeout_loses_its_running_job_and_shows_down(srv):
     finally:
         srv.app.bus.unsubscribe(sub)
     j = srv.store.get_job(a)
-    assert j.state == LOST and j.summary == "worker build-02 unreachable for 80s"
-    assert j.finished_at == at(90) and j.lane is None and j.exit_code is None
+    assert j.state == LOST and j.summary == f"worker build-02 unreachable for {G + 1}s"
+    assert j.finished_at == at(10 + G + 1) and j.lane is None and j.exit_code is None
     assert {"job_id": a, "state": LOST, "exit_code": None} in finished_events(events)
     assert srv.store.get_job(b).state == QUEUED and srv.store.get_job(c).state == QUEUED
     lane = srv.worker_lane("build-02", 1)
@@ -101,18 +106,20 @@ def test_worker_past_timeout_loses_its_running_job_and_shows_down(srv):
     assert srv.row(c)["reason"] == "worker_down" and srv.row(c)["estimate"]["finish_at"] is None
     assert [r["id"] for r in pools["default"]["recent"]] == [a]
     assert srv.app.mark_lost_workers(srv.clock.now) == []  # 더 없다
-    assert srv.store.get_job(a).summary == "worker build-02 unreachable for 80s"
+    assert srv.store.get_job(a).summary == f"worker build-02 unreachable for {G + 1}s"
 
 
 def test_heartbeat_brings_a_down_worker_back_up_without_resuming_the_lost_job(srv):
-    """§4: 다시 heartbeat 이 오면 up(idle) — lanes 와 hosts 가 돌아온다. lost 로 닫힌 잡은
-    이어받지 않는다(재현성 — 새로 제출). down 인 동안 그 풀의 `hosts[]` 는 비어 있다."""
+    """§4: 다시 heartbeat 이 오면 up(idle) — lanes 와 hosts 가 돌아온다. 유예(M5t-b) 뒤 lost 로
+    닫힌 잡은 이어받지 않는다(재현성 — 새로 제출). down 인 동안 그 풀의 `hosts[]` 는 비어 있다."""
     a = srv.queued_job(preset="lin")
     srv.registered("lin-01", pool="linux", lanes=2)
     assert srv.claimed("lin-01", 1) == a
     assert srv.heartbeat("lin-01", jobs=[a], host_sample=SAMPLE)[0] == 200
     assert [h["name"] for h in srv.pools()["linux"]["hosts"]] == ["lin-01"]
     srv.clock.advance(TIMEOUT + 30)
+    assert srv.app.mark_lost_workers(srv.clock.now) == []  # down 이지만 유예 안
+    srv.clock.advance(G - TIMEOUT - 30 + 1)
     assert srv.app.mark_lost_workers(srv.clock.now) == [a]
     assert srv.pools()["linux"]["lanes"] == 0 and srv.pools()["linux"]["hosts"] == []
     assert states_of(srv, "lin-01") == ["down", "down"]
@@ -121,7 +128,7 @@ def test_heartbeat_brings_a_down_worker_back_up_without_resuming_the_lost_job(sr
     assert srv.pools()["linux"]["lanes"] == 2
     assert [h["name"] for h in srv.pools()["linux"]["hosts"]] == ["lin-01"]
     j = srv.store.get_job(a)
-    assert j.state == LOST and j.summary == f"worker lin-01 unreachable for {TIMEOUT + 30}s"
+    assert j.state == LOST and j.summary == f"worker lin-01 unreachable for {G + 1}s"
     assert srv.app.mark_lost_workers(srv.clock.now) == []
     b = srv.queued_job(token="bob", preset="lin")
     assert srv.claimed("lin-01", 1) == b  # 레인은 비어 있다
@@ -136,15 +143,19 @@ def test_heartbeat_brings_a_down_worker_back_up_without_resuming_the_lost_job(sr
 
 def test_cancelling_job_of_a_down_worker_becomes_lost_not_cancelled(srv):
     """§3(리뷰 반영 — 두 규칙의 우선순위): 워커가 닿지 않으면 cancelling 잡도 `lost` 가 우선한다
-    — `kill_at + 2×heartbeat` 가 지나도 cancelled 가 아니다."""
+    — `kill_at + 2×heartbeat` 가 지나도 cancelled 가 아니다. M5t-b: 조용한 세션에는 취소 미확인
+    규칙이 걸리지 않고, 유예 G 뒤 lost 다."""
     a = srv.queued_job()
     srv.registered("build-02")
     assert srv.claimed("build-02") == a
     assert srv.cancel(a)[1]["state"] == CANCELLING  # kill_at = T0 + GRACE
     srv.clock.advance(TIMEOUT + 30)  # kill_at + 2×heartbeat 도, timeout 도 넘겼다
+    assert srv.app.mark_lost_workers(srv.clock.now) == []
+    assert srv.store.get_job(a).state == CANCELLING  # cancelled 로 위장하지 않는다
+    srv.clock.advance(G - TIMEOUT - 30 + 1)
     assert srv.app.mark_lost_workers(srv.clock.now) == [a]
     j = srv.store.get_job(a)
-    assert j.state == LOST and j.summary == f"worker build-02 unreachable for {TIMEOUT + 30}s"
+    assert j.state == LOST and j.summary == f"worker build-02 unreachable for {G + 1}s"
     assert srv.worker_lane("build-02", 1)["state"] == "down"
 
 
@@ -190,8 +201,8 @@ def test_unconfirmed_cancel_of_a_live_worker_is_closed_as_cancelled(srv):
 
 def test_server_restart_keeps_remote_jobs_and_loses_local_ones(srv):
     """§3(리뷰 반영): `recover_on_start` 는 **로컬 잡만**(`worker_name IS NULL`) lost 로 만든다.
-    원격 워커의 running 잡은 그대로 running 이고 레인 상태도 DB 로 다시 계산된다(busy). 그 뒤
-    `last_seen_at` 이 timeout 을 넘기면 `mark_lost_workers` 가 닫는다."""
+    원격 워커의 running 잡은 그대로 running 이고 레인 상태도 DB 로 다시 계산된다(busy). M5t-b
+    (결정 266 · 2차 Q-C): 유예는 서버 기동 시각부터 다시 센다 — 꺼져 있던 동안은 세지 않는다."""
     remote = srv.queued_job()
     local = srv.queued_job(token="bob")
     srv.registered("build-02")
@@ -201,7 +212,7 @@ def test_server_restart_keeps_remote_jobs_and_loses_local_ones(srv):
     assert srv.store.get_job(remote).worker_name == "build-02"
     assert srv.store.get_job(local).worker_name is None
     srv.clock.advance(20)
-    app2 = App(srv.cfg, srv.store, now_fn=srv.clock)  # 같은 저장소로 다시 뜬 서버
+    app2 = App(srv.cfg, srv.store, now_fn=srv.clock, mono_fn=srv.clock.mono)  # 다시 뜬 서버
     app2.start()
     try:
         j_local = srv.store.get_job(local)
@@ -214,12 +225,14 @@ def test_server_restart_keeps_remote_jobs_and_loses_local_ones(srv):
         assert [(w["state"], w["job_id"], w["display_name"]) for w in lanes] == [
             ("busy", remote, "build-02/1")
         ]
-        assert app2.mark_lost_workers(srv.clock.now) == []  # 아직 20초 — 살아 있다
-        srv.clock.advance(TIMEOUT - 20 + 1)  # 마지막 heartbeat(등록) 뒤 61초
+        assert app2.mark_lost_workers(srv.clock.now) == []  # 기동 직후 — 살아 있다
+        srv.clock.advance(G)  # 기동 뒤 G — 아직(꺼져 있던 20초는 세지 않는다)
+        assert app2.mark_lost_workers(srv.clock.now) == []
+        srv.clock.advance(1)
         assert app2.mark_lost_workers(srv.clock.now) == [remote]
         j_remote = srv.store.get_job(remote)
         assert j_remote.state == LOST
-        assert j_remote.summary == f"worker build-02 unreachable for {TIMEOUT + 1}s"
+        assert j_remote.summary == f"worker build-02 unreachable for {G + 1}s"
         doc = app2.status(None)
         assert [w["state"] for w in doc["server"]["workers"] if w["worker"] == "build-02"] == [
             "down"
