@@ -493,6 +493,154 @@ def restart(tmp_path: Path, fake: FakeServer, clock: WClock) -> rw.RemoteWorker:
     return w2
 
 
+def test_rl14_a_b_an_older_outbox_snapshot_never_lands_after_a_newer_one(tmp_path, monkeypatch):
+    """보내는 스레드의 저장(옛 스냅숏)이 파일을 쓰기 전에 멈춘 사이 레인이 finish 를 저장한다.
+    옛 스냅숏이 나중에 이름을 바꾸면 디스크의 큐에서 finish 가 사라진다 — 그 틈의 kill -9 가
+    finish 를 잃는다(P3 1라운드 LOW). 스냅숏을 만든 순서대로 써야 한다."""
+    ob = rw.JobOutbox(tmp_path / "jobs" / "7")
+    ob.append(b"line\n")
+    real = rw._write_json
+    inside, go = threading.Event(), threading.Event()
+    first = threading.Lock()
+
+    def slow_first(path: Path, data: dict[str, Any]) -> None:
+        if first.acquire(blocking=False):  # 첫 저장(보내는 스레드)만 멈춘다
+            inside.set()
+            assert go.wait(10)
+        real(path, data)
+
+    monkeypatch.setattr(rw, "_write_json", slow_first)
+    ob.acked = 5
+    sender = threading.Thread(target=ob.save)
+    sender.start()
+    assert inside.wait(10)
+
+    def lane_finish() -> None:
+        ob.finish = {"outcome": SUCCEEDED, "exit_code": 0, "log_bytes": 5}
+        ob.ended_at = 1.0
+        ob.save()
+
+    lane = threading.Thread(target=lane_finish)
+    lane.start()
+    lane.join(0.3)  # 레인의 저장이 먼저 끝나거나(결함) 줄을 선다
+    go.set()
+    sender.join(10)
+    lane.join(10)
+    on_disk = rw.JobOutbox.load(tmp_path / "jobs" / "7")
+    assert on_disk is not None and on_disk.finish is not None, "an older snapshot replaced it"
+    assert on_disk.acked == 5
+
+
+def test_rl20_b_a_spool_that_cannot_be_read_backs_off_and_says_so_once(tmp_path, fast):
+    """`stream.log` 를 못 읽으면 빈 조각을 보내 성공으로 세지 않는다 — 그러면 `acked` 는 그대로인
+    채 쉬지 않고 돈다(P3 1라운드 LOW). 읽기 실패는 백오프로 다시 해 보고 로그는 한 줄이다. 다시
+    읽히면 남은 로그와 finish 가 간다."""
+    clock = WClock()
+    fake = FakeServer(clock)
+    w = wworker(tmp_path, fake, clock)
+    w.prepare_sessions()
+    ob = ended_queue(w, 7, b"one\ntwo\n")
+    spool = w._job_dir(7) / rw.STREAM_FILE
+    hidden = spool.with_name("hidden")
+    spool.rename(hidden)  # 읽을 수 없다(OSError)
+    s = rw._JobSender(w, 7, ob).start()
+    try:
+        deadline = time.monotonic() + 0.5
+        while time.monotonic() < deadline and sum(1 for x in w.logs if "cannot read" in x) == 0:
+            time.sleep(0.01)
+        time.sleep(0.2)
+        assert [c for c in fake.calls if c[0] == "log"] == [], "an empty piece counted as sent"
+        assert sum(1 for x in w.logs if "cannot read" in x) == 1, w.logs
+        assert ob.acked == 0 and not ob.done
+        hidden.rename(spool)
+        s.thread.join(10)
+        assert ob.done and bytes(fake.received[7]) == b"one\ntwo\n"
+        assert fake.routes()[-1] == "finish"
+    finally:
+        s.halt.set()
+
+
+def test_rl17_c_a_a_line_longer_than_a_piece_goes_whole_while_the_job_runs(
+    tmp_path, fast, monkeypatch
+):
+    """한 줄은 늘 조각 하나에 든다(§4.5 · F34 · F35). 줄 끝이 256 KiB 안에 없으면 그 줄 끝까지
+    (서버 본문 상한 4 MiB 안에서) 한 조각으로 보낸다 — 줄 가운데서 자르면 서버가 두 조각에 걸친
+    비밀을 온전히 가리지 못한다(P3 1라운드 LOW). 줄 끝 없는 꼬리는 잡이 끝난 뒤에만 간다."""
+    monkeypatch.setattr(rw, "LOG_BATCH_BYTES", 16)
+    clock = WClock()
+    fake = FakeServer(clock)
+    w, ob, s = live_sender(tmp_path, fake, clock)
+    long_line = b"x" * 40 + b"\n"
+    ob.append(b"short\n" + long_line + b"tail-no-newline")
+    s.start()
+    try:
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline and ob.acked < 6 + len(long_line):
+            time.sleep(0.01)
+        time.sleep(0.1)
+        pieces = [c[4] for c in fake.calls if c[0] == "log"]
+        assert pieces == [b"short\n", long_line], pieces
+        end_job(w, ob)
+        s.wake.set()
+        s.thread.join(10)
+        pieces = [c[4] for c in fake.calls if c[0] == "log"]
+        assert pieces == [b"short\n", long_line, b"tail-no-newline"], pieces
+    finally:
+        s.halt.set()
+
+
+def test_rl17_c_b_the_piece_limit_is_the_servers_body_limit():
+    from remote_ci_monitor.remote_workers import MAX_WORKER_LOG_BODY
+
+    assert rw.LOG_PIECE_MAX_BYTES == MAX_WORKER_LOG_BODY
+
+
+def test_rl46_c_a_dead_queue_that_finished_does_not_leave_its_answers_counted(
+    tmp_path, fast, monkeypatch
+):
+    """죽은 세션 D 의 큐 둘. #7 은 503 한 번 뒤 보냈고, #8 은 그 뒤 연결 실패만 받는다. 등록
+    대기 300초는 서버가 응답한(HTTP 오류) 시간만 센다(결정 337). #7 의 옛 503 이 #8 의 연결 실패
+    시간까지 세게 하면 안 된다(P3 1라운드 LOW — 워커 하나의 깃발이 큐 사이에서 낡았다)."""
+    monkeypatch.setattr(rw, "BACKOFF_START_SECONDS", 0.01)
+    monkeypatch.setattr(rw, "BACKOFF_MAX_SECONDS", 0.01)
+    clock = WClock()
+    fake = FakeServer(clock)
+    w1 = wworker(tmp_path, fake, clock)
+    w1.prepare_sessions()
+    ended_queue(w1, 7, b"seven\n")
+    ended_queue(w1, 8, b"eight\n")
+    die(w1)
+    seven_sent = threading.Event()
+    state = {"refused_7": False, "slow_8": 3}
+    real_log, real_finish = fake.log, fake.finish
+
+    def log(job_id: int, data: bytes, offset: int | None = None) -> dict[str, Any]:
+        if job_id == 8 and state["slow_8"] > 0:
+            assert seven_sent.wait(10)
+            state["slow_8"] -= 1
+            clock.advance(400)  # 연결 실패 하나가 400초 걸린다
+            time.sleep(0.2)
+            raise conn_fail()
+        return real_log(job_id, data, offset)
+
+    def finish(job_id, outcome, rc, summary=None, **extra) -> dict[str, Any]:
+        if job_id == 7 and not state["refused_7"]:
+            state["refused_7"] = True
+            raise http(503)
+        out = real_finish(job_id, outcome, rc, summary, **extra)
+        if job_id == 7:
+            seven_sent.set()
+        return out
+
+    fake.log = log  # type: ignore[method-assign]
+    fake.finish = finish  # type: ignore[method-assign]
+    w2 = restart(tmp_path, fake, clock)
+    w2.send_dead_queues()
+    assert not any("queue not delivered" in s for s in w2.logs), w2.logs
+    done = sorted(c[2] for c in fake.calls if c[0] == "finish" and c[3] == SUCCEEDED)
+    assert done == [7, 7, 8] or done == [7, 8], fake.calls
+
+
 def test_rl14_a_a_finish_left_on_disk_is_sent_with_the_old_session_before_registering(
     tmp_path, fast
 ):

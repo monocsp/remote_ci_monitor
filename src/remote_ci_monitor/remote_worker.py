@@ -74,6 +74,9 @@ CLAIM_MIN_INTERVAL = 1.0  # 빈 204 가 이보다 빨리 오면 이만큼 쉰다
 RETRY_WAIT_SECONDS = 2.0  # 503 · 연결 실패 뒤 다시 claim 하기까지
 LOG_FLUSH_SECONDS = 1.0
 LOG_BATCH_BYTES = 256 * 1024
+#: 조각 하나의 상한 — 서버의 로그 본문 상한(`remote_workers.MAX_WORKER_LOG_BODY`)과 같다. 줄 끝이
+#: `LOG_BATCH_BYTES` 안에 없으면 그 줄 끝까지 이만큼 본다(한 줄은 조각 하나에, §4.5)
+LOG_PIECE_MAX_BYTES = 4 * 1024 * 1024
 WORKSPACE_KEEP_DAYS = 7
 STOP_SUMMARY = "worker stopped"
 #: 연결 실패가 이만큼 **연속**이면 같은 망에서 서버를 다시 찾는다(`server = "auto"` 일 때만, M5n §9)
@@ -193,6 +196,9 @@ class JobOutbox:
         self._mem = bytearray()
         self._fh: Any = None
         self._lock = threading.Lock()
+        # 저장 하나(스냅숏 → 쓰기 → 이름 바꾸기)를 통째로 줄 세운다 — 레인(finish)과 보내는
+        # 스레드(acked)의 저장이 엇갈려 옛 스냅숏이 나중에 이름을 바꾸지 않게
+        self._save_lock = threading.Lock()
         self.length = 0  # 그 잡이 낸 스트림 바이트(깨진 뒤에도 센다)
         self.written = 0  # 스풀에 실제로 있는 바이트
         self.broken = False
@@ -238,22 +244,23 @@ class JobOutbox:
     def save(self) -> None:
         if self.folder is None:
             return
-        with self._lock:
-            data = {
-                "acked": self.acked,
-                "phase": self.phase,
-                "finish": self.finish,
-                "ended_at": self.ended_at,
-                "bundle": self.bundle,
-                "log_stopped": self.log_stopped,
-                "done": self.done,
-                "broken": self.broken,
-                "length": self.length,
-            }
-        try:
-            _write_json(self.folder / OUTBOX_FILE, data)
-        except OSError:
-            pass  # 다음 저장이 다시 쓴다 — 디스크의 `acked` 는 하한일 뿐이다
+        with self._save_lock:  # mutcheck: outbox-save-out-of-order
+            with self._lock:
+                data = {
+                    "acked": self.acked,
+                    "phase": self.phase,
+                    "finish": self.finish,
+                    "ended_at": self.ended_at,
+                    "bundle": self.bundle,
+                    "log_stopped": self.log_stopped,
+                    "done": self.done,
+                    "broken": self.broken,
+                    "length": self.length,
+                }
+            try:
+                _write_json(self.folder / OUTBOX_FILE, data)
+            except OSError:
+                pass  # 다음 저장이 다시 쓴다 — 디스크의 `acked` 는 하한일 뿐이다
 
     # ── 스트림 ──
 
@@ -281,7 +288,9 @@ class JobOutbox:
         if self.broken:
             self.save()
 
-    def read(self, start: int, limit: int) -> bytes:
+    def read(self, start: int, limit: int) -> bytes | None:
+        """스풀의 `[start, start + limit)` 에서 있는 만큼. 파일을 못 읽으면 None(빈 바이트와
+        다르다)."""
         with self._lock:
             end = min(self.written, start + limit)
             if start >= end:
@@ -293,7 +302,7 @@ class JobOutbox:
                 fh.seek(start)
                 return fh.read(end - start)
         except OSError:
-            return b""
+            return None
 
     def pending(self) -> int:
         with self._lock:
@@ -337,6 +346,10 @@ class _JobSender:
         self.query_first = resumed
         self.delay = 0.0
         self.last_5xx = False  # 지금 막힌 항목의 마지막 시도가 HTTP 5xx 였다(결정 324)
+        # 마지막 시도가 서버의 오류 응답이었거나 스풀을 못 읽었다 — 죽은 세션 D 의 등록 대기
+        # 300초가 세는 시간(결정 337). 큐마다 두고 성공 · 연결 실패에 내린다(P3 1라운드)
+        self.answered = False
+        self._read_failed_said = False
         self.failures = 0
         # 펜싱 — 이 프로세스의 큐는 프로세스의 펜싱(W5)을, D 의 큐는 그 큐가 받은 409 를 본다
         self.fenced = proc.fenced if dead is None else threading.Event()
@@ -438,15 +451,26 @@ class _JobSender:
             return "artifacts"
         return "finish"
 
-    def _chunk(self) -> bytes:
+    def _chunk(self) -> bytes | None:
         """`acked` 부터 256 KiB 이하, 마지막 `\\n` 에서 자른 조각 — 한 줄이 두 요청에 걸치지 않는다
-        (F34 · F35). 줄 끝이 없으면 잡이 끝났을 때만 그대로 보낸다(러너는 줄 끝을 붙인다)."""
+        (F34 · F35). 줄 끝이 256 KiB 안에 없으면 그 줄 끝까지(`LOG_PIECE_MAX_BYTES` 안에서) 한
+        조각이다. 서버는 조각마다 가리므로 줄 가운데서 자르면 두 조각에 걸친 비밀을 온전히 가리지
+        못한다(P3 1라운드). 줄 끝 없는 꼬리는 스트림이 더 자라지 않을 때(잡이 끝났거나 D)만 보낸다.
+        러너는 64 KiB 마다 줄 끝을 붙이므로 4 MiB 넘는 한 줄은 러너에서 오지 않는다. 스풀을 못
+        읽으면 None."""
         ob = self.ob
         data = ob.read(ob.acked, LOG_BATCH_BYTES)
+        if data is None:
+            return None
         cut = data.rfind(b"\n")
+        if cut < 0 and len(data) >= LOG_BATCH_BYTES:  # mutcheck: long-line-cut-mid-line
+            data = ob.read(ob.acked, LOG_PIECE_MAX_BYTES)
+            if data is None:
+                return None
+            cut = data.find(b"\n")
         if cut >= 0:
             return data[: cut + 1]
-        if len(data) >= LOG_BATCH_BYTES or ob.finish is not None or self.dead is not None:
+        if len(data) >= LOG_PIECE_MAX_BYTES or ob.finish is not None or self.dead is not None:
             return data
         return b""
 
@@ -509,6 +533,8 @@ class _JobSender:
                     ob.phase = None
             elif step in ("query", "log"):
                 chunk = b"" if step == "query" else self._chunk()
+                if chunk is None:  # mutcheck: unreadable-spool-sent-empty
+                    return self._spool_unreadable()
                 out = self.client.log(self.job_id, chunk, offset=ob.acked)
                 got = out.get("offset") if isinstance(out, dict) else None
                 if isinstance(got, int) and not isinstance(got, bool):
@@ -537,8 +563,20 @@ class _JobSender:
         if self.dead is None:
             self.proc.mark_ok(*sent)
         self.last_5xx = False
+        self.answered = False
         self.failures = 0
         return True
+
+    def _spool_unreadable(self) -> bool:
+        """`stream.log` 를 못 읽었다. 빈 조각을 보내 성공으로 세지 않는다 — 그러면 `acked` 는
+        그대로인 채 쉬지 않고 돈다. 백오프로 다시 해 보고 로그는 한 줄이다. 끝난 잡이면 재전송
+        창(24시간)이 지난 뒤 finish 만 간다(§4.5). D 의 큐면 등록 대기 300초가 이 시간도 센다.
+        서버 탓이 아니어도 등록을 끝없이 막지 않게."""
+        if not self._read_failed_said:
+            self._read_failed_said = True
+            self.proc.log(f"#{self.job_id} report: cannot read the spooled log — retrying")
+        self.answered = True
+        return False
 
     def _send_finish(self, fenced: bool) -> None:
         rec = dict(self.ob.finish or {})
@@ -655,8 +693,7 @@ class _JobSender:
             return True
         # 5xx · 연결 실패 · 시간 초과 — 같은 항목을 백오프로 다시
         self.last_5xx = bool(e.status)
-        if dead is not None:
-            proc._dead_answered = bool(e.status)
+        self.answered = bool(e.status)
         self.failures += 1
         n = self.failures
         if n in (1, 10) or n % 60 == 0:
@@ -1150,9 +1187,6 @@ class RemoteWorker:
         # 하지 않고, heartbeat 의 `jobs` 목록에는 큐가 안 끝난 잡이 남는다(F10)
         self._senders: dict[int, _JobSender] = {}
         self._rereg_lock = threading.Lock()
-        # 죽은 세션 D 의 큐가 마지막으로 받은 것이 HTTP 응답(5xx)이었나 — 등록 대기 300초는 이
-        # 시간만 센다(결정 337)
-        self._dead_answered = False
         self._dead_dropped: set[str] = set()
         self._tail_said = False
         self._window_said = False
@@ -1599,7 +1633,11 @@ class RemoteWorker:
             if self.stopping.wait(0.05):
                 break
             now = self._epoch()
-            if self._dead_answered:
+            # 살아 있는 D 의 큐 가운데 마지막 시도가 서버의 오류 응답이었던 것이 있을 때만 센다.
+            # 깃발은 큐마다 둔다 — 워커 하나의 깃발은 끝난 큐의 옛 503 을 다른 큐의 연결 실패
+            # 시간에 남겼다
+            answering = any(s.alive() and s.answered for s in senders)
+            if answering:
                 answered += max(0.0, now - last)
             last = now
             if answered >= DEAD_SESSION_WAIT_SECONDS:  # mutcheck: dead-session-wait-forever

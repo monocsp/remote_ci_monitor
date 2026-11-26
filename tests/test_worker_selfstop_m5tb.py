@@ -621,7 +621,8 @@ def test_rl5_a_409_job_closed_on_a_log_chunk_kills_only_an_irreversible_job(
     w, fake, _, _ = make_worker(tmp_path)
     fake.log_error = ClientError(409, "job #7 is lost", {"code": "job_closed", "state": LOST})
     runner, t = start_job(w, monkeypatch, claimed(irreversible=irreversible))
-    runner.observer.output(b"x" * (rw.LOG_BATCH_BYTES + 1))
+    # 러너처럼 줄 끝이 있는 출력이다. 줄 끝 없는 256 KiB 는 도는 잡의 한 줄이라 기다린다(P3 1라운드)
+    runner.observer.output((b"x" * 1023 + b"\n") * (rw.LOG_BATCH_BYTES // 1024 + 1))
     # 배치는 따로 한 스레드가 보낸다(RL5 — 펌프를 막지 않는다). 그 전송의 409 를 기다린다
     deadline = time.monotonic() + 5
     while not runner.observer.closed_by_server and time.monotonic() < deadline:
