@@ -402,6 +402,13 @@ class _JobSender:
         # 5xx 는 서버에 닿았다는 뜻이다. 연결 실패면 finish 도 갈 수 없으니 순서를 지킨다
         return age >= FINISH_HOLD_SECONDS and self.last_5xx  # mutcheck: finish-waits-forever
 
+    def _window_over(self) -> bool:
+        """잡이 끝난 지 `RETRANSMIT_SECONDS` 가 지났다(디스크의 `ended_at`, 결정 264)."""
+        ob = self.ob
+        if ob.ended_at is None:
+            return False
+        return self.proc._epoch() - ob.ended_at >= RETRANSMIT_SECONDS
+
     def next_step(self) -> str | None:
         ob = self.ob
         if ob.done:
@@ -448,6 +455,14 @@ class _JobSender:
                 if self.attempt(step):
                     self.delay = 0.0
                     continue
+                if step == "finish" and self._window_over():  # mutcheck: finish-kept-past-24h
+                    # finish 마저 24시간 안에 못 보냈다 — 큐 항목을 버린다(§4.5 「재전송 창」)
+                    self.proc.log(
+                        f"#{self.job_id} report: finish not delivered in 24h — dropping the report"
+                    )
+                    self.ob.done = True
+                    self.ob.save()
+                    break
                 self.delay = min(BACKOFF_MAX_SECONDS, max(BACKOFF_START_SECONDS, self.delay * 2))
                 self.halt.wait(self.delay)
         except Exception as e:  # noqa: BLE001 — 보내는 스레드가 죽으면 레인이 묶인다

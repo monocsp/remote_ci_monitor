@@ -281,6 +281,7 @@ def test_rl19_the_configuration_says_how_the_report_queue_retries_and_gives_up()
     assert rw.RETRANSMIT_SECONDS == 24 * 3600
     assert "got HTTP 5xx for 300 s | sends the finish first" in body
     assert "24 hours after the job ended" in body
+    assert "`#N report: finish not delivered in 24h — dropping the report`" in body
     assert "`X-RCM-Log-Offset`" in body and "`409 log_gap`" in body
     assert (
         "dead session <id> queue not delivered after 300s of server errors — registering;"

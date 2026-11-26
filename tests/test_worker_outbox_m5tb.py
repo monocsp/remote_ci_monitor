@@ -674,6 +674,27 @@ def test_rl19_b_after_24h_the_finish_goes_without_the_log(tmp_path, fast):
     assert any("not delivered in 24h" in x for x in w.logs)
 
 
+def test_rl19_b_a_finish_not_sent_in_24h_is_dropped_with_one_line(tmp_path, fast):
+    """§4.5 「재전송 창」: finish 마저 24시간 안에 못 보내면 큐 항목을 버리고 로그 한 줄을 남긴다
+    (§4.1 타이머 표 「finish 도 못 보냈으면 큐 항목 버림 + 로그」, 결정 264). 보내는 스레드가
+    끝나야 레인이 풀리고 폴더가 끝없이 다음 프로세스로 넘어가지 않는다."""
+    clock = WClock()
+    fake = FakeServer(clock, tick=3 * 3600)
+    w, ob, s = live_sender(tmp_path, fake, clock)
+    ob.append(b"a\n")
+    end_job(w, ob)
+    fake.script["log"] = [conn_fail()] * 1000
+    fake.script["finish"] = [conn_fail()] * 1000
+    s.start()
+    s.thread.join(3)
+    assert not s.thread.is_alive(), "the sender still retries the finish after 24h"
+    assert ob.done
+    fins = [c for c in fake.calls if c[0] == "finish"]
+    assert len(fins) == 1  # 24시간 뒤 log_bytes 를 실은 finish 한 번 — 그것도 못 가면 버린다
+    dropped = [x for x in w.logs if "finish not delivered in 24h" in x]
+    assert dropped == ["#7 report: finish not delivered in 24h — dropping the report"], w.logs
+
+
 def test_rl19_a_a_running_job_never_gives_up_on_5xx(tmp_path, fast):
     clock = WClock()
     fake = FakeServer(clock, tick=10)

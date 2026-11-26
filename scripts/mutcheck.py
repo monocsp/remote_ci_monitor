@@ -7020,6 +7020,20 @@ MUTANTS = (
         ),
     ),
     Mutant(
+        # 24시간 뒤에도 못 보낸 finish 를 버리지 않는다 — 보내는 스레드와 레인이 끝없이 묶인다(RL19)
+        name="finish-kept-past-24h",
+        path="src/remote_ci_monitor/remote_worker.py",
+        old=(
+            '                if step == "finish" and self._window_over():'
+            "  # mutcheck: finish-kept-past-24h\n"
+        ),
+        new="                if False:\n",
+        tests=(
+            "tests/test_worker_outbox_m5tb.py::"
+            "test_rl19_b_a_finish_not_sent_in_24h_is_dropped_with_one_line",
+        ),
+    ),
+    Mutant(
         # finish 상한(300초)을 지운다 — 5xx 로 막힌 끝난 잡이 24시간 running 이다(RL40 · RL19)
         name="finish-waits-forever",
         path="src/remote_ci_monitor/remote_worker.py",

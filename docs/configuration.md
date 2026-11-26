@@ -1518,7 +1518,7 @@ from `expected_offset`, so a dropped answer or a retry never doubles or skips a 
 | the job is still running | retries every failure with backoff (1 s doubling to 30 s), with no limit |
 | the job ended and the log or bundle got HTTP 5xx for 300 s | sends the finish first; the bundle becomes `failed` (`upload_failed`) and the job's `log_complete` is `false` |
 | the job ended and the server cannot be reached | keeps the order and resends from the confirmed offset when the server is back |
-| 24 hours after the job ended | sends the finish without the rest of the log; a finish that still cannot go is dropped with a log line |
+| 24 hours after the job ended | sends the finish without the rest of the log; a finish that still cannot go is dropped with a log line (`#N report: finish not delivered in 24h — dropping the report`) |
 
 A worker restarted on the same data folder with the same token and server sends what its last
 process left, with that process's session, before it registers; a server that keeps answering
