@@ -497,6 +497,7 @@ ones you do not know.
 | `remote_machines` | coordinator roles: rows of `name` `pool` `alive` `eligible` `presets`, each `null` when the server does not say; else `null` |
 | `summary` | counts of `ready` `needs_check` `missing` `unknown` among presets that come to this machine, and `applies_unknown`: presets the server does not say whether they come here |
 | `problems` · `undecided` · `warnings` | the lines behind exit 1, exit 3 and the warnings; every `unknown` preset that might come, `unknown` probe and `unknown` row of rcm's own needs has its line in `undecided` |
+| `irreversible_holds` | roles `worker` and `coordinator-worker`: the open [group holds](#when-a-group-is-held-rcm-release-hold) of jobs that ran on this machine, rows of `job_id` `preset` `group` `scope` `worker` `cause` `since` (`[]` when there is none); `null` when rcm does not know (the server is unreachable, does not send them, or sent one it cannot read) and for the other roles. Not part of the exit code |
 
 macOS Command Line Tools shims: `/usr/bin/git`, `make`, `xcrun` and the other tools that only
 forward to the Command Line Tools open an install dialog when the tools are not installed. rcm
@@ -975,9 +976,17 @@ answers again. A lane takes no new job until the queue of its last job is sent. 
 drain the worker waits up to a minute for that queue; then it logs
 `job #<id> still not reported — restarting anyway`, leaves the queue on disk, and the restarted
 worker sends it before it registers again, so the new registration does not close that job as
-lost. The log and the artifacts are sent again for up to 24 hours after the job ends; after that
-the worker logs `#<id> report: log and artifacts not delivered in 24h — sending the finish without
-them`, and the job's log is marked incomplete. The restart leaves `RCM_WORKER_RESTARTED_AT` in its environment: within 5 minutes of
+lost. The restarted worker waits for that queue for at most 300 seconds of server error answers
+(connection failures do not count, because the server is not answering then). After that it logs
+`dead session <id> queue not delivered after 300s of server errors — registering; job #<id> will
+close as restarted-without-job`, registers and takes jobs again, and that job ends `lost`
+(`worker_restarted_without_job`). The log and the artifacts are sent again for up to 24 hours
+after the job ends. When that window has passed, the worker gives them up and sends the finish
+alone, with the size of the log it had (`log_bytes`), logging
+`#<id> report: log and artifacts not delivered in 24h — sending the finish without them`; the
+server then marks the job's log incomplete. When the finish itself cannot be delivered within those
+24 hours, the worker drops the job's queue and logs
+`#<id> report: finish not delivered in 24h — dropping the report`. The restart leaves `RCM_WORKER_RESTARTED_AT` in its environment: within 5 minutes of
 it, a server version change seen in a heartbeat does not drain again
 (`server runs v0.8.1 — not draining: restarted 60s ago`), and jobs go on being served. A refused
 registration drains at any time, because that lane cannot take jobs. While the server does not

@@ -414,3 +414,34 @@ def test_operating_says_an_unreported_job_waits_on_disk_not_a_minute():
         "`#<id> report: log and artifacts not delivered in 24h — sending the finish without them`"
         in body
     )
+
+
+def test_operating_drain_paragraph_follows_spec_4_5_and_has_the_300_second_cap():
+    """P3 r1 — 드레인 문단은 명세 §4.5(docs/m5tb-workplan.md 「재전송 창」)의 순서대로: 24시간이
+    지나면 로그 · 산출물 없이 finish 를 `log_bytes` 와 함께 보내고, finish 마저 24시간 안에 못
+    보내면 큐 항목을 버리고 로그 한 줄. 다시 시작한 워커가 등록 전에 큐를 보내는 데는 서버가
+    응답하는 시간으로 300초 상한(결정 337 · RL46). 인용하는 로그 문구는 PR2 의
+    remote_worker.py 에 있는 것만이다."""
+    body = flat(OPERATING)
+    send = (
+        "`#<id> report: log and artifacts not delivered in 24h — sending the finish without them`"
+    )
+    drop = "`#<id> report: finish not delivered in 24h — dropping the report`"
+    assert send in body and drop in body
+    assert body.index(send) < body.index(drop)
+    assert "with the size of the log it had (`log_bytes`)" in body
+    assert "for at most 300 seconds of server error answers" in body
+    assert "connection failures do not count" in body
+    assert (
+        "`dead session <id> queue not delivered after 300s of server errors — registering;"
+        " job #<id> will close as restarted-without-job`" in body
+    )
+    assert "`worker_restarted_without_job`" in body
+
+
+def test_operating_doctor_json_key_table_has_irreversible_holds():
+    """P3 r1 — `rcm doctor --json` 키 표에 `irreversible_holds` 행(역할에 따라 목록 또는 null)."""
+    rows = [ln for ln in OPERATING.splitlines() if ln.startswith("| `irreversible_holds` |")]
+    assert len(rows) == 1, rows
+    row = rows[0]
+    assert "`worker`" in row and "`coordinator-worker`" in row and "`null`" in row
