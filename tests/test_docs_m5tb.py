@@ -410,3 +410,19 @@ def test_b5_the_report_queue_section_says_ok_at_local_errors_and_a_2xx_that_is_n
         " waiting; job #N will close as restarted-without-job`"
     ) in body
     assert "for a queue a stopped process left, the line starts with `dead session <id>`" in body
+
+
+def test_b6_the_report_queue_section_says_a_stuck_phase_does_not_hold_the_finish():
+    """# batch-6 #1 끝난 잡의 밀린 phase 는 finish 를 막지 않는다 — 5xx · 예상 못 한 예외면 300초,
+    연결 실패면 24시간 뒤 finish 가 가고 phase 는 버린다. 죽은 세션 큐도 그 큐를 기다린다."""
+    from remote_ci_monitor import remote_worker as rw
+
+    body = flat(section(CONFIGURATION, "The worker's log and its report queue"))
+    hold = rw.FINISH_HOLD_SECONDS
+    assert (
+        f"`#N report: phase still not delivered {hold}s after the job ended — sending the finish"
+        " first, the phase is dropped`"
+    ) in body
+    assert "`#N report: phase not delivered in 24h — sending the finish without it`" in body
+    assert "When only the phase, the log or the bundle of a job that ended fails that way" in body
+    assert "When only the log or the bundle of a job that ended fails that way" not in body
