@@ -208,15 +208,29 @@ check_plist() { # check_plist <file> <label> <config> <test home> <rcm> <base> <
   return 0
 }
 
+# doctor --json 이 늘 내는 키 — src/remote_ci_monitor/doctor.py 의 document() 사전 그대로다(모르는 값은
+# 키를 빼지 않고 null). tests/test_acceptance_m5t_live.py 가 그 사전과 견준다
+DOCTOR_KEYS="doctor_version role measured_in host server service shell rcm_requirements presets probes remote_machines summary problems undecided warnings exit"
+
 # TD24: doctor 의 사람용 표와 --json 이 행마다 같은 판정인가, 측정 PATH 를 적었는가, 두 실행의
-# 종료 코드가 문서의 exit 와 같은가. 다르면 어긋난 행을 한 줄씩 찍고 1
+# 종료 코드가 문서의 exit 와 같은가. doctor 가 늘 내는 키가 빠지거나 요구 · 프리셋 절이 비면
+# 견줄 것이 없는 것이므로 실패다(이 하네스의 시험 서버에는 프리셋이 하나 있다). 다르면 어긋난
+# 행을 한 줄씩 찍고 1
 doctor_same() { # doctor_same <human file> <json file> <human rc> <json rc>
-  "$PY" -I - "$@" <<'EOF'
+  "$PY" -I - "$@" "$DOCTOR_KEYS" <<'EOF'
 import json, re, sys
-human, doc_path, human_rc, json_rc = sys.argv[1:5]
+human, doc_path, human_rc, json_rc, keys = sys.argv[1:6]
 lines = open(human, encoding="utf-8").read().splitlines()
 doc = json.load(open(doc_path, encoding="utf-8"))
 bad = []
+missing = [k for k in keys.split() if k not in doc]
+if missing:
+    bad.append(f"--json lacks keys doctor always writes: {', '.join(missing)}")
+for key in ("rcm_requirements", "presets"):
+    if not isinstance(doc.get(key), list) or not doc.get(key):
+        bad.append(f"--json {key} is empty or not a list — nothing to compare")
+if not isinstance(doc.get("service"), dict):
+    bad.append("--json service is not an object")
 # JSON 의 상태 → 표의 첫 칸(docs/operating.md 의 doctor 표와 같은 낱말)
 NEED = {"ok": "ok", "fail": "FAIL", "warn": "warn", "info": "info", "unknown": "?"}
 STATE = {"ready": "ready", "needs_check": "needs check", "missing": "missing", "unknown": "unknown"}
@@ -258,10 +272,29 @@ for p in doc.get("presets") or []:
         presets[p["name"]] = STATE.get(p.get("state"), "—") if p.get("state") is not None else "—"
 if presets:
     compare("presets", presets)
+# 프로브는 서버가 정의할 때만 있다 — 비어 있으면 표에도 그 절이 없어야 한다
 probes = {n: str(p.get("state")) for n, p in (doc.get("probes") or {}).items()}
 if probes:
     compare("probes", probes)
-path = (doc.get("service") or {}).get("path")
+elif "probes" in lines:
+    bad.append("probes: the table has the section, --json has none")
+s = doc.get("summary")
+if not isinstance(s, dict):
+    bad.append("--json summary is missing or not an object")
+else:
+    want = (
+        f"summary  {s.get('ready')} ready · {s.get('needs_check')} needs check · "
+        f"{s.get('missing')} missing · {s.get('unknown')} unknown"
+    )
+    if s.get("applies_unknown"):
+        want += f" · {s['applies_unknown']} may come (unknown)"
+    if want not in lines:
+        bad.append(f"summary: --json says '{want}', the table does not")
+for key, mark in (("warnings", "warn  "), ("problems", "FAIL  "), ("undecided", "?     ")):
+    for item in doc.get(key) or []:
+        if f"{mark}{item}" not in lines:
+            bad.append(f"{key}: '{item}' is in --json, not in the table")
+path =(doc.get("service") or {}).get("path")
 if not path:
     bad.append("--json has no measured PATH (service.path is null)")
 elif f"PATH     {path}" not in lines:
@@ -274,6 +307,25 @@ if human_rc != str(code) or json_rc != str(code):
 for b in bad:
     print(b)
 sys.exit(1 if bad else 0)
+EOF
+}
+
+# TD24 의 PASS 줄: 무엇을 쟀는지 말한다 — 서비스 파일이 없으면 기본 워커 PATH 를 잰 것이고, 명세
+# 행의 「실제 워커 서비스 환경」을 잰 것이 아니다
+td24_pass_text() { # td24_pass_text <json file>
+  "$PY" -I - "$1" <<'EOF'
+import json, sys
+d = json.load(open(sys.argv[1], encoding="utf-8"))
+s = d.get("service") or {}
+where = (
+    f"service file {s['file']} measured"
+    if s.get("file")
+    else "no service file — default worker PATH measured"
+)
+print(
+    f"PASS ({where}) table and --json agree row by row, exit {d.get('exit')}, "
+    f"measured PATH {s.get('path')}"
+)
 EOF
 }
 
@@ -313,19 +365,24 @@ tn8_verdict() { # tn8_verdict <wait rc> <wait stderr file> <osascript log>
 
 # ── 실행 ───────────────────────────────────────────────────────────────────
 
-main() {
-  local real_home=${HOME:-}
-  case "$real_home" in /?*) ;; *) die "HOME must be an absolute path other than / ($real_home)" ;; esac
-  [ -x "$RCM" ] || die "no $RCM — make the worktree's .venv first"
-  [ -x "$PY" ] || die "no $PY"
-  [ "$(uname -s)" = Darwin ] || die "this harness drives launchd: macOS only"
-  command -v launchctl >/dev/null || die "no launchctl"
-
-  # 운영 설정 경로는 이 변수로만 받는다(launchd 에서 찾지 않는다) — 다른 RCM_* 와 함께 지우기 전에
-  PROD_CONFIG=${RCM_LIVE_PROD_CONFIG:-}
-  local v
+# 운영과 떼어 놓는다: 셸의 RCM_* 를 모두 지우고 HOME 과 XDG 네 폴더를 시험 폴더 안으로 둔다.
+# 이 뒤의 rcm 명령은 모두 이 환경을 물려받는다(시험이 source 뒤 불러 확인한다)
+isolate_env() { # isolate_env <base>
+  local b=$1 v
   for v in $(env | sed -n 's/^\(RCM_[A-Za-z0-9_]*\)=.*/\1/p'); do unset "$v"; done
+  export HOME="$b/home"
+  export XDG_CONFIG_HOME="$b/xdg/config" XDG_DATA_HOME="$b/xdg/data"
+  export XDG_STATE_HOME="$b/xdg/state" XDG_CACHE_HOME="$b/xdg/cache"
+}
 
+main() {
+  local real_home=${HOME:-} v
+  case "$real_home" in /?*) ;; *) die "HOME must be an absolute path other than / ($real_home)" ;; esac
+
+  # 운영 설정 경로는 이 변수로만 받는다(launchd 에서 찾지 않는다) — isolate_env 가 RCM_* 를 지우기 전에
+  PROD_CONFIG=${RCM_LIVE_PROD_CONFIG:-}
+
+  # 포트와 시험 폴더 검사가 도구 검사보다 먼저다 — 어느 쪽이든 아무것도 만들기 전에 멈춘다
   P1=${M5T_PORT:-8794}
   P2=${M5T_PORT2:-$((P1 + 1))}
   is_test_port "$P1" || die "M5T_PORT $P1 is not a test port (8790-8899)"
@@ -335,6 +392,7 @@ main() {
     if lsof -nP -iTCP:"$v" -sTCP:LISTEN >/dev/null 2>&1; then die "port $v is in use"; fi
   done
 
+  [ -x "$PY" ] || die "no $PY"
   RID=$("$PY" -I -c 'import secrets; print(secrets.token_hex(4))')
   if [ -n "${M5T_BASE:-}" ]; then
     B=$M5T_BASE
@@ -344,6 +402,9 @@ main() {
   is_test_base "$B" "$real_home" || die "base $B is not ~/.local/share/rcm-devtest/<name> or ~/.local/share/rcm-devtest-<name>"
   if is_inside "$B" /tmp || is_inside "$B" /private/tmp; then die "base $B is under /tmp"; fi
   [ ! -e "$B" ] || die "$B exists — pick a new name (this harness never reuses or deletes a folder)"
+  [ -x "$RCM" ] || die "no $RCM — make the worktree's .venv first"
+  [ "$(uname -s)" = Darwin ] || die "this harness drives launchd: macOS only"
+  command -v launchctl >/dev/null || die "no launchctl"
   mkdir -p "$(dirname "$B")"
   mkdir "$B" || die "cannot create $B"
   REAL_HOME=$real_home
@@ -357,8 +418,7 @@ main() {
   BOOTED=""
   BG_PIDS=()
 
-  export HOME="$B/home" XDG_CONFIG_HOME="$B/xdg/config" XDG_DATA_HOME="$B/xdg/data"
-  export XDG_STATE_HOME="$B/xdg/state" XDG_CACHE_HOME="$B/xdg/cache"
+  isolate_env "$B"
   cd "$B/home"
   env | grep -E '^(RCM_|XDG_|HOME=)' | sed "s|$REAL_HOME|<HOME>|g" | sort >"$OUT/env.txt" || true
   trap cleanup EXIT
@@ -434,10 +494,15 @@ wait_http() { # wait_http <url> <seconds>
 }
 
 # 잡 하나의 칸: jf <url> <token file> <id> <key>...
+# 토큰은 curl 의 argv 에 두지 않는다(ps 에 보인다). 토큰 파일 옆의 600 헤더 파일을 `-H @파일` 로 준다 —
+# printf 는 셸 내장이라 프로세스 목록에 토큰이 나오지 않는다
 jf() {
-  local url=$1 tok=$2 id=$3
+  local url=$1 tok=$2 id=$3 hdr="$2.header"
   shift 3
-  curl --noproxy '*' -fs -H "Authorization: Bearer $(cat "$tok")" "$url/jobs/$id" | "$PY" -I -c '
+  if [ ! -s "$hdr" ]; then
+    (umask 077 && printf 'Authorization: Bearer %s\n' "$(tr -d '\r\n' <"$tok")" >"$hdr")
+  fi
+  curl --noproxy '*' -fs -H @"$hdr" "$url/jobs/$id" | "$PY" -I -c '
 import json, sys
 d = json.load(sys.stdin)
 print(" ".join(str(d.get(k)) for k in sys.argv[1:]))' "$@"
@@ -659,9 +724,7 @@ run_td24() {
     >"$OUT/td24-doctor.json" 2>"$OUT/td24-doctor.err" || jr=$?
   log "TD24 doctor exit: table $hr · --json $jr"
   if why=$(doctor_same "$OUT/td24-doctor.txt" "$OUT/td24-doctor.json" "$hr" "$jr" 2>&1); then
-    local path
-    path=$("$PY" -I -c 'import json,sys; print(json.load(open(sys.argv[1]))["service"]["path"])' "$OUT/td24-doctor.json")
-    verdict TD24 PASS "table and --json agree row by row, exit $jr, measured PATH $path"
+    verdict_line TD24 "$(td24_pass_text "$OUT/td24-doctor.json")"
   else
     verdict TD24 FAIL "$(printf '%s' "$why" | tr '\n' ';' | cut -c1-400)"
   fi

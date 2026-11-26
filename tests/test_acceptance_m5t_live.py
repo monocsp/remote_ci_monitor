@@ -474,7 +474,8 @@ def test_tr16_main_isolates_before_the_first_rcm_command() -> None:
     body = text[start : text.index("\n}\n", start)]
     assert 'isolate_env "$B"' in body
     assert body.index('mkdir "$B"') < body.index('isolate_env "$B"') < body.index("run_d352")
-    assert '"$RCM" ' not in body  # main 자신은 rcm 을 부르지 않는다
+    # main 자신은 rcm 을 부르지 않는다(`[ -x "$RCM" ]` 검사만 있다)
+    assert not re.search(r'^\s*"\$RCM"\s', body, re.M)
 
 
 def _test_base(tmp_path: Path) -> Path:
