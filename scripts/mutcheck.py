@@ -6507,20 +6507,6 @@ MUTANTS = (
         ),
     ),
     Mutant(
-        # 75 반복 결과가 취소에 지면 홀드 판단 없이 cancelled 로 닫는다
-        name="local-retried-race-hold-dropped",
-        path="src/remote_ci_monitor/worker.py",
-        old=(
-            "            # mutcheck: local-retried-race-hold-dropped\n"
-            "            self._close_cancelled_before_start(job, hold_cause=hold_cause)\n"
-        ),
-        new="            self._close_cancelled_before_start(job, hold_cause=None)\n",
-        tests=(
-            "tests/test_hold_notify_m5tb.py::"
-            "test_rl54_a_local_lane_close_that_loses_to_a_cancel_keeps_the_hold_decision",
-        ),
-    ),
-    Mutant(
         # 로컬 레인이 「띄우는 중」을 모른다 — 띄운 뒤의 예외도 「띄운 적 없음」(확인됨)으로 읽는다
         name="local-launch-not-marked",
         path="src/remote_ci_monitor/worker.py",
@@ -6801,6 +6787,21 @@ MUTANTS = (
         tests=(
             "tests/test_worker_session_m5tb.py::"
             "test_gap8_the_worker_logs_one_line_when_it_replaced_a_live_process",
+        ),
+    ),
+    Mutant(
+        # P6-2 #1 표식 전에 반복 정책을 얼린 잡이 표식 뒤 claim 되면 75 에서 다시 돈다 — 명령 두 번.
+        # 이 변이가 대신한 local-retried-race-hold-dropped 는 이 고침 뒤 동등 변이다(표식 잡은
+        # `retried` 로 가지 않아 그 자리의 hold_cause 가 언제나 None)
+        name="irreversible-job-retried",
+        path="src/remote_ci_monitor/core/model.py",
+        old="            and self.irreversible is not True  # mutcheck: irreversible-job-retried\n",
+        new="",
+        tests=(
+            "tests/test_worker_session_m5tb.py::"
+            "test_p62_1_a_remote_job_with_a_retry_frozen_before_the_mark_is_not_retried",
+            "tests/test_hold_notify_m5tb.py::"
+            "test_p62_1_a_local_job_with_a_retry_frozen_before_the_mark_is_not_retried",
         ),
     ),
 )

@@ -786,7 +786,8 @@ class Worker(threading.Thread):
         if not closed and oc.state == RETRIED:
             # `retried` 는 `running` 에서만 간다(M5s 결정 225) — 그 사이 취소가 들어왔다. 취소가
             # 이기고 다음 시도는 없다. 프로세스는 이미 끝났으니 여느 취소처럼 요청자 이름으로 닫는다
-            # mutcheck: local-retried-race-hold-dropped
+            # 표식 잡은 반복하지 않으므로(`Job.retries_on`, P6-2 #1) 여기의 hold_cause 는 늘
+            # None 이다 — 그래도 러너가 정한 값을 그대로 넘긴다
             self._close_cancelled_before_start(job, hold_cause=hold_cause)
         # ── 정리 ──
         # 반복할 시도의 워크스페이스는 남기지 않는다(M5s §4.2) — 실패가 아니고, 12번이면 12개다

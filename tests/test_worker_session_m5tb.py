@@ -202,6 +202,45 @@ def test_gap2_a_fenced_sessions_natural_end_goes_as_the_narrow_confirm(
     assert w.fenced.is_set()
 
 
+@pytest.mark.parametrize("gone", [True, None])
+def test_p62_1_a_remote_job_with_a_retry_frozen_before_the_mark_is_not_retried(tmp_path, gone):
+    """# P6-2 #1 표식 전에 `[retry]` 로 제출된 잡은 반복 정책을 얼린 채 대기한다. reload 가
+    `irreversible = true` 를 붙인 뒤 원격 워커가 claim 하면 claim 이 표식을 얼린다. 그 잡의 75
+    finish 를 `retried` 로 닫으면 다음 시도가 같은 명령을 다시 돌린다 — 표식 잡은 반복하지
+    않는다. `failed` 로 닫히고 다음 시도가 없다. 홀드는 `group_gone` 대로다."""
+    from remote_ci_monitor.core.model import FAILED
+
+    retry = {"on_exit": 75, "interval_seconds": 60, "max_attempts": 3}
+    deploy = sh("deploy", "echo deploy", source_modes=["git_ref"], repo="app", retry=retry)
+    presets = [p for p in PRESETS if p["name"] != "deploy"]
+    srv = WorkerServer(tmp_path, presets=[*presets, deploy])
+    try:
+        jid = srv.git_ref_job()
+        assert job_of(srv, jid).retry_on_exit == 75  # 제출 때 얼었다
+        # reload: 표식을 달면서 `[retry]` 를 뺐다(둘을 함께 두면 로더가 거절한다, P6 GAP4)
+        marked = parse_preset(
+            sh("deploy", "echo deploy", source_modes=["git_ref"], repo="app", irreversible=True)
+        )
+        srv.cfg.presets = (*(p for p in srv.cfg.presets if p.name != "deploy"), marked)
+        srv.app._sync_irreversible()
+        srv.registered("build-02")
+        assert srv.claimed("build-02") == jid
+        assert job_of(srv, jid).irreversible is True  # claim 때 얼었다
+        body: dict[str, Any] = {"outcome": "failed", "exit_code": 75}
+        if gone is not None:
+            body["group_gone"] = gone
+        status, answer = srv.req(
+            "POST", f"/worker/jobs/{jid}/finish", token="build-02", json_body=body
+        )
+        assert (status, answer.get("state")) == (200, FAILED), answer
+        j = job_of(srv, jid)
+        assert (j.state, j.exit_code, j.retried_as) == (FAILED, 75, None)
+        assert srv.store.list_scheduled() == []  # 다음 시도가 없다
+        assert len(hold_rows(srv)) == (0 if gone else 1)
+    finally:
+        srv.close()
+
+
 def test_gap6_an_artifact_upload_fenced_while_it_streams_publishes_nothing(srv, monkeypatch):
     """# GAP6 산출물 PUT 은 받기 전에 세션을 한 번 본다. 바이트를 받는 동안 같은 토큰의 새
     프로세스가 그 세션을 펜싱하면, 받은 뒤 발행하기 전에 다시 보고 버린다 — 409

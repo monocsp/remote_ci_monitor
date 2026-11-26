@@ -52,7 +52,8 @@ of a key bumps that number and is listed here.
   ([#284](https://github.com/monocsp/remote_ci_monitor/pull/284))
 - **An `irreversible` preset cannot also have `[presets.retry]`.** A retry runs the command
   again, so the server refuses to load that combination
-  (`irreversible presets cannot have [retry]`).
+  (`irreversible presets cannot have [retry]`). A job submitted with a retry before the mark is
+  never retried once it is claimed as irreversible: its retry exit code ends it `failed`.
   ([#284](https://github.com/monocsp/remote_ci_monitor/pull/284))
 - **`rcm release-hold N [--reason TEXT] [--json]`** releases a group hold after an admin checked
   the machine (exit 0 released, 1 no open hold, 2 refused, 3 unreachable or a server error).

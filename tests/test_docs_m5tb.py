@@ -197,6 +197,15 @@ def test_gap4_the_irreversible_section_says_retry_is_refused_with_the_loader_mes
     assert quoted in str(e.value)
 
 
+def test_p62_1_the_irreversible_section_says_a_frozen_retry_is_not_used():
+    """# P6-2 #1 표식 전에 반복을 얼린 잡도 표식 잡으로 claim 되면 반복하지 않는다 — 문서가
+    그것을 말한다."""
+    body = flat(section(CONFIGURATION, "Jobs that must not run twice: `irreversible`"))
+    assert "submitted with a retry before you marked its preset" in body
+    assert "it is never retried" in body
+    assert "ends it `failed`, with no next attempt" in body
+
+
 IRREVERSIBLE = "Jobs that must not run twice: `irreversible`"
 
 

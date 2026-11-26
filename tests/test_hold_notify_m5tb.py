@@ -542,6 +542,7 @@ def _local_lane_run(
     rc: int | None = 0,
     flags: dict[str, bool] | None = None,
     race: str | None = None,
+    frozen_retry: bool = False,
 ):
     """로컬 레인 하나가 표식 잡 하나를 가짜 러너로 돌린다. 러너는 `how` 대로 끝난다 — 결과
     (`result`, `rc` · `flags` 는 그 결과의 종료 코드와 취소 · 시간 초과 · 멈춤 표시) ·
@@ -549,8 +550,12 @@ def _local_lane_run(
     (`*_before_spawn`, `spawning` 을 부르지 않는다). `race` 는 러너 뒤의 경합이다.
 
     - `crash_after_result`: 러너가 결과를 낸 뒤 레인의 종료 규칙이 터진다(바깥 처리기).
-    - `cancel_before_retried`: 75 반복 결과를 닫기 직전에 취소가 들어온다(`retried` 가 진다).
+    - `cancel_before_retried`: 반복 정책을 얼린 잡이 75 로 끝나고 닫기 직전에 취소가 들어온다.
+      표식 잡은 반복하지 않으므로(P6-2 #1) 그 결과는 `failed` 로 닫힌다.
     - `cancel_before_fail`: 띄운 뒤의 `RunnerError` 를 닫기 직전에 취소가 들어온다.
+
+    `frozen_retry` 는 표식 전에 `[retry]` 로 제출돼 반복 정책을 얼린 잡이다(`cancel_before_retried`
+    도 그 잡이다).
 
     (잡 id, 홀드가 있는가, 버스 사건, 닫힌 잡)을 돌려준다."""
     import time
@@ -595,7 +600,7 @@ def _local_lane_run(
     monkeypatch.setattr(worker_mod, "run_job", fake_run_job)
     monkeypatch.setattr(worker_mod, "outcome_for", racing_outcome_for)
     # 반복은 git_ref 프리셋에만 있다(M5s) — 가짜 러너라 자재화는 돌지 않는다
-    retrying = race == "cancel_before_retried"
+    retrying = frozen_retry or race == "cancel_before_retried"
     retry = {
         "source_modes": ["git_ref"],
         "repo": "app",
@@ -721,12 +726,31 @@ def test_rl54_a_local_lane_error_after_the_runner_returned_keeps_that_result(
 def test_rl54_a_local_lane_close_that_loses_to_a_cancel_keeps_the_hold_decision(
     tmp_path, monkeypatch, race, gone, held
 ):
-    """P3 3라운드 LOW(A2): 로컬 레인의 닫기가 취소에 지면 `_close_cancelled_before_start` 가
-    닫는다. 75 반복 결과(`retried` 는 `running` 에서만 간다)와 띄운 뒤의 `RunnerError`
-    (`_fail_before_start`)가 그렇다. 두 자리 모두 러너가 정한 홀드를 그대로 넘긴다."""
+    """P3 3라운드 LOW(A2): 로컬 레인의 닫기가 취소와 겹쳐도 러너가 정한 홀드를 그대로 넘긴다.
+    띄운 뒤의 `RunnerError` 는 취소에 지고 `_close_cancelled_before_start` 가 닫는다
+    (`_fail_before_start`). 반복 정책을 얼린 표식 잡의 75 는 반복하지 않으므로(P6-2 #1 — 전에는
+    `retried` 가 취소에 졌다) `failed` 로 닫히고, 그 닫기도 홀드 판단을 버리지 않는다."""
     how = "result" if race == "cancel_before_retried" else "runner_error"
     jid, has_hold, events, job = _local_lane_run(tmp_path, monkeypatch, how, gone, rc=75, race=race)
-    assert job.state == "cancelled"
+    assert job.state == ("failed" if race == "cancel_before_retried" else "cancelled")
+    assert job.retried_as is None
+    assert has_hold is held
+    assert events == ([jid] if held else [])
+
+
+@pytest.mark.parametrize("gone, held", [(False, True), (True, False)])
+def test_p62_1_a_local_job_with_a_retry_frozen_before_the_mark_is_not_retried(
+    tmp_path, monkeypatch, gone, held
+):
+    """# P6-2 #1 표식 전에 `[retry]` 로 제출된 잡은 제출 때 반복 정책을 얼린다. 표식 뒤에 claim
+    되면 claim 이 `irreversible` 을 얼린다 — 그 잡이 반복 종료 코드(75)로 끝나도 `retried` 로
+    닫고 다음 시도를 만들면 되돌릴 수 없는 명령이 두 번 돈다. 표식 잡은 반복하지 않는다:
+    `failed` 로 닫히고 다음 시도가 없으며, 홀드 판단은 `group_gone` 그대로다."""
+    jid, has_hold, events, job = _local_lane_run(
+        tmp_path, monkeypatch, "result", gone, rc=75, frozen_retry=True
+    )
+    assert job.retry_on_exit == 75 and job.irreversible is True  # 둘 다 얼었다
+    assert (job.state, job.exit_code, job.retried_as) == ("failed", 75, None)
     assert has_hold is held
     assert events == ([jid] if held else [])
 

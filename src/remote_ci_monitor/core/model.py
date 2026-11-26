@@ -411,9 +411,14 @@ class Job:
         return self.chain_id if self.chain_id is not None else self.id
 
     def retries_on(self, rc: int | None) -> bool:
-        """이 종료코드가 얼린 반복 정책에 걸리나. 선언이 없거나 제출이 껐으면 언제나 False."""
+        """이 종료코드가 얼린 반복 정책에 걸리나. 선언이 없거나 제출이 껐으면 언제나 False.
+
+        claim 때 「되돌릴 수 없음」을 얼린 잡도 언제나 False 다(P6-2 #1). 반복 정책은 제출 때
+        얼므로 표식 전에 `[retry]` 로 제출된 잡이 표식 뒤에 claim 되면 둘 다 갖는다 — 반복하면
+        같은 명령이 두 번 돈다. 로컬 레인과 원격 finish 가 모두 이 함수로 정한다."""
         return (
             rc is not None
+            and self.irreversible is not True  # mutcheck: irreversible-job-retried
             and self.retry_on_exit is not None
             and not self.retry_disabled
             and rc == self.retry_on_exit
