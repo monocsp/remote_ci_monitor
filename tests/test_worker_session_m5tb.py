@@ -951,6 +951,24 @@ def test_rl31_identity_unknown_cases_send_no_signal(tmp_path, monkeypatch):
         _kill(p.pid)
 
 
+@pytest.mark.parametrize("broken", ["unreadable", "not_json", "not_an_object"])
+def test_rl31_a_proc_record_that_exists_but_cannot_be_read_is_unknown(tmp_path, broken):
+    """`proc.json` 이 **없으면** 띄운 적 없음(CONFIRMED)이다. 있는데 읽지 못하거나 깨졌으면
+    띄웠는지 모른다 — UNKNOWN 이고 신호도 없다(P3 2라운드 LOW). 없음과 못 읽음을 섞으면 도는
+    그룹이 사라졌다고 판정받는다."""
+    d = _dead_job(tmp_path, None)
+    path = d / "proc.json"
+    if broken == "unreadable":
+        path.mkdir()  # 읽으면 OSError(IsADirectoryError)
+    elif broken == "not_json":
+        path.write_text('{"pgid": 4', encoding="utf-8")
+    else:
+        path.write_text("[1, 2]", encoding="utf-8")
+    logs: list[str] = []
+    assert rw.judge_orphan(d, 1, logs.append) == rw.UNKNOWN
+    assert any("proc.json" in m for m in logs)
+
+
 def test_rl31_a_leaderless_group_is_unknown_and_left_alone(tmp_path):
     """(b) 리더(pid = pgid)가 죽고 멤버만 산다(F59 · W13)."""
     pidfile = tmp_path / "member.pid"

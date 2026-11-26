@@ -445,9 +445,22 @@ def try_lock(path: Path) -> int | None:
 
 def judge_orphan(job_dir: Path, grace_seconds: float, log: Callable[[str], None]) -> str:
     """죽은 세션의 잡 하나를 판정한다(§4.4 step 6). 같은 그룹일 때만 신호를 보낸다."""
-    proc = _read_json(job_dir / "proc.json")
-    if proc is None:
+    try:
+        text = (job_dir / "proc.json").read_text(encoding="utf-8")
+    except FileNotFoundError:
         return CONFIRMED  # Popen 직전 확인 전에 죽었다 — 띄운 적 없음(결정 333)
+    except OSError as e:
+        # 있는데 못 읽는다 — 띄웠는지 모른다. 없음(띄운 적 없음)과 섞으면 도는 그룹이 사라졌다고
+        # 판정받는다(P3 2라운드 LOW)
+        log(f"orphan #{job_dir.name}: cannot read proc.json ({type(e).__name__}) — not touching it")
+        return UNKNOWN  # mutcheck: orphan-unreadable-proc-confirmed
+    try:
+        proc = json.loads(text)
+    except ValueError:
+        proc = None
+    if not isinstance(proc, dict):  # mutcheck: orphan-broken-proc-confirmed
+        log(f"orphan #{job_dir.name}: proc.json is not a record — not touching it")
+        return UNKNOWN
     pgid = proc.get("pgid")
     if not isinstance(pgid, int) or isinstance(pgid, bool) or pgid <= 1:
         return UNKNOWN  # 띄우는 순간 죽었을 수 있다

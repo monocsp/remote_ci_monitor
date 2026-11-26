@@ -6338,6 +6338,29 @@ MUTANTS = (
             "test_rl34_f_the_worker_hands_its_monotonic_clock_to_the_runner",
         ),
     ),
+    # ── M5t-b P3 2라운드 LOW — 있는데 못 읽는 proc.json ──
+    Mutant(
+        # 깨진 proc.json(JSON 아님 · 객체 아님)을 「띄운 적 없음」으로 읽는다
+        name="orphan-broken-proc-confirmed",
+        path="src/remote_ci_monitor/remote_worker.py",
+        old="    if not isinstance(proc, dict):  # mutcheck: orphan-broken-proc-confirmed\n",
+        new="    if not isinstance(proc, dict):\n        return CONFIRMED\n",
+        tests=(
+            "tests/test_worker_session_m5tb.py::"
+            "test_rl31_a_proc_record_that_exists_but_cannot_be_read_is_unknown",
+        ),
+    ),
+    Mutant(
+        # 읽을 수 없는 proc.json(OSError)을 「띄운 적 없음」으로 읽는다
+        name="orphan-unreadable-proc-confirmed",
+        path="src/remote_ci_monitor/remote_worker.py",
+        old="        return UNKNOWN  # mutcheck: orphan-unreadable-proc-confirmed\n",
+        new="        return CONFIRMED\n",
+        tests=(
+            "tests/test_worker_session_m5tb.py::"
+            "test_rl31_a_proc_record_that_exists_but_cannot_be_read_is_unknown",
+        ),
+    ),
     # ── M5t-b P3 2라운드 HIGH — 로컬 레인이 러너의 group_gone 을 읽지 않는다 ──
     Mutant(
         # 로컬 레인이 그룹이 사라졌다는 확인 없이 표식 잡을 닫고 그룹을 연다(§4.12 확인 표 4행)
