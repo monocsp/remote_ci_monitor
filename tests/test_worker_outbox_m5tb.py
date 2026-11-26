@@ -2287,43 +2287,58 @@ def test_b8_1_a_registration_does_not_wait_on_a_finish_whose_end_is_ahead_of_the
     ], w2.logs
 
 
-class _ClockStops(FakeServer):
-    """처음 `ticks` 번의 요청만 시계를 민다 — 그 뒤 벽시계가 서 있다. D 의 클라이언트는 사본이라
-    남은 횟수를 사본과 나눈다."""
+class _WallStands(FakeServer):
+    """요청마다 단조 시계만 `tick` 초 민다 — 벽시계는 서 있다. D 큐 등록 대기는 단조 시계로
+    잰다(§4.1.3 「D 큐 등록 대기」). D 의 클라이언트는 사본이라 사본도 이 갈래여야 한다."""
 
-    def __init__(self, clock: WClock, *, tick: float, ticks: int) -> None:
-        super().__init__(clock, tick=tick)
-        self.left = [ticks]
-
-    def __copy__(self) -> _ClockStops:
-        other = _ClockStops.__new__(_ClockStops)
+    def __copy__(self) -> _WallStands:
+        other = _WallStands.__new__(_WallStands)
         other.__dict__.update(self.__dict__)
         return other
 
     def _next(self, route: str) -> None:
         with self.lock:
-            self.left[0] -= 1
-            if self.left[0] < 0:
-                self.tick = 0.0
-        super()._next(route)
+            self.clock.mono += self.tick
+        tick, self.tick = self.tick, 0.0
+        try:
+            super()._next(route)
+        finally:
+            self.tick = tick
 
 
-def test_b8_1_b_the_wait_for_an_owed_finish_has_a_fixed_cap(tmp_path, fast, monkeypatch):
-    """# batch-8 #1 등록 상한(300초)에 닿았을 때 끝난 잡의 나이가 0 과 300초 사이이고(시계가 조금
-    뒤로 갔다) 벽시계가 더 가지 않는다. finish 는 끝난 지 300초가 될 때까지 먼저 가지 않으니,
-    빚진 finish 를 기다리는 등록은 고정된 상한(`OWED_FINISH_WAIT_SECONDS`) 뒤에 끝나야 한다.
-    전에는 그 상한이 없어 시계가 따라잡을 때까지 기다렸다."""
-    monkeypatch.setattr(rw, "OWED_FINISH_WAIT_SECONDS", 0.3, raising=False)
+def _stamped(w: rw.RemoteWorker, clock: WClock) -> list[tuple[str, float]]:
+    """워커의 로그 줄마다 그때의 단조 시계를 함께 남긴다."""
+    stamps: list[tuple[str, float]] = []
+    say = w.log
+
+    def log(msg: str) -> None:
+        stamps.append((msg, clock.mono))
+        say(msg)
+
+    w.log = log  # type: ignore[method-assign]
+    return stamps
+
+
+def test_b8_1_b_the_wait_for_an_owed_finish_has_a_fixed_cap(tmp_path, fast):
+    """# batch-8 #1 등록 상한(300초)에 닿았을 때 끝난 잡의 나이가 0 과 300초 사이이고 벽시계가 더
+    가지 않는다(시계가 그만큼 뒤로 갔다). finish 는 끝난 지 300초가 될 때까지 먼저 가지 않으니,
+    빚진 finish 를 기다리는 등록은 고정된 상한(`OWED_FINISH_WAIT_SECONDS`, 단조 시계) 뒤에 끝나야
+    한다. 전에는 그 상한이 없어 시계가 따라잡을 때까지 기다렸다.
+    batch-9 #2 · #3: 벽시계를 요청 10번 뒤에 세우던 판은 보내는 스레드가 대기 고리의 0.05초
+    박자보다 빨라야 초록이었다. 이제 벽시계는 처음부터 서 있고 단조 시계만 간다 — 박자와
+    상관없이 나이가 늘 50초이고, 등록은 단조로 300 + 60초가 지나야 한다."""
     clock = WClock()
-    fake = _ClockStops(clock, tick=40, ticks=10)  # 400초를 민 뒤 선다
+    fake = _WallStands(clock, tick=40)
     w1 = wworker(tmp_path, fake, clock)
     w1.prepare_sessions()
     ended_queue(w1, 7, b"x\n")
     sid = w1.session_id
     die(w1)
-    clock.wall -= timedelta(seconds=350)  # 상한에서 잡의 나이는 50초쯤이다
+    clock.wall += timedelta(seconds=50)  # 다시 뜬 때 잡의 나이는 50초이고 그 뒤 벽시계는 선다
     fake.script["log"] = [http(503)] * 1000000
     w2 = restart(tmp_path, fake, clock)
+    stamps = _stamped(w2, clock)
+    began = clock.mono
     assert _run_bounded(w2.send_dead_queues, w2, 5), "registration waits on an owed finish"
     assert "finish" not in fake.routes()
     age = (clock.wall - T0W).total_seconds()
@@ -2333,6 +2348,9 @@ def test_b8_1_b_the_wait_for_an_owed_finish_has_a_fixed_cap(tmp_path, fast, monk
         f"dead session {sid[:8]} queue not delivered after 300s of server errors"
         " — registering; job #7 will close as restarted-without-job"
     ], w2.logs
+    at = [m for x, m in stamps if "queue not delivered" in x][0] - began
+    # 빚진 finish 를 정말 기다렸다 — 300초에서 바로 끊지 않았다
+    assert at >= rw.DEAD_SESSION_WAIT_SECONDS + rw.OWED_FINISH_WAIT_SECONDS, at
 
 
 def test_b8_1_c_the_owed_finish_wait_is_one_backoff_and_two_requests():
@@ -2343,6 +2361,83 @@ def test_b8_1_c_the_owed_finish_wait_is_one_backoff_and_two_requests():
     req = getattr(rc, "WORKER_REQUEST_TIMEOUT_SECONDS", None)
     assert req == rc.WorkerClient("http://fake", "t").timeout == 15
     assert getattr(rw, "OWED_FINISH_WAIT_SECONDS", None) == rw.BACKOFF_MAX_SECONDS + 2 * req == 60
+
+
+class _WallSteps(FakeServer):
+    """요청마다 두 시계를 `tick` 초 밀고, 첫 요청에서만 벽시계를 `step` 초 더 민다(NTP 가 시계를
+    앞으로 맞췄다)."""
+
+    def __init__(self, clock: WClock, *, tick: float, step: float) -> None:
+        super().__init__(clock, tick=tick)
+        self.step = [step]
+
+    def __copy__(self) -> _WallSteps:
+        other = _WallSteps.__new__(_WallSteps)
+        other.__dict__.update(self.__dict__)
+        return other
+
+    def _next(self, route: str) -> None:
+        with self.lock:
+            step, self.step[0] = self.step[0], 0.0
+            self.clock.wall += timedelta(seconds=step)
+        super()._next(route)
+
+
+def test_b9_3_a_a_wall_clock_step_forward_does_not_shorten_the_dead_session_wait(
+    tmp_path, fast, monkeypatch
+):
+    """# batch-9 #3 D 큐 등록 대기는 단조 시계로 잰다(§4.1.3 「D 큐 등록 대기(3판)」). 기다리는
+    중 벽시계가 250초 앞으로 뛰어도 등록은 단조로 300초가 지나야 한다 — 벽시계로 세면 50초 남짓에
+    등록해 D 의 큐를 너무 일찍 버린다. finish 는 벽시계로 300초가 되어 먼저 가 보고(500) 빚은
+    없다."""
+    # 보내는 쪽 백오프를 늘려 대기 고리(0.05초 박자)가 요청 하나하나를 본다 — 아니면 한 박자에
+    # 단조 시간이 수백 초씩 흘러 벽시계로 세는 판도 300초를 넘겨 초록일 수 있다
+    monkeypatch.setattr(rw, "BACKOFF_START_SECONDS", 0.1)
+    monkeypatch.setattr(rw, "BACKOFF_MAX_SECONDS", 0.1)
+    clock = WClock()
+    fake = _WallSteps(clock, tick=20, step=250)
+    w1 = wworker(tmp_path, fake, clock)
+    w1.prepare_sessions()
+    ended_queue(w1, 7, b"x\n")
+    die(w1)
+    fake.script["log"] = [http(503)] * 100000
+    fake.script["finish"] = [http(500)] * 100000
+    w2 = restart(tmp_path, fake, clock)
+    stamps = _stamped(w2, clock)
+    began = clock.mono
+    assert _run_bounded(w2.send_dead_queues, w2, 15), w2.logs
+    at = [m for x, m in stamps if "queue not delivered" in x]
+    assert at, w2.logs
+    assert at[0] - began >= rw.DEAD_SESSION_WAIT_SECONDS, (at[0] - began, w2.logs)
+    assert "finish" in fake.routes()  # 먼저 가 본 finish 가 있었다 — 빚을 기다린 것이 아니다
+
+
+def test_b9_3_b_a_wall_clock_that_went_back_and_stands_does_not_stall_the_dead_session_wait(
+    tmp_path, fast
+):
+    """# batch-9 #3 벽시계가 하루 뒤로 가고 그 뒤 서 있다. 벽시계로 세면 흐른 시간이 늘 0 이라
+    등록이 끝없이 기다린다. 단조 시계로 300초가 지나면 등록한다. 끝난 시각이 미래라 빚진 finish
+    는 없다."""
+    clock = WClock()
+    fake = _WallStands(clock, tick=40)
+    w1 = wworker(tmp_path, fake, clock)
+    w1.prepare_sessions()
+    ended_queue(w1, 7, b"x\n")
+    sid = w1.session_id
+    die(w1)
+    clock.wall -= timedelta(days=1)
+    fake.script["log"] = [http(503)] * 1000000
+    w2 = restart(tmp_path, fake, clock)
+    stamps = _stamped(w2, clock)
+    began = clock.mono
+    assert _run_bounded(w2.send_dead_queues, w2, 5), "the wall clock stalls the dead-session wait"
+    said = [x for x in w2.logs if "queue not delivered" in x]
+    assert said == [
+        f"dead session {sid[:8]} queue not delivered after 300s of server errors"
+        " — registering; job #7 will close as restarted-without-job"
+    ], w2.logs
+    at = [m for x, m in stamps if "queue not delivered" in x][0] - began
+    assert at >= rw.DEAD_SESSION_WAIT_SECONDS, at
 
 
 def test_b8_3_a_finish_sent_first_behind_the_log_names_only_the_log(tmp_path, fast):

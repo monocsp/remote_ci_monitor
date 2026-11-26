@@ -437,7 +437,8 @@ def test_b7_the_report_queue_section_says_local_errors_count_and_what_a_finish_l
     ) in body
     assert "Time without a connection does not count toward the 300 s." in body
     assert "A local error (the spooled log cannot be read, an unexpected error) counts" in body
-    assert "The finish of a job that ended is tried at least once before that" in body
+    # batch-9 #1 로그 · 번들 요청에 묶인 큐의 finish 는 가 보지 못한다 — 「한 번은」은 거짓이다
+    assert "tried at least once" not in body
     assert "stopped on a local error" not in body
     assert "Only time the server answers counts toward the 300 s" not in body
     assert (
@@ -451,7 +452,8 @@ def test_b7_the_report_queue_section_says_local_errors_count_and_what_a_finish_l
 
 def test_b8_the_report_queue_section_gives_the_worst_wait_for_an_owed_finish():
     """# batch-8 #1 등록이 빚진 finish 를 기다리는 최악의 시간을 숫자로 적는다 — 300초 상한 뒤
-    60초(백오프 한 번 · 요청 두 번). 벽시계가 뒤로 가 끝난 시각이 미래인 잡은 기다리지 않는다."""
+    60초(백오프 한 번 · 요청 두 번). 벽시계가 뒤로 가 끝난 시각이 미래인 잡은 기다리지 않는다.
+    batch-9 #1 · #3: 그 60초 안에 finish 를 못 해 보는 갈래와 단조 시계를 적는다."""
     from remote_ci_monitor import remote_worker as rw
     from remote_ci_monitor.client import WORKER_REQUEST_TIMEOUT_SECONDS
 
@@ -460,8 +462,20 @@ def test_b8_the_report_queue_section_gives_the_worst_wait_for_an_owed_finish():
     backoff = int(rw.BACKOFF_MAX_SECONDS)
     req = int(WORKER_REQUEST_TIMEOUT_SECONDS)
     assert (
-        f"registration waits for that try at most {extra} s past the 300 s"
+        f"registration waits for that finish no more than {extra} s past its 300 s"
         f" (one {backoff} s backoff and two {req} s requests)"
+    ) in body
+    # batch-9 #1 그 60초 안에 finish 를 못 해 보는 갈래도 적는다 — 보내는 스레드가 로그 POST
+    # (시한 60초) · 번들 PUT(시한 300초)에 묶여 있으면 등록은 기다리지 않는다
+    assert (
+        "when the queue is held by a log request (up to 60 s) or a bundle upload (up to 300 s),"
+        " the finish is not tried and the job closes as restarted-without-job"
+    ) in body
+    assert "registration waits for that try at most" not in body
+    # batch-9 #3 두 대기는 단조 시계로 잰다(§4.1.3 「D 큐 등록 대기(3판)」)
+    assert (
+        "Registration counts both waits on the monotonic clock, so setting the wall clock forward"
+        " or back does not shorten or stall them"
     ) in body
     assert "A job whose end time is ahead of the clock (the clock went back) is not waited for" in (
         body
