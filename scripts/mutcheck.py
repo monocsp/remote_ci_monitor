@@ -3473,6 +3473,20 @@ MUTANTS = (
         ),
     ),
     Mutant(
+        # timeout 의 시간을 `\d+(.\d+)?` 로만 읽는다 — `timeout .5 rcm serve` 의 명령이 `.5` 가
+        # 된다(P6 재확인 v1-6 · v2-5)
+        name="guard-timeout-strtod-duration-missed",
+        path="tools/guard_production.py",
+        old=(
+            '    r"(?:(?:\\d+(?:\\.\\d*)?|\\.\\d+)(?:e[+-]?\\d+)?|inf(?:inity)?)[smhd]?", '
+            "re.IGNORECASE\n"
+        ),
+        new='    r"\\d+(?:\\.\\d+)?[smhd]?"\n',
+        tests=(
+            "tests/test_guard_production_setup.py::test_b9_timeout_durations_that_strtod_reads_are_stripped",
+        ),
+    ),
+    Mutant(
         # 감싸기를 이름(basename)이 아니라 글자로 본다 — `/usr/bin/env rcm token --config <운영>`
         # · `/usr/bin/nohup rcm serve` 가 지나간다(P3 5라운드 v2-1)
         name="guard-wrapper-path-missed",

@@ -1246,3 +1246,13 @@ def test_b9_354_the_launcher_deny_names_its_cause_and_says_split(command, launch
     assert f"`{launcher}`" in verdict.reason and f"`{word}`" in verdict.reason, verdict.reason
     assert "two Bash calls" in verdict.reason, verdict.reason
     assert PLAIN_MESSAGE in verdict.reason, verdict.reason
+
+
+# ── P6 재확인(batch 9) v1-6 · v2-5: timeout 의 시간 `.5` · `1e1` · `inf` ──
+
+
+@pytest.mark.parametrize("duration", [".5", "1e1", "inf", "INF", "infinity", "2.5e-1m", "1.s"])
+def test_b9_timeout_durations_that_strtod_reads_are_stripped(duration):
+    # GNU timeout 은 시간을 strtod 로 읽는다 — `.5` · `1e1` · `inf` 도 시간이다
+    verdict = judge(f"timeout {duration} rcm serve --config /home/op/.config/rcm/server.toml")
+    assert verdict is not None and verdict.decision == "deny", duration

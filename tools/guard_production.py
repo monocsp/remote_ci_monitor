@@ -325,8 +325,11 @@ def _tokens(segment: str) -> list[str]:
         return text.split()
 
 
-#: timeout 의 시간 낱말(`30` · `1.5m` · `2h`)
-_DURATION = re.compile(r"\d+(?:\.\d+)?[smhd]?")
+#: timeout 의 시간 낱말(`30` · `1.5m` · `2h`). GNU timeout 은 strtod 로 읽으므로 `.5` · `1.` ·
+#: `1e1` · `inf` · `infinity` 도 시간이다(P6 재확인 v1-6 · v2-5)
+_DURATION = re.compile(
+    r"(?:(?:\d+(?:\.\d*)?|\.\d+)(?:e[+-]?\d+)?|inf(?:inity)?)[smhd]?", re.IGNORECASE
+)
 #: 값을 다음 낱말로 받는 timeout 플래그
 _TIMEOUT_VALUE_FLAGS = frozenset({"-s", "--signal", "-k", "--kill-after"})
 #: nice 의 조정값을 붙여 쓴 꼴(`-5` · `-n5` · `-n-5` · `--adjustment=5`)
