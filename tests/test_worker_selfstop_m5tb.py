@@ -530,9 +530,9 @@ def test_rl34_grace_j_and_the_threshold(tmp_path, grace, conf_grace, want_grace,
     assert plain.irreversible is False and plain.grace_seconds == conf_grace
 
 
-def _stopped(w, job_id: int = 7) -> bool:
-    obs = w._observers.get(job_id)
-    return obs is not None and obs.self_stop.is_set()
+def _stopped(runner: FakeRunner) -> bool:
+    # 관찰자를 러너에서 읽는다 — 멈춘 잡은 finish 뒤 워커의 관찰자 표에서 빠진다
+    return runner.observer.self_stop.is_set()
 
 
 def test_rl34_the_watchdog_stops_an_irreversible_job_exactly_at_g_minus_m(tmp_path, monkeypatch):
@@ -541,10 +541,10 @@ def test_rl34_the_watchdog_stops_an_irreversible_job_exactly_at_g_minus_m(tmp_pa
     runner, t = start_job(w, monkeypatch, claimed(irreversible=True))
     clocks.advance(564)
     w.watchdog_tick()
-    assert not _stopped(w)
+    assert not _stopped(runner)
     clocks.advance(1)
     w.watchdog_tick()
-    assert _stopped(w)
+    assert _stopped(runner)
     body = finish_of(fake, t)
     # `cancelled`(2)가 아니라 lost + worker_self_stopped(F66 · 결정 334)
     assert body["outcome"] == LOST and body["summary_code"] == "worker_self_stopped"
@@ -559,7 +559,7 @@ def test_rl26_waking_from_sleep_stops_on_the_first_tick_by_the_wall_clock(tmp_pa
     runner, t = start_job(w, monkeypatch, claimed(irreversible=True))
     clocks.advance(600 + 30, mono=2)
     w.watchdog_tick()
-    assert _stopped(w)
+    assert _stopped(runner)
     assert finish_of(fake, t)["summary_args"] == {"seconds": 630}
 
 
@@ -569,7 +569,7 @@ def test_rl26_a_wall_clock_going_back_does_not_hide_the_gap(tmp_path, monkeypatc
     runner, t = start_job(w, monkeypatch, claimed(irreversible=True))
     clocks.advance(-3600, mono=566)
     w.watchdog_tick()
-    assert _stopped(w)
+    assert _stopped(runner)
     finish_of(fake, t)
 
 
@@ -579,7 +579,7 @@ def test_rl26_a_plain_job_is_never_self_stopped(tmp_path, monkeypatch):
     runner, t = start_job(w, monkeypatch, claimed(irreversible=False))
     clocks.advance(5000)
     w.watchdog_tick()
-    assert not _stopped(w) and t.is_alive()
+    assert not _stopped(runner) and t.is_alive()
     runner.release.set()
     assert finish_of(fake, t)["outcome"] == SUCCEEDED
 
@@ -592,10 +592,10 @@ def test_rl34_a_2xx_moves_ok_at_and_the_watchdog_waits_again(tmp_path, monkeypat
     assert w.heartbeat_once() is True  # 2xx — 보낸 시각이 새 ok_at
     clocks.advance(500)
     w.watchdog_tick()
-    assert not _stopped(w)
+    assert not _stopped(runner)
     clocks.advance(65)
     w.watchdog_tick()
-    assert _stopped(w)
+    assert _stopped(runner)
     finish_of(fake, t)
 
 
@@ -612,10 +612,10 @@ def test_rl34_the_watchdog_judges_while_heartbeat_hangs(tmp_path, monkeypatch):
     assert dog.name == "rcm-worker-watchdog"
     clocks.advance(566)
     for _ in range(300):
-        if _stopped(w):
+        if _stopped(runner):
             break
         time.sleep(0.01)
-    assert _stopped(w)
+    assert _stopped(runner)
     finish_of(fake, t)
     fake.hb_gate.set()
     w.stopping.set()

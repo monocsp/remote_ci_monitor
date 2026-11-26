@@ -1411,7 +1411,7 @@ class RemoteWorker:
                     artifacts=_disposition(skipped),
                     summary_code=code,
                     summary_args=args,
-                    group_gone=True,
+                    group_gone=getattr(e, "group_gone", None) is not False,
                 )
                 self.log(f"lane {lane}: #{job.id} {outcome} before start")
                 self._cleanup(spec, failed=True)
@@ -1429,7 +1429,8 @@ class RemoteWorker:
                 artifacts=_disposition(skipped),
                 summary_code=code,
                 summary_args=args,
-                group_gone=True,
+                # 감독자가 떴다면 그룹 소멸은 S7 이 정했다(표지를 읽지 않는다, 결정 339-c (3))
+                group_gone=getattr(e, "group_gone", None) is not False,
             )
             self.log(f"lane {lane}: #{job.id} failed — {summary}")
             self._cleanup(spec, failed=True)
@@ -1461,6 +1462,7 @@ class RemoteWorker:
             finished=result,
             summary_code=code,
             summary_args=args,
+            group_gone=getattr(result, "group_gone", None),
         )
         self.log(f"lane {lane}: #{job.id} {outcome} in {_fmt_seconds(time.monotonic() - started)}")
         self._cleanup(spec, failed=outcome != SUCCEEDED)
