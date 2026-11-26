@@ -1089,3 +1089,173 @@ def test_rl45_the_job_document_carries_the_hold_and_its_release(srv):
     # 대기 잡 문서도 `hold` 키를 싣는다(그 잡 자신의 홀드 — 없으면 null)
     waiting = srv.queued_job(preset="ship")
     assert srv.req("GET", f"/jobs/{waiting}", token="alice")[1]["hold"] is None
+
+
+# ── P2-5: 계획↔시험 대조가 약하다고 한 행(RL11 · RL24 · RL44) ──────────────────────
+
+
+def _released_events(srv: WorkerServer, jid: int) -> int:
+    return sum(
+        1
+        for r in srv.store._conn().execute(
+            "SELECT payload FROM events WHERE job_id=? AND kind='hold' ORDER BY id", (jid,)
+        )
+        if json.loads(r["payload"])["action"] == "released"
+    )
+
+
+def _log_sha(srv: WorkerServer, jid: int) -> str:
+    import hashlib
+
+    path = srv.app.job_dir(jid) / "log.txt"
+    return hashlib.sha256(path.read_bytes() if path.exists() else b"").hexdigest()
+
+
+def test_rl11_a_fenced_sessions_late_reports_change_nothing_and_its_peer_closes_on_time(srv):
+    """펜싱된 A 의 늦은 log · phase · finish · 산출물 업로드 · capabilities 는 409 `session_fenced`
+    이고 log.txt 의 sha256 · 마커(`last_step`) · 산출물 · 능력 보고 · `late_result` 가 그대로다.
+    다른 이름의 토큰이 남의 세션을 실어 403 을 받은 뒤에도 그 세션의 표식 잡은 G 에 닫힌다."""
+    srv.registered("build-02")
+    jid = running(srv, preset="slow")
+    assert srv.log("build-02", jid, b"::rcm::step::real\nline\n")[0] == 200
+    old = srv.session("build-02")
+    srv.new_process("build-02")
+    srv.registered("build-02", lanes=2)  # B 가 A 를 펜싱한다 — A 의 잡은 A 의 세션에 남는다
+    before_job = srv.view(jid, token="alice")
+    before_sha = _log_sha(srv, jid)
+    before_workers = srv.workers()
+    sess = {"X-RCM-Worker-Session": old}
+    answers = [
+        srv.req(
+            "POST",
+            f"/worker/jobs/{jid}/log",
+            token="build-02",
+            body=b"::rcm::step::evil\n::rcm::summary::forged\n",
+            headers={"Content-Type": "application/octet-stream", **sess},
+        ),
+        srv.req(
+            "POST",
+            f"/worker/jobs/{jid}/phase",
+            token="build-02",
+            json_body={"phase": "running", "worker_session_id": old},
+        ),
+        srv.req(
+            "POST",
+            f"/worker/jobs/{jid}/finish",
+            token="build-02",
+            json_body={"outcome": "succeeded", "exit_code": 0, "worker_session_id": old},
+        ),
+        srv.req(
+            "PUT",
+            f"/worker/jobs/{jid}/artifacts",
+            token="build-02",
+            body=b"not-a-tar",
+            headers={"Content-Type": "application/x-tar", **sess},
+        ),
+        srv.req(
+            "POST",
+            "/worker/capabilities",
+            token="build-02",
+            json_body={"worker_session_id": old, "generation": "x", "presets": {}},
+        ),
+    ]
+    for status, body in answers:
+        assert status == 409 and body["code"] == "session_fenced", (status, body)
+    after_job = srv.view(jid, token="alice")
+    assert _log_sha(srv, jid) == before_sha
+    for key in ("state", "last_step", "summary", "artifacts", "late_result", "exit_code"):
+        assert after_job.get(key) == before_job.get(key), key
+    assert srv.workers() == before_workers
+    # 남의 토큰이 B 의 세션을 실은 heartbeat → 403. 그 뒤로 B 가 조용하면 표식 잡이 G 에 닫힌다
+    srv.registered("build-03")
+    theirs = srv.session("build-02")
+    ship = running(srv, preset="ship", lane=2)
+    for _ in range(3):
+        srv.clock.advance(250)
+        status, body = srv.req(
+            "POST",
+            "/worker/heartbeat",
+            token="build-03",
+            json_body={
+                "worker_session_id": theirs,
+                "seq": 99,
+                "claims_settled": 99,
+                "jobs": [ship],
+            },
+        )
+        assert status == 403, body
+        srv.app.mark_lost_workers(srv.clock.now)
+    j = job_of(srv, ship)
+    assert j.state == LOST and j.summary_code == "worker_unreachable"
+    assert [h["job_id"] for h in hold_rows(srv)] == [ship]
+
+
+def test_rl24_a_quiet_legacy_job_closes_at_heard_legacy_plus_g_and_holds_its_preset_group(srv):
+    srv.store.register_worker(
+        "build-02", pool="default", lanes=1, host_name=None, version=__version__, now=srv.clock()
+    )
+    jid = _legacy_running(srv, preset="ship")
+    log_dir = srv.app.job_dir(jid)
+    status, _ = srv.req(
+        "POST", "/worker/heartbeat", token="build-02", json_body={"jobs": [jid]}, legacy=True
+    )
+    assert status == 200  # heard_legacy(build-02) 가 오른다
+    srv.clock.advance(599)
+    assert srv.app.mark_lost_workers(srv.clock.now) == []
+    assert job_of(srv, jid).state == RUNNING
+    srv.clock.advance(2)  # heard_legacy + G(600) 를 넘었다
+    assert srv.app.mark_lost_workers(srv.clock.now) == [jid]
+    j = job_of(srv, jid)
+    assert j.state == LOST and j.summary_code == "worker_unreachable"
+    (h,) = hold_rows(srv)
+    assert h["job_id"] == jid and h["concurrency_group"] == "irreversible:ship"
+    assert srv.app.job_dir(jid) == log_dir  # 로그 경로는 그대로다
+
+
+def test_rl44_hold_release_events_are_one_for_a_b_c_and_zero_for_d(srv, tmp_path):
+    """(a) previous_sessions · (b) 재확인의 좁은 확인 · (c) 늦은 finish(`group_gone: true`) 는
+    사건 `hold`(released) 를 1건씩 남기고, (d) 다른 이름의 previous_sessions 는 0건이다."""
+    srv.registered("build-02")
+    srv.registered("build-03")
+    # (d) 먼저 — 다른 이름은 풀지 못하고 사건도 없다
+    d = running(srv, preset="ship")
+    srv.store.finish(d, LOST, now=srv.clock(), summary="x", hold_cause="worker_unreachable")
+    old = srv.session("build-02")
+    srv.new_process("build-03")
+    assert srv.register("build-03", previous_sessions=[old])[0] == 403
+    assert _released_events(srv, d) == 0
+    # (a) 같은 이름의 새 프로세스가 D 의 그룹이 없음을 확인한다
+    srv.restarted("build-02")
+    assert _released_events(srv, d) == 1
+    # (c) 같은 세션의 늦은 finish 가 group_gone: true
+    c = running(srv, preset="ship")
+    srv.store.finish(c, LOST, now=srv.clock(), summary="x", hold_cause="worker_unreachable")
+    status, body = srv.req(
+        "POST",
+        f"/worker/jobs/{c}/finish",
+        token="build-02",
+        json_body={"outcome": "lost", "exit_code": None, "group_gone": True},
+    )
+    assert status == 409 and body["hold_released"] is True
+    assert _released_events(srv, c) == 1
+    # (b) 죽은 세션의 잡을 재확인이 「확인됨」으로 닫는 좁은 확인
+    b = running(srv, preset="ship")
+    srv.store.finish(b, LOST, now=srv.clock(), summary="x", hold_cause="orphan_unverified")
+    dead = srv.new_process("build-02")
+    srv.registered("build-02", unverified_sessions=[dead])
+    status, body = srv.req(
+        "POST",
+        f"/worker/jobs/{b}/finish",
+        token="build-02",
+        json_body={
+            "outcome": "lost",
+            "exit_code": None,
+            "summary_code": "worker_replaced",
+            "summary_args": {},
+            "group_gone": True,
+            "worker_session_id": dead,
+        },
+    )
+    assert body.get("hold_released") is True, (status, body)
+    assert _released_events(srv, b) == 1
+    assert _released_events(srv, d) == 1 and _released_events(srv, c) == 1  # 다시 세지 않는다

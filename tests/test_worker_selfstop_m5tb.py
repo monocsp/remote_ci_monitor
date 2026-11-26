@@ -23,7 +23,7 @@ from remote_ci_monitor.config import (
     disconnect_grace,
     load_server_config,
 )
-from remote_ci_monitor.core.model import CANCELLED, LOST, RUNNING, SUCCEEDED
+from remote_ci_monitor.core.model import CANCELLED, CANCELLING, LOST, RUNNING, SUCCEEDED
 from remote_ci_monitor.runner import RunResult
 from test_worker_api import WORKER_PRESETS, WorkerServer, sh
 
@@ -786,3 +786,277 @@ def test_rl50_the_claimed_job_is_running_in_the_lock_section_that_settles_its_cl
     w._lane_loop(1)
     assert 7 in w.running
     assert [s for s in seen if s[0] >= 1 and not s[1]] == []  # 정리됐는데 running 에 없던 순간 0
+
+
+# ══ P2-5: 계획↔시험 대조가 약하다고 한 행(서버 쪽 RL3 · RL4 · RL8 · RL56) ═══════════════
+
+SUP = [
+    *SHIP,
+    sh("shipsup", "echo s", irreversible=True, supersede="all"),
+    sh("oksup", "echo o", supersede="all", concurrency_group="sup"),
+    sh("ship2", "echo s", irreversible=True),  # 그룹 irreversible:ship2
+    sh("ship3", "echo s", irreversible=True),
+]
+QUIET = 61  # 서버의 worker_timeout_seconds(60)를 넘긴 조용함 — `kill_at` 규칙이 멈춘다(T4)
+
+
+@pytest.fixture
+def sup(tmp_path):
+    s = WorkerServer(tmp_path, presets=SUP, lanes=0)
+    yield s
+    s.close()
+
+
+def _submitted(srv: WorkerServer, preset: str, branch: str = "feat") -> int:
+    from shelfkit import fixtures, submit, upload
+
+    status, body = submit(srv, preset, branch=branch)
+    assert status == 201, (status, body)
+    jid = int(body["job_id"])
+    upload(srv, jid, fixtures())
+    return jid
+
+
+def test_rl3_inside_and_past_g_a_same_group_submit_waits_and_never_runs_beside_the_first(sup):
+    """분단 중(G 안 · 밖) 같은 그룹 제출은 `queued` 로 남는다. G 안에서는 `blocked_by_group`,
+    첫 잡이 `lost`(표식 → 홀드)가 된 뒤에는 홀드가 막는다. 어느 쪽에서도 둘째가 claim 되지
+    않는다."""
+    sup.registered("build-02")
+    sup.registered("build-03")
+    a = _submitted(sup, "ship")
+    assert sup.claimed("build-02", 1) == a
+    sup.clock.advance(G // 2)  # 분단 — build-02 는 조용하다
+    b = _submitted(sup, "ship", branch="other")
+    assert sup.claim("build-03", 1)[0] == 204
+    assert sup.store.get_job(b).state == "queued" and sup.row(b)["reason"] == "blocked_by_group"
+    assert sup.heartbeat("build-03", jobs=[])[0] == 200
+    sup.clock.advance(G // 2 + 1)
+    assert sup.app.mark_lost_workers(sup.clock.now) == [a]
+    assert sup.claim("build-03", 1)[0] == 204  # 홀드가 그룹을 쥔다
+    assert sup.store.get_job(b).state == "queued" and sup.row(b)["reason"] == "needs_action"
+
+
+@pytest.mark.parametrize("preset", ["shipsup", "oksup"])
+def test_rl3_rl8_a_supersede_inside_g_leaves_the_first_cancelling_and_holding_the_group(
+    sup, preset
+):
+    """supersede 가 켜진 프리셋: G 안의 새 제출이 첫 잡을 `cancelling` 으로 둔다. 첫 잡은 그룹을
+    계속 쥐어 새 잡이 claim 되지 않는다. 복귀 없이 G 가 지나면 `lost`(`worker_unreachable`)이고
+    `cancelled` 나 `cancel_unconfirmed` 로 위장하지 않는다(RL8 b). 홀드는 표식 프리셋에만."""
+    sup.registered("build-02")
+    sup.registered("build-03")
+    a = _submitted(sup, preset)
+    assert sup.claimed("build-02", 1) == a
+    sup.clock.advance(QUIET)  # 「조용함」(gap > T)이 된 뒤의 supersede
+    b = _submitted(sup, preset)
+    assert sup.store.get_job(a).state == CANCELLING
+    for _ in range(6):  # kill_at + 2 × heartbeat 가 지나도 조용한 세션에는 걸리지 않는다
+        sup.clock.advance(20)
+        assert sup.heartbeat("build-03", jobs=[])[0] == 200
+        assert sup.app.mark_lost_workers(sup.clock.now) == []
+        assert sup.claim("build-03", 1)[0] == 204
+    assert sup.store.get_job(a).state == CANCELLING
+    sup.clock.advance(G)
+    assert sup.app.mark_lost_workers(sup.clock.now) == [a]
+    j = sup.store.get_job(a)
+    assert j.state == LOST and j.summary_code == "worker_unreachable"
+    assert [h["cause"] for h in holds(sup)] == (
+        ["worker_unreachable"] if preset == "shipsup" else []
+    )
+    if preset == "oksup":
+        assert sup.claimed("build-03", 1) == b
+
+
+def test_rl8_a_cancel_during_the_partition_reaches_the_worker_inside_g_and_ends_cancelled(srv):
+    """(a) 일반 프리셋: 분단 중 취소는 `cancelling` 으로 남고(조용한 세션에는 `kill_at` 규칙이
+    걸리지 않는다), G 안에 돌아온 첫 heartbeat 응답의 `cancel` 이 그 잡을 싣는다. 끝 상태는
+    `cancelled`(종료 2)이고 `lost` 가 아니다. 홀드 0.
+
+    표식 프리셋의 (a) 는 여기서 단언하지 않는다 — P2-5 notes 의 질문: 돌아온 첫 heartbeat 가 이미
+    지난 `kill_at + 2H` 로 그 잡을 `cancel_unconfirmed` 로 닫아 홀드를 건다(워커의 확인을 기다리지
+    않는다)."""
+    srv.registered("build-02")
+    a = srv.queued_job()
+    assert srv.claimed("build-02", 1) == a
+    srv.clock.advance(QUIET)  # 분단 — 조용함
+    assert srv.cancel(a)[1]["state"] == "cancelling"
+    srv.clock.advance(60)
+    assert srv.app.mark_lost_workers(srv.clock.now) == []  # 조용한 세션 — 미확인 닫기 없음
+    assert srv.store.get_job(a).state == CANCELLING
+    status, body = srv.heartbeat("build-02", jobs=[a])  # G 안에 복귀
+    assert status == 200 and body["cancel"] == [a]
+    srv.finish("build-02", a, "cancelled", exit_code=-15)
+    j = srv.store.get_job(a)
+    assert j.state == CANCELLED
+    assert holds(srv) == []
+
+
+def test_rl8_a_superseded_job_confirmed_inside_g_keeps_superseded_by_n(sup):
+    sup.registered("build-02")
+    a = _submitted(sup, "oksup")
+    assert sup.claimed("build-02", 1) == a
+    sup.clock.advance(30)
+    b = _submitted(sup, "oksup")
+    status, body = sup.heartbeat("build-02", jobs=[a])
+    assert status == 200 and body["cancel"] == [a]
+    assert sup.finish("build-02", a, "cancelled", exit_code=-15)[0] == 200  # 확인
+    j = sup.store.get_job(a)
+    assert j.state == CANCELLED and j.summary_code == "superseded"
+    assert j.summary_args == {"by": b}
+
+
+def test_rl8_a_live_session_that_never_confirms_an_irreversible_cancel_holds(srv):
+    """들리는 세션이 취소를 확인하지 않으면 `kill_at + 2 × heartbeat` 에 `cancel_unconfirmed` 로
+    닫히고 홀드가 걸린다. 그 뒤 워커의 finish 는 상태를 바꾸지 않는다."""
+    srv.registered("build-02")
+    a = srv.queued_job(preset="ship")
+    assert srv.claimed("build-02", 1) == a
+    assert srv.cancel(a)[1]["state"] == "cancelling"
+    for _ in range(12):
+        srv.clock.advance(5)
+        assert srv.heartbeat("build-02", jobs=[a])[0] == 200
+        if srv.store.get_job(a).state != CANCELLING:
+            break
+    j = srv.store.get_job(a)
+    assert j.state == CANCELLED and j.summary_code == "cancel_unconfirmed"
+    assert [(h["job_id"], h["cause"]) for h in holds(srv)] == [(a, "cancel_unconfirmed")]
+    status, body = srv.finish("build-02", a, "succeeded", exit_code=0)
+    assert status == 409 and body["code"] == "job_closed"
+    assert srv.store.get_job(a).state == CANCELLED
+
+
+def _race_at_the_boundary(s: WorkerServer, jid: int) -> dict[str, Any]:
+    """janitor 의 틱과 돌아온 heartbeat + finish 를 한 장벽에서 함께 출발시킨다."""
+    go = threading.Barrier(2)
+    out: dict[str, Any] = {}
+
+    def tick() -> None:
+        go.wait()
+        out["closed"] = s.app.mark_lost_workers(s.clock.now)
+
+    def back() -> None:
+        go.wait()
+        out["hb"] = s.heartbeat("build-02", jobs=[jid])[0]
+        out["fin"] = s.finish("build-02", jid, "succeeded", exit_code=0)
+
+    threads = [threading.Thread(target=tick), threading.Thread(target=back)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(10)
+    return out
+
+
+@pytest.mark.parametrize("preset", ["ship", "ok"])
+@pytest.mark.parametrize("offset", [-1, 0, 1])
+def test_rl4_racing_the_janitor_and_the_returning_heartbeat_leaves_one_final_state(
+    tmp_path, preset, offset
+):
+    """G 만료 경계(±1 틱)에서 janitor 와 돌아온 heartbeat · finish 가 겹친다. 여러 번 되풀이해도
+    최종 상태는 하나이고, `lost` 가 된 잡은 늦은 finish 로 뒤집히지 않는다(409 `job_closed`)."""
+    for rep in range(5):
+        s = WorkerServer(tmp_path / f"{preset}{offset}{rep}", presets=SHIP, lanes=0)
+        try:
+            s.registered("build-02")
+            a = s.queued_job(preset=preset)
+            assert s.claimed("build-02", 1) == a
+            s.clock.advance(G + offset)
+            out = _race_at_the_boundary(s, a)
+            final = s.store.get_job(a)
+            assert final.state in (LOST, SUCCEEDED), final.state
+            if final.state == LOST:
+                assert out["closed"] == [a]
+                assert out["fin"][0] == 409 and out["fin"][1]["code"] == "job_closed"
+            else:
+                assert out["closed"] == [] and out["fin"][0] == 200
+            if offset <= 0:
+                assert final.state == SUCCEEDED  # gap ≤ G — 닫지 않는다
+            # 다음 틱 · 다음 finish 도 뒤집지 않는다
+            assert s.app.mark_lost_workers(s.clock.now) == []
+            assert s.finish("build-02", a, "failed", exit_code=1)[0] == 409
+            assert s.store.get_job(a).state == final.state
+        finally:
+            s.close()
+
+
+def test_rl56_thirty_mixed_jobs_close_once_each_and_only_irreversible_ones_hold(sup):
+    srv = sup
+    srv.registered("build-02", lanes=30)
+    jobs = {}
+    marked = {10: "ship", 20: "ship2", 30: "ship3"}  # 그룹이 서로 달라 함께 돈다
+    for lane in range(1, 31):
+        preset = marked.get(lane, "ok")
+        jid = srv.queued_job(preset=preset)
+        assert srv.claimed("build-02", lane) == jid
+        jobs[jid] = preset
+    srv.clock.advance(G + 1)
+    first = srv.app.mark_lost_workers(srv.clock.now)
+    second = srv.app.mark_lost_workers(srv.clock.now)
+    assert len(first) == 20 and len(second) == 10 and not set(first) & set(second)
+    assert srv.app.mark_lost_workers(srv.clock.now) == []
+    assert all(srv.store.get_job(j).state == LOST for j in jobs)
+    assert sorted(h["job_id"] for h in holds(srv)) == sorted(
+        j for j, p in jobs.items() if p != "ok"
+    )
+    states = srv.store._conn().execute(
+        "SELECT COUNT(*) FROM events WHERE kind='hold' AND json_extract(payload, '$.action')"
+        " = 'created'"
+    )
+    assert states.fetchone()[0] == 3  # 홀드 사건도 표식 잡마다 하나
+
+
+def test_rl56_the_same_sessions_heartbeat_waits_for_the_close_and_sees_it(srv, monkeypatch):
+    """닫기 트랜잭션이 멈춘 동안 같은 세션의 heartbeat 는 그 닫힘이 끝난 뒤 처리되고, 응답의
+    `closed_jobs` 가 그 잡을 싣는다."""
+    srv.registered("build-02")
+    a = srv.queued_job()
+    assert srv.claimed("build-02", 1) == a
+    srv.clock.advance(G + 1)
+    gate, entered = threading.Event(), threading.Event()
+    real = srv.store.finish
+
+    def slow_finish(*args, **kw):
+        entered.set()
+        gate.wait(5)
+        return real(*args, **kw)
+
+    monkeypatch.setattr(srv.store, "finish", slow_finish)
+    tick = threading.Thread(target=lambda: srv.app.mark_lost_workers(srv.clock.now))
+    tick.start()
+    assert entered.wait(5)
+    out: dict[str, Any] = {}
+    hb = threading.Thread(target=lambda: out.setdefault("hb", srv.heartbeat("build-02", jobs=[a])))
+    hb.start()
+    hb.join(0.5)
+    assert hb.is_alive()  # 같은 세션 — 닫기가 끝나기를 기다린다
+    gate.set()
+    tick.join(10)
+    hb.join(10)
+    status, body = out["hb"]
+    assert status == 200
+    assert [c["id"] for c in body["closed_jobs"]] == [a]
+    assert srv.store.get_job(a).state == LOST
+
+
+def test_rl56_a_heard_that_rises_between_the_judgement_and_the_lock_keeps_the_job_open(
+    srv, monkeypatch
+):
+    srv.registered("build-02")
+    a = srv.queued_job()
+    assert srv.claimed("build-02", 1) == a
+    srv.clock.advance(G + 1)
+    real_lock = srv.app._session_lock
+    session = srv.session("build-02")
+    fired: list[bool] = []
+
+    def lock_after_a_heartbeat(key):
+        if key == session and not fired:
+            fired.append(True)
+            # 판정(잠금 밖) 뒤 · 잠금 전에 heartbeat 가 들었다 — `_hear` 가 하는 일을 그대로
+            with srv.app._heard_lock:
+                srv.app._heard[session] = srv.app.mono_fn()
+        return real_lock(key)
+
+    monkeypatch.setattr(srv.app, "_session_lock", lock_after_a_heartbeat)
+    assert srv.app.mark_lost_workers(srv.clock.now) == []
+    assert fired and srv.store.get_job(a).state == RUNNING
