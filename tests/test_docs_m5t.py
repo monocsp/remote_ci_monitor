@@ -674,11 +674,11 @@ def test_install_smoke_checks_the_catalog_in_the_server_toml_it_wrote():
 
 
 def unreleased() -> str:
-    text = read(CHANGELOG)
-    m = re.search(r"^## \[Unreleased\][^\n]*$", text, re.M)
-    assert m, "no [Unreleased]"
-    rest = text[m.end() :]
-    return rest[: re.search(r"^## \[", rest, re.M).start()]
+    """릴리스 뒤에는 항목이 `[Unreleased]` 가 아니라 그 버전의 절(0.11.0)에 있다 — 다른 문서 잠금
+    (tests/test_docs_m5.py `unreleased()`)처럼 「0.1.0 이후 전부」를 본다."""
+    from test_docs_m5 import unreleased as since_first_release
+
+    return since_first_release(read(CHANGELOG))
 
 
 @pytest.mark.parametrize(
