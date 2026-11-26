@@ -513,6 +513,30 @@ def test_rl14_a_a_finish_left_on_disk_is_sent_with_the_old_session_before_regist
     assert bytes(fake.received[7]) == b"one\ntwo\n"
 
 
+def test_rl16_b_a_log_gap_makes_the_worker_resend_from_the_expected_offset(tmp_path, fast):
+    """RL16 (b): 요청이 유실돼 워커의 다음 조각 오프셋이 서버보다 앞선다(흉내 — 디스크의 `acked`
+    가 서버보다 크다). 서버의 409 `log_gap` 이 준 `expected_offset` 부터 다시 보내 서버 로그가
+    스트림과 바이트로 같고, 프로세스는 멈추지 않는다(§4.5 응답 표 · 결정 271)."""
+    clock = WClock()
+    fake = FakeServer(clock)
+    w, ob, s = live_sender(tmp_path, fake, clock)
+    stream = b"one\ntwo\nthree\n"
+    ob.append(stream)
+    fake.received[7] = bytearray(stream[:4])  # 서버는 4 바이트만 받았다
+    ob.acked = 8  # 워커는 8 까지 받았다고 안다
+    end_job(w, ob)
+    s.start()
+    s.thread.join(3)
+    alive = s.thread.is_alive()
+    s.halt.set()  # 변이에서 끝없이 도는 스레드를 멈춘다
+    assert not alive, fake.calls[:6]
+    assert bytes(fake.received[7]) == stream
+    offsets = [c[3] for c in fake.calls if c[0] == "log"]
+    assert offsets[:2] == [8, 4], offsets  # 앞선 조각 → 409 → 4 부터
+    assert not w.stopping.is_set()
+    assert [c[3] for c in fake.calls if c[0] == "finish"] == [SUCCEEDED]
+
+
 def test_rl16_d_a_restarted_worker_asks_the_offset_and_sends_only_the_rest(tmp_path, fast):
     clock = WClock()
     fake = FakeServer(clock)
@@ -600,7 +624,12 @@ def test_rl46_a_dead_queue_with_server_errors_registers_after_300s_answered(tmp_
     w2.register()  # 그 뒤 정상 등록
 
 
-def test_rl46_b_connection_failures_do_not_count_toward_the_300s(tmp_path, fast):
+def test_rl46_b_connection_failures_do_not_count_toward_the_300s(tmp_path, fast, monkeypatch):
+    # 백오프를 늘려 실패 다섯 번이 0.5초에 걸치게 한다 — 대기 고리(0.05초 박자)가 그 사이를 여러
+    # 번 본다. 너무 빨리 끝나면 연결 실패를 세는 변이(dead-session-counts-connection-failures)도
+    # 초록이었다(batch-2 에서 찾음)
+    monkeypatch.setattr(rw, "BACKOFF_START_SECONDS", 0.1)
+    monkeypatch.setattr(rw, "BACKOFF_MAX_SECONDS", 0.1)
     clock = WClock()
     fake = FakeServer(clock, tick=400)  # 연결 실패 한 번에 400초가 흐른다
     w1 = wworker(tmp_path, fake, clock)
@@ -837,7 +866,13 @@ def test_rl12_b_drain_gives_up_after_the_limit_and_leaves_the_queue_on_disk(
     with w._lock:
         w.running[7] = 1
     w.draining.set()
-    w._finish(7, SUCCEEDED, 0, None, None, group_gone=True)
+    lane = threading.Thread(
+        target=w._finish, args=(7, SUCCEEDED, 0, None, None), kwargs={"group_gone": True}
+    )
+    lane.daemon = True
+    lane.start()
+    lane.join(10)
+    assert not lane.is_alive(), "the lane still waits for its queue past DRAIN_REPORT_SECONDS"
     assert 7 not in w.running
     assert (w._job_dir(7) / "outbox.json").is_file()  # 새 이미지가 등록 전에 보낸다
     assert any("restarting anyway" in x for x in w.logs)

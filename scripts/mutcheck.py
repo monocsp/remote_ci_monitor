@@ -7034,6 +7034,124 @@ MUTANTS = (
         ),
     ),
     Mutant(
+        # 로그 조각을 줄 끝에서 자르지 않는다 — 한 줄(비밀 값)이 두 요청에 걸친다(RL17 c · RL18)
+        name="log-chunk-splits-a-line",
+        path="src/remote_ci_monitor/remote_worker.py",
+        old='        cut = data.rfind(b"\\n")\n',
+        new="        cut = -1\n",
+        tests=("tests/test_worker_outbox_m5tb.py::test_rl17_c_chunks_end_at_a_line_end",),
+    ),
+    Mutant(
+        # `acked` 를 서버가 준 오프셋이 아니라 보낸 길이로 올린다 — 이어 보내기가 어긋난다(RL16 d)
+        name="log-acked-own-count",
+        path="src/remote_ci_monitor/remote_worker.py",
+        old=(
+            "                    ob.acked = min(max(got, 0), ob.written)"
+            "  # 2xx 의 `offset` 으로만 오른다\n"
+        ),
+        new="                    ob.acked += len(chunk)\n",
+        tests=(
+            "tests/test_worker_outbox_m5tb.py::"
+            "test_rl16_d_a_restarted_worker_asks_the_offset_and_sends_only_the_rest",
+        ),
+    ),
+    Mutant(
+        # 다시 시작한 프로세스가 빈 본문 오프셋 질의 없이 디스크의 `acked` 부터 보낸다(RL16 d · 329)
+        name="log-offset-query-skipped",
+        path="src/remote_ci_monitor/remote_worker.py",
+        old='            return "query" if self.query_first else "log"\n',
+        new='            return "log"\n',
+        tests=(
+            "tests/test_worker_outbox_m5tb.py::"
+            "test_rl16_d_a_restarted_worker_asks_the_offset_and_sends_only_the_rest",
+        ),
+    ),
+    Mutant(
+        # 409 log_gap 의 expected_offset 을 따르지 않는다 — 같은 앞선 조각을 끝없이 보낸다(RL16 b)
+        name="log-gap-not-followed",
+        path="src/remote_ci_monitor/remote_worker.py",
+        old="                self.ob.acked = max(0, min(expected, self.ob.written))\n",
+        new="                pass\n",
+        tests=(
+            "tests/test_worker_outbox_m5tb.py::"
+            "test_rl16_b_a_log_gap_makes_the_worker_resend_from_the_expected_offset",
+        ),
+    ),
+    Mutant(
+        # 연결 실패에도 300초 뒤 finish 를 앞당긴다 — 서버에 닿지 않아 로그만 잃는다(RL40 · 324)
+        name="finish-first-on-connection-failure",
+        path="src/remote_ci_monitor/remote_worker.py",
+        old=(
+            "        return age >= FINISH_HOLD_SECONDS and self.last_5xx"
+            "  # mutcheck: finish-waits-forever\n"
+        ),
+        new="        return age >= FINISH_HOLD_SECONDS\n",
+        tests=(
+            "tests/test_worker_outbox_m5tb.py::"
+            "test_rl40_connection_failures_keep_the_order_and_send_the_log_first",
+        ),
+    ),
+    Mutant(
+        # 24시간 창을 지운다 — 연결이 안 되는 동안 끝난 잡의 finish 가 로그 뒤에 영원히 선다(RL19 b)
+        name="retransmit-window-ignored",
+        path="src/remote_ci_monitor/remote_worker.py",
+        old="        if age >= RETRANSMIT_SECONDS:\n",
+        new="        if False:\n",
+        tests=(
+            "tests/test_worker_outbox_m5tb.py::test_rl19_b_after_24h_the_finish_goes_without_the_log",
+        ),
+    ),
+    Mutant(
+        # 죽은 세션 큐의 등록 대기 300초에 연결 실패 시간도 센다(RL46 b · 결정 337)
+        name="dead-session-counts-connection-failures",
+        path="src/remote_ci_monitor/remote_worker.py",
+        old="            if self._dead_answered:\n",
+        new="            if True:\n",
+        tests=(
+            "tests/test_worker_outbox_m5tb.py::"
+            "test_rl46_b_connection_failures_do_not_count_toward_the_300s",
+        ),
+    ),
+    Mutant(
+        # 등록 전에 죽은 세션의 큐를 보내지 않는다 — 등록이 그 잡을 lost 로 먼저 닫는다(RL14 a)
+        name="dead-queue-after-register",
+        path="src/remote_ci_monitor/remote_worker.py",
+        old="        self.send_dead_queues()\n",
+        new="        pass\n",
+        tests=(
+            "tests/test_e2e_worker_outbox_m5tb.py::"
+            "test_rl14_a_a_finish_left_on_disk_by_kill_9_is_sent_before_the_restart_registers",
+        ),
+    ),
+    Mutant(
+        # 드레인이 보고 큐를 60초 상한 없이 기다린다 — 버전 따라가기가 멈춘다(RL12 b · §4.4)
+        name="drain-waits-for-the-queue-forever",
+        path="src/remote_ci_monitor/remote_worker.py",
+        old=(
+            "                if now - waited_since >= DRAIN_REPORT_SECONDS"
+            " and not sender.ob.done:\n"
+        ),
+        new="                if False:\n",
+        tests=(
+            "tests/test_worker_outbox_m5tb.py::"
+            "test_rl12_b_drain_gives_up_after_the_limit_and_leaves_the_queue_on_disk",
+        ),
+    ),
+    Mutant(
+        # 서버가 이미 기록한 finish(W4 첫 행)를 큐에서 지우지 않는다 — 같은 결과를 또 보낸다(RL35 a)
+        name="recorded-finish-sent-again",
+        path="src/remote_ci_monitor/remote_worker.py",
+        old=(
+            "        if state in FINISH_RECORDED and sender is not None"
+            " and sender.ob.finish is not None:\n"
+        ),
+        new="        if False:\n",
+        tests=(
+            "tests/test_worker_selfstop_m5tb.py::"
+            "test_rl35_a_recorded_finish_drops_the_parked_report_and_is_not_sent_again",
+        ),
+    ),
+    Mutant(
         # finish 상한(300초)을 지운다 — 5xx 로 막힌 끝난 잡이 24시간 running 이다(RL40 · RL19)
         name="finish-waits-forever",
         path="src/remote_ci_monitor/remote_worker.py",
