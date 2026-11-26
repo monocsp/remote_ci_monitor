@@ -7789,6 +7789,39 @@ MUTANTS = (
             "test_b5_5_b_a_folder_that_cannot_be_synced_is_said_once",
         ),
     ),
+    Mutant(
+        # 예상 못 한 예외가 재전송 창 점검을 건너뛴다 — finish 를 24시간 넘게 다시 한다(batch-5 #6)
+        name="unexpected-finish-skips-the-24h-window",
+        path="src/remote_ci_monitor/remote_worker.py",
+        old=(
+            "                    ok = self._unexpected(step, e)"
+            "  # mutcheck: unexpected-error-kills-the-sender\n"
+        ),
+        new=(
+            "                    self._unexpected(step, e)\n"
+            "                    self.halt.wait(0.001)\n"
+            "                    continue\n"
+        ),
+        tests=(
+            "tests/test_worker_outbox_m5tb.py::"
+            "test_b5_6_a_a_finish_stuck_on_an_unexpected_error_is_dropped_after_24h",
+        ),
+    ),
+    Mutant(
+        # 읽히는 outbox 까지 격리 폴더로 옮긴다 — 보낼 큐가 사라진다(batch-5 #6)
+        name="readable-outbox-set-aside",
+        path="src/remote_ci_monitor/remote_worker.py",
+        old=(
+            "                if ob is None:\n"
+            "                    self._set_aside(dead, job_dir)"
+            "  # mutcheck: unreadable-outbox-silent\n"
+        ),
+        new=("                self._set_aside(dead, job_dir)\n                if ob is None:\n"),
+        tests=(
+            "tests/test_worker_outbox_m5tb.py::"
+            "test_b5_6_b_a_readable_outbox_of_a_dead_session_is_not_set_aside",
+        ),
+    ),
 )
 
 
