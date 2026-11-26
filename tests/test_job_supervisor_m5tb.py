@@ -347,6 +347,20 @@ def test_rl41_a_flag_raised_while_preparing_starts_no_process_even_without_requi
     assert obs.pids == [] and not ran.exists()
 
 
+@pytest.mark.parametrize("flag", ["stop", "cancel"])
+def test_rl41_c_a_preset_with_requires_and_a_flag_while_preparing_starts_no_process(tmp_path, flag):
+    """(c) `requires` 가 있는 표식 프리셋에서 (a): 도구 검사를 지나도 Popen 직전 확인이 끊는다 —
+    명령 표지 파일 0개, 감독자 · 명령 pid 0, 결과는 플래그대로, `group_gone` 참."""
+    ran = tmp_path / "ran"
+    obs = Obs()
+    s = spec(tmp_path, ["touch", str(ran)], irreversible=True, requires=("sh", "touch"))
+    result = run_job(s, obs, materialize=lambda _s: getattr(obs, flag).set())
+    assert (result.lost, result.cancelled) == ((True, False) if flag == "stop" else (False, True))
+    assert result.rc is None and result.group_gone is True
+    assert obs.pids == [] and not ran.exists()
+    assert "executing" not in obs.phases
+
+
 def test_rl41_a_flag_between_the_check_and_popen_is_caught_by_the_first_immediate_check(
     tmp_path, monkeypatch
 ):

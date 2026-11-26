@@ -1007,6 +1007,35 @@ def test_rl41_every_lost_path_reports_worker_self_stopped(tmp_path, monkeypatch,
         assert body["group_gone"] is True
 
 
+def test_rl41_a_self_stop_report_inside_g_closes_lost_without_a_step_or_a_hold(srv):
+    """(a)~(c) 의 끝: 자기 멈춤 보고(`lost` · `worker_self_stopped` · `group_gone: true`)가 G 안에
+    서버에 닿으면 잡은 `lost`(종료 3)이고 `failed_step` 이 없으며 홀드 0 이다 — 그룹은 다음 잡에
+    열린다."""
+    srv.registered("build-02")
+    a = srv.queued_job(preset="ship")
+    assert srv.claimed("build-02", 1) == a
+    srv.clock.advance(G - 40)  # G 안
+    status, body = srv.req(
+        "POST",
+        f"/worker/jobs/{a}/finish",
+        token="build-02",
+        json_body={
+            "outcome": LOST,
+            "exit_code": None,
+            "summary_code": "worker_self_stopped",
+            "summary_args": {"seconds": G - 35},
+            "group_gone": True,
+        },
+    )
+    assert status == 200, body
+    j = srv.store.get_job(a)
+    assert j.state == LOST and j.summary_code == "worker_self_stopped"
+    assert srv.view(a).get("failed_step") is None
+    assert holds(srv) == []
+    b = srv.queued_job(preset="ship")
+    assert srv.claimed("build-02", 1) == b  # 그룹이 풀렸다
+
+
 # ── 얼린 유예로 판정 · 늦은 heartbeat 응답 · claim 번호와 running(RL30 · RL50) ──────────
 
 
