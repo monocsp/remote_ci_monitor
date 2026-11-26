@@ -2695,3 +2695,60 @@ def test_b12_m_a_command_line_without_rcm_passes(cfg, home, tmp_path, how):
         _agent(home, "com.remote-ci-monitor.ci-watch", argv)
     fake = Fake(platform="linux" if how == "shell-unit" else "darwin")
     assert go(fake, *coordinator_args(tmp_path / "data")) == 0, fake.text
+
+
+@pytest.mark.parametrize(
+    "exec_lines",
+    [
+        "ExecStart={rcm} serve --config {config}\nExecStart=/bin/true",
+        "ExecStart=/bin/true\nExecStart={rcm} serve --config {config}",
+        "ExecStart={rcm} serve --config {config}\n[X-Extra]\nExecStart=/bin/true",
+    ],
+    ids=["rcm-first", "rcm-last", "another-section-after"],
+)
+def test_b12_l1_every_execstart_of_the_service_section_is_read(cfg, home, tmp_path, exec_lines):
+    # batch 12 L1(v1-3): `ExecStart=` 가 여럿이면(Type=oneshot) 모두 본다 — 마지막 줄만 읽으면
+    # 앞줄의 rcm 을 놓친다. `[Service]` 밖의 ExecStart= 는 systemd 가 쓰지 않으니 무시한다
+    from remote_ci_monitor import doctor
+
+    hub = _hand_unit(home, tmp_path, exec_lines)
+    before = hub["config"].read_bytes()
+    fake = Fake(platform="linux")
+    argv = coordinator_args(tmp_path / "data", "--config", str(hub["config"]), "--force", "all")
+    assert go(fake, *argv) == 1, fake.text
+    assert "this is ci-hub's config — refusing" in fake.err.getvalue(), fake.text
+    assert hub["config"].read_bytes() == before
+    sf = doctor.read_service_file(hub["unit"], user_home=str(home))
+    assert sf.command == "serve", sf
+
+
+def test_b12_l1_the_parser_knows_the_section_and_the_reset(tmp_path):
+    # doctor 의 유닛 파서는 섹션을 안다 — `[Service]` 밖의 ExecStart= 는 서비스의 명령이 아니다.
+    # 빈 `ExecStart=` 는 그때까지의 명령을 지운다(systemd.service 「ExecStart=」)
+    from remote_ci_monitor import doctor
+
+    unit = tmp_path / "x.service"
+    unit.write_text("[Service]\nExecStart=/bin/true\n[Unit]\nExecStart=/opt/v/bin/rcm serve\n")
+    sf = doctor.read_service_file(unit)
+    assert (sf.command, sf.argv) == (None, ["/bin/true"]), sf
+    unit.write_text("[Service]\nExecStart=/opt/v/bin/rcm serve\nExecStart=\nExecStart=/bin/true\n")
+    sf = doctor.read_service_file(unit)
+    assert (sf.command, sf.argv) == (None, ["/bin/true"]), sf
+
+
+@pytest.mark.parametrize("second", ["another-rcm", "unreadable"])
+def test_b12_l1_several_execstarts_close_when_setup_cannot_tell(cfg, home, tmp_path, second):
+    # rcm 을 띄우는 ExecStart= 가 둘 이상이거나 그중 읽지 못하는 줄이 있으면 닫는 쪽이다
+    worker = tmp_path / "w" / "worker.toml"
+    worker.parent.mkdir()
+    worker.write_text(f'[worker]\ndata_dir = "{tmp_path / "w-data"}"\n')
+    line = {
+        "another-rcm": f"ExecStart={{rcm}} worker --config {worker}",
+        "unreadable": "ExecStart=/opt/x '--broken",
+    }[second]
+    hub = _hand_unit(home, tmp_path, "ExecStart={rcm} serve --config {config}\n" + line)
+    fake = Fake(platform="linux")
+    assert go(fake, *coordinator_args(tmp_path / "data")) == 1, fake.text
+    err = fake.err.getvalue()
+    assert str(hub["unit"]) in err and "refusing" in err, err
+    _nothing_written(cfg, tmp_path / "data")
