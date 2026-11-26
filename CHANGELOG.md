@@ -7,6 +7,15 @@ of a key bumps that number and is listed here.
 
 ## [Unreleased]
 
+### Fixed
+- **`rcm discover` finds every rcm server on the computer it runs on.** It used to see only the
+  ones that could hear multicast on the network: a second or third server started from a
+  terminal on the same Mac never heard the question, so `rcm discover` listed only the server
+  that could and `rcm worker` with `server_name` stopped with `no rcm server named …`. The
+  question now also goes over the loopback interface, and each server listens there too. A
+  server on another computer still has to hear the network; on macOS, check the Local Network
+  permission of the process that runs `rcm serve`.
+
 ## [0.11.0] - 2026-11-26
 
 ### Breaking changes
