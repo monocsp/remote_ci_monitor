@@ -1057,6 +1057,81 @@ def test_rl14_dead_sessions_go_to_previous_or_unverified_in_the_first_register(t
     assert "t" not in json.dumps(owner).replace("token_name", "")  # 토큰 값은 안 적는다
 
 
+class _RegisterFails(_Who):
+    """프로토콜 2 서버인데 등록만 5xx 다 — 재시작 루프의 한 번(P6 GAP1)."""
+
+    def spec(self) -> dict[str, Any]:
+        return {"worker_protocol": 2}
+
+    def register(self, **kw: Any) -> dict[str, Any]:
+        self.registered.append(kw)
+        raise ClientError(500, "internal error")
+
+
+def test_gap1_seventy_failed_starts_leave_no_folder_and_the_next_register_succeeds(srv, tmp_path):
+    """# GAP1 등록이 실패한 시작(5xx · 403 · 버전 불일치)은 자기 세션 폴더를 남기지 않는다. 남기면
+    다음 시작마다 잡 없는 죽은 세션이 `previous_sessions` 에 하나씩 붙어 65번째에 서버의 64 상한
+    400 을 받고 — register 는 모든 HTTP 상태를 종료 2 로 읽는다 — 서버가 멀쩡해져도 영영 등록하지
+    못한다."""
+    url = f"http://127.0.0.1:{srv.port}"
+    cfg = WorkerConfig(
+        server=url, token=srv.tokens["build-02"], data_dir=str(tmp_path / "w"), lanes=1
+    )
+    for _ in range(70):
+        w = RemoteWorker(cfg, client=_RegisterFails(), log=lambda m: None)
+        with pytest.raises(WorkerExit) as e:
+            w.run()
+        assert e.value.code == 2
+    base = tmp_path / "w" / rw.SESSIONS_DIR
+    assert sorted(p.name for p in base.iterdir()) == []
+    w = RemoteWorker(cfg, log=lambda m: None)
+    w.prepare_sessions()
+    try:
+        w.register()
+        code = None
+    except WorkerExit as e:
+        code = e.code
+    assert code is None
+    assert srv.store.get_session(w.session_id) is not None
+
+
+def _aged(d: Path, at: float) -> Path:
+    os.utime(d / "lock", (at, at))  # `ok_at.json` 이 없으면 D 의 나이는 `lock` 의 mtime 이다
+    return d
+
+
+def test_gap1_more_than_64_dead_sessions_go_oldest_first_and_the_rest_wait_on_disk(tmp_path):
+    """# GAP1 죽은 세션이 서버의 목록 상한(64)보다 많으면 오래된 것부터 64개만 싣고 나머지는 지우지
+    않고 다음 시작에 싣는다. 등록이 받은 확인된 세션의 폴더는 그 자리에서 지운다 — 다시 보고할
+    것이 없다(잡이 모두 「확인됨」이고 서버가 닫고 펜싱했다). 「모름」 세션은 재확인에 쓰여
+    남는다."""
+    fake = _Who()
+    w = _worker(tmp_path, fake)
+    owner = rw.owner_of(w.config, "build-02")
+    start = time.time() - 3600
+    dead = [_aged(_dead_folder(w, owner, {}), start + i) for i in range(70)]
+    unsure = [
+        _aged(_dead_folder(w, owner, {4: {"pgid": None, "start": None}}), start + i)
+        for i in range(66)
+    ]
+    w.prepare_sessions()
+    w.register()
+    assert fake.registered[0]["previous_sessions"] == [d.name for d in dead[:64]]
+    assert fake.registered[0]["unverified_sessions"] == [d.name for d in unsure[:64]]
+    assert [d.exists() for d in dead] == [False] * 64 + [True] * 6
+    assert all(d.exists() for d in unsure)
+    os.close(w._session_fd)  # 이 프로세스가 죽었다 — 제 폴더는 다음 프로세스의 죽은 세션이다
+    for d in w.dead_sessions:
+        if d.session_id in {u.name for u in unsure}:
+            os.close(d.fd)
+    fake2 = _Who()
+    w2 = _worker(tmp_path, fake2)
+    w2.prepare_sessions()
+    w2.register()
+    assert fake2.registered[0]["previous_sessions"][:6] == [d.name for d in dead[64:]]
+    assert not any(d.exists() for d in dead)
+
+
 def test_rl38_a_foreign_or_ownerless_folder_is_not_locked_judged_or_touched(tmp_path):
     p = _spawn_group(["sleep", "30"])
     try:

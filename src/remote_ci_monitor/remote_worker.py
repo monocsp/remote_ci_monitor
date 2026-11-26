@@ -326,6 +326,9 @@ class _RemoteObserver:
 # `jobs/<id>/claim.json` · `proc.json`. 죽은 세션 D 의 폴더를 잠글 수 있으면 D 는 죽었다(F43).
 
 SESSIONS_DIR = "worker-sessions"
+#: 등록 본문의 `previous_sessions` · `unverified_sessions` 한 목록에 싣는 최대 수 — 서버의
+#: `_session_list` 상한과 같다. 넘는 죽은 세션은 오래된 것부터 싣고 나머지는 다음 시작에 싣는다
+SESSION_LIST_MAX = 64
 #: 리눅스 프로세스 표 — 시험이 가짜 폴더로 바꾼다
 PROC_ROOT = Path("/proc")
 #: `LC_ALL=C TZ=UTC ps -o lstart=` 의 모양(F71). 앞뒤 공백을 지운 뒤 맞아야 쓴다
@@ -808,15 +811,43 @@ class RemoteWorker:
                     )
             dead = DeadSession(entry.name, entry, dfd, verdicts)
             self.dead_sessions.append(dead)
-            if dead.verified:
-                self.previous_sessions.append(dead.session_id)
-                os.close(dfd)
-            else:
-                self.unverified_sessions.append(dead.session_id)
+            if not dead.verified:
                 self.log(
                     f"dead session {dead.session_id[:8]}: process identity unknown — keeping its"
                     " group held, checking again later"
                 )
+        # 오래된 것부터(P6 GAP1) — 서버의 목록 상한을 넘으면 앞의 것만 싣고 나머지는 다음 시작에.
+        # 확인된 D 의 잠금은 등록이 받을 때까지 쥔다 — 받으면 그 폴더를 지운다(`_settle_reported`)
+        for dead in sorted(self.dead_sessions, key=lambda d: (d.ok_at(), d.session_id)):
+            if dead.verified:
+                self.previous_sessions.append(dead.session_id)
+            else:
+                self.unverified_sessions.append(dead.session_id)
+
+    def _drop_own_session(self) -> None:
+        """등록하지 못한 시작의 제 폴더를 지운다(P6 GAP1). 잡을 받은 적이 없어 다음 프로세스가
+        판정할 것이 없다 — 남기면 재시작 루프마다 잡 없는 죽은 세션이 하나씩 쌓여 등록 목록 상한을
+        넘는다."""
+        own, fd = self.session_dir, self._session_fd
+        self.session_dir, self._session_fd = None, None
+        if own is not None:
+            shutil.rmtree(own, ignore_errors=True)  # mutcheck: failed-start-keeps-its-folder
+        if fd is not None:
+            os.close(fd)
+
+    def _settle_reported(self, previous: list[str]) -> None:
+        """등록이 받은 죽은 세션 정리(P6 GAP1). 확인된 D 는 서버가 그 busy 잡을 닫고 홀드를 풀고
+        펜싱했다 — 다시 보고할 것이 없으니 잠금을 쥔 채 폴더를 지운다. 「모름」 D 는 재확인
+        (step 9)이 쓰므로 남긴다. 싣지 못한 확인된 D 는 잠금만 놓고 다음 시작에 싣는다."""
+        sent = set(previous)
+        for dead in self.dead_sessions:
+            if not dead.verified:
+                continue
+            if dead.session_id in sent:
+                shutil.rmtree(dead.path, ignore_errors=True)  # mutcheck: reported-dead-folder-kept
+            if dead.fd >= 0:
+                os.close(dead.fd)
+                dead.fd = -1
 
     def schedule_rechecks(self) -> None:
         """「모름」 잡이 있는 D 마다 `D.ok_at + G_J − m_J` 에 다시 본다(step 9). 지났으면 바로 한
@@ -1115,9 +1146,9 @@ class RemoteWorker:
             try:
                 sessions: dict[str, list[str]] = {}
                 if self.previous_sessions or self.unverified_sessions:
-                    sessions = {
-                        "previous_sessions": list(self.previous_sessions),
-                        "unverified_sessions": list(self.unverified_sessions),
+                    sessions = {  # mutcheck: session-list-uncapped
+                        "previous_sessions": self.previous_sessions[:SESSION_LIST_MAX],
+                        "unverified_sessions": self.unverified_sessions[:SESSION_LIST_MAX],
                     }
                 out = self.client.register(
                     pool=self.config.pool,
@@ -1149,7 +1180,9 @@ class RemoteWorker:
                 continue
             self._conn_failures = 0
             self.mark_ok(*sent)
-            self.previous_sessions, self.unverified_sessions = [], []  # 첫 등록만 싣는다
+            # 첫 등록만 싣는다 — 받은 확인된 D 의 폴더는 지운다(P6 GAP1)
+            self._settle_reported(sessions.get("previous_sessions", []))
+            self.previous_sessions, self.unverified_sessions = [], []
             self.heartbeat_seconds = int(out.get("heartbeat_seconds") or 5)
             self.claim_wait_seconds = int(out.get("claim_wait_seconds") or 20)
             self.timeout_seconds = int(out.get("worker_timeout_seconds") or 60)
@@ -2112,7 +2145,12 @@ class RemoteWorker:
         # 뒤에 만든다 — 재시작 루프가 빈 폴더를 쌓지 않게(V2-12)
         self.check_protocol()
         self.prepare_sessions()
-        out = self.register()
+        try:
+            out = self.register()
+        except BaseException:
+            # 등록하지 못한 시작(종료 2 · 3 · 0 · 따라가기)은 폴더를 남기지 않는다(P6 GAP1)
+            self._drop_own_session()
+            raise
         self.schedule_rechecks()
         self.log(
             f"rcm worker {self.name} · pool {out.get('pool')} · lanes {out.get('lanes')} · "

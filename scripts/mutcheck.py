@@ -6646,6 +6646,46 @@ MUTANTS = (
             "test_rl54_a_local_claim_that_commits_and_then_cannot_read_the_job_closes_it_unheld",
         ),
     ),
+    # ── M5t-b P6 엣지 감사 GAP ──
+    Mutant(
+        # GAP1 등록하지 못한 시작이 제 폴더를 남긴다 — 재시작 루프가 죽은 세션을 쌓는다
+        name="failed-start-keeps-its-folder",
+        path="src/remote_ci_monitor/remote_worker.py",
+        old=(
+            "            shutil.rmtree(own, ignore_errors=True)  # mutcheck: "
+            "failed-start-keeps-its-folder\n"
+        ),
+        new="            pass\n",
+        tests=(
+            "tests/test_worker_session_m5tb.py::"
+            "test_gap1_seventy_failed_starts_leave_no_folder_and_the_next_register_succeeds",
+        ),
+    ),
+    Mutant(
+        # GAP1 등록 목록에 상한이 없다 — 65개째부터 서버가 400 이고 워커는 종료 2 를 되풀이한다
+        name="session-list-uncapped",
+        path="src/remote_ci_monitor/remote_worker.py",
+        old='"previous_sessions": self.previous_sessions[:SESSION_LIST_MAX],\n',
+        new='"previous_sessions": list(self.previous_sessions),\n',
+        tests=(
+            "tests/test_worker_session_m5tb.py::"
+            "test_gap1_more_than_64_dead_sessions_go_oldest_first_and_the_rest_wait_on_disk",
+        ),
+    ),
+    Mutant(
+        # GAP1 등록이 받은 확인된 죽은 세션의 폴더를 남긴다 — 다음 시작마다 다시 싣는다
+        name="reported-dead-folder-kept",
+        path="src/remote_ci_monitor/remote_worker.py",
+        old=(
+            "                shutil.rmtree(dead.path, ignore_errors=True)  # mutcheck: "
+            "reported-dead-folder-kept\n"
+        ),
+        new="                pass\n",
+        tests=(
+            "tests/test_worker_session_m5tb.py::"
+            "test_gap1_more_than_64_dead_sessions_go_oldest_first_and_the_rest_wait_on_disk",
+        ),
+    ),
 )
 
 
