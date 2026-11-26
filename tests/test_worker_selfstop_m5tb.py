@@ -790,6 +790,194 @@ def test_rl34_at_most_four_heartbeats_hang_at_once(tmp_path, monkeypatch):
     fake.hb_gate.set()
 
 
+def _tick_until_stopped(w, clocks: Clocks, runner: FakeRunner, limit: int) -> int | None:
+    """감시 틱을 1초씩 민다. 멈춘 틱의 경과 초(없으면 None)."""
+    for n in range(1, limit + 1):
+        clocks.advance(1)
+        w.watchdog_tick()
+        if _stopped(runner):
+            return n
+    return None
+
+
+@pytest.mark.parametrize("grace_g", [95, 600])
+@pytest.mark.parametrize("conf_grace", [10, 60])
+@pytest.mark.parametrize("backlog", [False, True])
+def test_rl34_a_b_the_group_is_gone_before_the_server_may_close(
+    tmp_path, monkeypatch, grace_g, conf_grace, backlog
+):
+    """(a)(b) 마지막 2xx 를 보낸 시각에서 `G − m` 에 감시가 멈추고, 감시 틱 + 러너 멈춤(`grace_J`)
+    을 더해도 서버가 닫을 수 있는 가장 이른 시각 `heard + G`(heard ≥ 그 2xx 를 보낸 시각)보다
+    앞이다. (b) 돌아온 첫 heartbeat 뒤 못 한 보고가 쌓여 있어도(다시 보내도 실패) 같다. 기본
+    grace · 큰 grace, 가장 작은 G · 기본 G 의 모든 조합."""
+    w, fake, clocks, _ = make_worker(tmp_path, grace_seconds=conf_grace)
+    runner, t = start_job(w, monkeypatch, claimed(irreversible=True, grace=grace_g))
+    clocks.advance(30)
+    if backlog:
+
+        def unreachable() -> None:
+            raise ClientError(0, "connection refused")
+
+        w._unreported[99] = (unreachable, time.monotonic())
+    sent = clocks.now().timestamp()
+    assert w.heartbeat_once() is True  # 돌아온 첫 heartbeat — 마지막 2xx
+    assert w.ok_at() == (sent, clocks.mono)
+    assert (99 in w._unreported) is backlog
+    spec, _ = w._spec_from_claim(claimed(irreversible=True, grace=grace_g), 1)
+    grace_j = spec.grace_seconds
+    stopped = _tick_until_stopped(w, clocks, runner, grace_g + 10)  # 분단
+    assert stopped == w.self_stop_threshold(grace_g, grace_j)
+    group_gone_by = stopped + rw.WATCHDOG_TICK_SECONDS + grace_j
+    assert group_gone_by < grace_g  # `heard + G` 보다 앞(heard ≥ sent)
+    body = finish_of(fake, t)
+    assert body["outcome"] == LOST and body["summary_code"] == "worker_self_stopped"
+
+
+@pytest.mark.parametrize(
+    ("timeout", "beat"),
+    [(60, 5), (10, 1)],  # 기본 설정 · e2e 설정(T 10 · H 1 · G 90)
+)
+def test_rl34_c_fourteen_second_heartbeats_keep_the_job_even_losing_one_2xx(
+    tmp_path, monkeypatch, timeout, beat
+):
+    """(c) 연결은 되는데 heartbeat 마다 14초 걸려 2xx 가 온다. 그 사이 2xx 하나를 잃어도(`ok_at`
+    나이 ≤ 14 + H + 14 + H + 15 < L) 가장 작은 G 에서조차 자기 멈춤이 걸리지 않는다."""
+    w, fake, clocks, _ = make_worker(tmp_path)
+    w.timeout_seconds, w.heartbeat_seconds = timeout, beat
+    lowest = w.connected_age_floor() + DISCONNECT_GRACE_MARGIN_SECONDS
+    w.mark_ok(clocks.now().timestamp(), clocks.mono)
+    runner, t = start_job(w, monkeypatch, claimed(irreversible=True, grace=lowest))
+    lose = {3}  # 넷째 회차의 2xx 를 잃는다
+    rounds = {"n": 0}
+
+    def slow_heartbeat(jobs, host=None, *, seq=None, claims_settled=None):
+        n = rounds["n"]
+        rounds["n"] += 1
+        for _ in range(14):  # 14초 걸린다 — 그동안 감시는 1초마다 본다
+            clocks.advance(1)
+            w.watchdog_tick()
+        if n in lose:
+            raise ClientError(0, "connection reset")  # 그 2xx 를 잃었다
+        return {}
+
+    fake.heartbeat = slow_heartbeat  # type: ignore[method-assign]
+    for _ in range(12):
+        w.heartbeat_once()
+        for _ in range(beat):
+            clocks.advance(1)
+            w.watchdog_tick()
+        assert not _stopped(runner), rounds
+    runner.release.set()
+    assert finish_of(fake, t)["outcome"] == SUCCEEDED
+
+
+def test_rl34_d_heartbeats_that_keep_getting_5xx_stop_the_job_at_g_minus_m(tmp_path, monkeypatch):
+    """(d) 연결은 되는데 heartbeat 가 5xx 만 받는다. 서버는 요청을 받으므로(heard 가 오른다) 닫지
+    않고, 워커는 마지막 2xx 의 `G − m` 에 표식 잡을 멈춰 `lost`(`worker_self_stopped`)로 보고한다.
+    멈춤 + 틱 + `grace_J` 는 그 2xx 의 `+ G` 보다 앞이다 — 두 번 돌지 않는 쪽."""
+    w, fake, clocks, _ = make_worker(tmp_path)
+    w.mark_ok(clocks.now().timestamp(), clocks.mono)
+    runner, t = start_job(w, monkeypatch, claimed(irreversible=True, grace=600))
+
+    def five_xx(jobs, host=None, *, seq=None, claims_settled=None):
+        raise ClientError(503, "server busy")
+
+    fake.heartbeat = five_xx  # type: ignore[method-assign]
+    stopped = None
+    for n in range(1, 700):
+        clocks.advance(1)
+        if n % 5 == 0:
+            assert w.heartbeat_once() is False
+        w.watchdog_tick()
+        if _stopped(runner):
+            stopped = n
+            break
+    assert stopped == w.self_stop_threshold(600, 10) == 565
+    assert stopped + rw.WATCHDOG_TICK_SECONDS + 10 < 600
+    body = finish_of(fake, t)
+    assert body["outcome"] == LOST and body["summary_code"] == "worker_self_stopped"
+
+
+class _DribblingServer:
+    """응답 머리를 보낸 뒤 몸통을 0.2초마다 한 바이트씩 흘리는 HTTP 서버(소켓 시한 안쪽). 받은
+    요청 수를 센다."""
+
+    def __init__(self) -> None:
+        import socket
+
+        self.sock = socket.socket()
+        self.sock.bind(("127.0.0.1", 0))
+        self.sock.listen(8)
+        self.port = self.sock.getsockname()[1]
+        self.requests = 0
+        self.stop = threading.Event()
+        threading.Thread(target=self._accept, daemon=True).start()
+
+    def _accept(self) -> None:
+        while not self.stop.is_set():
+            try:
+                conn, _ = self.sock.accept()
+            except OSError:
+                return
+            threading.Thread(target=self._serve, args=(conn,), daemon=True).start()
+
+    def _serve(self, conn: Any) -> None:
+        try:
+            conn.settimeout(5)
+            data = b""
+            while b"\r\n\r\n" not in data:
+                chunk = conn.recv(4096)
+                if not chunk:
+                    return
+                data += chunk
+            self.requests += 1
+            conn.sendall(
+                b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 4096\r\n\r\n"
+            )
+            while not self.stop.is_set():
+                conn.sendall(b" ")
+                time.sleep(0.2)
+        except OSError:
+            pass
+        finally:
+            conn.close()
+
+    def close(self) -> None:
+        self.stop.set()
+        self.sock.close()
+
+
+def test_rl34_e_a_dribbling_server_is_cut_by_the_deadline_and_the_next_beat_goes(
+    tmp_path, monkeypatch
+):
+    """(e) 서버가 응답 바이트를 조금씩 흘려(소켓 시한 안쪽) heartbeat 하나가 기한을 넘긴다. 진짜
+    `WorkerClient` 로 보낸다 — 전체 기한이 그 회차를 끊고 다음 박자가 간다(박자가 막히지 않는다).
+    기한만 줄여 시험 시간을 짧게 한다."""
+    from remote_ci_monitor.client import WorkerClient
+
+    monkeypatch.setattr(rw, "HEARTBEAT_DEADLINE_SECONDS", 1.0)
+    srv = _DribblingServer()
+    try:
+        client = WorkerClient(f"http://127.0.0.1:{srv.port}", "t")
+        client.session_id = "0" * 32
+        config = WorkerConfig(
+            server=client.server, token="t", data_dir=str(tmp_path / "w"), lanes=1
+        )
+        w = rw.RemoteWorker(config, client=client, log=lambda m: None)
+        for n in (1, 2):
+            began = time.monotonic()
+            assert w.heartbeat_once() is False
+            assert time.monotonic() - began < 1.0 + 1.0  # 기한에 끊겼다
+            for _ in range(100):
+                if srv.requests >= n:
+                    break
+                time.sleep(0.02)
+            assert srv.requests == n  # 다음 박자가 갔다
+        assert w.ok_at() is None
+    finally:
+        srv.close()
+
+
 @pytest.mark.parametrize("where", ["after_run", "requires", "prepare"])
 def test_rl41_every_lost_path_reports_worker_self_stopped(tmp_path, monkeypatch, where):
     """실행 뒤 · requires 실패 뒤 · 준비 실패 뒤 세 곳이 모두 자기 멈춤을 `worker_self_stopped` 로

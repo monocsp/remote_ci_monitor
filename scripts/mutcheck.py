@@ -5968,6 +5968,41 @@ MUTANTS = (
             "test_rl52_a_a_supervisor_that_sees_the_wrong_parent_logs_the_marker_and_the_flag_wins",
         ),
     ),
+    Mutant(
+        # 자기 멈춤 문턱이 `G − m` 이 아니라 G 다 — 1판의 「G 뒤에 죽음」, 서버가 먼저 닫을 수
+        # 있다(RL34 (a)(b))
+        name="self-stop-at-g",
+        path="src/remote_ci_monitor/remote_worker.py",
+        old=(
+            "        return grace_seconds - (HEARTBEAT_DEADLINE_SECONDS + grace_j + "
+            "SELF_STOP_SLACK_SECONDS)\n"
+        ),
+        new="        return grace_seconds\n",
+        tests=(
+            "tests/test_worker_selfstop_m5tb.py::"
+            "test_rl34_a_b_the_group_is_gone_before_the_server_may_close",
+        ),
+    ),
+    Mutant(
+        # heartbeat 의 답을 받기 전에 `ok_at` 을 올린다 — 5xx 만 받는 워커가 자기 멈춤을
+        # 하지 않는다(RL34 (d))
+        name="ok-at-before-the-answer",
+        path="src/remote_ci_monitor/remote_worker.py",
+        old=(
+            '                box["out"] = self.client.heartbeat('
+            "jobs, host, seq=seq, claims_settled=settled)\n"
+            "                self.mark_ok(*sent)\n"
+        ),
+        new=(
+            "                self.mark_ok(*sent)\n"
+            '                box["out"] = self.client.heartbeat('
+            "jobs, host, seq=seq, claims_settled=settled)\n"
+        ),
+        tests=(
+            "tests/test_worker_selfstop_m5tb.py::"
+            "test_rl34_d_heartbeats_that_keep_getting_5xx_stop_the_job_at_g_minus_m",
+        ),
+    ),
 )
 
 
