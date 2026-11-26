@@ -6003,6 +6003,22 @@ MUTANTS = (
             "test_rl34_d_heartbeats_that_keep_getting_5xx_stop_the_job_at_g_minus_m",
         ),
     ),
+    Mutant(
+        # requires 프리셋의 준비 중 멈춤이 `group_gone` 을 싣지 않는다 — 프로세스를 띄운 적
+        # 없는 표식 잡의 그룹이 홀드된다(RL41 (c))
+        name="requires-early-stop-group-unknown",
+        path="src/remote_ci_monitor/runner.py",
+        old=(
+            "                # mutcheck: requires-early-stop-group-unknown\n"
+            "                return RunResult(rc=None, started=at, finished=at, lost=True, "
+            "group_gone=True)\n"
+        ),
+        new="                return RunResult(rc=None, started=at, finished=at, lost=True)\n",
+        tests=(
+            "tests/test_job_supervisor_m5tb.py::"
+            "test_rl41_c_a_preset_with_requires_and_a_flag_while_preparing_starts_no_process",
+        ),
+    ),
 )
 
 

@@ -417,13 +417,16 @@ def run_job(
         if spec.requires:
             # 자재화가 길었다면 그사이 취소·종료 요청이 와 있을 수 있다 — 그게 이긴다. 프로세스도
             # 판정 줄도 없이 돌려주고, 호출자가 여느 취소·유실처럼 닫는다(M5l S4 · 리뷰 B P2).
-            # 없는 도구가 사용자의 취소를 `tool_missing` 으로 덮어서는 안 된다.
+            # 없는 도구가 사용자의 취소를 `tool_missing` 으로 덮어서는 안 된다. 프로세스를 띄우지
+            # 않았으니 그룹은 없다(`group_gone` 참) — 아래 Popen 직전 확인과 같다. 빠지면 표식 잡의
+            # finish 가 `group_gone` 없이 가서 서버가 그룹을 홀드한다(RL41 (c))
             if observer.should_stop():
                 at = now_fn()
-                return RunResult(rc=None, started=at, finished=at, lost=True)
+                # mutcheck: requires-early-stop-group-unknown
+                return RunResult(rc=None, started=at, finished=at, lost=True, group_gone=True)
             if observer.should_cancel():
                 at = now_fn()
-                return RunResult(rc=None, started=at, finished=at, cancelled=True)
+                return RunResult(rc=None, started=at, finished=at, cancelled=True, group_gone=True)
             # Popen 직전, **최종 환경**에서 — 프로세스가 볼 PATH 그대로, 상대 항목은 워크스페이스
             # 기준. 같은 줄을 관찰자에게도 주어 원격 워커의 서버 로그에도 남는다(마커는 아니다).
             missing = missing_tools(spec.requires, env, spec.workspace)
