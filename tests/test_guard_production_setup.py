@@ -1680,6 +1680,8 @@ P3_F2_MISSED_COMMAND_PLACES = [
 P3_M1_COMMENTS = [
     "# don't\nrcm $S\n# won't",
     "echo a # it's\nrcm ${S}tup\n# 'x",
+    # 글 자리에 선 주석 — `#'` 부터 줄 끝까지가 주석이라 둘째 줄은 명령이다
+    "gh pr comment 1 --body #'\nrcm ${S}tup\n#'",
 ]
 #: 면제의 조건마다 하나 — 명령이 모두 평범해도 rcm 글이 글 자리 밖에 있으면, 글 변수가 글 자리
 #: 밖에도 나오면, 명령 자리에 평범하지 않은 것이 있으면, 글이 실행될 파일로 흘러가면 바닥이다
