@@ -1906,6 +1906,7 @@ def test_b10_h1_setups_own_service_is_free_of_the_label_check_only(flag, attr, w
         data=b"x",
     )
     own = dict(label="lbl", written=(b"x",), force_service=True, fold_case=False)
+    own["installed"] = svc.file
     assert core.production_refusal([svc], {}, **own) is None
     target = getattr(svc, attr) / "inner" if attr != "config" else svc.config
     reason = core.production_refusal([svc], {flag: target}, **own)
@@ -2005,7 +2006,7 @@ def test_b9_352_core_refusal_is_pure():
     assert "checkout" in (core.production_refusal([svc], {"--config": Path("/K/x")}, **fold) or "")
     named = {**ask, "label": "lbl"}
     assert "label — refusing" in (core.production_refusal([svc], {}, **named) or "")
-    forced = {**named, "force_service": True, "written": (b"x",)}
+    forced = {**named, "force_service": True, "written": (b"x",), "installed": Path("/s/lbl.plist")}
     assert core.production_refusal([svc], {}, **forced) is None
     broken = core.RcmService(name="b", file=Path("/s/b.plist"), problem="cannot read it")
     assert "/s/b.plist" in (core.production_refusal([broken], {}, **ask) or "")

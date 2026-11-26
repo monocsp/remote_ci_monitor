@@ -706,11 +706,12 @@ def _where(args: argparse.Namespace, world: World, role: str, **given: Any) -> c
             manager=core.manager_of(world.platform),
             fold_case=fold,
             expand_user=os.path.expanduser,
+            resolve=real_path,
             **values,
         )
     except core.SetupValueError as e:
         raise SetupUsage(str(e)) from None
-    place = core.install_place_of(found.config, home, fold_case=fold)
+    place = _install_place(found.config, world)
     if place is not None:
         # 설정 파일도 서비스 파일과 같은 규칙이다 — 서비스 관리자가 읽는 자리에 쓰지 않는다
         # (P3 3라운드 v1-1). 그 자리의 운영 서비스 파일을 `--config --force config` 로 덮을 수
@@ -720,6 +721,19 @@ def _where(args: argparse.Namespace, world: World, role: str, **given: Any) -> c
             "reads — setup writes no config there; pick a config path outside it"
         )
     return found
+
+
+def _install_place(path: Path, world: World) -> Path | None:
+    """`path` 가 서비스 관리자가 읽는 자리 안이면 그 자리 — `$HOME` 과 passwd 의 홈(`scan_homes`)
+    둘 다의 사용자 자리, `$XDG_CONFIG_HOME/systemd/user`, 시스템 자리다. 심볼릭 링크를 풀어서도
+    견준다(batch 10 H2)."""
+    fold = core.folds_case(world.platform)
+    xdg = core.xdg_config_home(os.environ)
+    for home in scan_homes():
+        place = core.install_place_of(path, home, fold_case=fold, xdg=xdg, resolve=real_path)
+        if place is not None:
+            return place
+    return None
 
 
 #: 글자로 받는 옵션 — 설정 · 서비스 파일에 UTF-8 로 들어간다
@@ -823,8 +837,14 @@ def _check_production(args: argparse.Namespace, plan: Plan, world: World) -> Non
         targets["--service-file"] = plan.service
     if plan.data_dir is not None:
         targets["--data-dir"] = plan.data_dir
+    fold = core.folds_case(world.platform)
+    # setup 이 쓴(쓸) 서비스 파일 — 렌더한 바이트와, 설정 폴더 아래에 있는 staged 사본뿐이다.
+    # `--service-file` 이 가리키는 아무 파일의 바이트를 넣으면 설치된 유닛(이나 그 사본)을
+    # 가리켜 운영 라벨을 setup 의 것으로 만들었다(batch 10 H2)
     written = [f.data for f in plan.files if f.kind == "service"]
-    if plan.service is not None:
+    if plan.service is not None and core.same_or_inside(
+        real_path(plan.service), real_path(plan.config.parent), fold_case=fold
+    ):
         try:
             written.append(plan.service.read_bytes())
         except OSError:
@@ -835,7 +855,8 @@ def _check_production(args: argparse.Namespace, plan: Plan, world: World) -> Non
         label=plan.label if plan.service is not None else None,
         written=written,
         force_service=bool(set(args.force or ()) & {"service", "all"}),
-        fold_case=core.folds_case(world.platform),
+        fold_case=fold,
+        installed=real_path(plan.installed) if plan.installed is not None else None,
     )
     if reason is not None:
         raise SetupFailed(reason)
@@ -1052,6 +1073,8 @@ def _service(args: argparse.Namespace, ask: _Ask | None, world: World, plan: Pla
     found = _where(args, world, plan.role, label=label)
     staged, place = found.service_file, found.install_place
     assert staged is not None  # 서비스가 있는 역할 · 서비스 관리자가 있는 플랫폼
+    if place is None:  # passwd 의 홈 아래 설치 자리(batch 10 H2 · H3)
+        place = _install_place(staged, world)
     if place is not None:
         # 설치 자리에 쓰지 않는다(§4.1, ⛔ Q9) — 그 자리의 파일은 서비스 관리자가 읽는 것이고,
         # 운영 서비스의 파일도 거기 있다(P3 v1-2)

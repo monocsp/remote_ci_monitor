@@ -400,9 +400,20 @@ SYSTEM_SERVICE_DIRS = (
 )
 
 
-def install_places(home: Path) -> tuple[Path, ...]:
-    """서비스 관리자가 읽는 자리 전부 — launchd · systemd 의 사용자 자리와 시스템 자리."""
-    return (install_dir(LAUNCHD, home), install_dir(SYSTEMD, home), *SYSTEM_SERVICE_DIRS)
+def install_places(home: Path, xdg: Path | None = None) -> tuple[Path, ...]:
+    """서비스 관리자가 읽는 자리 전부 — launchd · systemd 의 사용자 자리와 시스템 자리. `xdg`
+    (`$XDG_CONFIG_HOME`)를 주면 systemd 가 읽는 `$XDG_CONFIG_HOME/systemd/user` 도 든다(batch 10
+    H2)."""
+    user = (install_dir(LAUNCHD, home), install_dir(SYSTEMD, home))
+    if xdg is not None:
+        user += (xdg / "systemd" / "user",)
+    return (*user, *SYSTEM_SERVICE_DIRS)
+
+
+def xdg_config_home(environ: Mapping[str, str]) -> Path | None:
+    """`$XDG_CONFIG_HOME` — 절대 경로일 때만(XDG 규약은 상대 경로를 버린다)."""
+    raw = environ.get("XDG_CONFIG_HOME")
+    return Path(raw) if raw and os.path.isabs(raw) else None
 
 
 def folds_case(platform: str) -> bool:
@@ -423,14 +434,24 @@ def place_key(path: str | Path, *, fold_case: bool) -> str:
     return text
 
 
-def install_place_of(path: Path, home: Path, *, fold_case: bool) -> Path | None:
+def install_place_of(
+    path: Path,
+    home: Path,
+    *,
+    fold_case: bool,
+    xdg: Path | None = None,
+    resolve: Callable[[Path], Path] | None = None,
+) -> Path | None:
     """`path` 가 설치 자리 안이면 그 자리. 바로 아래만이 아니라 그 안 전부다 — systemd 는
-    `<유닛>.d/` 의 drop-in 도 읽는다. 경로는 글자로만 비교한다(심링크는 풀지 않는다). 대소문자는
-    `place_key` 가 `fold_case` 대로 다룬다."""
-    text = place_key(path, fold_case=fold_case)
-    for place in install_places(home):
-        root = place_key(place, fold_case=fold_case)
-        if text == root or text.startswith(root.rstrip("/") + "/"):
+    `<유닛>.d/` 의 drop-in 도 읽는다. 경로는 글자로 비교하고, `resolve`(심볼릭 링크를 푸는 함수 —
+    I/O 라 호출자가 준다)를 주면 푼 경로끼리도 견준다(batch 10 H2: 설치 자리를 가리키는 폴더
+    링크). 대소문자는 `place_key` 가 `fold_case` 대로 다룬다."""
+    for place in install_places(home, xdg):
+        if same_or_inside(path, place, fold_case=fold_case):
+            return place
+        if resolve is not None and same_or_inside(
+            resolve(path), resolve(place), fold_case=fold_case
+        ):
             return place
     return None
 
@@ -791,6 +812,7 @@ def where(
     default_data_dir: str = DEFAULT_DATA_DIR,
     fold_case: bool,
     expand_user: ExpandUser,
+    resolve: Callable[[Path], Path] | None = None,
 ) -> Where:
     """setup 이 어디에 쓸지 — setup 의 경로 결정은 모두 이 함수를 거친다.
 
@@ -800,7 +822,8 @@ def where(
     역할은 `SetupValueError` 다 — 빈 `--config` 를 기본 자리로 읽지 않는다.
 
     기계에서 읽는 것은 없다: 대소문자 규칙(`fold_case`, `folds_case(platform)`)과 `~user` 를 푸는
-    함수(`expand_user`)는 호출자가 준다(P3 3라운드 v1-5)."""
+    함수(`expand_user`), 심볼릭 링크를 푸는 함수(`resolve`, 설치 자리 비교용)는 호출자가
+    준다(P3 3라운드 v1-5)."""
     if role not in CONFIG_NAMES:
         raise SetupValueError(f"--role must be one of {', '.join(ROLES)} (got {role!r})")
     given = {"config": config, "service_file": service_file, "data_dir": data_dir, "label": label}
@@ -824,7 +847,9 @@ def where(
             service = abs_path(service_file, home=home, cwd=cwd, expand_user=expand_user)
         else:
             service = conf.parent / "service" / service_file_name(chosen, manager)
-        place = install_place_of(service, home, fold_case=fold_case)
+        place = install_place_of(
+            service, home, fold_case=fold_case, xdg=xdg_config_home(environ), resolve=resolve
+        )
     data: Path | None = None
     if role in SERVER_ROLES:
         raw = data_dir if data_dir is not None else default_data_dir
@@ -897,10 +922,12 @@ def production_refusal(
        쪽) — 그 서비스가 무엇을 쓰는지 모른다.
     2. 대상이 어느 서비스의 서비스 파일 · 설정 · data_dir · venv · 체크아웃이거나 그 안이면
        거절한다.
-    3. setup 의 라벨(과 그 유닛 이름)이 설치된 서비스의 이름이면 `--force service` 이고 설치
-       파일이 setup 이 쓴(쓸) 파일과 같을 때(`written`)만 받는다. 이 예외는 라벨 검사에만
-       있다 — 그 서비스의 설정 · data_dir · venv · 체크아웃은 2 에서 예외 없이 거절한다(batch
-       10 H1: 같은 인자에 `--force all` 이면 설치된 서비스가 읽는 설정을 덮었다)."""
+    3. setup 의 라벨(과 그 유닛 이름)이 설치된 서비스의 이름이면 `--force service` 이고, 그
+       서비스 파일이 그 라벨의 설치 자리(`installed`, 푼 경로)이고, 설치 파일이 setup 이 쓴(쓸)
+       파일과 같을 때(`written`: 렌더한 바이트와 설정 폴더 아래의 staged 사본)만 받는다. 이
+       예외는 라벨 검사에만 있다 — 그 서비스의 서비스 파일 · 설정 · data_dir · venv · 체크아웃은
+       2 에서 예외 없이 거절한다(batch 10 H1 · H2: 같은 인자에 `--force all` 이면 설치된 서비스가
+       읽는 설정을 덮었고, 설치된 유닛을 가리키는 `--service-file` 이 own 을 참으로 만들었다)."""
     for svc in services:
         if svc.problem is not None:
             return (
@@ -911,7 +938,8 @@ def production_refusal(
 
     def own(svc: RcmService) -> bool:
         named = bool(mine.intersection(svc.names))
-        return named and force_service and svc.data is not None and svc.data in written
+        placed = installed is not None and same_or_inside(svc.file, installed, fold_case=fold_case)
+        return named and force_service and placed and svc.data is not None and svc.data in written
 
     for flag, target in targets.items():
         for svc in services:

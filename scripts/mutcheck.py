@@ -2944,9 +2944,9 @@ MUTANTS = (
     Mutant(
         # setup 이 설치 자리(~/Library/LaunchAgents …)에 서비스 파일을 쓴다(§4.1, P3 v1-2)
         name="setup-install-place-written",
-        path="src/remote_ci_monitor/core/setup.py",
-        old="        place = install_place_of(service, home, fold_case=fold_case)\n",
-        new="        place = None\n",
+        path="src/remote_ci_monitor/setup.py",
+        old="    if place is not None:\n        # 설치 자리에 쓰지 않는다(§4.1, ⛔ Q9)",
+        new="    if False:\n        # 설치 자리에 쓰지 않는다(§4.1, ⛔ Q9)",
         tests=("tests/test_setup.py::test_tr24_setup_refuses_a_service_file_on_an_install_place",),
     ),
     Mutant(
@@ -3206,7 +3206,7 @@ MUTANTS = (
         # `--force config` 로 덮는다(P3 3라운드 v1-1)
         name="setup-config-in-install-place-written",
         path="src/remote_ci_monitor/setup.py",
-        old="    place = core.install_place_of(found.config, home, fold_case=fold)\n",
+        old="    place = _install_place(found.config, world)\n",
         new="    place = None\n",
         tests=("tests/test_setup.py::test_tr24_setup_refuses_a_config_inside_an_install_place",),
     ),
@@ -3795,10 +3795,10 @@ MUTANTS = (
         name="setup-production-own-without-cmp",
         path="src/remote_ci_monitor/core/setup.py",
         old=(
-            "        return named and force_service and svc.data is not None "
+            "        return named and force_service and placed and svc.data is not None "
             "and svc.data in written\n"
         ),
-        new="        return named and force_service\n",
+        new="        return named and force_service and placed\n",
         tests=(
             "tests/test_setup.py::test_b9_352_the_production_label_needs_force_service_and_the_same_file",
             "tests/test_setup.py::test_b9_352_setups_own_installed_service_still_guards_its_config",
@@ -3873,6 +3873,48 @@ MUTANTS = (
         old="        homes.append(account)\n",
         new="        pass\n",
         tests=("tests/test_setup.py::test_b10_h3_the_scan_reads_the_account_home_not_only_home",),
+    ),
+    Mutant(
+        # `--service-file` 이 가리키는 아무 파일의 바이트가 `written` 에 든다 — 운영 plist 의
+        # 사본을 주면 운영 라벨이 setup 의 것이 된다(batch 10 H2)
+        name="setup-production-written-reads-any-service-file",
+        path="src/remote_ci_monitor/setup.py",
+        old="        real_path(plan.service), real_path(plan.config.parent), fold_case=fold\n",
+        new="        real_path(plan.service), real_path(plan.service), fold_case=fold\n",
+        tests=(
+            "tests/test_setup.py::"
+            "test_b10_h2_a_copy_outside_the_config_folder_does_not_make_the_label_setups",
+        ),
+    ),
+    Mutant(
+        # own 이 서비스 파일이 그 라벨의 설치 자리인지 보지 않는다(batch 10 H2)
+        name="setup-production-own-anywhere",
+        path="src/remote_ci_monitor/core/setup.py",
+        old=(
+            "        placed = installed is not None and same_or_inside(svc.file, installed, "
+            "fold_case=fold_case)\n"
+        ),
+        new="        placed = True\n",
+        tests=(
+            "tests/test_setup.py::"
+            "test_b10_h2_own_needs_the_install_place_and_the_service_file_is_refused_first",
+        ),
+    ),
+    Mutant(
+        # 설치 자리를 글자로만 견준다 — LaunchAgents 를 가리키는 폴더 링크 안에 쓴다(batch 10 H2)
+        name="setup-install-place-links-not-resolved",
+        path="src/remote_ci_monitor/core/setup.py",
+        old="        if resolve is not None and same_or_inside(\n",
+        new="        if False and same_or_inside(\n",
+        tests=("tests/test_setup.py::test_b10_h2_an_install_place_is_found_through_links_and_xdg",),
+    ),
+    Mutant(
+        # `$XDG_CONFIG_HOME/systemd/user` 가 설치 자리가 아니다 — setup 이 그 안에 쓴다(batch 10 H2)
+        name="setup-install-place-xdg-missed",
+        path="src/remote_ci_monitor/core/setup.py",
+        old='        user += (xdg / "systemd" / "user",)\n',
+        new="        pass\n",
+        tests=("tests/test_setup.py::test_b10_h2_an_install_place_is_found_through_links_and_xdg",),
     ),
     Mutant(
         # 읽지 못한 rcm 같은 파일을 rcm 이 아닌 것으로 본다(결정 352, 닫는 쪽)
