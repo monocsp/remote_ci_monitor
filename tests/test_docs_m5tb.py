@@ -195,3 +195,10 @@ def test_gap4_the_irreversible_section_says_retry_is_refused_with_the_loader_mes
     with pytest.raises(config_mod.ConfigError) as e:
         config_mod.parse_preset(preset)
     assert quoted in str(e.value)
+
+
+def test_gap5_operating_says_a_worker_whose_job_holds_a_group_is_not_forgotten():
+    """# GAP5 일주일 조용한 워커를 잊는 규칙의 예외에 열린 홀드가 든다."""
+    text = flat(OPERATING)
+    assert "neither is a worker whose job holds a group" in text
+    assert "confirm the job's processes are gone and release the hold" in text

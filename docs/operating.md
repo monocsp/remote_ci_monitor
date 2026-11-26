@@ -1304,7 +1304,10 @@ bundles rather than evicting bundles somebody is still waiting for; the affected
 - Medians are recomputed when a job finishes, not on every request. A status document served
   seconds after a job ends already includes it; nothing else moves a 45-day median.
 - A worker the server has not heard from in a week is forgotten, and its lanes stop appearing as
-  `down`. A worker with a job still running is never forgotten, however long it has been silent.
+  `down`. A worker with a job still running is never forgotten, however long it has been silent,
+  and neither is a worker whose job holds a group
+  ([`rcm release-hold`](#when-a-group-is-held-rcm-release-hold)): when it comes back it can still
+  confirm the job's processes are gone and release the hold.
 - When the queue is paused or every worker lane is down, ETAs are `null` on purpose.
 - Host samples are polled (default every 5 s). `stale` means the last sample is older than 3 intervals; `hosts_error` means the sampler itself failed. Memory "used" on macOS is `active + wired + compressed` (what Activity Monitor calls Memory Used), which is smaller than `top`'s PhysMem used. Memory is shown in GiB under the `GB` label, like Activity Monitor and `free -h`, so a 24 GB machine reads `24.0 GB`. GPU numbers come from `ioreg` (Apple Silicon) or `nvidia-smi`; on other machines the GPU shows `unavailable` with the reason. Disk is the filesystem holding the **data directory** — where snapshots, mirrors and workspaces land — not the root partition, and a remote worker reports its own. It is counted in decimal GB, like Finder. The card warns at 85% used **or** under 10 GiB free, whichever comes first: a large disk at 90% still has room, a small one at 80% cannot unpack a snapshot.
 

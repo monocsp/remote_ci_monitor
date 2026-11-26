@@ -6734,6 +6734,17 @@ MUTANTS = (
             "test_gap4_an_irreversible_preset_cannot_have_retry",
         ),
     ),
+    Mutant(
+        # GAP5 열린 홀드가 있는 워커를 잊는다 — 세션 행이 지워져 돌아온 워커가 홀드를 못 푼다
+        name="forget-held-worker",
+        path="src/remote_ci_monitor/store.py",
+        old='WHERE h.released_at IS NULL "  # mutcheck: forget-held-worker\n',
+        new='WHERE 0 "\n',
+        tests=(
+            "tests/test_irreversible_hold_m5tb.py::"
+            "test_gap5_a_worker_with_an_open_hold_is_not_forgotten",
+        ),
+    ),
 )
 
 

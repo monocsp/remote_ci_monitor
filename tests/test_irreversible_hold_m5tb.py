@@ -286,6 +286,35 @@ def test_gap4_an_irreversible_preset_cannot_have_retry():
     assert parse_preset(base).retry is not None
 
 
+def test_gap5_a_worker_with_an_open_hold_is_not_forgotten(store):
+    """# GAP5 오래 떠나 있던 워커를 잊으면 세션 행도 지워진다. 그 워커가 돌아와 죽은 세션을
+    `previous_sessions` 로 넘겨도 서버가 그 세션을 몰라 홀드를 스스로 풀지 못한다. 열린 홀드가
+    있는 워커는 잊지 않는다 — 홀드가 풀리면 다음 쓸기에서 잊는다."""
+    sid = "a" * 32
+    store.open_session(
+        "build-02",
+        sid,
+        previous=[],
+        unverified=[],
+        now=NOW,
+        pool=DEFAULT_POOL,
+        lanes=1,
+        host_name=None,
+        version="x",
+    )
+    register(store, "gone-01")
+    enqueue(store, "deploy", group=SYNTH, scope=SCOPE_GLOBAL)
+    job = claim_remote(store, "build-02", session_id=sid, claim_seq=1, grace_seconds=600)
+    assert store.finish(job.id, LOST, now=at(1), summary="x", hold_cause="worker_unreachable")
+    assert store.has_open_hold(job.id)
+    later = NOW + timedelta(days=30)
+    assert store.forget_workers(later) == ["gone-01"]
+    assert store.get_worker("build-02") is not None
+    assert store.get_session(sid) is not None
+    store.release_hold(job.id, kind="admin", by="admin", reason="checked", now=at(2))
+    assert store.forget_workers(later) == ["build-02"]
+
+
 def test_rl48_config_fills_a_synthetic_global_group_for_an_irreversible_preset():
     p = parse_preset({"name": "ship", "argv": ["sh", "-c", "true"], "irreversible": True})
     assert p.irreversible is True

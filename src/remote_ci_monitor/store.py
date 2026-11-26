@@ -4904,6 +4904,11 @@ class Store:
                 # 지우면 `pools_without_workers` 가 비어 `rcm check` 의 경보가 꺼진다 —
                 # 잡은 그대로 멈춰 있는데.
                 f"AND pool NOT IN (SELECT DISTINCT pool FROM jobs WHERE state IN ({waiting})) "
+                # 열린 홀드가 있는 워커도 남긴다(P6 GAP5) — 잊으면 세션 행이 지워져 돌아온 워커의
+                # `previous_sessions` 가 그 홀드를 풀지 못한다
+                "AND name NOT IN (SELECT j.worker_name FROM jobs j JOIN irreversible_holds h "
+                "ON h.job_id = j.id WHERE h.released_at IS NULL "  # mutcheck: forget-held-worker
+                "AND j.worker_name IS NOT NULL) "
                 "ORDER BY name",
                 (_ts(cutoff), *sorted(BUSY_STATES), *pending),
             ).fetchall()
