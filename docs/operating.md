@@ -689,8 +689,8 @@ directory the command would *actually* open, in the CLI's own order: `--data-dir
 `$RCM_CONFIG`, `./rcm.toml`, `$XDG_CONFIG_HOME/rcm/server.toml`, `~/.config/rcm/server.toml`).
 So a **copy of the production config** that only changes `port` is refused too — its `data_dir`
 is still the production one — and so is a test config run with `RCM_SERVER_DATA_DIR` pointing at
-production. `cd <dir> && rcm …` is judged in `<dir>`; `env -i`, `env -u NAME`, `exec`, `nohup`,
-`time`, `command` and a `( … )` or `{ … }` group do not hide the command. The hook does not look
+production. `cd <dir> && rcm …` is judged in `<dir>`; `env -i`, `env -u NAME`, `env -S '…'`, `exec`,
+`nohup`, `time`, `nice`, `timeout <duration>`, `command` and a `( … )` or `{ … }` group do not hide the command. The hook does not look
 inside `bash -c '…'`, `xargs`, `uv run` or `$(…)`, and does not resolve symlinks.
 
 ## Keeping clients on the server's version

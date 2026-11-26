@@ -325,9 +325,37 @@ def _tokens(segment: str) -> list[str]:
         return text.split()
 
 
+#: timeout 의 시간 낱말(`30` · `1.5m` · `2h`)
+_DURATION = re.compile(r"\d+(?:\.\d+)?[smhd]?")
+#: 값을 다음 낱말로 받는 timeout 플래그
+_TIMEOUT_VALUE_FLAGS = frozenset({"-s", "--signal", "-k", "--kill-after"})
+#: nice 의 조정값을 붙여 쓴 꼴(`-5` · `-n5` · `-n-5` · `--adjustment=5`)
+_NICE_GLUED = re.compile(r"-n?-?\d+|--adjustment=-?\d+")
+
+
+def _split_string(tokens: list[str], index: int) -> list[str] | None:
+    """`tokens[index]` 가 `env` 의 `-S STRING` · `-SSTRING` · `--split-string[=]STRING` 이면 그
+    글을 낱말로 나눠 그 자리에 끼운 토큰 목록, 아니면 None."""
+    head = tokens[index]
+    if head in ("-S", "--split-string"):
+        text, used = (tokens[index + 1] if index + 1 < len(tokens) else ""), 2
+    elif head.startswith("--split-string="):
+        text, used = head.split("=", 1)[1], 1
+    elif head.startswith("-S"):
+        text, used = head[2:], 1
+    else:
+        return None
+    try:
+        words = shlex.split(text)
+    except ValueError:
+        words = text.split()
+    return tokens[:index] + words + tokens[index + used :]
+
+
 def _strip_prefix(tokens: list[str]) -> tuple[list[str], dict[str, str], set[str], bool]:
     """(argv, 조각 앞의 VAR=value, `-u` 로 지운 이름, `-i` 가 있었나). `env` 의 `-i`·`-u NAME`·
-    `--unset=NAME`·`--` 를 알고, `sudo`·`exec`·`nohup` 같은 감싸기를 뗀다."""
+    `--unset=NAME`·`-S STRING`·`--` 를 알고, `sudo`·`exec`·`nohup` 같은 감싸기와 `nice`(조정값)
+    · `timeout`(플래그와 시간 하나)을 뗀다(P6 재확인 7 · v2-7)."""
     env: dict[str, str] = {}
     unset: set[str] = set()
     cleared = False
@@ -339,6 +367,25 @@ def _strip_prefix(tokens: list[str]) -> tuple[list[str], dict[str, str], set[str
             in_env = _name(head) == "env"
             index += 1
             continue
+        if _name(head) == "nice":
+            in_env, index = False, index + 1
+            if index < len(tokens) and tokens[index] in ("-n", "--adjustment"):
+                index += 2
+            elif index < len(tokens) and _NICE_GLUED.fullmatch(tokens[index]):
+                index += 1
+            continue
+        if _name(head) in ("timeout", "gtimeout"):
+            in_env, index = False, index + 1
+            while index < len(tokens) and tokens[index].startswith("-"):
+                index += 2 if tokens[index] in _TIMEOUT_VALUE_FLAGS else 1
+            if index < len(tokens) and _DURATION.fullmatch(tokens[index]):
+                index += 1
+            continue
+        if in_env:
+            split = _split_string(tokens, index)
+            if split is not None:
+                tokens = split
+                continue
         if in_env and head in ("-i", "--ignore-environment", "-"):
             cleared = True
             index += 1

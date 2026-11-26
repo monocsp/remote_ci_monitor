@@ -1148,3 +1148,41 @@ def test_b8_2_a_developer_worktree_venv_on_path_is_still_free(tmp_path, monkeypa
     monkeypatch.setenv("PATH", f"{venv}/bin:/usr/bin:/bin")
     prod = guard.find_production()
     assert prod.checkout is None and prod.venv is None, prod
+
+
+# ── P6 재확인(batch 8) 7: nice · timeout · env -S 뒤의 rcm 도 setup 이 아닌 규칙이 본다 ──
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "nice rcm serve --data-dir /home/op/.local/share/rcm",
+        "nice -n 5 rcm token --config /home/op/.config/rcm/server.toml list",
+        "nice -n5 rcm serve --config /home/op/.config/rcm/server.toml",
+        "nice --adjustment=5 rcm serve --config /home/op/.config/rcm/server.toml",
+        "timeout 30 rcm serve --config /home/op/.config/rcm/server.toml",
+        "timeout -s KILL 30s rcm worker --config /home/op/.config/rcm/worker.toml",
+        "timeout --kill-after=5 1.5m rcm serve --data-dir /home/op/.local/share/rcm",
+        "env -S 'rcm serve --config /home/op/.config/rcm/server.toml'",
+        '/usr/bin/env -S "rcm token --config /home/op/.config/rcm/server.toml list"',
+        "env --split-string='rcm serve --data-dir /home/op/.local/share/rcm'",
+        "nice timeout 30 env -S 'rcm serve --data-dir /home/op/.local/share/rcm'",
+    ],
+)
+def test_b8_7_nice_timeout_and_env_split_do_not_hide_rcm(command):
+    # v2-7: `_strip_prefix` 가 nice(조정값), timeout(시간 하나와 그 플래그), env -S(나눌 글)를
+    # 떼어 내야 뒤의 rcm 을 DB 를 여는 명령 · 서버 규칙이 본다
+    verdict = judge(command)
+    assert verdict is not None and verdict.decision == "deny", command
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "nice -n 5 make test",
+        "timeout 30 ./.venv/bin/python -m pytest -q",
+        "env -S 'python3 -c pass'",
+    ],
+)
+def test_b8_7_nice_timeout_and_env_split_around_other_commands_pass(command):
+    assert judge(command) is None, command

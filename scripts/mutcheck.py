@@ -3399,6 +3399,36 @@ MUTANTS = (
         ),
     ),
     Mutant(
+        # `nice` 를 떼지 않는다 — `nice -n 5 rcm token --config <운영>` 이 지나간다(P6 재확인 7)
+        name="guard-nice-not-stripped",
+        path="tools/guard_production.py",
+        old='        if _name(head) == "nice":\n',
+        new="        if False:\n",
+        tests=(
+            "tests/test_guard_production_setup.py::test_b8_7_nice_timeout_and_env_split_do_not_hide_rcm",
+        ),
+    ),
+    Mutant(
+        # timeout 의 시간 낱말을 남긴다 — `timeout 30 rcm serve` 의 명령이 `30` 이 된다(P6 재확인 7)
+        name="guard-timeout-duration-kept",
+        path="tools/guard_production.py",
+        old="            if index < len(tokens) and _DURATION.fullmatch(tokens[index]):\n",
+        new="            if False:\n",
+        tests=(
+            "tests/test_guard_production_setup.py::test_b8_7_nice_timeout_and_env_split_do_not_hide_rcm",
+        ),
+    ),
+    Mutant(
+        # `env -S '…'` 의 글을 나누지 않는다 — 그 안의 rcm 을 보지 못한다(P6 재확인 7)
+        name="guard-env-split-string-ignored",
+        path="tools/guard_production.py",
+        old="            if split is not None:\n",
+        new="            if False:\n",
+        tests=(
+            "tests/test_guard_production_setup.py::test_b8_7_nice_timeout_and_env_split_do_not_hide_rcm",
+        ),
+    ),
+    Mutant(
         # 감싸기를 이름(basename)이 아니라 글자로 본다 — `/usr/bin/env rcm token --config <운영>`
         # · `/usr/bin/nohup rcm serve` 가 지나간다(P3 5라운드 v2-1)
         name="guard-wrapper-path-missed",
