@@ -2752,3 +2752,33 @@ def test_b12_l1_several_execstarts_close_when_setup_cannot_tell(cfg, home, tmp_p
     err = fake.err.getvalue()
     assert str(hub["unit"]) in err and "refusing" in err, err
     _nothing_written(cfg, tmp_path / "data")
+
+
+@pytest.mark.parametrize("name", ["com.example.backup", "com.example.rcm-hub"])
+def test_b12_l2_a_file_another_error_kept_from_setup_is_not_skipped_quietly(
+    cfg, home, tmp_path, monkeypatch, name
+):
+    # batch 12 L2(v1-6): 권한이 아닌 OSError(EIO 같은)로 읽지 못한 파일도 조용히 건너뛰지 않는다
+    # — 권한 거부와 같이 이름으로 가린다. 다른 프로그램의 이름이면 경고 줄, rcm 같으면 거절
+    import errno
+
+    plist = _agent(home, name, ["/opt/x"])
+    real_read = Path.read_bytes
+
+    def read_bytes(self: Path) -> bytes:
+        if self.name == plist.name:
+            raise OSError(errno.EIO, os.strerror(errno.EIO), str(self))
+        return real_read(self)
+
+    monkeypatch.setattr(Path, "read_bytes", read_bytes)
+    fake = Fake()
+    code = go(fake, *coordinator_args(tmp_path / "data"))
+    err = fake.err.getvalue()
+    if name == "com.example.backup":
+        assert code == 0, fake.text
+        warning = f"could not read {plist} — skipped; if it runs rcm, setup cannot protect it"
+        assert warning in err, fake.text
+    else:
+        assert code == 1, fake.text
+        assert str(plist) in err and "refusing" in err, err
+        _nothing_written(cfg, tmp_path / "data")
