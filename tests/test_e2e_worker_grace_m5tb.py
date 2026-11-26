@@ -407,6 +407,52 @@ def test_rl8_a_a_cancel_during_the_partition_ends_both_jobs_cancelled_after_the_
     assert grace.holds() == []
 
 
+# ── RL7 (a) — worker_timeout 보다 길고 G 보다 짧은 서버 정지 ────────────────────
+
+
+@pytest.mark.slow
+def test_rl7_a_a_server_stop_inside_g_keeps_the_jobs_and_the_real_exit_codes(grace):
+    """서버를 `worker_timeout`(10)보다 길고 G(90)보다 짧게(약 66초) 멈춘다. 그동안 기다리던
+    `rcm wait` 은 오늘 계약대로 연결 실패 60초 뒤 종료 3 이다. 다시 올린 뒤 첫 janitor 틱과 그
+    뒤에도 원격 잡은 `lost` 가 되지 않고, 워커가 미뤄 둔 finish 가 확정되어 `rcm wait --job N` 은
+    진짜 결과 코드(0)를 낸다. 홀드 0."""
+    import subprocess
+
+    from test_e2e_worker import RCM
+
+    grace.start("build-02", "build-03")
+    x = grace.submit("shipshort")
+    y = grace.submit("plainshort")
+    px, py = grace.pid(x), grace.pid(y)
+    waiting = subprocess.Popen(
+        [*RCM, "wait", "--job", str(y), "--timeout", "300"],
+        env=grace.env,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    try:
+        time.sleep(1)
+        grace.server.stop()
+        down = time.monotonic()
+        code = waiting.wait(timeout=120)
+        gone = time.monotonic() - down
+        assert code == 3  # 연결 실패 60초 — 오늘 계약
+        assert 50 < gone < 85, gone
+        wait_until(lambda: is_dead(px) and is_dead(py), 30, "both commands to end (sleep 22)")
+        time.sleep(max(0.0, 66 - (time.monotonic() - down)))
+        assert time.monotonic() - down < G - 10
+        grace.server.start()
+        time.sleep(7)  # 기동 직후 janitor 틱(5초)이 지난다
+        for jid in (x, y):
+            assert grace.job(jid)["state"] != "lost"
+        assert grace.wait_exit(x, 60) == 0 and grace.wait_exit(y, 60) == 0
+        assert grace.job(x)["state"] == grace.job(y)["state"] == "succeeded"
+        assert grace.holds() == []
+    finally:
+        if waiting.poll() is None:
+            waiting.kill()
+
+
 # ── RL10 — 같은 토큰의 둘째 프로세스 ────────────────────────────────────────────
 
 
