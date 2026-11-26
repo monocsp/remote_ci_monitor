@@ -2528,3 +2528,13 @@ def test_b11_l1_the_hint_is_only_for_the_service_setup_wrote():
     assert ours is not None and REMOVE_FIRST in ours, ours
     other = core.production_refusal([svc], {"--config": svc.config}, written=(b"y",), **base)
     assert other is not None and "config — refusing" in other and REMOVE_FIRST not in other
+
+
+def test_b11_l3_no_account_home_refuses(cfg, tmp_path, monkeypatch):
+    # batch 11 L3(v2-3 · v1-6): passwd 에서 이 계정의 홈을 찾지 못하면 `$HOME` 만 믿지 않고 닫는
+    # 쪽이다 — 그 홈 아래의 운영 서비스를 볼 수 없다
+    monkeypatch.setattr(setup, "account_home", lambda: None)
+    fake = Fake()
+    assert go(fake, *coordinator_args(tmp_path / "data")) == 1, fake.text
+    assert "cannot find this account's home — refusing" in fake.err.getvalue(), fake.text
+    _nothing_written(cfg, tmp_path / "data")
