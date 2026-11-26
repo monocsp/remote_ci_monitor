@@ -30,10 +30,11 @@ pull request as their original.
    `### Security`, or `### Breaking changes` first when it breaks something.
 2. Update the document that owns the subject, and its Korean mirror if it has one.
 3. Add the key to `examples/server.toml` (commented is fine) when it is a config key.
-4. Run `pytest tests/test_docs_m5.py tests/test_docs_m5b.py tests/test_docs_m5c.py tests/test_examples.py`.
-   These lock the wording; they read README plus `docs/configuration.md` and `docs/operating.md`,
-   so text may move between them.
-5. `ruff check .` — Korean lines count as double width, so wrap them well before 100 columns.
+4. Run `./.venv/bin/python -m pytest tests/test_docs_m5.py tests/test_docs_m5b.py
+   tests/test_docs_m5c.py tests/test_examples.py`. These lock the wording; they read README plus
+   `docs/configuration.md` and `docs/operating.md`, so text may move between them.
+5. `./.venv/bin/ruff check .` — Korean lines count as double width, so wrap them well before 100
+   columns.
 
 ## Releasing
 
@@ -44,9 +45,9 @@ verbatim; `release.yml` copies it. Full steps in `CONTRIBUTING.md`.
 ## Screenshots
 
 ```sh
-pip install -e ".[docs]"                     # Pillow; Chrome must be installed
-python tools/screenshots/capture.py all      # throwaway server + jobs → raw screenshots
-python tools/screenshots/build.py            # red boxes and numbers → docs/images/ui/
+./.venv/bin/python -m pip install -e ".[docs]"        # Pillow; Chrome must be installed
+./.venv/bin/python tools/screenshots/capture.py all   # throwaway server + jobs → raw screenshots
+./.venv/bin/python tools/screenshots/build.py         # red boxes and numbers → docs/images/ui/
 ```
 
 The numbers drawn by `build.py` are the ①②③ of both usage guides: change one and change both.

@@ -7,6 +7,257 @@ of a key bumps that number and is listed here.
 
 ## [Unreleased]
 
+## [0.11.0] - 2026-11-26
+
+### Breaking changes
+- **`rcm worker --check` asks before it uses a server found on the network.** With
+  `server = "auto"` it shows the server's name and address and waits for a yes in a terminal;
+  without a terminal it exits 3 and sends nothing, where it used to go on with exit 0. Pass
+  `--server URL` in scripts. The package now needs Python 3.11.4 or newer (`requires-python`),
+  as 3.11.0–3.11.3 lack the safe `tarfile` filter rcm already required at run time.
+  ([#268](https://github.com/monocsp/remote_ci_monitor/pull/268))
+
+### Added
+- **A first run from start to finish.** The README's new «First run» section names the four
+  roles, gives the shortest path in five lines and, on a machine that already runs rcm as a
+  service, sends you to a test install first (also in the README's top links). The usage guide's
+  new «Getting started» section walks it step by step: on one machine through `rcm setup`,
+  installing the printed service, the token, `rcm doctor` and `rcm check` to the first
+  `rcm run ok` and `rcm wait --notify`; then adding a worker or a client, a test install next to
+  one that already runs (its own port, label, config and data folder), and undoing it all. The
+  README is shorter: the Store tab's screens and the gate loop step by step moved to the usage
+  guide (section 10 and section 4), and its Status line names the current release. The server
+  template (`rcm init server`, `rcm setup`, `examples/server.toml`) ends with a commented toolchain
+  catalog: `[[probes]]` and `[[tools]]` install hints for Flutter, Xcode, Android, Node and Python
+  that pass the start checks once uncommented. Its `[[notify]]` comment now lists `RCM_MACHINE`.
+  ([#275](https://github.com/monocsp/remote_ci_monitor/pull/275))
+- **`rcm wait` says where the job ran, and what became of its artifacts.** Its end line for a
+  finished job is `#381 succeeded on build-02 · 6m 31s · artifacts ready`: the machine, the time,
+  the failed step of a failed job and the artifact state (left out when the preset declares no
+  artifacts, and for a job that never started). Warning, log and shelf lines may follow it.
+  Artifacts that `failed`, were `dropped`, are `unavailable` or `unknown` add a warning line, and
+  artifacts still `collecting` or `uploading` add a line saying so; the exit code does not change.
+  `rcm wait --notify` also shows a desktop notification on the computer that waits, after the
+  JSON line (`osascript` on macOS, `notify-send` on Linux; without the tool, or on Ctrl-C while
+  it runs, it warns once and exits as it would have). It is off by default and `rcm run` does not
+  have it. Job documents (`GET /jobs/<id>`, `/api/status` rows, `rcm wait --json`) gain `ran_on`:
+  the remote worker's name as it claimed the job, this server's host name for a local lane, `null`
+  for a job that never started or for a local lane when this server does not know its own name.
+  A local lane's `ran_on` is not stored: it follows the server's current host name. `worker` stays
+  `null` for a local lane. `[[notify]]` hooks get `RCM_MACHINE` with the same value, empty when
+  it is `null`. ([#273](https://github.com/monocsp/remote_ci_monitor/pull/273))
+- **`rcm setup` sets a machine up as a client, worker, coordinator or coordinator-worker.** It
+  writes the config file and, for the last three, a launchd plist or systemd user unit under the
+  config folder's `service/`; it registers and starts nothing and prints the `cp -n` and start
+  lines instead. `--role ROLE --yes` asks nothing and needs `--server` (client), `--server`,
+  `--pool` and `--lanes` (worker) or `--bind` (coordinators), or it exits 2. Existing files are
+  kept unless `--force`; a `data_dir` that already holds `rcm.sqlite3` is refused unless
+  `--reuse-data-dir`, and setup never opens a database or creates a token; it prints the
+  `rcm token` commands to run. `rcm` with no arguments, in a terminal on a machine with no config
+  at all, asks whether to set it up; everywhere else it is the usage error (exit 2) it was.
+  `rcm setup` does not follow the server's version, and `rcm doctor` finds a service installed
+  under a `--label` of your own. It takes options by their whole name only, refuses a
+  `--service-file` inside a folder the service manager reads (on macOS whatever the case), and
+  writes systemd unit paths with spaces, `%` or `$` the way systemd reads them. An empty
+  `--config`, `--service-file`, `--data-dir` or `--label` is a usage error, a `--config` inside a
+  folder the service manager reads is refused like a `--service-file` there, and a run whose files
+  are all written exits 0 even when the closing report fails or is interrupted. It prints the
+  order that replaces a service already loaded or rewritten with `--force service`, a
+  `to remove: …` line (it unloads and deletes the installed service file only when `cmp` finds
+  it is the one setup wrote), the `loginctl enable-linger` line before the start on Linux and a
+  worker's token line before its start, and its last `rcm doctor` line names the `rcm` the service
+  runs. `--bind` takes an address, not a name, and an IPv6 one without brackets; a `server.toml`
+  setup cannot read is a warning that `--force config` fixes; a service manager that does not
+  answer is "could not tell", not "not loaded". Right before it writes, setup looks for the rcm
+  services it can find on this machine (launchd and systemd, user and system places) and refuses,
+  with exit 1 and no override, a config file, service file or `data_dir` that is one of theirs or
+  inside their config, `data_dir`, virtualenv or source checkout, and their label unless
+  `--force service` and the installed file is the one setup wrote (even then that service's config,
+  `data_dir`, virtualenv and checkout stay refused). It looks under both `$HOME` and the account's
+  home, counts a service's `--data-dir` and data-dir variable as its `data_dir` too, finds the
+  virtualenv of a `python -m` service, and compares install places, `$XDG_CONFIG_HOME/systemd/user`
+  among them, with symbolic links resolved. An rcm-looking service it cannot read or stat, or one
+  with lines it does not follow (`EnvironmentFile=`) or `$VARIABLES` in its `ExecStart=`, stops
+  it too; a file it may not read whose name is another program's only gets the warning `could not
+  read <file> — skipped; if it runs rcm, setup cannot protect it`. Units are read the way systemd
+  reads them (lines continued with a backslash, spaces around `=`), labels are compared without
+  case on macOS, the refusal that keeps a service setup installed says to remove it first, and
+  setup refuses when it cannot find the account's home. It also counts an `rcm` started under
+  another name (a link to `rcm`, another executable in a virtualenv with rcm installed), refuses a
+  service whose command line shows rcm in a form it cannot read (`sh -c "cd x;rcm serve"`,
+  `$(which rcm)`) or a unit with two `ExecStart=` lines that start rcm, reads every `ExecStart=`
+  of a unit's `[Service]` section and ignores the other sections, judges a file it cannot read for
+  any reason by its name, and also looks in `~/.local/share/systemd/user`,
+  `$XDG_DATA_HOME/systemd/user`, `/etc/xdg/systemd/user` and `/usr/local/lib/systemd/`.
+  ([#272](https://github.com/monocsp/remote_ci_monitor/pull/272))
+- **`lanes = 0` runs a server that only hands jobs out.** It runs no job itself: `@local` is not
+  alive and never a candidate, its probes do not run, `--machine @local`, `rcm recheck @local`
+  and `local_only` submissions are refused with 409, and jobs that lost their place wait with
+  `no capable machine` and the reason `no local lanes (lanes = 0)` instead of failing.
+  `/api/health` gains `capacity` (presets with a live machine to run on now, out of all, and the
+  names of the rest) without changing its status code; `rcm check` draws it as a `capacity` row
+  (FAIL when no preset has a machine, warn when some have none, and `server could not count
+  capacity` when the server sends `null` or counts that do not add up — FAIL on such a server),
+  and `rcm doctor --role coordinator` ends on it and names `pool` presets a capable worker in
+  another pool could take. `pools_without_workers` counts the default pool on such a server. `rcm top`,
+  `rcm machines` and the web page say `no local lanes` / `runs no jobs` instead of `lanes 0/0 busy`
+  and `down`.
+  ([#271](https://github.com/monocsp/remote_ci_monitor/pull/271))
+- **`local_only = true` keeps a preset on the server's own lanes.** A remote worker never gets it:
+  it is left out of `GET /worker/spec`, no remote claim hands it out, and `rcm machines` shows it
+  as `local_only` on every remote worker. A submission the server's lanes cannot take — pinned to
+  a remote worker, sent to another pool, `any-capable` with `local_accept_any = false`, or missing
+  a required tool there — is refused with 409 before it joins or supersedes anything. Jobs already
+  waiting when the mark is added show `no capable machine` with no ETA instead of being failed. A
+  `local_only` pool preset must use the default pool, or the server does not start; an older
+  server does not know the key, so upgrade every server that reads the preset first, and remove
+  the `local_only` lines before rolling back below 0.11.0.
+  `POST /machines/{id}/recheck` without names lists a check a remote worker cannot run under a
+  new `skipped` key instead of as a failed job. `rcm run` exits 2 on these refusals, as no job
+  was made. For a `local_only` preset no local lane can take, `POST /api/eta` now answers
+  `ahead: null`; `ahead` was always a number before.
+  ([#266](https://github.com/monocsp/remote_ci_monitor/pull/266))
+- **`rcm doctor` says what this machine can build and test, and what to install first.** It
+  measures in the service's environment (the service manager's defaults plus the service file's
+  variables, not your shell), lists every preset that would come to this machine as `ready`,
+  `needs check`, `missing` (with the coordinator's install hint) or `unknown`, checks rcm's own
+  needs (Python 3.11.4+, git, the host sampler's commands), and exits 0, 1 (something is missing
+  or nothing would come here), 2 (usage) or 3 (could not decide). Roles: `worker`,
+  `coordinator-worker`, `coordinator` and `client`; `--json`, `--shell-path`, `--offline`,
+  `--service-file`. It sends the server only read requests and opens no database. `--json` always
+  carries every key (`null` when unknown) under `doctor_version: 1`. A systemd unit without
+  `PATH` is not guessed (exit 3), a service file it cannot read is named (exit 3), a unit line it
+  does not follow (`EnvironmentFile=`, a `%h` specifier) is named (exit 3), a server answer that is
+  not the JSON it expects (an HTML page from the wrong port, an empty body, a field of the wrong
+  type) is named with the route (exit 3), an error it did not expect ends in
+  `could not decide: <kind>: <message>` (exit 3) rather than a traceback, an unreachable
+  `[[repos]]` entry or a `git_ref` preset whose repository is missing from the worker's
+  `[[repos]]` is a failure, and `--role coordinator` lists `local_only` presets as needing a local
+  lane. What it cannot know stays unknown and exits 3, never 0 or 1: an answer missing a field it
+  needs (`ok` or `version` from `/api/health`, a preset's `name`), a preset the server does not
+  place (an older server without `placement` is not read as `pool`), a service file it cannot read
+  (the default `PATH` is used only when there is no candidate file at all), a `token_file` or a
+  git version it cannot read, a `git ls-remote` that timed out or could not run, a config the
+  service starts with that it cannot read, a missing home folder. Without `--config` it measures
+  with the config the service reads: the service file's `--config`, `--pool`, `--port` and its
+  `RCM_CONFIG` and `RCM_SERVER_*` variables count, then `rcm.toml` in the service's working
+  directory and the service's config folder; your shell's `RCM_CONFIG`, `RCM_SERVER_*` and
+  `XDG_CONFIG_HOME` and the folder you run it in never do. A coordinator role with no server config
+  anywhere is a usage error (exit 2) instead of asking port 8787 with the built-in defaults. A file
+  in a standard service place that it cannot read, or that looks like rcm's but whose command it
+  cannot resolve, leaves that place unknown; a file there that plainly starts something else (the
+  `rcm-ci-connect` watcher) is not a candidate. A `--service-file` whose command it cannot resolve
+  leaves `PATH` and config unknown. `%h` in a systemd user unit is the home folder; other
+  specifiers stay unknown. `--json` `summary` counts presets that may come under
+  `applies_unknown`. A `token_file` repository is checked with the worker's own credential
+  helper. Unknown values are `null` in `--json`, never the word `None`, and `rcm worker --check`
+  shows a `/worker/spec` that is not rcm's as a FAIL line instead of a traceback. `rcm doctor`
+  never follows the server's version. `GET /worker/spec` now also carries each preset's `pool`,
+  `pools`, `placement`, `checks`, `source_modes`, repository name (no URL) and
+  `unreachable_checks` (the checks a remote worker cannot run, with a reason code), and the
+  `[[tools]]` table; older workers ignore them.
+  ([#268](https://github.com/monocsp/remote_ci_monitor/pull/268))
+- **`[[tools]]` in `server.toml` gives a tool an install hint.** `name`, `docs` and
+  `[tools.install]` lines for `darwin`, `linux` or `any`; shown by `rcm doctor` next to a missing
+  tool, never run. Control characters, lines over 300 characters, an unknown key, a name given
+  twice, longer than 64 characters or with spaces around it stop the server from starting; a name
+  no preset or probe uses is a warning. An older server does not know the table, so remove it
+  before rolling back below 0.11.0.
+  ([#268](https://github.com/monocsp/remote_ci_monitor/pull/268))
+- **Workers report host facts, and `rcm machines --machine ID` shows them.** OS version, real
+  arch and Rosetta, container, root, package manager and Python come with registration and every
+  capability report, are kept in memory only, and appear in `GET /api/machines` (new `host` key)
+  only for a request with a client token (a worker token sent with Basic gets none). The server keeps only true or false for Rosetta, container
+  and root, and a string of at most 64 characters without control characters for the rest;
+  anything else, and what the worker could not tell, is `null`. Line and paragraph separators and
+  bidirectional controls are removed too.
+  ([#268](https://github.com/monocsp/remote_ci_monitor/pull/268))
+- **`rcm worker --check` shows a `version` row and a last line with the number of missing
+  tools.** A different server version is a warning when registering will follow it and FAIL when
+  this install cannot follow; the missing line is ok only when nothing is missing and never fails
+  the check; the existing rows are unchanged, except that a `repos` row that timed out now reads
+  `git ls-remote timed out after 10s` instead of `unreachable: timed out after 10s`.
+  ([#268](https://github.com/monocsp/remote_ci_monitor/pull/268))
+
+### Fixed
+- **A test install next to a running one no longer reads as if the running install were its
+  own.** `rcm setup` with a `--config` outside the folder of an existing `worker.toml` names that
+  file as another rcm install's, separate from this config, instead of saying this machine
+  already has one. When `FILE` is outside the default config folder, `rcm doctor --config FILE`
+  measures the service file `rcm setup` put in the `service/` folder next to `FILE` (or its
+  installed copy, when one with the same label is installed) before the standard places, so a
+  test install measures its own service instead of the running install's; with the default
+  config, or when that folder holds none of the role's files, several or an unreadable one,
+  doctor looks where it did before. A service found there that starts rcm with another config is
+  named by label and file with the config it uses, and doctor says no service starts rcm with
+  `FILE` (with `--service-file`, only that the given file starts rcm with another config); the
+  exit code and the `--json` keys are unchanged. The `launchctl` lines `rcm setup` prints (`next —`, the swap order,
+  `to remove:`) and the `next:` line of `rcm init worker --service-file` carry your numeric user
+  id, `gui/501`, instead of `gui/$(id -u)`. The usage guide's test install runs its job from a small empty folder, keeps
+  its commands in one terminal and says which commands still show the running install; its first
+  job step tells the short `rcm run` line from the `rcm wait` end line and how to see a
+  `--notify` notification. ([#277](https://github.com/monocsp/remote_ci_monitor/pull/277))
+- **`rcm init worker --service-file` writes a systemd unit whose paths hold a space, `%` or `$`
+  the way systemd reads them**, quoted, `%%` and `$$`, and refuses a path with a line break or
+  another control character with exit 2 instead of writing a broken unit.
+  ([#272](https://github.com/monocsp/remote_ci_monitor/pull/272))
+- **A config file that is not UTF-8 stops `rcm serve`, `rcm worker` and the other commands with one
+  line naming the file and the byte, instead of a traceback.** An included preset file is read the
+  same way. `rcm doctor` reports it as a usage error (exit 2), as it does a `server.toml` whose
+  `[server]` is not a table; the home folder in that line shows as `~`.
+  ([#268](https://github.com/monocsp/remote_ci_monitor/pull/268))
+- **`rcm recheck` names the checks it skipped, and `rcm eta --job` no longer counts a line for a
+  job no machine can take.** A `local_only` check a remote worker cannot run prints
+  `<check> skipped on <machine> [local_only]` and is not a failure; a `no capable machine` job
+  shows no `ahead` count, as `POST /api/eta` already did.
+  ([#268](https://github.com/monocsp/remote_ci_monitor/pull/268))
+- **macOS Command Line Tools shims are no longer run when the tools are not installed.** A file
+  directly in `/usr/bin/` that links `libxcselect` counts as missing (`needs Command Line Tools`)
+  in the job's `requires` check, the server's tool measurements, `rcm check` (its `git` row too),
+  `rcm worker --check` and worker probes, instead of opening the install dialog on a headless
+  service. `rcm doctor` runs `git ls-remote` with the service `PATH`'s git in the service
+  environment. `rcm serve` with `[[repos]]` refuses to start on such a shim
+  (`git is missing (needs Command Line Tools)`), and `git_ref` jobs fail with
+  `git is not installed on the build machine (needs Command Line Tools)` instead of running it.
+  ([#268](https://github.com/monocsp/remote_ci_monitor/pull/268))
+- **`rcm doctor` finds system service files and no longer reads a server measurement of an older
+  config.** `/etc/systemd/system/rcm-*.service` (where the documented Linux server install puts
+  its unit) and `/Library/LaunchDaemons/com.remote-ci-monitor.*.plist` are searched too, measured
+  as the user in `User=` or `UserName`; a user this machine does not know is exit 3. A server
+  role with no service file at all no longer borrows the worker's `PATH`: its `PATH` is unknown
+  (exit 3), and `measured_in` is `server_service_env` only when the server's measurement was read.
+  Each `preset_env` entry in `GET /api/health` now carries a `digest` of the preset definition the
+  server measured; `rcm doctor --role coordinator-worker` reads a preset's measurement only when
+  it matches the `server.toml` on disk, and shows `unknown` (`not_reloaded`, exit 3) until the
+  server reloads it. The `python` row says it is the Python that ran `rcm doctor`, and a
+  `service python` row measures the one the service starts rcm with when that differs. The
+  `linger` row is only for systemd user units (`unknown` without `USER`). `rcm doctor | head` and a
+  terminal that is not UTF-8 keep the exit code instead of a traceback; Ctrl-C stops running probes
+  and exits 130; a `git ls-remote` or `git --version` past its time limit is stopped with its
+  helpers. A server name found on the network is cleaned to one line before the question, and
+  server text and `[[tools]]` lose (or refuse) line separators and bidirectional controls as well
+  as control characters.
+  ([#268](https://github.com/monocsp/remote_ci_monitor/pull/268))
+- **`rcm doctor` never runs a service Python that is a Command Line Tools shim, and Ctrl-C leaves
+  no `git` behind.** A service started with `/usr/bin/python3` on a Mac without the tools fails
+  the `service python` row (`missing (needs Command Line Tools)`) instead of opening the install
+  dialog. Ctrl-C during `git ls-remote`, `git --version` or the service Python's measurement stops
+  them with their helpers and exits 130. A systemd `--service-file` that is neither in a user
+  unit place nor in `/etc/systemd/system` gets an `unknown` `linger` row instead of none, and a
+  closed stderr no longer turns the exit code into 120. `[[tools]]` text with a control character at its start or
+  end (`\r`, a newline, a tab) now stops the server from starting, as one in the middle already
+  did. The `server: found …` line and the "several rcm servers" messages of every command clean
+  the name and address found on the network to one line.
+  ([#268](https://github.com/monocsp/remote_ci_monitor/pull/268))
+- **`tools/guard_production.py`: the `rcm setup` net now refuses when it crashes instead of
+  allowing.** An error inside the net used to leave only a warning and let the Bash command run;
+  now the hook refuses that command, as it already did for an error while judging `rcm setup`
+  itself. The net of #272 is otherwise unchanged, and so is its over-blocking: a command that
+  names rcm in quoted text (a PR title, a commit message, a comment body) next to `$`, `(` or a
+  launcher word such as the `-x` of `tar -x` is still refused. Pass such text through a file
+  (`gh pr create --body-file`, `git commit -F <file>`) and keep the rcm word out of the command.
+  ([#274](https://github.com/monocsp/remote_ci_monitor/pull/274))
+
 ## [0.10.0] - 2026-11-23
 
 A job can now wait for a time you name (`rcm run --at` / `--in`, the new states `scheduled` and
@@ -2197,7 +2448,8 @@ Python 3.11+ standard library only — zero runtime dependencies. API schema: `s
 - No partial-upload resume: an interrupted snapshot upload ends as `cancelled`; run `rcm run` again.
 - Basic auth is clear text — use it only behind TLS (Tailscale HTTPS or a reverse proxy).
 
-[Unreleased]: https://github.com/monocsp/remote_ci_monitor/compare/v0.10.0...HEAD
+[Unreleased]: https://github.com/monocsp/remote_ci_monitor/compare/v0.11.0...HEAD
+[0.11.0]: https://github.com/monocsp/remote_ci_monitor/compare/v0.10.0...v0.11.0
 [0.10.0]: https://github.com/monocsp/remote_ci_monitor/compare/v0.9.0...v0.10.0
 [0.9.0]: https://github.com/monocsp/remote_ci_monitor/compare/v0.8.0...v0.9.0
 [0.8.0]: https://github.com/monocsp/remote_ci_monitor/compare/v0.7.0...v0.8.0

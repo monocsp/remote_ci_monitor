@@ -10,7 +10,7 @@ description = "Local job server for a single build machine: queue, run presets, 
 readme = "README.md"
 license = "MIT"
 license-files = ["LICENSE"]
-requires-python = ">=3.11"
+requires-python = ">=3.11.4"
 keywords = ["ci", "build-server", "job-queue", "build-machine", "monitoring"]
 # 런타임 의존성 0 — 표준 라이브러리만 쓴다(PLAN.md 「의존성 원칙」).
 dependencies = []

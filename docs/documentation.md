@@ -8,9 +8,9 @@ deeper files) and the changelog follows [Keep a Changelog](https://keepachangelo
 
 | file | audience | rule |
 |---|---|---|
-| `README.md` | someone deciding whether to use this | the front door: what it is, install, first job, where to go next. Keep it under ~250 lines |
+| `README.md` | someone deciding whether to use this | the front door: what it is, install, the shortest first run, where to go next. The step-by-step first setup lives in `docs/usage.md` «Getting started», not here |
 | `README.ko.md` | the same, in Korean | a **mirror** of `README.md`: same sections, same order, same headings |
-| `docs/usage.md` · `docs/usage.ko.md` | a new user doing it for the first time | numbered walkthrough with annotated screenshots |
+| `docs/usage.md` · `docs/usage.ko.md` | a new user doing it for the first time | «Getting started» first (pick a role, set up one machine, add machines, a test install next to one that runs, undo), then the numbered walkthrough with annotated screenshots |
 | `docs/configuration.md` | someone writing `server.toml` | every key and preset feature, with examples |
 | `docs/operating.md` | whoever runs the build machine | service files, Docker, upgrades, security, the manual check |
 | `CHANGELOG.md` | someone upgrading | every user-visible change, newest first |
@@ -31,6 +31,8 @@ none. Everything else stays English, per the house rule in `CONTRIBUTING.md`.
   `scripts/smoke_install.sh` in CI. Change a command there and change the script with it.
 - Link to the deeper document instead of inlining it. If a section grows past a screen, it belongs
   in `docs/`.
+- The first-run section keeps the role table, the shortest path and the links to the usage guide's
+  «Getting started» and its test install. The steps themselves live there, in both languages.
 - Images live in `docs/images/ui/` and are referenced from the READMEs by their full
   `raw.githubusercontent.com` URL, so they also render on PyPI. Documents under `docs/` use
   relative paths. Every image gets alt text that says what it shows.

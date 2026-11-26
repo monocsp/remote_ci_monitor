@@ -86,6 +86,451 @@ Three things learned from a real deployment (a Flutter monorepo gate on a Mac mi
   service. Until then sessions reach the server by address — `server = "http://<host>.local:8787"`
   in `client.toml` works on the same Wi-Fi without any permission.
 
+## Set a machine up: `rcm setup`
+
+`rcm setup` writes the config file and the service file for one of four roles, from the same
+templates `rcm init` uses:
+
+| role | what the machine does | what setup writes |
+|---|---|---|
+| `client` | sends jobs and reads their results | `client.toml` (mode 600) |
+| `worker` | runs the jobs a coordinator hands it | `worker.toml` (mode 600) and a worker service file |
+| `coordinator` | queues jobs and hands them to other machines; runs none itself | `server.toml` with [`lanes = 0`](configuration.md#a-server-that-only-hands-out-jobs-lanes--0) and a server service file |
+| `coordinator-worker` | a coordinator that also runs jobs here (today's `rcm serve`) | `server.toml` with `lanes = 1` and a server service file |
+
+The role is not stored anywhere: rcm reads it back from the config files that exist, the same way
+`rcm doctor` does. In a terminal `rcm setup` asks for the role and for each value, with the
+template's defaults. `rcm setup --role ROLE --yes` asks nothing, and neither does a run without a
+terminal. Then these flags must be given, or it stops with exit 2 before writing anything
+(options are taken by their whole name only: `--data-dir`, never `--data`; an empty or blank
+`--config`, `--service-file`, `--data-dir` or `--label` is a usage error too):
+
+| role | needed with `--yes` | optional |
+|---|---|---|
+| `client` | `--server URL` | `--by LABEL`, `--config PATH` |
+| `worker` | `--server URL`, `--pool NAME`, `--lanes N` | `--label`, `--service-file PATH`, `--config PATH` |
+| `coordinator`, `coordinator-worker` | `--bind ADDRESS` | `--port`, `--data-dir`, `--label`, `--advertise` / `--no-advertise`, `--service-file`, `--config` |
+
+```sh
+rcm setup                                                   # asks
+rcm setup --role worker --server http://macmini:8787 --pool linux --lanes 2 --yes
+rcm setup --role coordinator --bind 100.101.102.103 --yes   # a Tailscale address
+```
+
+**`rcm` with no arguments.** In a terminal (stdin and stderr both), on a machine with no config at
+all, `rcm` asks `No rcm config on this machine yet. Set it up now?` and runs `rcm setup` on yes.
+Everywhere else it prints the usage and exits 2, as before: without a terminal, after a no, and
+when any config is there. A config is `$RCM_CONFIG`, `./rcm.toml`, `server.toml` or `client.toml`
+under `$XDG_CONFIG_HOME/rcm` or `~/.config/rcm`, `worker.toml` in `$XDG_CONFIG_HOME/rcm` (or
+`~/.config/rcm` without `XDG_CONFIG_HOME`), or only environment variables: `RCM_SERVER` or
+`RCM_TOKEN` for a client, `RCM_WORKER_TOKEN` for a worker. An `$RCM_CONFIG` that names a missing
+file is a usage error, and nothing is asked.
+
+**Where it writes.** Config files go to `$XDG_CONFIG_HOME/rcm` (or `~/.config/rcm`), or to
+`--config PATH`. The service file goes next to them, in `<config dir>/service/<label>.plist` on
+macOS or `<config dir>/service/<unit>` on Linux, or to `--service-file PATH`. It does not go to
+`~/Library/LaunchAgents`: launchd would start anything there at the next login. A `--service-file`
+or `--config` inside a folder the service manager reads (`~/Library/LaunchAgents`, `/Library/LaunchAgents`,
+`/Library/LaunchDaemons`, `~/.config/systemd/user`, `/etc/systemd/user`, `/etc/systemd/system`)
+is refused with exit 2; on macOS the match ignores case, as the disk does
+(`~/library/launchagents` is the same folder). The label is
+`com.remote-ci-monitor.server` or `com.remote-ci-monitor.worker` unless you pass `--label`; the
+systemd unit of a standard label is `rcm-server.service` or `rcm-worker.service`, and of any
+other label `<label>.service`. The server service file has the file-descriptor limit of 4096,
+`HOME`, `WorkingDirectory`, a `PATH` with `/usr/sbin` and without the venv's `bin`, and a log
+named from the label: `server.log` and `worker.log` for the standard labels, `<label>.log`
+otherwise, under `~/Library/Logs/rcm` (launchd) or `~/.local/state/rcm` (systemd); the worker's
+systemd unit gets the same `HOME` and label log. It runs the `rcm` that ran setup by its absolute
+path; setup warns when it could only find an `rcm` on `PATH`.
+In a systemd unit a path with a space, `%` or `$` is written the way systemd reads it (quoted,
+`%%`, `$$`); a path with a line break or another control character is refused with exit 2.
+
+**It registers and starts nothing.** It prints the lines to run yourself, with absolute paths and
+your numeric user id in `gui/<uid>` (`gui/501`, what `id -u` prints), so a pasted line holds no
+shell substitution:
+
+```sh
+mkdir -p <log folder> <LaunchAgents folder>
+cp -n <config dir>/service/<label>.plist <LaunchAgents folder>/<label>.plist
+cmp -s <config dir>/service/<label>.plist <LaunchAgents folder>/<label>.plist && launchctl bootstrap gui/<uid> <LaunchAgents folder>/<label>.plist || echo "not started: the installed file differs from the one setup wrote, or the start failed; to replace an installed one: launchctl bootout, cp without -n, launchctl bootstrap"
+```
+
+On Linux the start is `systemctl --user daemon-reload && systemctl --user enable --now
+<unit>`, and before it setup prints `sudo loginctl enable-linger $USER`: on a machine nobody logs
+in to there is no user manager to start the service otherwise, and without it the service stops
+when you log out. `cp -n` never replaces a file already installed, and the start runs only when the
+installed file is the one setup just wrote. When a service with the same label is already loaded
+(setup only asks: `launchctl print`, or `systemctl --user is-active` and `is-enabled`), it says so
+and leaves it alone. Then, and when `--force service` rewrote a service file that was there, it
+also prints the order that replaces the installed one: `launchctl bootout gui/<uid>/<label>`,
+`cp` without `-n`, `launchctl bootstrap gui/<uid> <file>`, or `systemctl --user disable --now
+<unit>`, `cp`, `systemctl --user daemon-reload`, `systemctl --user enable --now <unit>`. Only
+launchd's `Could not find service` and systemd's `is-active` exit 3 with `inactive` or `unknown`
+on its output count as not loaded (`activating` or `reloading` does not, and `failed` means the
+unit is there, so it counts as loaded); any other
+answer (no user session, `Failed to connect to bus`) is "could not tell", with a warning that the
+printed start may fail on that machine. Once the file is installed, `rcm doctor` reads the
+installed copy, `--label` or not.
+
+**To remove it.** Unload the service, then delete the installed file and the files setup wrote.
+On macOS: `launchctl bootout gui/<uid>/<label>` and `rm -f ~/Library/LaunchAgents/<label>.plist`;
+on Linux: `systemctl --user disable --now <unit>`, `rm -f ~/.config/systemd/user/<unit>` and
+`systemctl --user daemon-reload`. The config file and `<config dir>/service/<file>` go the same
+way; a `data_dir` and its database stay until you delete them. setup prints this as one
+`to remove: …` line with its own paths, just before its last line. In that line the service is
+unloaded and its installed file deleted only when `cmp -s` finds the installed file is the one
+setup wrote (`cmp -s <staged> <installed> && { launchctl bootout …; rm -f <installed>; }`), and
+deleted even when the unload fails (a service already stopped); a file someone else installed
+under that name is left alone. The line just above it says so: if the service is still running
+when the unload fails, stop it first. When a service with the label was already
+loaded before setup ran, the line adds that it may not be one setup wrote.
+
+**What it refuses or warns about.**
+
+- **A production service's files.** Just before it writes, and once more right before the first
+  write, setup looks for the rcm services on this machine: every `*.plist` in
+  `~/Library/LaunchAgents`, `/Library/LaunchAgents` and `/Library/LaunchDaemons`, and every
+  `*.service` in `~/.config/systemd/user`, `~/.local/share/systemd/user`,
+  `$XDG_CONFIG_HOME/systemd/user`, `$XDG_DATA_HOME/systemd/user`, `/etc/systemd/user`,
+  `/etc/xdg/systemd/user`, `/etc/systemd/system`, `/usr/local/lib/systemd/system` and
+  `/usr/local/lib/systemd/user` that starts `rcm` or `python -m remote_ci_monitor[.cli]` (or is
+  named like one). An `rcm` started under another name counts: a link whose target is named `rcm`,
+  or another executable in the `bin` of a virtualenv that has rcm installed. The user places are
+  read under both `$HOME` and the account's home from the password database, so a `HOME` pointed
+  elsewhere does not hide them. For each service it reads the `--config` it starts with, every
+  `data_dir` it may use (the config's, the unit's `--data-dir` and the data-dir variable in its
+  environment, all of them, whichever wins), the virtualenv of the executable it runs (for
+  `<venv>/bin/python -m …`, the folder that holds `bin/python`) and that virtualenv's editable
+  source checkout; it opens no database. A config file, service file or `data_dir` that is one of
+  these or inside one is refused with exit 1, `this is <label>'s <service
+  file|config|data_dir|venv|checkout> — refusing`, and nothing is written; no flag overrides it. A
+  label equal to an installed rcm service's label (or unit name) is refused the same way unless you
+  pass `--force service`, that service's file sits in the label's install place and it is byte for
+  byte the one setup writes now (or the copy under its config folder). That exception covers the
+  label only: the service's config, `data_dir`, virtualenv and checkout stay refused, so to rewrite
+  a service setup installed, remove it first; the refusal says so (``remove the installed service
+  first — see the `to remove:` line from the run that installed it``). An rcm-looking service whose
+  `--config` or `data_dir` setup cannot resolve (no `--config`, `sh -c`, a `~` with no known home),
+  or that has lines setup does not follow (`EnvironmentFile=`, a specifier in `Environment=`, `$VAR`
+  or `${VAR}` in `ExecStart=`, a line it cannot parse), also stops it, naming the file, and so does
+  a command line that shows rcm in a form setup cannot read (`sh -c "cd x;rcm serve …"`, `(rcm …)`,
+  `'rcm'`, `$(which rcm)`: `… looks like an rcm service, but its command line runs rcm in a way
+  setup cannot read … refusing`) or a unit with more than one `ExecStart=` that starts rcm. Units
+  are read with systemd's rules for continued lines and comments, but C-style escapes (`\x2f`, `\s`)
+  are not decoded: a line ending in a backslash goes on with the next, comment lines in between are
+  skipped, spaces around `=` do not count, only lines in `[Service]` count (and lines before any
+  section header), and every `ExecStart=` is read, an empty one clearing those before it; an
+  `ExecStart=` that still cannot be parsed stops setup when the file mentions rcm. A file setup is
+  not allowed to read or stat, or cannot read for another reason, is judged by its name: one that
+  looks like rcm (or links to a file that does), or a name setup cannot judge, stops it; a file
+  named for another program only gets the warning `could not read <file> — skipped; if it runs rcm,
+  setup cannot protect it`. When setup cannot find the account's home in the password database it
+  refuses (`cannot find this account's home — refusing`) rather than trust `$HOME` alone. Paths are
+  compared with symbolic links resolved and, on macOS, without case, and so are labels; install
+  places are compared the same way, so a link to a folder the service manager reads is that folder.
+  This holds for the services setup can find in those places only. It does not see a server started
+  by hand, a service loaded straight from a file outside those places (`launchctl bootstrap <path>`,
+  `systemctl link <path>`), another user's services, units under `/run`, `/usr/lib` or `/lib`, a
+  unit path or command written with systemd escapes, template (`name@.service`) and transient units,
+  drop-ins (`<unit>.d/`), the contents of an `EnvironmentFile=` (it refuses instead), a unit created
+  after the last check, an unreadable file whose name does not look like rcm (it warns instead), or
+  a wrapper script that starts rcm from a service whose label and command do not look like rcm.
+  Nothing in setup stands between those and their files.
+- An existing config or service file is kept: the run stops with exit 1 and writes nothing.
+  `--force config`, `--force service` or `--force` (both) replace them. When a write fails part
+  way, what was already written is undone. An existing `server.toml` that is not TOML or not
+  UTF-8 does not stop setup: it warns `could not read <path>` and goes on, and only
+  `--force config` replaces that file.
+- A `data_dir` that already holds `rcm.sqlite3` is refused with exit 1. `--reuse-data-dir` keeps
+  using it; setup then reads the schema version from the file's header, without opening the
+  database, and warns when it differs from this build's (the service migrates an older one when it
+  starts). `--data-dir` is written as an absolute path.
+- A port something already listens on gets a warning. setup binds the port once to check and
+  connects to nothing.
+- `--bind` must be an address of this machine or `0.0.0.0`, written as an address: a name
+  (`localhost`, `macmini.local`) is refused with exit 2, `give an address, not a name`, because
+  setup looks no name up. An IPv6 address goes without brackets (`[::1]` is refused with exit 2
+  and that hint) and is written in its short form, so `0:0:0:0:0:0:0:0` is `::`, every address.
+  A Tailscale address is the
+  recommended choice: setup writes `advertise = false` (mDNS would hand LAN workers an address
+  they cannot reach, so give workers the URL) and warns that everyone on the tailnet can read the
+  queue. A LAN address or `0.0.0.0` gets the warning that anyone on the network can read the queue,
+  the shelf and the machine list, and a LAN address also the advice to reserve it in your router.
+  `127.0.0.1` gets a warning that no other machine can connect.
+- A `coordinator-worker` on a machine that already has `worker.toml` gets a warning: the two run
+  two sets of lanes on one host. When `--config` puts this config outside the folder that
+  `worker.toml` is in (a test install next to a running one), the warning names that file as
+  another rcm install's, separate from this config.
+- A flag the role does not use (`--lanes` for a coordinator, `--pool` or `--server` for a
+  coordinator, `--advertise` for a client) gets one warning line naming them.
+- When setup cannot tell whether the port is free, or whether a service with the label is already
+  loaded, it says so instead of staying quiet.
+- When a file cannot be put back after a failed write, the error names it (`could not restore
+  <path>`).
+
+**A second install on the same machine.** To try rcm next to an install that runs as a service,
+give the test its own port, label, config and data folder, and keep it off the network:
+
+```sh
+rcm setup --role coordinator-worker --bind 127.0.0.1 --port 8790 --no-advertise --label com.example.rcm-test --config ~/rcm-test/server.toml --data-dir ~/rcm-test/data --yes
+rcm serve --config ~/rcm-test/server.toml
+```
+
+Start it in a terminal like this rather than installing its service file: launchd starts an
+installed plist again at every login. Clear `RCM_*` from the shell, then reach it with
+`RCM_SERVER=http://127.0.0.1:8790` and a token made with
+`rcm token --config ~/rcm-test/server.toml add NAME`. The refusals above keep setup off the running
+service's files. Nothing keeps another build from opening the running install's database when you
+give it that `--config` or `--data-dir`, and opening it migrates it.
+
+**Tokens.** setup creates none, opens no database and prints no token. A coordinator prints the
+two commands to run once its service is up, with the same `rcm` the service runs, so that no other
+build opens (and migrates) its database: `<rcm> token --config <server.toml> add CLIENT_NAME` (a
+client token, never `--admin`) and `<rcm> token --config <server.toml> add WORKER_NAME --worker`.
+It prints them on a machine without launchd or systemd too. A client is told to get a token from
+the coordinator and set `RCM_TOKEN`; a worker to put the worker token in `worker.toml` as
+`token = "…"`, because a service does not see the `RCM_WORKER_TOKEN` of your shell, and it gets
+that line before the lines that start its service: a worker without a token is refused and
+restarted over and over.
+
+**At the end** it runs the checks that need no server (Python, SQLite, the open-files limit of the
+service file it wrote, whether the config file reads, and the host) as advice that does not change
+the exit code, then the `to remove: …` line, and last says to start the service and add the
+token (a worker: the token first) and run `<rcm> doctor --role <role>`, with the `rcm` the service
+runs and any `--config` or `--service-file` you gave.
+Exit codes: 0 written (also when the closing report fails or is interrupted after every file is
+written: the last line is `files written; the report failed: …` or `files written; report
+interrupted`), 1 not written (an unexpected error is one line, without a traceback, that says what
+is on disk), 2 usage, 130 interrupted before every file is written. `rcm setup` does not follow
+the server's version.
+
+## Check a machine before you use it: `rcm doctor`
+
+`rcm doctor` says what this machine can build and test, and what to install first. It measures the
+way the service will run, not the way your shell does: it starts from an empty environment, adds
+what the service manager sets (launchd: `HOME` `USER` `LOGNAME` `SHELL` `TMPDIR` `PATH`; systemd
+user units: `HOME` `USER` `LOGNAME` `SHELL` `XDG_RUNTIME_DIR` `PATH`) and the variables in the
+service file, and runs the server's probes and `requires` checks there. A `JAVA_HOME` exported in
+your shell does not count. For a system service (`/etc/systemd/system`, `/Library/LaunchDaemons`)
+`HOME`, `USER`, `LOGNAME` and `SHELL` are those of the user in `User=` or `UserName` (root
+without one), read from this machine's user database; when this machine does not know that user,
+the report says so, does not look for that service's config in your home folder, and exits 3.
+
+```sh
+rcm doctor                                    # the role the config files on this machine name
+rcm doctor --role worker --service-file ~/Library/LaunchAgents/com.remote-ci-monitor.worker.plist
+rcm doctor --role coordinator-worker --json   # the server's own service measurements
+```
+
+| role | what it reads | what decides the exit code |
+|---|---|---|
+| `worker` | `worker.toml` (or `RCM_WORKER_TOKEN` and `--server`), the service file, and the server's `/worker/spec` | a tool missing for a `pool` preset of this machine's pool, rcm's own needs, or no preset that would come to this machine |
+| `coordinator-worker` | the local `server.toml` (never the database) and the server's `/api/health` and `/api/machines`, read with a client token | the same rules, for the server's own lane as its service measured it — for each preset only when the server measured the definition the `server.toml` on disk has |
+| `coordinator` | the same files and routes | rcm's own needs and `capacity` from `/api/health`: 1 when no preset has a machine to run on, a warning naming the presets that have none; a `pool` preset that a capable worker in another pool could take is named with that worker (changing it to `any-capable` is yours to decide; rcm changes no preset). With `lanes = 0` and a server that does not report `capacity`, exit 3 |
+| `client` | `client.toml` or `RCM_SERVER` / `RCM_TOKEN` | the server answers and the token works |
+
+Without `--config`, `rcm doctor` reads the config the service reads. When a service file is found,
+its command line is read with rcm's own parser: `--config` there names the file (`--config=X` and
+shortened options too), and its `--server`, `--pool` and `--lanes` (worker) or `--bind` and
+`--port` (server) apply as they do for the service. A server service started without `--config`
+reads `RCM_CONFIG` from the service file's environment, then `rcm.toml` in the service's working
+directory (`WorkingDirectory`; without it launchd starts the service in `/` and a systemd user
+unit in the home folder), then `server.toml` in the service's config folder; a worker service
+started without `--config` reads `worker.toml` from the service's config folder (the service's
+`XDG_CONFIG_HOME`, else `~/.config/rcm`). `RCM_SERVER_*` count only from the service file's
+environment. Your shell's `RCM_CONFIG`, `RCM_SERVER_*` and `XDG_CONFIG_HOME`, and the folder you
+run `rcm doctor` in, never decide what the service reads. When rcm cannot tell the working
+directory (a systemd unit outside `~/.config/systemd/user/` without `WorkingDirectory=`) and an
+`rcm.toml` may be there, the report exits 3. Without a service file, the places `rcm init` writes
+are read (`~/.config/rcm/worker.toml`, `~/.config/rcm/server.toml`); pass `--config` for a file
+anywhere else. `--config` and `--server` given to `rcm doctor` win, with a warning when the
+service starts with another `--config` (or a relative one, which depends on the service's working
+directory and is not compared). That warning says no service starts rcm with the config given,
+names the service it found by label and file with the config that service uses, another
+install's, and says the given file was measured as given; with `--service-file` it only says that
+the given file starts rcm with another config. With a `--config` outside the default config folder,
+the service file `rcm setup` put next to that config (in its `service/` folder) is looked at first,
+or its installed copy when one with the same label is installed, so a test install next to a
+running one measures its own service. When that folder holds none of the role's files, several,
+or one rcm cannot read, doctor picks nothing from that folder and looks in the places it always
+has; a test install without one of its own falls back to the running install's service, with that
+warning. With the default config, doctor only looks in those places. A `coordinator` or `coordinator-worker` report
+with no server config anywhere is a usage error (exit 2): it does not ask whatever answers on port
+8787 with the built-in defaults. When the service file cannot be read and no `--config` is given,
+or the config the service names cannot be read, rcm does not know what the service runs with: the
+report names it, asks the server nothing, and exits 3.
+
+The server's own lane is judged from the server's measurement (`preset_env` in `/api/health`),
+but the presets come from the `server.toml` on disk. Each `preset_env` entry carries a `digest`
+of the definition the server measured (`requires`, `env_passthrough`, the names in the preset's
+`env` and its `PATH`). When it differs from the definition on disk, the server has not reloaded
+that config yet: the preset is `unknown` with code `not_reloaded` (run `rcm reload`), and the
+report exits 3. A server that sends no `digest` cannot say which definition it measured, so its
+presets are `unknown` too.
+
+Each preset shows one state: `ready` (it starts taking jobs once the service reports), `needs
+check` (its tools are there and rcm runs its check presets once after the worker registers — not
+"ok" yet), `missing` (with the install hint and docs link from the coordinator's `[[tools]]` when
+there is one), or `unknown`. An `any-capable` preset that misses a tool is "not coming to this
+machine" — a warning, not a failure. A preset for another pool is listed and left out. On a remote
+worker, a preset whose `checks` name a `local_only` check is "not coming (check is local-only)",
+not "needs check": that check never runs there. The server names those checks for each preset in
+`GET /worker/spec` (`unreachable_checks`), and `rcm doctor` reads only that key; it does not guess
+from which presets the spec leaves out. Against a server that does not send the key, a preset with
+`checks` is `unknown` (code `check_unknown`) and the report exits 3. `rcm doctor --role
+coordinator` lists every `local_only` preset as "needs a local lane", judged by the same rule the
+server places jobs with. A preset the server does not place — an older server that sends no
+`placement`, a placement rcm does not know, or no `pool`, `pools` or `checks` where the judgement
+needs them — is `unknown` with `applies: unknown`: it is never read as a `pool` preset, so a tool
+it misses does not exit 1, and "nothing would come to this machine" is not claimed while it might.
+The coordinator's `[[tools]]` hints show for the server's own lane too.
+
+The service file is found in this order: `--service-file`; with `--config FILE`, the one `rcm setup`
+put in the `service/` folder next to `FILE` (its copy in the install place instead, whenever a copy
+with the same label is installed there — bytes and `--config` are not compared); this step runs
+only for a `--config` outside the default config folder, and when that folder holds none of the
+role's files, several, or one rcm cannot read, it picks nothing and the next place is tried, so a
+config in the default folder goes straight to the standard order; the standard places
+(`~/Library/LaunchAgents/com.remote-ci-monitor.*.plist`, `~/.config/systemd/user/rcm-*.service`,
+and the system places `/Library/LaunchDaemons/com.remote-ci-monitor.*.plist` and
+`/etc/systemd/system/rcm-*.service`, where the Linux server install above puts
+`rcm-server.service`); `~/.config/rcm/service/`. Only files that start the role's command (`rcm worker` or `rcm serve`)
+count; a file in those places that looks like rcm's but whose command rcm cannot resolve to one of
+its own (`env rcm worker`, `sh -c "exec rcm worker"`, arguments rcm would refuse, a label ending in
+`worker` or `server` that starts something else) is named as unreadable, since it may be this
+role's service. A file there that plainly starts something else — no `rcm` executable or
+`remote_ci_monitor` module in its command, and a label that does not end in `worker` or `server`,
+like the `rcm-ci-connect` watcher `com.remote-ci-monitor.ci-watch.plist` — is not a candidate. A
+file given with `--service-file` is used as given; if it starts another role's command the report
+warns, and if rcm cannot resolve its command, the `PATH` and config of what it starts are unknown
+(exit 3). Two in the same place need `--service-file` (exit 2 without a terminal). With none, a
+worker is measured with the worker's default service `PATH` (the one `rcm init worker` writes) and
+the report says so; a `coordinator` or `coordinator-worker` report does not borrow it — the
+server's `PATH` is unknown, `measured_in` is `none` unless the server's own measurement was read,
+and the report says "no service file for the rcm server was found" and exits 3. A system unit
+without `WorkingDirectory=` starts in `/`. A launchd plist without `PATH`
+gets launchd's default, `/usr/bin:/bin:/usr/sbin:/sbin`. A systemd unit without
+`Environment=PATH=…` is not guessed — the default differs between distributions — so the report
+shows no `PATH`, measures no tool and exits 3 until the unit sets one. A unit line rcm does not
+follow (`EnvironmentFile=`, `PassEnvironment=`, `UnsetEnvironment=`) and an `Environment=` or
+`ExecStart=` value with a systemd specifier rcm does not expand are named by line and key, and the
+report exits 3. `%h` in a user unit (`~/.config/systemd/user/`, `~/.config/rcm/service/`) is your
+home folder and is expanded; any other specifier, and `%h` in a unit given with `--service-file`
+from another folder (it may be a system unit, where `%h` is `/root`), is not. When the line
+can change `PATH` (`EnvironmentFile=` always can), the service `PATH` is unknown and no tool is
+measured. Write `PATH` out in full in an `Environment=` line. A `$` is kept as written: systemd does
+not expand variables in `Environment=`. A service file rcm cannot
+read (XML cut short, a plist whose top level is not a dictionary, an argument or environment value
+that is not a string, a unit line it cannot parse) is named with the reason, never its values, and
+the report exits 3. When one in a standard place cannot be read, that whole place is unknown: rcm
+does not measure with another file next to it, since the broken one may be this role's service,
+and it does not go on to `~/.config/rcm/service/`, since the service manager reads the installed
+file, not that copy. The service `PATH` is then unknown and no tool is measured, as it is for a
+file given with `--service-file` that cannot be read. The worker's default `PATH` is used
+only when no candidate file was found at all. `--shell-path` measures
+once more in your shell and marks the presets whose result differs.
+
+rcm's own needs are rows of their own: Python 3.11.4+ (the `python` row is the Python that ran
+`rcm doctor`; when the service file starts rcm with another Python — a `python3.x -m
+remote_ci_monitor.cli` command, or the `#!` line of its `rcm` script — a `service python` row
+measures that one in the service environment, and is `unknown` when it cannot be run; a macOS
+Command Line Tools shim such as `/usr/bin/python3` without the tools installed is not run, as it
+would open the install dialog, and the row fails with `missing (needs Command Line Tools)`);
+git, when a `git_ref` preset comes to this machine (2.31+ with `token_file`); every `[[repos]]`
+entry reachable with `git ls-remote` (a FAIL, since `git_ref` jobs cannot run without it); for a worker, the repository of each `git_ref` preset
+in its `[[repos]]` (a FAIL naming the repository, else the job fails with `repo_missing`); the host
+sampler's commands on the service `PATH`; and a warning when the rcm install's own `bin` folder
+is on that `PATH`. A `[[repos]]` entry with `token_file` is checked the way the worker calls git,
+with a credential helper that reads only that file. A row rcm cannot measure is `unknown`, not a
+FAIL, and the report exits 3: a git version it cannot read, a `token_file` the user running
+`rcm doctor` cannot read (run it as the service's user), repositories when the service `PATH` is
+unknown, a `git ls-remote` that timed out or could not run. A `git ls-remote` or `git --version`
+that runs past its time limit is stopped with its whole process group, so no credential helper or
+`git-remote-https` is left behind. On macOS it also reminds you of Local Network permission and
+of keeping the machine awake; rcm checks neither. On Linux a systemd user unit gets a `linger`
+row (`loginctl enable-linger`); a system unit does not, and when neither `USER` nor `LOGNAME` is
+set the row is `unknown`. A `--service-file` outside both the user unit places and
+`/etc/systemd/system` may or may not be a user unit, so its `linger` row is `unknown` too.
+
+| exit | meaning |
+|---|---|
+| 0 | every preset that comes to this machine is `ready` or `needs check`, and rcm's own needs are met; warnings allowed |
+| 1 | a tool is missing, rcm's own needs fail (Python 3.11.4+, git 2.31+ for `token_file`, an unreachable or missing repository), or nothing would come to this machine |
+| 2 | usage: a bad flag, a config file you gave or that sits in a standard place that does not exist, is not UTF-8 or TOML, or whose `[server]` is not a table, no server config at all for a coordinator role, a server URL that does not start with `http://` or `https://`, several roles or service files to choose from |
+| 3 | could not decide: the server is down or older, an answer from it that is not the JSON rcm expects (an HTML page from the wrong port or a proxy, an empty body, a field of the wrong type, a field rcm needs that is missing, `null` or, for a name, empty, such as `ok` and `version` in `/api/health`, `kind` in `/api/whoami`, `presets` and each preset's `name` in `/worker/spec`, `machines` in `/api/machines`), a preset the server does not place, a row rcm cannot measure, a probe timed out, no token or a refused one, a server found on the network that nobody confirmed, a systemd unit without `PATH` or with a line rcm does not follow, a service file it cannot read, a config the service starts with that it cannot read, no home folder |
+
+1 wins over 3, and 3 over 0. `rcm check` keeps its own exit codes. An error rcm did not expect
+ends the report with exit 3 and one line, `could not decide: <kind>: <message>` (home folder as
+`~`), on stderr and in `undecided`, not with a traceback. Exit 3 also covers a server that has not
+reloaded the config on disk, no service file for a server role, a system service whose user rcm
+does not know, and a service Python rcm cannot run. The exit code stays the verdict when the
+output cannot be written: `rcm doctor | head -1` ends quietly, and on a terminal that is not
+UTF-8 the text report replaces the characters it cannot print while `--json` writes them as
+`\uXXXX`; a closed stderr drops the usage and could-not-decide lines quietly. Ctrl-C stops the
+probes, the `git` and the service Python that are running, with their helpers, and exits 130.
+
+What it never does: it sends the server only read requests (no registration, no capability
+report — the server's judgement stays the server's), opens no database, runs no install hint and never uses
+`sudo` (as root, as in a container, rcm's own hints drop it; the coordinator's `[[tools]]` text is
+shown as written, after control characters, line separators and bidirectional controls are
+removed). It prints no home folder (`~` instead),
+no preset `env` value and no value from the service file, only the names. A server found by mDNS
+gets no request before you confirm it in a terminal; `--server URL` skips the question. The name
+and address it shows in that question come from the network and are cleaned to one line first.
+`--offline` skips `git ls-remote` for `[[repos]]` and still asks the coordinator.
+
+`--json` prints one document with these keys, always all of them; a value rcm does not know is
+`null`, never a missing key. `doctor_version` is `1`; a later version only adds keys, so ignore the
+ones you do not know.
+
+| key | what it holds |
+|---|---|
+| `doctor_version` · `role` · `exit` | `1`, the role measured, the exit code |
+| `measured_in` | `clean_service_env` (worker), `server_service_env` (coordinator-worker, when the server's own measurement was read), `none` |
+| `host` | `os` `os_release` `os_like` `arch` `machine` `rosetta` `container` `root` `package_manager` `python` `rcm`; `rosetta` and `container` are `null` when rcm could not tell |
+| `server` | `url` `found_by` (`flag`, `config`, `mdns`) `state` (`ok`, `not ok` when the server answers `ok: false`, `unreachable`, `token refused`, `unreadable answer`, `not confirmed`, `—`) `generation` `version` (`null` when the server does not say) |
+| `service` | `file` `manager` `path` `env_names` (names only); `null` for `client` |
+| `shell` | `{"path"}` with `--shell-path`, else `null` |
+| `rcm_requirements` | rows of `name` `state` (`ok` `warn` `fail` `info` `unknown`) `detail` `needed_for` `install` |
+| `presets` | rows of `name` `applies` (`pool` `any-capable` `not_coming` `other_pool` `local_lane_only` `unknown`) `state` `missing` (`tool` `install` `docs`) `checks` `code` `tools` `warn` `note` `shell_differs` |
+| `probes` | probe name → `state` `value` |
+| `remote_machines` | coordinator roles: rows of `name` `pool` `alive` `eligible` `presets`, each `null` when the server does not say; else `null` |
+| `summary` | counts of `ready` `needs_check` `missing` `unknown` among presets that come to this machine, and `applies_unknown`: presets the server does not say whether they come here |
+| `problems` · `undecided` · `warnings` | the lines behind exit 1, exit 3 and the warnings; every `unknown` preset that might come, `unknown` probe and `unknown` row of rcm's own needs has its line in `undecided` |
+
+macOS Command Line Tools shims: `/usr/bin/git`, `make`, `xcrun` and the other tools that only
+forward to the Command Line Tools open an install dialog when the tools are not installed. rcm
+treats a file directly in `/usr/bin/` that links `libxcselect` as such a shim and, when
+`xcode-select -p` fails, reports it as `missing (needs Command Line Tools)` without running it —
+in `rcm doctor`, in the job's `requires` check, in the server's tool rows, in worker probes and
+in the `git` row of `rcm check` and `rcm worker --check` alike; `git ls-remote` for `[[repos]]` is
+then not run. `rcm serve` with `[[repos]]` does not start on such a shim (`git is missing (needs
+Command Line Tools)`), and `git_ref` jobs fail as `git is not installed on the build machine (needs
+Command Line Tools)` without running it, so a headless service does not open the
+dialog for every job. `rcm doctor` runs `git ls-remote` with the git on the service `PATH`, in the service
+environment, not your shell's. `/usr/bin/java` and the other Java stubs are not detected this way.
+
+A worker sends the same host facts (OS version, real arch and Rosetta, container, root, package
+manager, Python) when it registers and with each capability report. The server keeps them in
+memory only, never in the database, so after a server restart they show `—` until the next
+report. `rcm machines --machine ID` prints them on its `host` line. `GET /api/machines` carries
+them only to a request with a client token, even when `read_auth = "none"` lets anyone read the
+rest; a worker token sent with Basic under `read_auth = "basic"` does not get them.
+
+`rcm worker --check` keeps its rows and adds two: `version` (ok when it matches the server; a
+warning when registering will follow the server's version; FAIL when this install cannot follow,
+such as an editable or pinned one) and a last line with the number of missing tools that points
+at `rcm doctor --role worker`. That line is ok only when nothing is missing, and a warning when
+something is or when the server sent no spec to count from (`—`); it never fails the check. A
+`/worker/spec` answer that is not rcm's (a list, a string, an HTML page, a probe timeout that is
+not a number) is a FAIL on the `presets` row, as a health or whoami answer of the wrong shape is
+on the `server` and `token` rows, never a traceback. A server version or token name the server
+does not send is left out of the line, not printed as `None`.
+
+With `server = "auto"`, `rcm worker --check` now asks before it talks to the server it found on
+the network, as `rcm doctor` does. Without a terminal there is nobody to ask, so it exits 3 and
+sends nothing; pass `--server URL` in scripts.
+
 ## Docker (Linux build machine)
 
 `Dockerfile` builds a server image (`python:3.12-slim` + git for `git_ref` presets, non-root user
@@ -251,6 +696,10 @@ finished since then are gone from the database while their `jobs/<id>/` logs and
 them but does not delete them), and a job number handed out after the backup will be reused. Do
 this only when the new build cannot run at all; otherwise fix forward.
 
+Before you roll back below 0.11.0, remove `local_only = true` from every preset, `include` files
+included, and the top-level `[[tools]]` tables: an older server does not know either key and
+refuses to start.
+
 ### From a git checkout
 
 The service's virtual environment can point at a working copy instead of a released wheel:
@@ -283,20 +732,66 @@ install, refuses edits to it and to the server's config and data, refuses a comm
 open the production database with a build other than the service's own (`rcm token …`, `rcm
 serve`, `rcm worker` — a different build migrates the database on open), and asks before a
 deploy. `rcm gc --dry-run --config` is allowed: it plans on a temporary copy. A machine with no
-such install sees nothing.
+such install sees nothing. For `rcm setup` the hook does not try to read arbitrary shell. On a
+machine with a production install it lets setup through only as **one plain command**: optional
+`NAME=value` words, then `rcm` (any path ending in `/rcm`, or `python3 -m remote_ci_monitor`),
+then `setup` and its arguments — no `;` `&` `|` `$` `` ` `` `(` `)` `<` `>`, backslash, glob or
+line break anywhere, quotes only around a whole value, and `--config`, `--service-file`,
+`--data-dir`, `HOME` and `XDG_CONFIG_HOME` given as absolute or `~` paths (a relative path is
+refused wherever the session stands). `rcm setup --help` passes in that shape only. For such a
+command it asks setup's own resolver where it would write, and refuses a setup that would write
+its config or service file anywhere an edit is refused (the production checkout, the service
+virtualenv, the server's config folder or data directory) or into a folder the service manager
+reads, use a production label, or point a server at the production `data_dir`; paths are
+compared as written and with symbolic links resolved. Anything else that could reach setup — a
+command naming rcm (or with a variable where the command goes) that holds the word `setup`
+anywhere, or where the word after rcm is something the shell builds (`${S}tup`, `` `…` ``,
+`s{e,}tup`) — is refused with "run `rcm setup` as one plain command: no ; & | $ ` ( ) < > or
+backslash, absolute or ~ paths only". So are `cd /x && rcm setup …`, `env rcm setup …`, a
+command line setup would reject, and a failure of the hook itself. If the net itself fails (an
+internal error), the hook treats the command as one that can reach `rcm setup` and refuses it.
+The hook also refuses any command that holds both a word that could be rcm (`rcm`, a path ending
+in `/rcm`, the module word `remote_ci_monitor[.cli]`, a glob such as `r?m`, or — after the launcher — a `$` variable or
+`` `…` `` whose last path part is not a plain other name) and, anywhere in it, a launcher that
+feeds arguments (`xargs`, `parallel`, `find … -exec`, `fd -x`, `entr`, `rush`, `xe`), whose
+arguments come from input the hook cannot read, or one that gives a terminal (`script`,
+`unbuffer`, `expect`, `socat`, `tmux`, `screen`, `ssh -t`, Python's `pty`), where the first-run
+question would start setup. The refusal names the launcher and the word, and says to split the
+command into two Bash calls. The hook does not look at where the launcher stands — `<f xargs rcm`
+and `2>/dev/null xargs rcm` are refused like `xargs rcm` — so `git ls-files | xargs grep -n rcm`
+is refused too; search text with a tool that is not a launcher. A path through the source tree
+(`src/remote_ci_monitor/…`) is not an rcm word, and a variable before the launcher or one that
+ends in a plain name (`xargs ruff check "$PWD/x"`) is not either, so `find src/remote_ci_monitor
+-name '*.py' -exec ruff check {} +` and `git ls-files src/remote_ci_monitor | xargs ruff check`
+pass. Text that only mentions it, such as `git commit -m "… rcm setup …"`, is refused as well.
+The net refuses some ordinary commands too — a command that names rcm in quoted text next to `$`
+or `(`, or a launcher word such as `fd -x` or `expect` anywhere in the line. This is accepted:
+pass text through a file (`git commit -F <file>`, `gh pr create --body-file <file>`,
+`gh pr comment --body-file <file>`; a title can come from `--title "$(cat <file>)"`) and split
+long chains into separate commands.
+
+The hook is the first line, not the last. It judges shell text, and every closed list it keeps
+(launchers, shell metacharacters, where a word stands) has an outside: a variable where the
+command goes, `sed … | sh`, an interpreter that builds the command, a glob or `r(c)m` in the
+command word, a launcher it does not list. Those are left to setup itself, which refuses a
+production service's files before it writes (see **What it refuses or warns about** above).
 
 The *service virtualenv* is the one whose editable install (`direct_url.json`) points at the
 primary checkout — not whatever `rcm` is first on `PATH`, which in a shell with a worktree's
 `.venv` activated is the worktree's build. The hook looks at `~/.local/share/rcm-venv`, then at
 the `rcm` named by the installed launchd or systemd unit, then at every `rcm` on `PATH`, and
-takes the first whose editable source is not a linked worktree. What counts is the data
+takes the first with an editable source. The first two are what the service runs, so they count
+wherever they sit — a service run from a worktree, such as `remote_ci_monitor-service`, or one
+that runs the `.venv` inside its checkout. An `rcm` found only on `PATH` counts only when its
+virtualenv lies outside its source and the source is not a linked worktree, so your own
+worktree's `.venv` is a development build. What counts is the data
 directory the command would *actually* open, in the CLI's own order: `--data-dir`, then
 `RCM_SERVER_DATA_DIR`, then the `data_dir` of the config it would pick (`--config`,
 `$RCM_CONFIG`, `./rcm.toml`, `$XDG_CONFIG_HOME/rcm/server.toml`, `~/.config/rcm/server.toml`).
 So a **copy of the production config** that only changes `port` is refused too — its `data_dir`
 is still the production one — and so is a test config run with `RCM_SERVER_DATA_DIR` pointing at
-production. `cd <dir> && rcm …` is judged in `<dir>`; `env -i`, `env -u NAME`, `exec`, `nohup`,
-`time`, `command` and a `( … )` or `{ … }` group do not hide the command. The hook does not look
+production. `cd <dir> && rcm …` is judged in `<dir>`; `env -i`, `env -u NAME`, `env -S '…'`, `exec`,
+`nohup`, `time`, `nice`, `timeout <duration>` (`30`, `1.5m`, `.5`, `1e1`, `inf`), `command` and a `( … )` or `{ … }` group do not hide the command. The hook does not look
 inside `bash -c '…'`, `xargs`, `uv run` or `$(…)`, and does not resolve symlinks.
 
 ## Keeping clients on the server's version
@@ -326,6 +821,8 @@ itself.
 
 Some commands never follow, because they are the server or work without one: `rcm serve`,
 `rcm token`, `rcm init`, `rcm discover`, `rcm version`, `rcm skills` and `rcm gc --config …`.
+`rcm doctor` does not follow either: it measures what this install can do. Nor does `rcm setup`,
+which writes this machine's own config.
 `rcm worker` follows at its own moments, described in [remote workers](#remote-workers) below. A call with `--help` or `--version` always shows the installed rcm's help
 and version. The help of a command that only the server's version has appears once the installed
 rcm is upgraded.

@@ -962,6 +962,46 @@ The row carries **names, never values**. `/api/health` is readable without a tok
 configuration, so it says `JAVA_HOME` and never what `JAVA_HOME` is, and a tool declared as an
 absolute path is named by its basename — the same rule the job log and `local preset tools` follow.
 
+### Install hints: `[[tools]]`
+
+`requires` says a tool is missing; `[[tools]]` says how to get it. When `rcm doctor` finds a tool
+missing on a machine, it prints the hint for that machine's OS next to it, with the docs link:
+
+```toml
+[[tools]]                       # shown, never run
+name = "fvm"                    # the basename in requires, or a probe's argv[0]
+docs = "https://example.org/fvm/install"
+[tools.install]                 # darwin · linux · any (used when the OS has no line)
+darwin = "brew install fvm"
+linux = "see the docs"
+```
+
+The text is shown as written. rcm never runs it and never installs anything with `sudo`; whether
+the text is right is up to whoever runs the coordinator. Each string is one line of at most 300
+characters without control characters (line and paragraph separators, bidirectional controls
+and zero-width characters count too), the install keys are `darwin`, `linux` and `any`, and a
+name appears once, has no spaces around it and is at most 64 characters (the length `rcm doctor`
+matches names at). Anything else is a config error at start. An older server does not know the
+table and refuses to start, so remove it before rolling back below 0.11.0. A name that no preset
+`requires` and no probe runs is a warning at start and at `rcm reload`, because its hint would
+never show.
+
+Workers get the table with the rest of the spec (`GET /worker/spec`, a worker token). It is not in
+`/api/status` or `/api/machines`, which may be readable without a token. A worker strips control
+characters once more before it prints a hint.
+
+**A toolchain catalog to start from.** The server template (what `rcm init server` and
+`rcm setup` write, and `examples/server.toml`) ends with a commented toolchain catalog:
+`[[probes]]` and `[[tools]]` entries for Flutter, iOS (Xcode and CocoaPods), Android (JDK and the
+SDK's `sdkmanager`), Node and Python, each with notes on what trips a service up. Lines starting
+with one `#` are config: remove the `# ` of the entries you want. Lines starting with `##` are
+notes. Uncommented as a whole, the catalog passes the start checks, and every hint in it belongs to
+a probe, so none warns. None of these names is built into rcm, and the lines were tried on one
+Apple Silicon Mac only: check each on your machines. Version rules ("Xcode 27 or newer") belong in
+a [check preset](#proving-a-machine-works-checks), since rcm compares no versions. macOS's
+`/usr/bin/java` is a stub that rcm's Command Line Tools rule does not recognise, so give a Java
+preset a JDK of its own (`JAVA_HOME` and `PATH` in `[presets.env]`).
+
 ### Naming what failed
 
 The `failed: …` lines, `failed_step` and the history above come from one place: the
@@ -1201,7 +1241,10 @@ Git mirrors are never pruned.
   `100+` when the job reported more than the ledger keeps; both empty when nothing was named),
   `RCM_SHELF_URL` (a kept job's [shelf](#keeping-a-jobs-files-the-shelf) link, empty otherwise),
   `RCM_ACTION_CODE` and `RCM_ACTION_NOTE` (the job's last
-  [action](#when-a-person-has-to-act), empty without one);
+  [action](#when-a-person-has-to-act), empty without one),
+  `RCM_MACHINE` (where the job ran: the remote worker's name as it claimed the job, or this
+  server's current host name for a local lane; empty for a job that never started or for a local
+  lane when this server does not know its own name — the job's `ran_on`);
   the hook also inherits `PATH`, `HOME` and `LANG`;
   user strings are sanitised and capped at 4 KB (`RCM_FAILURES` drops whole lines to fit). A `url`
   rule POSTs `{"notify": <rule>, "job": <the finished job>, "failures": [...], "failure_count": N,
@@ -1230,7 +1273,9 @@ Git mirrors are never pruned.
 
 ## Parallel lanes without overloading the machine
 
-`[server] lanes` is how many jobs the build machine runs at once. Raising it used to be a gamble:
+`[server] lanes` is how many jobs the build machine runs at once (`0` makes it a server that only
+hands jobs out — see [A server that only hands out jobs](#a-server-that-only-hands-out-jobs-lanes--0)).
+Raising it used to be a gamble:
 two heavy jobs together and the machine crawls. Now lane 2 and above only pick up a job while the
 host CPU is below `cpu_max_percent`.
 
@@ -1356,6 +1401,11 @@ writes the token anywhere; carrying it to the worker is still a person's job. A 
 see the `RCM_WORKER_TOKEN` of your shell, so before you start it put `token = "…"` in
 `worker.toml` (the file is mode 600).
 
+`rcm setup --role worker --server URL --pool P --lanes N --yes` does both steps at once: it writes
+`worker.toml` with that URL (never `"auto"`) and the service file in `service/` next to it,
+prints the copy and start lines instead of running them, and ends with
+the checks that need no server. See [Set a machine up](operating.md#set-a-machine-up-rcm-setup).
+
 Without `--config`, `rcm worker` reads the `worker.toml` that `rcm init worker` wrote
 (`~/.config/rcm/worker.toml`, or under `$XDG_CONFIG_HOME`) when it exists, and says which file it
 read. The long form still works, with flags instead of a file — given `--server`, it reads no file
@@ -1402,6 +1452,53 @@ heartbeat finishes its jobs and restarts the same way, without losing one. `RCM_
 `rcm worker --no-follow` pin the version or turn this off, and an editable install does not follow.
 `rcm worker --check` never follows. Details, including what a service manager sees, are in
 [remote workers](operating.md#remote-workers).
+
+### A server that only hands out jobs: `lanes = 0`
+
+```toml
+[server]
+lanes = 0        # no local lanes: queue jobs and hand them to remote workers only
+```
+
+With `lanes = 0` the server runs no job itself. It takes submissions, keeps the queue and hands
+each job to a worker that can take it. What changes:
+
+- `@local` is not alive and is never a candidate: no placement, no `eligible_now` entry in the
+  submission answer, no automatic check on it. The server does not run its own `[[probes]]`.
+- A submission with `--machine @local` is refused with 409 (`this server has no local lanes`).
+  `rcm recheck @local` gets the same 409, and the web machines table draws no Recheck button on
+  that row. A [`local_only`](#keeping-a-preset-on-the-server-local_only) preset is refused the
+  same way, since only the server's lanes may run it. Jobs already waiting when the server
+  restarts with `lanes = 0`, or when a reload marks their preset `local_only`, wait with
+  `no capable machine` and no ETA, and the reason names `no local lanes (lanes = 0)` on `@local`;
+  they are not failed. Cancelling one cancels it at once. The next attempt of a retried job
+  pinned to `@local` waits the same way, and a newer submission of the same branch does not
+  supersede a job pinned to a machine.
+- Without a worker a job waits (`worker down`, ETA `—`); a worker that attaches to its pool takes
+  it at once, and the queue survives a restart.
+- `/api/health` keeps answering 200 and carries `capacity`: `total` presets, how many have a live
+  machine they can go to now (`reachable`) and the names of the rest (`unreachable`). A machine
+  counts when the preset's candidates include it and it is alive; a `pool` preset without `checks`
+  counts every live lane of its pool whatever the verdict, as placement does. `rcm check` draws a
+  `capacity` row: FAIL when no preset has a machine, warn with the names when some have none
+  (a deploy preset no machine runs can be normal), no row without presets. When the server
+  could not count (`capacity: null`, the reason is in the server log once, not on every
+  health call) or sends counts that do not add up, the row says
+  `server could not count capacity`: FAIL on a `lanes = 0` server, warn on one with lanes. An
+  older server that does not send the key gets no row.
+- `pools_without_workers` in `/api/health` now lists the default pool too when all its workers
+  are down, as the server has no lane of its own there.
+- `rcm check` shows `local preset tools` and `service preset tools` as `this machine runs no
+  jobs`, not as FAIL, and its `machines` row does not count `@local`. `rcm top` says
+  `no local lanes` instead of `lanes 0/0 busy`, the host line of the server says `runs no jobs`
+  (the host sampler keeps running), and `rcm machines` and the web machines table show `@local`
+  as `runs no jobs` / `no lanes` instead of `down`.
+- The mDNS record says `lanes=0`.
+
+`rcm doctor --role coordinator` (the role a `lanes = 0` config names) ends on `capacity`
+instead of «no preset would come here»: see [rcm doctor](operating.md#check-a-machine-before-you-use-it-rcm-doctor).
+`rcm setup --role coordinator --bind ADDRESS --yes` writes such a `server.toml` with its server
+service file: see [Set a machine up](operating.md#set-a-machine-up-rcm-setup).
 
 ## Which machine runs a job
 
@@ -1490,7 +1587,10 @@ silent wait.
 `any-capable` is for presets that need no secrets. The release profile's secret files live on the
 server under `<config dir>/secrets/<repo>/` and are never shipped to a worker, so a deploy, upload
 or release preset stays `placement = "pool"` on the machine that holds them. Gates, tests and
-checks that read nothing secret are what `any-capable` is for.
+checks that read nothing secret are what `any-capable` is for. A `pool` preset in the default pool
+is still picked up by any remote worker you register in that pool; mark such a preset
+`local_only = true` ([below](#keeping-a-preset-on-the-server-local_only)) to keep it on the
+server's own lanes.
 
 A `git_ref` job is fetched by whichever worker takes it, so every worker that may take an
 `any-capable` `git_ref` preset — and every worker that runs checks, which are always `git_ref` —
@@ -1514,6 +1614,14 @@ The verdict, worker by worker — the first row that applies is the answer:
 | `check_needed` | unknown | no check has passed on this worker with its current fingerprint |
 | `fingerprint_unknown` | unknown | the preset has `checks` and the fingerprint is unknown |
 | `ok` | eligible | — |
+
+Two more codes come from `local_only` (below). `local_only` (ineligible) is shown first, before
+any row of this table, on a remote worker for a `local_only` preset. `check_local_only`
+(ineligible, with the check's name) replaces `check_needed` on a remote worker for a preset whose
+`checks` names a `local_only` check that has not passed there — that check can never run there, so
+the preset is not "pending". It also replaces `check_failed`, and `check_running` while the
+check's job is only waiting: no machine can take that job, and a recheck there is refused. A check
+job the remote worker has already claimed runs to its end and counts.
 
 `env_passthrough` names the worker's environment lacks are shown but do not block: an empty value
 can be intended.
@@ -1588,7 +1696,70 @@ that worker's lanes take it, ignoring pool, placement and verdict, so a check ca
 itself. A token may pin a check preset; pinning any other preset needs an admin token (403
 otherwise). An unknown machine is 400, a machine that is down 409 — no job is created and
 `rcm run` exits 2. A pinned job whose tool is missing is picked up and fails with `tool_missing`,
-which for a check is the failed check.
+which for a check is the failed check. Pinning a `local_only` preset to a remote worker is 409
+(next section).
+
+### Keeping a preset on the server: `local_only`
+
+```toml
+[[presets]]
+name = "release-ios"
+argv = ["bash", "scripts/release_ios.sh"]
+local_only = true                # only the server's own lanes run it, never a remote worker
+```
+
+`local_only = true` (default `false`) gives the preset one machine: `@local`, the server's own
+lanes. Mark the presets that need what only the server has — the release profile's secrets, a
+signing identity, a store login. Without it, a remote worker registered in the default pool picks
+up a default-pool release job and runs it without those secrets, or with its own.
+
+Everything that chooses a machine uses that one list, so a remote worker never sees the preset:
+
+- it is not in the remote workers' `GET /worker/spec`, its `env` included, and no remote claim
+  hands it out — pinned, pool or `any-capable`;
+- `rcm machines` and `/api/machines` show it as `local_only` on every remote worker, and it is not
+  counted in their `eligible` number;
+- the waiting row, `rcm eta` and the `POST /jobs` answer (`placement.eligible_now`) count only
+  `@local`. When no local lane can take the job, `POST /api/eta` answers `ahead: null` with no
+  estimate. `ahead` was always a number before, so a script that reads it must accept `null`.
+  Otherwise `ahead` counts only the jobs that compete for the server's lanes.
+
+The server's lanes take the job exactly as before. A `local_only` `pool` preset must use the
+default pool — the server's lanes serve no other — or the server does not start. Extra `pools` are
+allowed, but a submission to one of them is refused.
+
+**Submissions that cannot run are refused.** `POST /jobs` answers 409 and creates no job when the
+server's lanes cannot take it: `--machine` names a remote worker (`… runs only on this server's
+local lanes (local_only) — machine mbp cannot take it`), `--pool` names a pool other than
+`default`, the preset is `any-capable` while `[server] local_accept_any = false`, or it is
+`any-capable` and the server's lanes miss a `requires` tool. The reason code is
+`no_capable_machine`, or `tool_missing` for the last case. This check runs before joining an
+identical job and before superseding older ones. `rcm run` prints the server's reason and exits 2,
+since no job was made. A preset whose check has not passed (or failed)
+on `@local` is not refused: the job waits with `check pending` or `check failed`, as any other.
+Nor is one submitted while `@local` has no report yet, or a stale one.
+
+**Adding the mark later.** After `rcm reload` or a restart that adds `local_only`, jobs already
+waiting are placed again: one pinned to a remote worker, or queued in another pool, shows
+`no capable machine` with no ETA. It is not failed — cancel it or move the mark back. A scheduled
+job follows the same rule once its time comes. A job already running on a remote worker is not
+stopped: it finishes and reports its result as usual. Its retry (`[presets.retry]`) is a new
+attempt and follows the mark: one pinned to that worker waits with `no capable machine` and no
+ETA, one in the default pool goes to the server's lanes. An older server does not know the key
+and refuses to start, so upgrade every server that reads the preset first, `include` files
+included. Before rolling back below 0.11.0, remove the presets' `local_only` lines first: an older
+server does not know the key and does not start.
+
+**Checks.** A `local_only` check preset runs only on `@local`. On a remote worker, a preset that
+needs it shows `check_local_only`, the check's row in `rcm machines` shows `local_only` and asks
+for no recheck, the sweeper does not submit it there, and `rcm recheck <remote> <check>` is 409.
+Its state follows the same rule as the verdict: unless the check passed there or that machine is
+running it, the row shows `needed` with the last job's number, so a check job nobody can take does
+not read as running, and a failure there is not counted among that machine's problems.
+`rcm recheck <remote>` without names submits the other checks and answers 200; the skipped one is
+listed apart from `jobs`, as `skipped: [{"preset": "<check>", "code": "local_only"}]`, and is not a
+failure. A check that already passed on a remote worker before the mark was added keeps counting
+there until that machine's fingerprint changes; after that it cannot be run there again.
 
 ### Concurrency groups across machines: `concurrency_scope`
 
@@ -1642,6 +1813,9 @@ hours and which check failed — `3 machines · 1 environment changed (Mac mini:
 1 check failed (Mac mini: sim-check #3620)`; FAIL when a check failed. `placement`: every
 `any-capable` preset and every preset with `checks`, with how many machines can run it now —
 `gate: any machine (2 eligible) · scenario-qa: pool default (check failed)`; warn when one has none.
+A third row, `capacity`, counts the presets that have a live machine to run on now
+(`9/10 presets have a machine to run on — none for: deploy-android`): FAIL when none has, warn
+when some have not, no row on a server without presets or one too old to say.
 
 `rcm recheck MACHINE [CHECK…]` (admin; `POST /machines/{id}/recheck`) submits that worker's checks
 again — all of them, or the ones named — whatever the automatic once-per-fingerprint rule and the
@@ -1657,6 +1831,7 @@ pinned one `on <machine>`.
 | `[[probes]]` | `name` · `argv` · `timeout_seconds` | — · — · `10` |
 | `[server]` | `probe_interval_seconds` · `auto_checks` · `local_accept_any` · `check_sweep_seconds` | `600` · `true` · `true` · `30` |
 | `[[presets]]` | `placement` · `concurrency_scope` · `checks` · `check_ref` · `sample` | `"pool"` · `"pool"` · `[]` · `"HEAD"` · `true` (`false` for a check preset) |
+| `[[presets]]` | `local_only` | `false` |
 | `worker.toml` | `server = "auto"` · `server_name` · `accept_any` | — · `""` · `true` |
 
 `rcm reload` picks up `[[probes]]` and the preset keys. The `[server]` keys need a restart, like

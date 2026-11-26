@@ -21,6 +21,7 @@ from remote_ci_monitor.core.model import (
     Estimate,
     HostSample,
     Job,
+    LocalMachine,
     Pool,
     Preset,
     Progress,
@@ -234,8 +235,35 @@ def chain_json(job: Job) -> dict[str, Any]:
     }
 
 
+def ran_on(job: Job, local: LocalMachine | None) -> str | None:
+    """잡이 돈 머신의 이름(M5t-a 결정 248 f) — 잡 문서의 `ran_on` 과 알림의 `RCM_MACHINE`.
+
+    저장 칸이 없다. 잡 문서를 만들 때마다 이 함수 하나로 계산한다.
+
+    - 시작하지 못한 잡(`started_at` 없음)은 None 이다. 대상 워커가 정해져 있어도 돌지 않았다.
+    - 원격 워커가 집었으면 그 워커(`worker_name`)다.
+    - 로컬 레인 잡이면 이 서버 머신의 이름이다. 잡의 `host_key` 가 이 머신의 것이 아니면(다른
+      물리 머신에서 돈 잡) None 이다. `host_key` 는 해시라서 거기서 이름을 지어내지 않는다.
+      `host_key` 가 없는 옛 행(M5n 이전)은 store 의 관례대로 로컬로 읽는다.
+    - 이름을 모르면 None 이다. `worker` 칸의 null(로컬) 관례는 이 함수가 건드리지 않는다.
+    """
+    if job.started_at is None:
+        return None
+    if job.worker_name:
+        return job.worker_name
+    if local is None or not local.name:
+        return None
+    if job.host_key is not None and job.host_key != local.host_key:
+        return None
+    return local.name
+
+
 def queue_row_json(
-    row: QueueRow, *, base_url: str | None = None, log_tail: list[str] | None = None
+    row: QueueRow,
+    *,
+    base_url: str | None = None,
+    log_tail: list[str] | None = None,
+    local: LocalMachine | None = None,
 ) -> dict[str, Any]:
     job = row.job
     return {
@@ -290,6 +318,8 @@ def queue_row_json(
         "concurrency_scope": job.concurrency_scope,
         "host_key": job.host_key,
         "placement_detail": [placement_note_json(n) for n in row.placement_detail],
+        # M5t-a 결정 248 f — 잡이 돈 머신. 대기 중이면 null. 키 추가만
+        "ran_on": ran_on(job, local),
         # M5p — 제출 때 얼린 keep 과 보관 상태. `shelf` 는 서버가 채운다(DB 를 봐야 한다).
         # 키 추가만 — schema_version 그대로
         "keep": job.keep,
@@ -316,7 +346,11 @@ def placement_note_json(n: Any) -> dict[str, Any]:
 
 
 def recent_json(
-    job: Job, *, base_url: str | None = None, action: Action | None = None
+    job: Job,
+    *,
+    base_url: str | None = None,
+    action: Action | None = None,
+    local: LocalMachine | None = None,
 ) -> dict[str, Any]:
     """끝난 잡 한 행. `action` 은 순수 층이 모른다 — 마커를 읽은 호출자(서버 · 알림)가 넘긴다."""
     started = job.started_at
@@ -358,6 +392,8 @@ def recent_json(
         "target_worker": job.target_worker,
         "host_key": job.host_key,
         "worker": job.worker_name,
+        # M5t-a 결정 248 f — 돈 머신의 이름. `worker` 의 null(로컬) 관례는 그대로. 키 추가만
+        "ran_on": ran_on(job, local),
         # M5p — 제출 때 얼린 keep 과 보관 상태(서버가 채운다). 키 추가만
         "keep": job.keep,
         "shelf": None,
@@ -406,6 +442,8 @@ def scheduled_json(job: Job, *, base_url: str | None = None) -> dict[str, Any]:
         # 채운다. 표식이 있으면 `reason` 은 `needs_action`, 없으면 둘 다 null
         "reason": None,
         "action": None,
+        # M5t-a 결정 248 f — 예약 잡은 시작 전이다. 다른 잡 문서와 같은 키를 싣는다
+        "ran_on": None,
     }
 
 
@@ -522,13 +560,17 @@ def pool_json(
     now: datetime,
     base_url: str | None,
     log_tails: Mapping[int, list[str]] | None,
+    local: LocalMachine | None = None,
 ) -> dict[str, Any]:
     tails = log_tails or {}
     return {
         "name": pool.name,
         "lanes": pool.lanes,
         "queue": (
-            [queue_row_json(r, base_url=base_url, log_tail=tails.get(r.job.id)) for r in pool.queue]
+            [
+                queue_row_json(r, base_url=base_url, log_tail=tails.get(r.job.id), local=local)
+                for r in pool.queue
+            ]
             if pool.queue is not None
             else None
         ),
@@ -543,7 +585,7 @@ def pool_json(
         "scheduled_error": pool.scheduled_error,
         "scheduled_error_code": pool.scheduled_error_code,
         "recent": (
-            [recent_json(j, base_url=base_url) for j in pool.recent]
+            [recent_json(j, base_url=base_url, local=local) for j in pool.recent]
             if pool.recent is not None
             else None
         ),
@@ -679,7 +721,13 @@ def status_json(
         "server": server_json(model.server),
         "presets": [preset_json(p) for p in model.presets],
         "pools": [
-            pool_json(p, now=model.generated_at, base_url=model.base_url, log_tails=log_tails)
+            pool_json(
+                p,
+                now=model.generated_at,
+                base_url=model.base_url,
+                log_tails=log_tails,
+                local=model.local_machine,
+            )
             for p in model.pools
         ],
     }

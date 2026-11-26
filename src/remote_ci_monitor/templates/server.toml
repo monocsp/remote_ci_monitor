@@ -10,7 +10,7 @@
 bind = "127.0.0.1"          # Set your Tailscale IP or 0.0.0.0 to accept remote sessions.
 port = 8787
 data_dir = "~/.local/share/rcm"
-lanes = 1                   # Parallel job lanes. 1 for a single build machine.
+lanes = 1                   # Parallel job lanes. 1 for one build machine; 0 = remote workers only.
 admission = "load"          # Lanes 2+ wait while the host is busy. "always" turns the gate off.
 cpu_max_percent = 80        # Lanes 2+ do not start a job while CPU is above this. Lane 1 always does.
 admission_samples = 3       # This many host samples in a row must be under the cap.
@@ -184,6 +184,7 @@ source_modes = ["tree"]
 priority = "normal"         # "low" | "normal" | "high" — default for this preset and the ceiling for non-admin sessions
 pool = "default"            # worker pool for this preset's jobs
 # pools = ["linux"]         # extra pools a session may pick with --pool (remote workers, M5b)
+# local_only = true         # only the server's own lanes run it, never a remote worker (0.11.0+)
 expected_seconds = 480
 duration_key_inputs = ["scope"]
 # artifacts = ["test/**/goldens/*.png"]   # files this job produces that a session may fetch back
@@ -226,7 +227,8 @@ default = "default"
 # ── Notifications ──────────────────────────────────────────────────────────
 # Run a command (no shell) or POST JSON to a URL when jobs finish. Env for argv: RCM_JOB_ID RCM_STATE
 # RCM_PRESET RCM_KEY RCM_REQUESTER RCM_SUMMARY RCM_FAILED_STEP RCM_EXIT_CODE RCM_JOB_SECONDS RCM_URL
-# RCM_NOTIFY. Exactly one of argv / url. `on` defaults to every terminal state.
+# RCM_NOTIFY RCM_MACHINE (where the job ran). Exactly one of argv / url. `on` defaults to every
+# terminal state.
 # [[notify]]
 # name = "on-failure"
 # on = ["failed", "timed_out", "lost"]
@@ -247,24 +249,10 @@ default = "default"
 # concurrency_group = "deploy"
 
 # ── Flutter on several machines (any machine that can run it) ──────────────
-# Every worker runs these probes in its own service environment and reports the output as its
-# fingerprint; `rcm machines` shows it. The values are visible on /api/machines and /api/status,
-# so pick commands that print only a version. Nothing here is built into rcm — adjust freely.
-# The output must not move on its own: plain `flutter --version` prints "(4 months ago)", which
-# changes the fingerprint every month and re-runs the checks; `--machine` prints JSON instead.
-# [[probes]]
-# name = "flutter"
-# argv = ["fvm", "flutter", "--version", "--machine"]
-# timeout_seconds = 30
-# [[probes]]
-# name = "xcode"
-# argv = ["xcodebuild", "-version"]
-# [[probes]]
-# name = "java"
-# argv = ["java", "-version"]
-# [[probes]]
-# name = "idb"
-# argv = ["idb_companion", "--version"]
+# Every worker runs the [[probes]] in its own service environment and reports the output as its
+# fingerprint; `rcm machines` shows it. The probes these presets are judged by (flutter, xcode,
+# java, idb) are in the toolchain catalog at the end of this file. Nothing here is built into
+# rcm — adjust freely.
 #
 # A check preset: the project's own proof that a machine works (boot a simulator, tap once). It
 # must accept git_ref — rcm submits it by itself, pinned to a machine, whenever that machine's
@@ -297,3 +285,115 @@ default = "default"
 # concurrency_group = "simulator"
 # concurrency_scope = "host"
 # timeout_seconds = 3600
+
+# ── Toolchain catalog ──────────────────────────────────────────────────────
+## Examples for the toolchains build machines often run: Flutter, iOS (Xcode), Android, Node and
+## Python. None of these names is built into rcm. Lines that start with one `#` are config:
+## remove the `# ` in front of the entries you want. Lines that start with `##` are notes.
+## [[probes]] fill a machine's fingerprint (`rcm machines`). Anyone who can read the queue can
+## read their output, so they print versions only, never paths or user names. [[tools]] are
+## install hints: `rcm doctor` prints the line for the machine's OS next to a tool a preset
+## `requires` or a probe runs, and rcm never runs it. A version rule ("Xcode 27 or newer")
+## belongs in a check preset, not here: rcm compares no versions.
+## These lines were tried on one Apple Silicon Mac only. Check each one on your own machines.
+## A service starts with a short PATH (a launchd service has no /opt/homebrew/bin). Put the
+## toolchains on the PATH of the service file or of the preset's [presets.env]; nvm, fnm, pyenv,
+## rbenv and sdkman work through shell functions or shims that a service does not see.
+#
+## Flutter · Dart. `flutter doctor` exits 0 even when something is wrong, so it proves nothing.
+## `--machine` prints JSON that stays the same for the same version; plain `--version` prints
+## "(4 months ago)", which moves the fingerprint by itself every month and runs the checks
+## again. The first run of a new SDK downloads files, hence the longer timeout.
+## With fvm: argv = ["fvm", "flutter", "--version", "--machine"].
+# [[probes]]
+# name = "flutter"
+# argv = ["flutter", "--version", "--machine"]
+# timeout_seconds = 60
+# [[tools]]
+# name = "flutter"
+# docs = "https://docs.flutter.dev/install/manual"
+# [tools.install]
+# darwin = "brew install --cask flutter, or the manual install in the docs"
+# linux = "the manual install in the docs"
+#
+## iOS · Xcode, macOS only. With only the Command Line Tools installed, `xcodebuild -version`
+## exits 1. Accept the license once with `sudo xcodebuild -license accept`; simulator runtimes
+## come with `xcodebuild -downloadPlatform iOS`. The App Store updates Xcode.app in place: the
+## fingerprint shows the new version and a check preset decides whether it still works.
+## DEVELOPER_DIR in [presets.env] pins one Xcode for a preset. CocoaPods started by launchd
+## needs LANG = "en_US.UTF-8" in the preset's [presets.env].
+# [[probes]]
+# name = "xcode"
+# argv = ["xcodebuild", "-version"]
+# [[tools]]
+# name = "xcodebuild"
+# docs = "https://developer.apple.com/xcode/"
+# [tools.install]
+# darwin = "Xcode from the App Store, then: sudo xcodebuild -runFirstLaunch"
+# any = "Xcode runs on macOS only"
+# [[probes]]
+# name = "cocoapods"
+# argv = ["pod", "--version"]
+# [[tools]]
+# name = "pod"
+# docs = "https://guides.cocoapods.org/using/getting-started.html"
+# [tools.install]
+# darwin = "brew install cocoapods"
+# [[probes]]
+# name = "idb"
+# argv = ["idb_companion", "--version"]
+#
+## Android. The Android Gradle plugin needs JDK 17 or newer. macOS's /usr/bin/java is a stub, not
+## a JDK, and rcm's Command Line Tools rule does not recognise it, so a probe or a `requires`
+## check may run it. Give the job a JDK of its own: JAVA_HOME and PATH in [presets.env]
+## (`/usr/libexec/java_home -v 17` prints the JDK's path on macOS). `java -version` prints to
+## stderr; a probe reads both streams. The SDK's tools are on no default PATH: add
+## $ANDROID_HOME/cmdline-tools/latest/bin and $ANDROID_HOME/platform-tools to the preset's PATH,
+## written out in full. The emulator needs /dev/kvm on Linux and is not supported in a VM or
+## in Docker.
+# [[probes]]
+# name = "java"
+# argv = ["java", "-version"]
+# [[tools]]
+# name = "java"
+# docs = "https://developer.android.com/build/releases/gradle-plugin"
+# [tools.install]
+# darwin = "brew install --cask temurin@17"
+# linux = "Debian/Ubuntu: sudo apt-get install openjdk-17-jdk-headless · Arch: sudo pacman -S jdk17-openjdk"
+# [[probes]]
+# name = "android-sdk"
+# argv = ["sdkmanager", "--version"]
+# timeout_seconds = 30
+# [[tools]]
+# name = "sdkmanager"
+# docs = "https://developer.android.com/tools/sdkmanager"
+# [tools.install]
+# any = 'Android command-line tools from the docs, then: sdkmanager "platform-tools" "platforms;android-36" "build-tools;36.0.0" and sdkmanager --licenses'
+#
+## Node · headless Chrome. nvm's node is not on a service PATH: `nvm which <version>` prints the
+## absolute path to put on the preset's PATH. Ubuntu's chromium-browser package is an empty snap
+## wrapper; Playwright installs a browser of its own (npx playwright install --with-deps
+## chromium). Chrome in a container running as root needs --no-sandbox.
+# [[probes]]
+# name = "node"
+# argv = ["node", "--version"]
+# [[tools]]
+# name = "node"
+# docs = "https://nodejs.org/en/download"
+# [tools.install]
+# darwin = "brew install node"
+# linux = "the distribution's nodejs package, or an installer from the docs"
+#
+## Python. Run a project's own tools from its venv (`<venv>/bin/python -m pytest`), not from the
+## PATH, where python3 may be another interpreter. macOS's /usr/bin/python3 is a Command Line
+## Tools shim (Python 3.9). Homebrew's Python refuses pip installs outside a venv (PEP 668).
+# [[probes]]
+# name = "python"
+# argv = ["python3", "--version"]
+# [[tools]]
+# name = "python3"
+# docs = "https://www.python.org/downloads/"
+# [tools.install]
+# darwin = "brew install python@3.13"
+# linux = "Debian/Ubuntu: sudo apt-get install python3 python3-venv · Fedora/RHEL: sudo dnf install python3 · Arch: sudo pacman -S python"
+# ── End of the toolchain catalog ───────────────────────────────────────────

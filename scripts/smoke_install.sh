@@ -88,6 +88,7 @@ step "rcm init server"
 CFG=$("$RCM" init server)
 [ -f "$CFG" ] || { echo "smoke: init server did not write $CFG" >&2; exit 1; }
 grep -q '^name = "ok"' "$CFG" || { echo "smoke: template lacks the ok preset" >&2; exit 1; }
+grep -q '^# ── Toolchain catalog' "$CFG" || { echo "smoke: template lacks the toolchain catalog" >&2; exit 1; }
 
 step "rcm token add"
 TOKEN=$("$RCM" token add laptop)

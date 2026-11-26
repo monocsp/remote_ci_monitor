@@ -182,6 +182,7 @@ NEW_RECENT = frozenset(
         "retry_of",
         "retried_as",
         "max_attempts",
+        "ran_on",  # M5t-a 결정 248 f — 잡이 돈 머신(계산 값, 시작 전이면 null)
     }
 )
 NEW_ROW = frozenset(
@@ -208,6 +209,7 @@ NEW_ROW = frozenset(
         "retry_of",
         "retried_as",
         "max_attempts",
+        "ran_on",  # M5t-a 결정 248 f — 잡이 돈 머신(계산 값, 시작 전이면 null)
     }
 )
 NEW_HOST = frozenset({"gpu_note_code", "disk"})  # `disk` 는 M5d-2 §4.6 (가)

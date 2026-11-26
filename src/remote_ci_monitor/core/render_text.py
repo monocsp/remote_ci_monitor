@@ -12,6 +12,7 @@ from datetime import datetime, tzinfo
 from typing import Any
 from zoneinfo import ZoneInfo
 
+from remote_ci_monitor.core import artifacts as _art
 from remote_ci_monitor.core.model import (
     CANCELLED,
     CANCELLING,
@@ -24,6 +25,7 @@ from remote_ci_monitor.core.model import (
     RETRIED,
     RUNNING,
     SUCCEEDED,
+    TERMINAL_STATES,
     TIMED_OUT,
     UPLOADING,
 )
@@ -565,6 +567,8 @@ def verdict_text(code: Any, detail: Any = None, state: Any = None) -> str:
         return "stale report"
     if code == "fingerprint_unknown":
         return "fingerprint unknown"
+    if code == "no_local_lanes":  # 분배 전용 서버의 `@local`(M5t-a 결정 243)
+        return "no local lanes (lanes = 0)"
     return str(code) if code else DASH
 
 
@@ -868,6 +872,86 @@ def failure_lines(
     return out
 
 
+#: 기다림이 끝날 때 경고 줄로 말하는 산출물 상태(M5t-a 결정 248 e). 종료 코드는 그대로다 —
+#: 「테스트가 깨졌다」와 「산출물을 못 받았다」는 다른 사실이다(M5e §3)
+ARTIFACT_WARN_STATES = (_art.FAILED, _art.DROPPED, _art.UNAVAILABLE, _art.UNKNOWN)
+#: 잡은 끝났는데 산출물은 아직 모으거나 올리는 중 — 「나중에 보라」고 안내한다(경고가 아니다)
+ARTIFACT_STILL_COLLECTING = (_art.COLLECTING, _art.UPLOADING)
+
+
+def _artifact_state(job: Mapping[str, Any]) -> str | None:
+    """잡 문서의 `artifacts.state`. 키가 없거나(옛 서버) 어휘 밖이면 None — 말하지 않는다."""
+    doc = job.get("artifacts")
+    state = doc.get("state") if isinstance(doc, dict) else None
+    return state if isinstance(state, str) and state in _art.ARTIFACT_STATES else None
+
+
+def _never_started(job: Mapping[str, Any]) -> bool:
+    """`started_at` 이 null 로 온 잡 — 돌지 않았으니 올릴 산출물도 없다.
+
+    키가 아예 없는 문서(가짜 서버 · 다른 모양)는 시작했는지 모른다고 보고 False 다 — 돈 잡의
+    산출물 경고를 지우지 않는다."""
+    return "started_at" in job and job.get("started_at") is None
+
+
+def wait_end_line(job: Mapping[str, Any], *, job_id: int) -> str | None:
+    """`#381 succeeded on build-02 · 6m 31s · artifacts ready` — 기다림 끝의 한 줄(M5t-a 248 e · f).
+
+    끝난 잡에만 낸다. 머신은 서버가 계산한 `ran_on` 이다 — 모르면(시작하지 못한 잡 · 옛 서버)
+    `on …` 을 빼고, `worker` 나 `host_key` 로 이름을 짓지 않는다. 실패면 선언된 실패 스텝을
+    붙인다(추측한 스텝은 없다, M5h). 산출물은 `disabled`(프리셋이 산출물을 선언하지 않았다)일 때
+    말하지 않는다 — 산출물이 없는 잡마다 같은 꼬리를 붙이지 않는다.
+    """
+    state = job.get("state")
+    if state not in TERMINAL_STATES:
+        return None
+    head = f"#{job_id} {state}"
+    machine = job.get("ran_on")
+    name = clean_line(machine) if isinstance(machine, str) else ""
+    if name:
+        head += f" on {name}"
+    parts = [head]
+    seconds = job.get("job_seconds")
+    if isinstance(seconds, (int, float)) and not isinstance(seconds, bool):
+        parts.append(fmt_duration(seconds))
+    step = job.get("failed_step")
+    step_name = clean_line(step) if isinstance(step, str) else ""
+    # 취소된 옛 행에는 `failed_step` 이 남아 있을 수 있다(M5h 이전, 운영 잡 #176)
+    if step_name and state not in (SUCCEEDED, CANCELLED):
+        parts.append(f"step {step_name}")
+    # 시작하지 못한 잡은 산출물을 말하지 않는다(M5t-a 결정 248 e — 돌지 않았다)
+    artifacts = None if _never_started(job) else _artifact_state(job)
+    if artifacts is not None and artifacts != _art.DISABLED:
+        parts.append(f"artifacts {artifacts}")
+    return " · ".join(parts)
+
+
+def artifact_notice(job: Mapping[str, Any], *, job_id: int) -> tuple[str, str] | None:
+    """기다림 끝의 산출물 안내(M5t-a 결정 248 e) — `("warning", 줄)` · `("info", 줄)` · None.
+
+    `failed` · `dropped` · `unavailable` · `unknown` 은 경고이고 `collecting` · `uploading` 은
+    「아직 수집 중」 안내다. 끝나지 않은 잡(`--timeout`)은 말하지 않는다 — 산출물은 잡이 끝난 뒤의
+    일이다. 시작하지 못한 잡(`started_at` null)도 말하지 않는다 — 올릴 것이 없었다.
+    """
+    if job.get("state") not in TERMINAL_STATES:
+        return None
+    if _never_started(job):
+        return None
+    state = _artifact_state(job)
+    if state in ARTIFACT_WARN_STATES:
+        doc = job.get("artifacts")
+        raw = doc.get("reason_code") if isinstance(doc, dict) else None
+        reason = clean_line(raw) if isinstance(raw, str) else ""
+        tail = f" ({reason})" if reason else ""
+        return "warning", f"warning: #{job_id} artifacts {state}{tail}"
+    if state in ARTIFACT_STILL_COLLECTING:
+        return "info", (
+            f"#{job_id} artifacts still collecting ({state}) — "
+            f"see them later with rcm artifacts {job_id}"
+        )
+    return None
+
+
 def _int(value: Any) -> int:
     return value if isinstance(value, int) and not isinstance(value, bool) else 0
 
@@ -983,6 +1067,11 @@ def render_queue_row(
     return lines
 
 
+#: `lanes = 0` 인 서버의 표기(M5t-a §3 C10 · C11) — 머리줄과 호스트 줄, `rcm machines`
+NO_LOCAL_LANES = "no local lanes"
+RUNS_NO_JOBS = "runs no jobs"
+
+
 def render(
     status: dict[str, Any], *, tz: tzinfo | None = None, host_name: str | None = None
 ) -> str:
@@ -1001,7 +1090,10 @@ def render(
     busy = sum(1 for w in workers if w.get("state") == "busy")
     down = [w for w in workers if w.get("state") == "down"]
     lanes = server.get("lanes") or len(workers) or 0
-    if lanes == 1 and workers:
+    if server.get("lanes") == 0 and not workers:
+        # 분배 전용(M5t-a 결정 243) — `lanes 0/0 busy` 는 「다 놀고 있다」로 읽힌다
+        wtxt = NO_LOCAL_LANES
+    elif lanes == 1 and workers:
         w = workers[0]
         wtxt = f"worker {w.get('state')}" + (f" #{w['job_id']}" if w.get("job_id") else "")
     else:
@@ -1200,11 +1292,17 @@ def render_pool(
             gpu = h.get("gpu") or {}
             load = h.get("load") or [None]
             cores = h.get("cores") if h.get("cores") is not None else DASH
+            # 서버 자신의 표본인데 로컬 레인이 없다 — 샘플러는 돌지만 이 머신은 잡을 돌리지 않는다
+            idle_role = (
+                f" · {RUNS_NO_JOBS}"
+                if h.get("source") == "local" and server.get("lanes") == 0
+                else ""
+            )
             out.append(
                 f"host  {h.get('name')} ({age} ago{stale})  load {_load(load[0])}"
                 f" / {cores} cores · CPU {_pct(cpu)}"
                 f" · mem {_gb(mem.get('used_bytes'))} / {_gb(mem.get('total_bytes'))}"
-                f" · GPU {_pct(gpu.get('util_pct')) if gpu else DASH}"
+                f" · GPU {_pct(gpu.get('util_pct')) if gpu else DASH}{idle_role}"
             )
             if h.get("disk"):
                 out.append(f"      disk: {_disk(h.get('disk'))}")

@@ -85,6 +85,8 @@ ENV_KEYS = {
     # M5s 결정 213 — 마지막 「사람이 할 일」 표식(없으면 빈 값)
     "RCM_ACTION_CODE",
     "RCM_ACTION_NOTE",
+    # M5t-a 결정 248 f — 잡이 돈 머신(`ran_on`). 시작 못 한 잡은 빈 값
+    "RCM_MACHINE",
 }
 
 

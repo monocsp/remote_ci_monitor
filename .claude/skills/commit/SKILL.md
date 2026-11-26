@@ -82,5 +82,13 @@ given.
    EOF
    )"
    ```
+   On a machine with a production rcm install, `tools/guard_production.py` refuses a Bash command
+   whose text holds `rcm` (or `remote_ci_monitor`) and the word `setup` unless it is one plain
+   `rcm setup` call, so a header or body naming both goes through a file: `git commit -F <file>`
+   and `python3 tools/guard_naming.py commit "$(cat <header file>)"` hold neither word.
 5. Fixing review feedback: `git commit --fixup <sha>` and squash before merge, or a new
    `fix(...)` commit when it is a separate change. Never rewrite a commit that is already merged.
+   In the development loop (`dev-loop`, `dev-lite`, `dev-batch`, the QA skills) every review fix
+   is a new `fix(...)` commit — no fixup, no squash, no rebase: a `verified:` comment and a
+   `tools/redgreen.py` receipt name shas, and `tools/merge_pr.py` merges with a merge commit
+   (`.claude/skills/_shared/stage-lead.md` «Rules for every lead» 5).

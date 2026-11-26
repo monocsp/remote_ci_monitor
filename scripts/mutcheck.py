@@ -6,6 +6,34 @@
 못 찾으면 그 자체로 실패다(코드가 바뀌어 감시가 풀린 것).
 
 변이 목록(개수는 `MUTANTS` 가 정본이다 — 문서의 숫자는 머지마다 썩는다):
+  M5t-a PR7 — `m5t-live-port-check-takes-8787` · `m5t-live-plist-home-unchecked`: 실기 하네스의
+     bootstrap 전 검사가 운영 포트를 받음 · plist 의 HOME 을 안 봄
+     (`scripts/acceptance/m5t_live.sh`, `docs/m5t-workplan.md` §7 · TR16);
+     `m5t-live-home-not-isolated` · `m5t-live-rcm-env-kept` · `m5t-live-bootout-label-unchecked`:
+     격리가 HOME 을 안 바꿈 · RCM_* 를 안 지움 · bootout 직전 라벨 재검사 없음(PR #276 P3)
+  M5t-a PR6 — `m5t-core-names-a-catalog-tool`: 코어가 툴체인 카탈로그의 도구 이름을 상수로 가짐
+     (`hostsample.py`, `docs/m5t-workplan.md` §4.5 · TD23)
+  M5t-a PR5 — `m5t-ran-on-*` 둘(시작 전 잡 · 다른 머신의 로컬 잡에 이름을 지음) ·
+     `m5t-terminal-view-without-local` · `m5t-notify-machine-from-worker` ·
+     `m5t-wait-end-line-without-machine` · `m5t-wait-artifact-unknown-silent` ·
+     `m5t-wait-notify-*` 둘(플래그 없이 알림 · 도구가 없으면 죽음)
+     (`docs/m5t-workplan.md` §4.6 · TN1~TN11) + P6-1 의 다섯: 받기 실패를 「succeeded」로 알림 ·
+     알림 중 Ctrl-C 가 새어 나감 · 도구의 0 아닌 종료를 넘김 · notify-send 에 `--` 없음 ·
+     시작 못 한 잡에 산출물 경고(`cli.py` · `core/render_text.py`, PR #273 검토)
+  M5t-a PR1 — `m5t-local-only-remote-kept`: 후보 함수가 `local_only` 프리셋의 원격 머신을 안 뺌
+     (`capabilities.py`, `docs/m5t-workplan.md` §4.3 · TO15 — 진입점 17 경우가 모두 빨개진다)
+     + `m5t-cli-local-only-refusal-is-unknown`: `rcm run` 이 원격 금지 409 를 3 으로 끝냄(`cli.py`)
+     + `m5t-check-local-only-needed-only`: 원격에서 못 도는 점검의 대기 · 실패 기록이 판정에 남음
+     (`capabilities.py`, P6 GAP X1)
+     + `m5t-check-local-only-claimed-ignored`: 그 머신이 집은 점검도 check_local_only 로 냄
+     (`capabilities.py`, batch 7 T3)
+     + `m5t-claim-excluded-sql-dropped`: claim SQL 이 제외 목록을 안 씀(`store.py`, batch 7 T5)
+  M5t-a PR2 — `doctor-unknown-exits-0`: 판정 못 함을 0 으로 끝냄(`core/doctor.py`, 결정 246) +
+     `doctor-spec-unreachable-checks-empty`: `/worker/spec` 의 `unreachable_checks` 가 늘 빔
+     (`capabilities.py`, TO18) + P3 1라운드의 넷: 잘린 XML plist 를 안 잡음(`doctor.py`) ·
+     `rcm check` 의 git 행이 shim 규칙을 건너뜀(`cli.py`) · 서버가 재지 않은 로컬 레인 프리셋이
+     ready(`doctor.py`) · 호스트 사실의 제어문자를 안 지움(`capabilities.py`) + P3 2라운드의 둘:
+     doctor 의 맨 바깥 경계가 없음 · 서버 답의 모양을 안 봄(`doctor.py`)
   M5s C — `action-*` 다섯: 도는 행의 표식을 이유가 무시 · code 어휘 검사 제거 · note 제어문자를
      안 지움 · 플래그 없이 4 · 취소 중에도 4 + `clean-line-keeps-bidi`(note · 실패 이름이 bidi 를
      남김) (`docs/m5s-workplan.md` §4.3 · 결정 213 · 234 · #251 격리 검증)
@@ -156,6 +184,20 @@
      씀 · 필요 없는 묶음 목록까지 읽음 · 도는 status 잡이 「지금 하는 일」이 됨 · 목록에 없는
      상태 값을 믿음 · 행이 차면 문서 찾기도 건너뜀 · 합친 잡을 새것부터 안 세움 · 실패한 조회를
      모른 척함 (`docs/m5s-workplan.md` §4.4 · §3 #11, #254 격리 검증)
+  개발 루프 도구 — `scenario-trace-zero-ids-pass`: 표지는 있고 ID 가 없는 표를 통과시킴
+     (`tools/scenario_trace.py`, 2026-11-25) + `dev-batch-*` 셋: 보고 없는 rcm/ci 를 초록으로 ·
+     낡은 `verified:` 를 yes 로 · porcelain 첫 줄의 앞 공백을 잃음 (`tools/dev_batch.py`, 격리 검증)
+     + 2라운드 셋: `@` 로 시작하는 커밋 경로를 버림 · 상태 파일의 꼴 검사를 건너뜀
+     (`tools/dev_batch.py`) · 영수증에 집 경로를 남김 (`tools/redgreen.py`)
+     + 3라운드 넷: 댓글을 읽기 전에 verified 를 "no" 로 둠(`tools/dev_batch.py`) · 안 닫힌 펜스를
+     문제로 안 셈(`tools/scenario_trace.py`) · pytest 만 죽이고 그 그룹은 남김 · 잠긴 워크트리를
+     `--force` 하나로 지우려 함(`tools/redgreen.py`)
+     + 4라운드 여섯: 404 아닌 브랜치 읽기 실패를 「not pushed」로 · 끝난 check-run 의 모르는 결론을
+     통과로 · PR diff 를 안 봄(`merge -s ours`)(`tools/dev_batch.py`) · xfail 을 돈 시험으로 셈 ·
+     건너뛴 시험의 요약 줄을 안 읽음(`tools/redgreen.py`) · 앞 `|` 없는 행을 안 봄
+     (`tools/scenario_trace.py`)
+     + 5라운드 둘: xfail 시험의 태그를 증명으로 셈(`tools/scenario_trace.py`) · add 의 잠금을 뺌
+     (`tools/dev_batch.py`)
   #246 격리 검증 — 넷: 새 커밋으로 풀린 제출을 닫힌 PR 잡으로 취소함 · 다시 열린 PR 을 건너뜀 · PR
      목록의 첫 쪽만 읽음 · `guard_merge` 가 저장소 옵션을 한 번만 봄
 
@@ -176,6 +218,7 @@
 from __future__ import annotations
 
 import argparse
+import ast
 import os
 import re
 import shutil
@@ -1012,7 +1055,7 @@ MUTANTS = (
     Mutant(
         name="requires-check-skipped",
         path="src/remote_ci_monitor/runner.py",
-        old="    return [name for name in requires if shutil.which(name, path=path) is None]\n",
+        old="    return [name for name in requires if find_tool(name, path) is None]\n",
         new="    return []  # noqa: mutant\n",
         tests=("tests/test_requires.py",),
     ),
@@ -1270,8 +1313,11 @@ MUTANTS = (
         # `rcm serve` 가 따라간다 — 서버가 정본이다(§2.3)
         name="m5q-follow-serve-follows",
         path="src/remote_ci_monitor/follow.py",
-        old='    {"serve", "worker", "token", "init", "discover", "version", "skills"}',
-        new='    {"worker", "token", "init", "discover", "version", "skills"}',
+        old=(
+            '    {"serve", "worker", "token", "init", "discover", "version", "skills", "doctor", '
+            '"setup"}'
+        ),
+        new='    {"worker", "token", "init", "discover", "version", "skills", "doctor", "setup"}',
         tests=("tests/test_follow_rules.py",),
     ),
     Mutant(
@@ -1310,8 +1356,14 @@ MUTANTS = (
         # `rcm check` 의 client 행이 서버가 보낸 version 을 그대로 찍는다(#226 D3)
         name="m5q-check-row-unclean-version",
         path="src/remote_ci_monitor/cli.py",
-        old="    server_v = follow.clean(raw)\n",
-        new="    server_v = raw\n",
+        old=(
+            "    server_v = follow.clean(raw)\n"
+            "    mine, theirs = _version_key(__version__), _version_key(server_v)\n"
+        ),
+        new=(
+            "    server_v = raw\n"
+            "    mine, theirs = _version_key(__version__), _version_key(server_v)\n"
+        ),
         tests=("tests/test_follow_cli.py",),
     ),
     Mutant(
@@ -2106,6 +2158,2662 @@ MUTANTS = (
             "test_a_submission_after_a_reload_changed_max_attempts_does_not_join",
         ),
     ),
+    # ── 개발 루프 도구 (2026-11-25) ──
+    Mutant(
+        # 시나리오 표지가 있는데 ID 가 하나도 없는 표를 통과시킨다 — 대조할 것이 없는데 「ok」라서
+        # 검사하지 않은 명세가 검사한 것처럼 보인다(fail-open)
+        name="scenario-trace-zero-ids-pass",
+        path="tools/scenario_trace.py",
+        old='        if not group["ids"]:\n',
+        new="        if False:\n",
+        tests=("tests/test_scenario_trace.py",),
+    ),
+    Mutant(
+        # 아직 보고가 없는 rcm/ci 를 초록으로 읽는다 — status 가 「merge」를 권한다(격리 검증 F2)
+        name="dev-batch-unreported-ci-success",
+        path="tools/dev_batch.py",
+        old='    found = ((c.pending, "pending"), (c.missing, "not reported"))\n',
+        new='    found = ((c.pending, "pending"),)\n',
+        tests=(
+            "tests/test_dev_batch.py::"
+            "test_status_never_reads_an_unfinished_check_or_an_old_marker_as_done",
+        ),
+    ),
+    Mutant(
+        # 다른 sha 에 단 `verified:` 표식을 지금 head 의 검증으로 센다(격리 검증 F2)
+        name="dev-batch-stale-verified-yes",
+        path="tools/dev_batch.py",
+        old='    return "yes" if sha in marks else "stale" if marks else "no"',
+        new='    return "yes" if marks else "no"',
+        tests=(
+            "tests/test_dev_batch.py::"
+            "test_status_never_reads_an_unfinished_check_or_an_old_marker_as_done",
+        ),
+    ),
+    Mutant(
+        # porcelain 출력을 strip 한다 — 첫 줄 ` M docs/a.md` 가 `ocs/a.md` 가 되어 범위 밖으로
+        # 보인다(격리 검증 F1)
+        name="dev-batch-porcelain-first-line",
+        path="tools/dev_batch.py",
+        old="for entry in _git(*status, cwd=wt, strip=False).split",
+        new="for entry in _git(*status, cwd=wt, strip=True).split",
+        tests=(
+            "tests/test_dev_batch.py::test_scope_reads_the_worktree_status_without_losing_characters",
+        ),
+    ),
+    Mutant(
+        # `@` 로 시작하는 커밋 경로를 버린다 — `git log --format=@%H` 를 한 줄기로 나누던 때의
+        # 버그 꼴: `@src-config.py` 를 커밋 머리로 읽어 범위 밖인데 「scope ok」(2라운드 F1)
+        name="dev-batch-scope-drops-at-paths",
+        path="tools/dev_batch.py",
+        old="touched += [(sha[:12], name) for name in names if name]",
+        new='touched += [(sha[:12], name) for name in names if name and name[0] != "@"]',
+        tests=(
+            "tests/test_dev_batch.py::test_scope_sees_a_committed_path_that_looks_like_a_log_header",
+        ),
+    ),
+    Mutant(
+        # 상태 파일의 꼴 검사를 건너뛴다 — 문자열 owns · 없는 묶음을 가리키는 after 가 종료 3 이
+        # 아니라 트레이스백 · 엉뚱한 범위가 된다(2라운드 F2 · F12)
+        name="dev-batch-shape-check-skipped",
+        path="tools/dev_batch.py",
+        old="        if not all(shapes):\n",
+        new="        if False:\n",
+        tests=("tests/test_dev_batch.py::test_a_state_file_with_a_wrong_shape_is_corrupt",),
+    ),
+    Mutant(
+        # 시험 출력의 집 경로를 `~` 로 바꾸지 않는다 — 영수증(PR 본문에 붙는다)에 개인 경로가
+        # 남는다(2라운드 F13)
+        name="redgreen-home-path-kept",
+        path="tools/redgreen.py",
+        old='[(Path(p), "<tmp>") for p in _temp_dirs()] + [(Path.home(), "~")]',
+        new='[(Path(p), "<tmp>") for p in _temp_dirs()]',
+        tests=("tests/test_redgreen.py::test_the_receipt_hides_a_path_under_the_home_folder",),
+    ),
+    Mutant(
+        # 댓글을 읽기 **전에** verified 를 "no" 로 둔다 — 댓글 읽기가 실패해도 「no · verify ·
+        # 종료 0」이 된다. 모르는 것을 아는 값으로 남기는 꼴(3라운드 H2)
+        name="dev-batch-verified-default-before-read",
+        path="tools/dev_batch.py",
+        old="    cells: dict[str, str] = {}\n",
+        new='    cells: dict[str, str] = {}\n    row["verified"] = "no"\n',
+        tests=(
+            "tests/test_dev_batch.py::"
+            "test_a_read_that_did_not_answer_leaves_a_dash_never_a_known_value",
+        ),
+    ),
+    Mutant(
+        # 문서 끝까지 안 닫힌 펜스를 문제로 세지 않는다 — 펜스 뒤의 표지를 조용히 못 읽고
+        # 통과한다(3라운드 H3)
+        name="scenario-trace-unclosed-fence-ignored",
+        path="tools/scenario_trace.py",
+        old='    if fence:\n        message = f"the {fence} fence opened here never closes',
+        new='    if False:\n        message = f"the {fence} fence opened here never closes',
+        tests=(
+            "tests/test_scenario_trace.py::"
+            "test_an_unclosed_fence_is_a_format_problem_at_the_line_it_opened",
+        ),
+    ),
+    Mutant(
+        # 끊길 때 pytest 하나만 죽인다 — 시험이 띄운 자식이 남는다(3라운드 L1)
+        name="redgreen-kills-only-pytest",
+        path="tools/redgreen.py",
+        old="                os.killpg(proc.pid, signal.SIGKILL)\n",
+        new="                os.kill(proc.pid, signal.SIGKILL)\n",
+        tests=(
+            "tests/test_redgreen.py::"
+            "test_a_signal_removes_the_worktrees_and_stops_the_whole_pytest_group",
+        ),
+    ),
+    Mutant(
+        # 잠긴(끊긴 add 의 initializing) 워크트리를 `--force` 하나로 지우려 한다 — 못 지우고,
+        # 폴더를 지운 뒤의 prune 도 잠긴 등록은 남긴다(3라운드 M3)
+        name="redgreen-locked-worktree-single-force",
+        path="tools/redgreen.py",
+        old='_git(root, "worktree", "remove", "-f", "-f", str(path))',
+        new='_git(root, "worktree", "remove", "--force", str(path))',
+        tests=("tests/test_redgreen.py::test_a_locked_worktree_left_by_a_cut_add_is_removed",),
+    ),
+    Mutant(
+        # 404 가 아닌 브랜치 읽기 실패(502 …)도 「not pushed」로 읽는다 — 못 읽은 것을 「없다」로
+        # 센다(4라운드 M4)
+        name="dev-batch-branch-error-not-pushed",
+        path="tools/dev_batch.py",
+        old="            if error.status != 404:\n                raise\n",
+        new="            if False:\n                raise\n",
+        tests=(
+            "tests/test_dev_batch.py::"
+            "test_a_read_that_did_not_answer_leaves_a_dash_never_a_known_value",
+        ),
+    ),
+    Mutant(
+        # 끝난 check-run 의 모르는 결론(`weird`)을 거르지 않는다 — merge_pr 는 그것을 「ok」로
+        # 센다(4라운드 M4)
+        name="dev-batch-unknown-conclusion-ok",
+        path="tools/dev_batch.py",
+        old='                _need(done, path, f"unknown check-run conclusion {end!r}")\n',
+        new='                _need(True, path, f"unknown check-run conclusion {end!r}")\n',
+        tests=(
+            "tests/test_dev_batch.py::"
+            "test_a_read_that_did_not_answer_leaves_a_dash_never_a_known_value",
+        ),
+    ),
+    Mutant(
+        # scope 가 PR 의 diff 를 안 본다 — `merge -s ours` 가 dev 의 변경을 버려도 `--cc` 에는
+        # 아무것도 없어 「scope ok」(4라운드 H2)
+        name="dev-batch-scope-skips-pr-diff",
+        path="tools/dev_batch.py",
+        old='    touched += [("merge-result", name)',
+        new='    touched += [] and [("merge-result", name)',
+        tests=(
+            "tests/test_dev_batch.py::"
+            "test_scope_sees_paths_a_merge_that_kept_only_our_side_carries",
+        ),
+    ),
+    Mutant(
+        # xfail 을 돈 시험으로 센다 — 통과 하나와 xfail 하나인 파일 nodeid 가 「passed」(4라운드 M4)
+        name="redgreen-xfail-counts-as-run",
+        path="tools/redgreen.py",
+        old='NOT_RUN = frozenset({"SKIPPED", "XFAIL", "XPASS"})',
+        new='NOT_RUN = frozenset({"SKIPPED", "XPASS"})',
+        tests=("tests/test_redgreen.py::test_an_xfail_next_to_a_passing_test_is_not_passed",),
+    ),
+    Mutant(
+        # 건너뛴 시험의 요약 줄을 읽지 않는다 — 파일 · 클래스 · 매개변수 nodeid 의 건너뛴 시험이
+        # 안 보여 영수증이 red-then-green(4라운드 H3)
+        name="redgreen-skipped-lines-unread",
+        path="tools/redgreen.py",
+        old="(PASSED|FAILED|ERROR|XPASS|XFAIL|SKIPPED)",
+        new="(PASSED|FAILED|ERROR|XPASS|XFAIL)",
+        tests=("tests/test_redgreen.py::test_a_skipped_test_inside_a_requested_node_is_undecided",),
+    ),
+    Mutant(
+        # 신호 막기를 try 밖에서 건다 — 막기 호출 안에서 처리기가 SystemExit 를 던지면 SIGTERM ·
+        # SIGINT 가 막힌 채 남아 같은 pytest 워커의 다음 자식이 SIGTERM 을 못 받는다(rc -9,
+        # 2026-11-25 dev rcm/ci #4136 · #4137 · #4165)
+        name="redgreen-block-outside-try",
+        path="tools/redgreen.py",
+        old="    try:\n        signal.pthread_sigmask(signal.SIG_BLOCK, HELD)\n        yield\n",
+        new="    signal.pthread_sigmask(signal.SIG_BLOCK, HELD)\n    try:\n        yield\n",
+        tests=(
+            "tests/test_redgreen.py::"
+            "test_sm1_a_handler_that_fires_as_the_block_lands_leaves_no_mask",
+        ),
+    ),
+    Mutant(
+        # 표 바로 뒤의 앞 `|` 없는 행을 보지 않는다 — GFM 은 행으로 그리는데 대조하지 않고
+        # 통과한다(4라운드 H1)
+        name="scenario-trace-unpiped-row-ignored",
+        path="tools/scenario_trace.py",
+        old="        if after < len(lines) and after not in code and _row_like(lines[after]):\n",
+        new="        if False:\n",
+        tests=(
+            "tests/test_scenario_trace.py::"
+            "test_a_row_without_a_leading_pipe_right_after_the_table_is_a_format_problem",
+        ),
+    ),
+    Mutant(
+        # xfail 을 단 시험의 태그를 행의 증명으로 센다 — 실패해도 초록인 시험이 행을 채운다
+        # (5라운드 H1)
+        name="scenario-trace-xfail-counts-as-proof",
+        path="tools/scenario_trace.py",
+        old='    kind = "xfail" if name in ("xfail", "expectedfailure") else kind\n',
+        new="    kind = kind\n",
+        tests=(
+            "tests/test_scenario_trace.py::"
+            "test_a_tag_on_an_xfail_test_is_reported_like_a_skipped_one",
+        ),
+    ),
+    Mutant(
+        # add 의 잠금을 뺀다 — 동시에 add 한 세션들이 서로의 묶음을 덮어 하나만 남는다
+        # (5라운드 M4)
+        name="dev-batch-no-lock",
+        path="tools/dev_batch.py",
+        old="        fcntl.flock(handle, fcntl.LOCK_EX)\n",
+        new="        pass\n",
+        tests=("tests/test_dev_batch.py::test_concurrent_adds_keep_every_bundle",),
+    ),
+    # ── M5t-a PR2 — 환경 진단 rcm doctor (docs/m5t-workplan.md §7 「변이 검사」) ──
+    Mutant(
+        # doctor 가 판정 못 함(서버 불통 · 시한 초과 · 옛 서버)을 0 으로 끝낸다 — 「다 갖춤」과
+        # 「알 수 없음」이 같은 0 이 되어 자동화가 모르는 머신을 준비됐다고 읽는다(결정 246)
+        name="doctor-unknown-exits-0",
+        path="src/remote_ci_monitor/core/doctor.py",
+        old="    if undecided:\n        return EXIT_UNKNOWN\n",
+        new="    if undecided:\n        return EXIT_OK\n",
+        tests=(
+            "tests/test_doctor.py::test_td34_exit_priority_is_problem_then_unknown_then_ok",
+            "tests/test_doctor_cli.py::test_td3_a_probe_timeout_is_unknown_and_exits_3",
+            "tests/test_doctor_cli.py::test_td4_an_unreachable_server_exits_3_not_0",
+            "tests/test_doctor_cli.py::test_td5_an_older_server_without_the_new_keys_exits_3",
+        ),
+    ),
+    Mutant(
+        # `/worker/spec` 의 `unreachable_checks` 를 늘 빈 목록으로 낸다 — 원격 워커의 doctor 가
+        # 영영 안 오는 `local_only` 점검을 「점검 필요」로 읽는다(TO18, 위임 결정 2)
+        name="doctor-spec-unreachable-checks-empty",
+        path="src/remote_ci_monitor/capabilities.py",
+        old="                        if not self.check_reachable(remote, c)\n",
+        new="                        if False\n",
+        tests=(
+            "tests/test_doctor_cli.py::"
+            "test_to18_worker_spec_names_the_checks_a_remote_worker_cannot_reach",
+            "tests/test_doctor_cli.py::test_to18_doctor_reads_the_real_servers_unreachable_checks",
+        ),
+    ),
+    Mutant(
+        # 잘린 XML 의 plist(ExpatError — ValueError 가 아니다)를 잡지 않는다 — 설치 자리에 깨진
+        # plist 하나만 있어도 `--service-file` 없는 doctor 가 traceback 으로 끝난다(P3 1라운드 HIGH)
+        name="doctor-service-file-expat-uncaught",
+        path="src/remote_ci_monitor/doctor.py",
+        old=(
+            "    except (ValueError, plistlib.InvalidFileException, xml.parsers.expat.ExpatError)"
+            " as e:\n"
+        ),
+        new="    except (ValueError, plistlib.InvalidFileException) as e:\n",
+        tests=(
+            "tests/test_doctor_cli.py::"
+            "test_an_unreadable_plist_in_launch_agents_is_named_and_exits_3",
+            "tests/test_doctor_cli.py::"
+            "test_an_unreadable_explicit_service_file_is_unknown_not_a_crash",
+        ),
+    ),
+    Mutant(
+        # `rcm check` · `rcm worker --check` 의 git 행이 shim 규칙 없이 `shutil.which` 를 쓴다 — CLT
+        # 없는 Mac 에서 shim 을 「있음」으로 세고 그것으로 `git ls-remote` 를 돌려 설치 창을 띄운다
+        # (P3 1라운드 MED, 검증자 1 #2)
+        name="check-git-row-skips-shim-rule",
+        path="src/remote_ci_monitor/cli.py",
+        old='    git = runner.find_tool("git", path)\n',
+        new='    git = shutil.which("git", path=path)\n',
+        tests=(
+            "tests/test_doctor_cli.py::test_worker_check_git_row_follows_the_shim_rule",
+            "tests/test_doctor_cli.py::test_rcm_check_git_row_follows_the_shim_rule",
+        ),
+    ),
+    Mutant(
+        # 서버가 재지 않은 로컬 레인 프리셋(`preset_env` 에 없음)을 빈 「빠진 도구」로 읽어 ready 라
+        # 부른다(P3 1라운드 MED, 검증자 1 #3)
+        name="doctor-local-lane-unmeasured-ready",
+        path="src/remote_ci_monitor/doctor.py",
+        old="            if got is None and p.requires and row.counts:\n",
+        new="            if False:\n",
+        tests=(
+            "tests/test_doctor_cli.py::"
+            "test_a_local_lane_preset_the_server_did_not_measure_is_unknown",
+        ),
+    ),
+    Mutant(
+        # 워커가 보낸 호스트 사실의 제어문자를 지우지 않는다 — ESC 가 `rcm machines` 의 터미널과
+        # 웹에 그대로 나간다(P3 1라운드 MED, 검증자 2 #3)
+        name="host-facts-control-chars-kept",
+        path="src/remote_ci_monitor/capabilities.py",
+        old="            out[key] = clean_line(value)[:HOST_FACT_MAX] or None\n",
+        new="            out[key] = value[:HOST_FACT_MAX] or None\n",
+        tests=(
+            "tests/test_doctor_cli.py::test_host_facts_lose_control_characters_and_stop_at_64",
+            "tests/test_doctor_cli.py::test_host_facts_lose_line_separators_and_bidi_controls",
+        ),
+    ),
+    Mutant(
+        # doctor 의 맨 바깥 경계가 없다 — 읽는 자리가 모르는 예외가 「판정 못 함」(종료 3)이 아니라
+        # traceback 과 종료 1 로 끝난다(P3 2라운드 HIGH)
+        name="doctor-boundary-removed",
+        path="src/remote_ci_monitor/doctor.py",
+        old="    except Exception as e:  # noqa: BLE001 — doctor 의 맨 바깥 경계\n",
+        new="    except ZeroDivisionError as e:  # 변이: 경계가 없다\n",
+        tests=(
+            "tests/test_doctor_cli.py::"
+            "test_an_unexpected_error_is_could_not_decide_not_a_traceback",
+        ),
+    ),
+    Mutant(
+        # `reach` 가 서버 답의 모양을 보지 않는다 — HTML 200 · 빈 200 · [] · null · 칸 타입이 틀린
+        # 답을 dict 로 믿고 쓰다 경계에 닿는다. 경계가 있어도 망가진 입력 표가 빨개진다(P3 2라운드)
+        name="doctor-answer-shape-unchecked",
+        path="src/remote_ci_monitor/doctor.py",
+        old="            why = shape_problem(answer, ANSWER_SHAPES[route])\n",
+        new="            why = None\n",
+        tests=(
+            "tests/test_doctor_cli.py::"
+            "test_a_server_answer_of_the_wrong_shape_is_named_and_exits_3",
+        ),
+    ),
+    Mutant(
+        # 필수 칸 검사를 끈다 — `{}` · 남의 서비스의 `{"status":"ok"}` · `version` 없는 health 를
+        # rcm 서버의 답으로 믿고 0 이나 1 로 끝낸다. 생성형 표가 빨개진다(P3 3라운드 근본 원인)
+        name="doctor-required-key-unchecked",
+        path="src/remote_ci_monitor/doctor.py",
+        old="                if sub.required:\n",
+        new="                if False:\n",
+        tests=(
+            "tests/test_doctor_cli.py::"
+            "test_a_required_fact_the_server_did_not_give_is_never_exit_0_or_1",
+        ),
+    ),
+    Mutant(
+        # 서비스 파일 후보를 못 읽어 고른 파일이 없는데도 기본 PATH 를 짐작해 잰다 — 빠진 도구가
+        # 종료 1 이 된다. 순서 표가 빨개진다(P3 3라운드 HIGH)
+        name="doctor-unreadable-candidate-path-guessed",
+        path="src/remote_ci_monitor/doctor.py",
+        old="        elif skipped:\n",
+        new="        elif False:\n",
+        tests=(
+            "tests/test_doctor_cli.py::"
+            "test_an_unreadable_service_file_leaves_the_path_unknown_in_every_order",
+        ),
+    ),
+    Mutant(
+        # `placement` 없는 옛 서버의 프리셋을 `pool` 로 짐작한다 — 빠진 도구가 종료 1 이 된다(TD5,
+        # 메인 세션 결정: 모름 · 종료 3)
+        name="doctor-older-server-read-as-pool",
+        path="src/remote_ci_monitor/core/doctor.py",
+        old="    if placement is None:\n",
+        new='    if placement is None:\n        placement = "pool"\n    if False:\n',
+        tests=(
+            "tests/test_doctor_cli.py::test_td5_an_older_server_with_a_missing_tool_exits_3_not_1",
+        ),
+    ),
+    Mutant(
+        # 설정 파일이 어디에도 없는 coordinator 를 기본값(프리셋 없음 · 8787)으로 잰다 — 그 포트의
+        # 아무 서버에 묻고 0 이나 「프리셋 없음」(1)으로 끝난다(P3 4라운드 HIGH)
+        name="doctor-coordinator-defaults-trusted",
+        path="src/remote_ci_monitor/doctor.py",
+        old="        if path is None:  # 서버 설정 파일이 어디에도 없다\n",
+        new="        if False:\n",
+        tests=(
+            "tests/test_doctor_cli.py::"
+            "test_a_coordinator_role_without_a_server_config_is_a_usage_error",
+            "tests/test_doctor_cli.py::test_every_input_doctor_did_not_read_ends_in_2_or_3",
+        ),
+    ),
+    Mutant(
+        # 서비스 파일의 실행 인자(`--config` · `--port`)를 읽지 않는다 — 서비스가 X 로 떠도 표준
+        # 자리나 기본값으로 잰다(P3 4라운드 HIGH)
+        name="doctor-service-launch-ignored",
+        path="src/remote_ci_monitor/doctor.py",
+        old="        if sf.launch is None or sf.command != ROLE_COMMANDS.get(self.role):\n",
+        new="        if True:\n",
+        tests=(
+            "tests/test_doctor_cli.py::"
+            "test_the_service_files_config_argument_is_the_config_doctor_reads",
+            "tests/test_doctor_cli.py::"
+            "test_the_servers_service_arguments_and_environment_choose_the_port",
+        ),
+    ),
+    Mutant(
+        # 같은 자리에 못 읽은 형제 파일이 있어도 읽히는 파일로 잰다(P3 4라운드 LOW)
+        name="doctor-unreadable-sibling-ignored",
+        path="src/remote_ci_monitor/doctor.py",
+        old="        if len(skipped) > before:\n",
+        new="        if False:\n",
+        tests=(
+            "tests/test_doctor_cli.py::"
+            "test_a_readable_file_next_to_an_unreadable_one_is_not_chosen",
+        ),
+    ),
+    Mutant(
+        # 실행 명령을 rcm 의 하위 명령으로 풀지 못한 서비스 파일을 조용히 뺀다(P3 4라운드 LOW)
+        name="doctor-unresolved-command-dropped",
+        path="src/remote_ci_monitor/doctor.py",
+        old="        if sf.launch is None:\n",
+        new="        if False:\n",
+        tests=(
+            "tests/test_doctor_cli.py::"
+            "test_a_service_file_whose_rcm_command_rcm_cannot_tell_is_named",
+        ),
+    ),
+    Mutant(
+        # `git ls-remote` 의 시한 초과 · 실행 실패를 「닿지 않음」(FAIL, 종료 1)으로 단정한다
+        # (P3 4라운드 MED)
+        name="doctor-ls-remote-unsure-is-unreachable",
+        path="src/remote_ci_monitor/doctor.py",
+        old="    if isinstance(result, dc.Unsure):\n",
+        new="    if False:\n",
+        tests=(
+            "tests/test_doctor_cli.py::"
+            "test_a_git_ls_remote_that_times_out_or_cannot_run_is_unknown_not_unreachable",
+        ),
+    ),
+    Mutant(
+        # 모름인 프리셋 행이 「판정 못 함」 줄을 내지 않는다 — 옛 서버의 프리셋이 종료 0 이 된다
+        # (3라운드에 생긴 규칙, P3 4라운드 검증자 1 #9)
+        name="doctor-unknown-rows-not-undecided",
+        path="src/remote_ci_monitor/doctor.py",
+        old="        undecided += dc.unknown_rows(rows)\n",
+        new="        undecided += []\n",
+        tests=(
+            "tests/test_doctor_cli.py::test_td5_an_older_server_with_a_missing_tool_exits_3_not_1",
+        ),
+    ),
+    Mutant(
+        # 읽지 못한 git 버전을 「낮다」(FAIL)로 단정한다(3라운드에 생긴 규칙, 검증자 1 #9)
+        name="doctor-git-version-unknown-fails",
+        path="src/remote_ci_monitor/doctor.py",
+        old='            return requirement("git", "unknown", detail, needed)\n',
+        new='            return requirement("git", "fail", detail, needed)\n',
+        tests=(
+            "tests/test_doctor_cli.py::test_a_git_version_rcm_cannot_read_is_unknown_not_a_fail",
+        ),
+    ),
+    Mutant(
+        # 오는지 모르는 프리셋이 있어도 「아무것도 오지 않는다」(종료 1)로 단정한다(3라운드에 생긴
+        # 규칙, 검증자 1 #9)
+        name="doctor-no-jobs-ignores-unknown",
+        path="src/remote_ci_monitor/core/doctor.py",
+        old="    if any(r.counts or r.applies == APPLIES_UNKNOWN for r in rows):\n",
+        new="    if any(r.counts for r in rows):\n",
+        tests=("tests/test_doctor.py::test_no_jobs_reason_does_not_fire_while_a_preset_may_come",),
+    ),
+    Mutant(
+        # 후보 함수가 `local_only` 프리셋에서 원격 머신을 빼지 않는다 — 배치 · ETA · 제출 · 점검 ·
+        # `/worker/spec` · claim · `/api/machines` 가 모두 원격을 후보로 본다(M5t-a 결정 254, TO15)
+        name="m5t-local-only-remote-kept",
+        path="src/remote_ci_monitor/capabilities.py",
+        old='        views = [v for v in views if v.kind == "local"]  # 원격 제외',
+        new="        pass  # 원격 제외",
+        tests=(
+            "tests/test_local_only.py::"
+            "test_to15_no_entry_point_offers_a_local_only_preset_to_a_remote_machine",
+            "tests/test_local_only.py::"
+            "test_to18_a_remote_machine_does_not_wait_for_a_check_that_runs_only_locally",
+            "tests/test_local_only.py::"
+            "test_e1_a_remote_run_finishes_after_the_mark_and_its_retry_stays_off_remote",
+            "tests/test_local_only.py::test_e3_a_local_only_retry_chain_is_never_claimed_remotely",
+        ),
+    ),
+    Mutant(
+        # `local_only` 거절 409(`no_capable_machine` · `tool_missing`)가 `rcm run` 에서
+        # 「결과 모름」(3)이 된다 — 잡이 안 생긴 확실한 거절인데 세션이 다시 묻거나 기다린다
+        # (M5t-a P3 2라운드 HIGH)
+        name="m5t-cli-local-only-refusal-is-unknown",
+        path="src/remote_ci_monitor/cli.py",
+        old='_REFUSED_CODES += ("no_capable_machine", "tool_missing")',
+        new="_REFUSED_CODES += ()",
+        tests=("tests/test_local_only.py::test_to10_to16_rcm_run_exits_2_on_a_local_only_refusal",),
+    ),
+    Mutant(
+        # 원격에서 다시 못 도는 점검(`local_only`)의 재매핑이 `check_needed` 에만 걸린다 — 표식을 단
+        # 순간 그 머신을 겨눈 대기 점검 잡은 「점검 중」으로 끝없이 기다리고, 실패 기록은 409 로
+        # 끝나는 다시 점검을 권한다(M5t-a P6 GAP X1)
+        name="m5t-check-local-only-needed-only",
+        path="src/remote_ci_monitor/capabilities.py",
+        old="        if v.code not in _CHECK_CODES_GATED or report is None:",
+        new="        if v.code != cap.CODE_CHECK_NEEDED or report is None:",
+        tests=(
+            "tests/test_local_only.py::"
+            "test_x1_a_remote_check_record_follows_the_mark_unless_that_machine_is_running_it",
+        ),
+    ),
+    Mutant(
+        # 원격에서 다시 못 도는 점검(`local_only`)의 기록 가운데 그 머신이 이미 집은 잡의 예외를
+        # 지운다 — 돌고 있는 점검이 끝나기도 전에 check_local_only 로 보이고, 그 결과가 오면 다시
+        # 통과로 돌아온다(M5t-a P6 재확인, batch 7 T3)
+        name="m5t-check-local-only-claimed-ignored",
+        path="src/remote_ci_monitor/capabilities.py",
+        old="    return state == cap.CHECK_RUNNING and claimed\n",
+        new="    return False\n",
+        tests=(
+            "tests/test_local_only.py::"
+            "test_x1_a_remote_check_record_follows_the_mark_unless_that_machine_is_running_it",
+            "tests/test_local_only.py::"
+            "test_t4_a_remote_check_being_cancelled_stays_running_until_it_ends",
+        ),
+    ),
+    Mutant(
+        # claim SQL 의 제외 조건만 지운다(바인딩 값도 함께 빼 SQL 은 그대로 돈다) — 후보 함수가
+        # 뺀 `local_only` 프리셋을 원격 claim 이 네 갈래 어디서든 집는다(M5t-a P3, batch 7 T5)
+        name="m5t-claim-excluded-sql-dropped",
+        path="src/remote_ci_monitor/store.py",
+        old=(
+            """        excluded_sql = f" AND c.preset NOT IN ({','.join('?' * len(excluded))})" """
+            """if excluded else ""\n"""
+        ),
+        new='        excluded, excluded_sql = (), ""\n',
+        tests=(
+            "tests/test_local_only.py::"
+            "test_to15_the_claim_sql_drops_excluded_presets_on_every_branch",
+        ),
+    ),
+    # ── #268 검증 사이클 2 의 1라운드 — 확정을 모름으로 · 셸이 서비스를 대신한다 ──
+    Mutant(
+        # rcm 의 서비스가 아님이 확실한 파일(ci-watch plist)도 「못 읽음」으로 적는다 — 모든 입력을
+        # 읽은 실행이 종료 3 이 된다(HIGH 1)
+        name="doctor-foreign-service-file-unreadable",
+        path="src/remote_ci_monitor/doctor.py",
+        old="        if sf.launch is None and not looks_like_rcm(sf):\n",
+        new="        if False:\n",
+        tests=(
+            "tests/test_doctor_cli.py::"
+            "test_the_ci_watch_plist_next_to_the_service_is_not_a_candidate",
+            "tests/test_doctor_cli.py::test_only_files_that_look_like_rcm_are_named_unreadable",
+        ),
+    ),
+    Mutant(
+        # 서비스 인자에 --config 가 없으면 doctor 셸의 RCM_CONFIG 를 읽는다(HIGH 2)
+        name="doctor-shell-rcm-config-leaks",
+        path="src/remote_ci_monitor/doctor.py",
+        old='        raw = launch.get("config") or env.get("RCM_CONFIG")\n',
+        new='        raw = launch.get("config") or os.environ.get("RCM_CONFIG")\n',
+        tests=(
+            "tests/test_doctor_cli.py::"
+            "test_the_doctor_shells_rcm_config_and_folder_never_choose_the_servers_config",
+        ),
+    ),
+    Mutant(
+        # 작업 폴더가 적혀 있지 않은 launchd 서비스의 `./rcm.toml` 을 doctor 가 선 폴더에서 찾는다
+        # (HIGH 2)
+        name="doctor-cwd-is-the-services-folder",
+        path="src/remote_ci_monitor/doctor.py",
+        old="            return [LAUNCHD_DEFAULT_WORKDIR]\n",
+        new="            return [os.getcwd()]\n",
+        tests=(
+            "tests/test_doctor_cli.py::"
+            "test_the_doctor_shells_rcm_config_and_folder_never_choose_the_servers_config",
+        ),
+    ),
+    Mutant(
+        # 사람이 준 서비스 파일의 명령을 풀지 못해도 그 파일의 PATH 로 잰다(MED 3)
+        name="doctor-explicit-unresolved-path-trusted",
+        path="src/remote_ci_monitor/doctor.py",
+        old=(
+            "        unresolved = bool(self.opts.service_file) and sf is not None "
+            "and sf.launch is None\n"
+        ),
+        new="        unresolved = False\n",
+        tests=(
+            "tests/test_doctor_cli.py::"
+            "test_an_explicit_service_file_whose_command_rcm_cannot_resolve_is_unknown",
+        ),
+    ),
+    Mutant(
+        # 사용자 유닛 자리의 `%h` 를 풀지 않는다 — rcm 이 아는 홈을 모름으로 만든다(MED 4)
+        name="doctor-user-unit-home-unexpanded",
+        path="src/remote_ci_monitor/doctor.py",
+        old="        found = _matching(stage, role, skipped, user_home)\n",
+        new="        found = _matching(stage, role, skipped, None)\n",
+        tests=("tests/test_doctor_cli.py::test_h_in_a_user_unit_is_the_home_doctor_knows",),
+    ),
+    Mutant(
+        # 출력 뒤 stdout 을 flush 하지 않는다 — 닫힌 파이프를 파이썬 종료 때 알아 종료 120 과
+        # `Exception ignored … BrokenPipeError` 가 난다(P6 GAP E3)
+        name="doctor-closed-pipe-at-exit",
+        path="src/remote_ci_monitor/doctor.py",
+        old="        sys.stdout.flush()\n",
+        new="        pass\n",
+        tests=(
+            "tests/test_doctor_cli.py::"
+            "test_e3_a_closed_pipe_keeps_the_verdict_and_prints_no_traceback",
+        ),
+    ),
+    Mutant(
+        # git_ref 잡의 git 이 shim 규칙을 건너뛴다 — CLT 없는 Mac 에서 잡마다 설치 창이 뜬다
+        # (P6 GAP R2)
+        name="gitops-git-shim-runs",
+        path="src/remote_ci_monitor/gitops.py",
+        old='    return shutil.which("git", path=path) is not None and '
+        'runner.find_tool("git", path) is None\n',
+        new="    return False\n",
+        tests=("tests/test_tool_shim.py::test_r2_git_ref_jobs_never_run_a_blocked_git_shim",),
+    ),
+    Mutant(
+        # 서버가 잰 정의와 디스크의 정의를 견주지 않는다 — reload 전 서버의 옛 측정으로 ready 를
+        # 낸다(P6 GAP E4)
+        name="doctor-lane-generation-unchecked",
+        path="src/remote_ci_monitor/doctor.py",
+        old="            stale = got is not None and got.digest != mine\n",
+        new="            stale = False\n",
+        tests=(
+            "tests/test_doctor_cli.py::test_e4_a_server_that_has_not_reloaded_the_config_is_unknown",
+        ),
+    ),
+    Mutant(
+        # 시스템 자리(`/etc/systemd/system` · `/Library/LaunchDaemons`)를 보지 않는다 — 문서의
+        # Linux 서버 설치를 못 찾고 워커의 PATH 로 짐작한다(P3 사이클 2 r2 검증자 1 #1)
+        name="doctor-system-service-place-ignored",
+        path="src/remote_ci_monitor/doctor.py",
+        old="    for stage in (launch_agents + user_units + system_files, staged):\n",
+        new="    for stage in (launch_agents + user_units, staged):\n",
+        # `examples/` 는 변이 사본에 없다 — 그 파일을 읽지 않는 LaunchDaemons 칸으로 본다
+        tests=(
+            "tests/test_doctor_cli.py::"
+            "test_p3_the_documented_system_server_service_is_found[LaunchDaemons]",
+        ),
+    ),
+    Mutant(
+        # 시험의 운영 보호 가드가 운영 폴더의 조상인 허용 뿌리(홈에서 시작한 pytest 의 cwd)를 그대로
+        # 둔다 — 그 실행에서는 가드가 아무것도 막지 않는다(P3 사이클 2 r2 두 명)
+        name="test-guard-ancestor-root-kept",
+        path="tests/conftest.py",
+        old="    return tuple(sorted(r for r in roots if not any(_under(d, r) for d in "
+        "PRODUCTION_DIRS)))\n",
+        new="    return tuple(sorted(roots))\n",
+        tests=(
+            "tests/test_doctor_cli.py::"
+            "test_the_production_guard_fails_a_test_that_reaches_production[home]",
+        ),
+    ),
+    Mutant(
+        # `[[tools]]` 의 글자 검사가 `str.strip()` 한 값과 견준다 — 앞뒤의 `\r` · `\n` · U+2028 이
+        # 거절되지 않고 그대로 저장된다(batch 10 재확인 X-bidi)
+        name="config-tool-text-ends-unchecked",
+        path="src/remote_ci_monitor/config.py",
+        old='    fenced = f"|{value}|"\n',
+        new="    fenced = value.strip()\n",
+        tests=("tests/test_doctor.py::test_x_bidi_tools_refuse_controls_at_either_end_too",),
+    ),
+    Mutant(
+        # 자기 세션의 git · 서비스 Python 을 Ctrl-C 때 거두지 않는다 — `Popen.__exit__` 가 0.25초
+        # 뒤 두고 가서 그 손자가 doctor 뒤에 남는다(batch 10 재확인 Ctrl-C 자식)
+        name="gitops-run-process-ctrl-c-leaves-group",
+        path="src/remote_ci_monitor/gitops.py",
+        old="        except BaseException:\n",
+        new="        except subprocess.TimeoutExpired:\n",
+        tests=(
+            "tests/test_doctor_cli.py::test_x_ctrlc_run_process_takes_its_group_down_on_ctrl_c",
+            "tests/test_doctor_cli.py::"
+            "test_x_ctrlc_interrupting_doctor_leaves_no_git_or_service_python_behind",
+        ),
+    ),
+    Mutant(
+        # 서비스의 Python 이 CLT shim 인지 보지 않고 돌린다 — CLT 없는 Mac 에서 doctor 가 설치 창을
+        # 띄운다(batch 10 재확인 X-python shim)
+        name="doctor-service-python-shim-runs",
+        path="src/remote_ci_monitor/doctor.py",
+        old="        if runner.tool_blocked(python):\n",
+        new="        if False:\n",
+        tests=(
+            "tests/test_doctor_cli.py::"
+            "test_x_python_a_service_python_that_is_a_clt_shim_is_never_run",
+        ),
+    ),
+    Mutant(
+        # 시험의 운영 보호 가드가 루프백 이름으로 가는 8787 만 막는다(옛 규칙) — 운영 서버는
+        # 0.0.0.0 에 묶여 LAN 주소 · `.local` 이름으로도 닿는다(P6 GAP E7, batch 10 재확인 5)
+        name="test-guard-port-on-loopback-only",
+        path="tests/conftest.py",
+        old="    return isinstance(address, tuple) and len(address) >= 2 and address[1] == "
+        "PRODUCTION_PORT\n",
+        new="    return (\n"
+        "        isinstance(address, tuple)\n"
+        "        and len(address) >= 2\n"
+        "        and address[1] == PRODUCTION_PORT\n"
+        '        and address[0] in ("127.0.0.1", "::1", "localhost")\n'
+        "    )\n",
+        tests=(
+            "tests/test_doctor_cli.py::"
+            "test_the_production_guard_blocks_port_8787_on_any_address[192.168.0.10]",
+        ),
+    ),
+    Mutant(
+        # `rcm serve` 의 기동 점검이 git 을 `shutil.which` 로 찾는다 — CLT 없는 Mac 의 shim 을
+        # 있음으로 센다(P6 GAP R2, batch 10 재확인 6)
+        name="config-startup-git-shim-counted",
+        path="src/remote_ci_monitor/config.py",
+        old='        if runner.find_tool("git", path) is None:\n',
+        new='        if __import__("shutil").which("git", path=path) is None:\n',
+        tests=(
+            "tests/test_tool_shim.py::test_r2_server_startup_counts_a_blocked_git_shim_as_missing",
+        ),
+    ),
+    # ── M5t-a PR5 — 요청자에게 알리기 (docs/m5t-workplan.md §4.6, 결정 248 e · f, TN1~TN11) ──
+    Mutant(
+        # 시작하지 못한 잡에도 `ran_on` 을 계산한다 — 대기 · 시작 전 취소 잡이 이 머신에서 돈 것처럼
+        # 보이고 훅의 RCM_MACHINE 이 찬다(TN11)
+        name="m5t-ran-on-unstarted-named",
+        path="src/remote_ci_monitor/core/status.py",
+        old="    if job.started_at is None:\n        return None\n    if job.worker_name:\n",
+        new="    if job.worker_name:\n",
+        tests=(
+            "tests/test_requester_notify_m5t.py::"
+            "test_tn11_ran_on_is_null_for_a_job_that_never_started",
+            "tests/test_requester_notify_m5t.py::"
+            "test_tn2_tn9_every_job_document_builder_carries_ran_on",
+        ),
+    ),
+    Mutant(
+        # 다른 물리 머신에서 돈 로컬 레인 잡을 이 머신 이름으로 부른다 — 모르는 이름을 지어낸다(TN9)
+        name="m5t-ran-on-foreign-host-named",
+        path="src/remote_ci_monitor/core/status.py",
+        old=(
+            "    if job.host_key is not None and job.host_key != local.host_key:\n"
+            "        return None\n"
+        ),
+        new="",
+        tests=(
+            "tests/test_requester_notify_m5t.py::"
+            "test_tn9_ran_on_is_null_when_the_name_is_unknown_and_never_comes_from_host_key",
+        ),
+    ),
+    Mutant(
+        # 끝난 잡의 문서(`GET /jobs/<id>`)가 이 서버 머신을 모른다 — 로컬 레인 잡의 `ran_on` 이
+        # null 이 된다(TN2)
+        name="m5t-terminal-view-without-local",
+        path="src/remote_ci_monitor/server.py",
+        old=(
+            "            action=self._last_action(job.id),\n"
+            "            local=self.local_machine(),\n"
+        ),
+        new="            action=self._last_action(job.id),\n",
+        tests=(
+            "tests/test_requester_notify_m5t.py::"
+            "test_tn2_a_local_lane_job_names_this_machine_and_keeps_worker_null",
+        ),
+    ),
+    Mutant(
+        # 훅의 RCM_MACHINE 을 `worker` 칸에서 읽는다 — 로컬 레인 잡(worker null)의 훅이 빈 값을
+        # 받는다(TN5)
+        name="m5t-notify-machine-from-worker",
+        path="src/remote_ci_monitor/core/notify.py",
+        old='        "RCM_MACHINE": sanitize_text(job_row.get("ran_on")),',
+        new='        "RCM_MACHINE": sanitize_text(job_row.get("worker")),',
+        tests=(
+            "tests/test_requester_notify_m5t.py::"
+            "test_tn5_notify_env_carries_rcm_machine_and_keeps_rcm_requester",
+            "tests/test_requester_notify_m5t.py::"
+            "test_tn5_the_server_hook_gets_this_machine_for_a_local_lane_job",
+        ),
+    ),
+    Mutant(
+        # `rcm wait` 끝줄이 머신을 빼먹는다(TN1 · TN2)
+        name="m5t-wait-end-line-without-machine",
+        path="src/remote_ci_monitor/core/render_text.py",
+        old='    if name:\n        head += f" on {name}"\n',
+        new='    if False:\n        head += f" on {name}"\n',
+        tests=(
+            "tests/test_requester_notify_m5t.py::"
+            "test_tn1_the_end_line_names_the_machine_and_the_time",
+            "tests/test_requester_notify_m5t.py::"
+            "test_tn2_a_local_lane_job_names_its_machine_on_the_end_line",
+        ),
+    ),
+    Mutant(
+        # 산출물 상태 `unknown`(보고하지 않은 옛 워커 · M5e 이전 잡)을 경고하지 않는다(TN10)
+        name="m5t-wait-artifact-unknown-silent",
+        path="src/remote_ci_monitor/core/render_text.py",
+        old="ARTIFACT_WARN_STATES = (_art.FAILED, _art.DROPPED, _art.UNAVAILABLE, _art.UNKNOWN)",
+        new="ARTIFACT_WARN_STATES = (_art.FAILED, _art.DROPPED, _art.UNAVAILABLE)",
+        tests=(
+            "tests/test_requester_notify_m5t.py::"
+            "test_tn10_four_artifact_states_warn_and_two_say_still_collecting",
+        ),
+    ),
+    Mutant(
+        # `--notify` 없이도 OS 알림을 부른다 — 기본 꺼짐(⛔ Q3)이 깨진다(TN7)
+        name="m5t-wait-notify-always",
+        path="src/remote_ci_monitor/cli.py",
+        old="    if notify:\n        try:\n            warning = os_notify(",
+        new="    if True:\n        try:\n            warning = os_notify(",
+        tests=(
+            "tests/test_requester_notify_m5t.py::"
+            "test_tn7_wait_without_notify_never_calls_the_os_notifier",
+        ),
+    ),
+    Mutant(
+        # 알림 도구가 없으면 예외로 죽는다 — 경고 한 줄 + 정상 종료가 아니다(TN6)
+        name="m5t-wait-notify-missing-tool-raises",
+        path="src/remote_ci_monitor/cli.py",
+        old='        return f"warning: --notify: {tool} not found — no notification sent"\n',
+        new="        raise FileNotFoundError(tool)\n",
+        tests=(
+            "tests/test_requester_notify_m5t.py::"
+            "test_tn6_wait_notify_without_the_tool_warns_once_and_exits_normally",
+        ),
+    ),
+    # ── M5t-a PR5 P6-1 — 알림의 끝 · 문구 · 실패 갈래(PR #273 검토 LOW 1~5) ──
+    Mutant(
+        # 받기 실패로 종료 코드가 5 가 됐는데 알림은 잡의 「succeeded」 끝 줄을 그대로 보낸다(LOW 1)
+        name="m5t-wait-notify-delivery-says-succeeded",
+        path="src/remote_ci_monitor/cli.py",
+        old="    if code == EXIT_DELIVERY:\n        said = ",
+        new="    if False:\n        said = ",
+        tests=(
+            "tests/test_requester_notify_m5t.py::"
+            "test_tn7_a_delivery_failure_is_what_the_notification_says",
+        ),
+    ),
+    Mutant(
+        # 알림 도구를 기다리다 온 Ctrl-C 가 rcm wait 밖으로 나가 종료 코드를 잃는다(LOW 2)
+        name="m5t-wait-notify-ctrl-c-escapes",
+        path="src/remote_ci_monitor/cli.py",
+        old='        except KeyboardInterrupt:\n            warning = "warning: --notify: ',
+        new='        except OSError:\n            warning = "warning: --notify: ',
+        tests=(
+            "tests/test_requester_notify_m5t.py::"
+            "test_tn7_ctrl_c_during_the_notification_keeps_the_exit_code_and_the_json",
+        ),
+    ),
+    Mutant(
+        # 0 이 아닌 알림 도구 종료를 조용히 넘긴다 — 알림이 안 갔는데 아무 말도 없다(LOW 3)
+        name="m5t-os-notify-nonzero-silent",
+        path="src/remote_ci_monitor/cli.py",
+        old='    if proc.returncode != 0:\n        return f"warning: --notify: {tool} exited',
+        new='    if proc.returncode < 0:\n        return f"warning: --notify: {tool} exited',
+        tests=(
+            "tests/test_requester_notify_m5t.py::"
+            "test_tn6_os_notify_failures_warn_once_and_never_raise",
+        ),
+    ),
+    Mutant(
+        # notify-send 인자 앞의 `--` 가 빠진다 — `-` 로 시작하는 본문이 옵션으로 읽힌다(LOW 4)
+        name="m5t-notify-send-without-end-of-options",
+        path="src/remote_ci_monitor/cli.py",
+        old='        return "notify-send", ["--", title, message]\n',
+        new='        return "notify-send", [title, message]\n',
+        tests=(
+            "tests/test_requester_notify_m5t.py::test_tn7_notify_send_reads_a_dash_message_as_text",
+        ),
+    ),
+    Mutant(
+        # 시작하지 못한 잡에도 산출물 경고를 낸다 — 돌지 않았으니 올릴 것이 없다(LOW 5)
+        name="m5t-wait-unstarted-artifacts-told",
+        path="src/remote_ci_monitor/core/render_text.py",
+        old="    if _never_started(job):\n        return None\n",
+        new="    if False:\n        return None\n",
+        tests=(
+            "tests/test_requester_notify_m5t.py::"
+            "test_tn11_a_job_that_never_started_says_nothing_about_artifacts",
+        ),
+    ),
+    # ── M5t-a PR4 — rcm setup (docs/m5t-workplan.md §4.1, TR31 · TR33) ──
+    Mutant(
+        # `rcm setup` 이 rcm.sqlite3 가 이미 있는 data_dir 을 거절하지 않는다 — 그 서비스가
+        # setup 을 돌린 빌드로 남의 DB 를 열어 마이그레이션한다(TR31)
+        name="setup-existing-data-dir-accepted",
+        path="src/remote_ci_monitor/setup.py",
+        old="        if not args.reuse_data_dir:\n",
+        new="        if False:\n",
+        tests=(
+            "tests/test_setup.py::"
+            "test_tr31_a_data_dir_that_already_holds_a_database_is_refused_unless_reused",
+        ),
+    ),
+    Mutant(
+        # guard 가 운영 data_dir(그 안 포함)을 고르는 `rcm setup` 을 막지 않는다(TR33)
+        name="guard-setup-production-data-dir-allowed",
+        path="tools/guard_production.py",
+        old=(
+            "            if inside(data, prod.data_dir) or inside(_real(data), "
+            "real_prod.data_dir):\n"
+        ),
+        new="            if False:\n",
+        tests=(
+            "tests/test_guard_production_setup.py::test_tr33_setup_on_the_production_data_dir_is_denied",
+            "tests/test_guard_production_setup.py::"
+            "test_tr33_the_template_default_resolves_with_the_commands_home",
+        ),
+    ),
+    Mutant(
+        # 인자 없는 `rcm` 이 설정이 있는 머신에서도 첫 실행 질문을 띄운다 — 이미 설정한
+        # 머신(환경변수만 쓰는 클라이언트 · 워커 포함)에 setup 을 다시 권한다(TR2 · TR19 · TR29)
+        name="setup-first-run-asks-with-config",
+        path="src/remote_ci_monitor/setup.py",
+        old="    if roles:\n        return None\n",
+        new="    if False:\n        return None\n",
+        tests=(
+            "tests/test_setup_cli.py::test_tr2_a_terminal_with_any_config_does_not_ask",
+            "tests/test_setup_cli.py::test_tr19_an_env_only_client_counts_as_configured",
+            "tests/test_setup_cli.py::test_tr29_an_env_only_worker_counts_as_configured",
+        ),
+    ),
+    Mutant(
+        # doctor 가 `rcm setup --label` 로 설치한 서비스의 설치 자리를 보지 않는다 — 서비스 관리자가
+        # 읽는 파일 대신 setup 자리의 사본을 잰다(6-B-V1 · 6-B-V2)
+        name="doctor-custom-label-install-place-ignored",
+        path="src/remote_ci_monitor/doctor.py",
+        old="        if there.is_file() and there not in place:\n",
+        new="        if False:\n",
+        tests=(
+            "tests/test_setup.py::"
+            "test_tr24_doctor_finds_the_installed_copy_of_a_custom_label_service",
+        ),
+    ),
+    # ── M5t-a PR4 P3 1라운드 — guard · setup 의 규칙마다 하나(v2-5 · v1-4) ──
+    Mutant(
+        # guard 가 운영 설정 폴더에 쓰는 `rcm setup` 을 막지 않는다(TR20 규칙 1)
+        name="guard-setup-production-config-allowed",
+        path="tools/guard_production.py",
+        old=(
+            "            hit = production_root(target, prod) or production_root(_real(target), "
+            "real_prod)\n"
+        ),
+        new="            hit = None\n",
+        tests=(
+            "tests/test_guard_production_setup.py::test_tr20_setup_that_would_write_the_production_config_folder_is_denied",
+            "tests/test_guard_production_setup.py::test_tr20_a_config_written_with_a_shell_variable_is_denied",
+        ),
+    ),
+    Mutant(
+        # guard 가 운영 라벨의 서비스 파일을 쓰는 `rcm setup` 을 막지 않는다(TR20 규칙 2)
+        name="guard-setup-production-label-allowed",
+        path="tools/guard_production.py",
+        old="            if label in SETUP_STANDARD_LABELS or unit_name(label) in units:\n",
+        new="            if False:\n",
+        tests=(
+            "tests/test_guard_production_setup.py::test_tr20_setup_that_would_write_a_production_label_is_denied",
+            "tests/test_guard_production_setup.py::test_tr20_no_label_means_the_standard_one_and_is_denied_but_a_client_has_none",
+        ),
+    ),
+    Mutant(
+        # guard 가 운영 서비스 파일 자리를 가리키는 `--service-file` 을 막지 않는다(P3 v1-2)
+        name="guard-setup-service-place-allowed",
+        path="tools/guard_production.py",
+        old="            place = _service_place(target, session_home)\n",
+        new="            place = None\n",
+        tests=(
+            "tests/test_guard_production_setup.py::test_tr20_a_service_file_on_a_production_service_place_is_denied",
+            "tests/test_guard_production_setup.py::test_tr20_every_production_service_unit_is_a_place_setup_may_not_write",
+            "tests/test_guard_production_setup.py::test_tr20_setup_may_not_write_its_config_into_any_production_root",
+        ),
+    ),
+    Mutant(
+        # setup 이 줄인 옵션을 받는다 — guard 가 못 본 경로에 쓴다(P3 v1-1 · v2-2)
+        name="setup-abbreviated-options-accepted",
+        path="src/remote_ci_monitor/core/setup.py",
+        old='PARSER_OPTIONS: dict[str, Any] = {"allow_abbrev": False}\n',
+        new='PARSER_OPTIONS: dict[str, Any] = {"allow_abbrev": True}\n',
+        tests=("tests/test_setup.py::test_tr20_setup_takes_no_abbreviated_option",),
+    ),
+    Mutant(
+        # setup 이 설치 자리(~/Library/LaunchAgents …)에 서비스 파일을 쓴다(§4.1, P3 v1-2)
+        name="setup-install-place-written",
+        path="src/remote_ci_monitor/setup.py",
+        old="    if place is not None:\n        # 설치 자리에 쓰지 않는다(§4.1, ⛔ Q9)",
+        new="    if False:\n        # 설치 자리에 쓰지 않는다(§4.1, ⛔ Q9)",
+        tests=("tests/test_setup.py::test_tr24_setup_refuses_a_service_file_on_an_install_place",),
+    ),
+    Mutant(
+        # setup 이 있는 파일을 `--force` 없이 덮는다(TR6)
+        name="setup-existing-file-overwritten",
+        path="src/remote_ci_monitor/setup.py",
+        old="    blocked = [f for f in plan.files if f.path.exists() and f.kind not in forced]\n",
+        new="    blocked = []\n",
+        tests=(
+            "tests/test_setup.py::test_tr6_an_existing_file_is_kept_and_only_the_forced_kind_is_replaced",
+            "tests/test_setup.py::test_tr6_an_existing_service_file_is_kept_without_force_and_nothing_else_is_written",
+        ),
+    ),
+    Mutant(
+        # setup 이 쓰다 멈춘 뒤 이미 쓴 파일을 되돌리지 않는다 — 반쪽 설정이 남는다(TR7)
+        name="setup-partial-write-not-rolled-back",
+        path="src/remote_ci_monitor/setup.py",
+        old="        for written, old, mode in reversed(done):\n",
+        new="        for written, old, mode in []:\n",
+        tests=("tests/test_setup.py::test_tr7_a_failure_part_way_leaves_no_half_written_config",),
+    ),
+    Mutant(
+        # 인자 없는 `rcm` 이 터미널이 아닌데도 첫 실행 질문을 띄운다(TR1, 결정 240)
+        name="setup-first-run-asks-without-a-terminal",
+        path="src/remote_ci_monitor/setup.py",
+        old="    if not world.interactive():\n        return None\n",
+        new="    if False:\n        return None\n",
+        tests=("tests/test_setup_cli.py::test_tr1_without_a_terminal_bare_rcm_never_asks",),
+    ),
+    Mutant(
+        # 대화형 숫자를 `isdigit()` 로 받는다 — `²` 에서 traceback(P3 v2-3)
+        name="setup-non-ascii-digit-accepted",
+        path="src/remote_ci_monitor/setup.py",
+        old="    if answer.isascii() and answer.isdecimal():\n",
+        new="    if answer.isdigit():\n",
+        tests=("tests/test_setup.py::test_tr22_a_digit_that_is_not_ascii_is_asked_again",),
+    ),
+    Mutant(
+        # setup 의 맨 바깥 경계가 없다 — 예상 못 한 예외가 traceback 으로 나온다(P3 v2-3)
+        name="setup-boundary-missing",
+        path="src/remote_ci_monitor/setup.py",
+        old="    except Exception as e:  # noqa: BLE001 — setup 의 맨 바깥 경계\n",
+        new="    except ZeroDivisionError as e:  # noqa: BLE001 — setup 의 맨 바깥 경계\n",
+        tests=("tests/test_setup.py::test_tr28_an_unexpected_error_is_one_line_and_exit_one",),
+    ),
+    Mutant(
+        # systemd 유닛의 `%` 를 지정자로 둔다 — `%h` 가 든 경로가 다른 경로로 읽힌다(P3 v2-4)
+        name="setup-unit-percent-unescaped",
+        path="src/remote_ci_monitor/core/setup.py",
+        old='    return value.replace("%", "%%")\n',
+        new="    return value\n",
+        tests=("tests/test_setup.py::test_tr11_a_systemd_unit_keeps_odd_paths_whole",),
+    ),
+    Mutant(
+        # 서버 서비스 파일의 PATH 맨 앞에 rcm 의 venv bin 을 둔다 — 프리셋의 `python` 이 rcm 의
+        # 것으로 바뀐다(TR11)
+        name="setup-service-path-starts-with-the-venv",
+        path="src/remote_ci_monitor/setup.py",
+        old="            path=cli.WORKER_SERVICE_PATH,\n",
+        new='            path=f"{rcm.parent}:{cli.WORKER_SERVICE_PATH}",\n',
+        tests=(
+            "tests/test_setup.py::test_tr11_the_written_service_file_path_does_not_start_with_the_venv",
+        ),
+    ),
+    Mutant(
+        # LAN bind 의 경고가 없는 읽기 인증 모드(`read_auth`)를 권한다(TR10, Q14)
+        name="setup-bind-warning-offers-read-auth",
+        path="src/remote_ci_monitor/core/setup.py",
+        old="        return [READ_OPEN, DHCP_NOTE]\n",
+        new='        return [READ_OPEN, DHCP_NOTE, "set read_auth = token to close reads"]\n',
+        tests=("tests/test_setup.py::test_tr10_the_interactive_run_never_offers_a_read_auth_mode",),
+    ),
+    # ── M5t-a PR4 P3 2라운드 — guard 와 setup 이 같은 해석기를 쓴다(batch-4) ──
+    Mutant(
+        # 빈 `--config` · `--data-dir` 을 받는다 — 빈 `--config` 는 기본 자리(운영 설정 폴더일 수
+        # 있다)로 떨어진다(P3 2라운드 v2-1). setup 과 guard 가 같은 `blank_flags` 를 쓴다
+        name="setup-blank-value-accepted",
+        path="src/remote_ci_monitor/core/setup.py",
+        old="        if isinstance(values.get(name), str) and not values[name].strip()\n",
+        new="        if False\n",
+        tests=(
+            "tests/test_setup.py::test_tr20_an_empty_path_or_label_is_a_usage_error",
+            "tests/test_guard_production_setup.py::test_tr20_an_empty_value_is_denied",
+        ),
+    ),
+    Mutant(
+        # client 에도 서비스 파일 자리를 준다 — guard 가 client 가 쓰지 않는 `--service-file` 을
+        # 막고, 해석기의 답이 setup 이 쓴 자리와 달라진다(P3 2라운드 LOW)
+        name="setup-client-gets-a-service-file",
+        path="src/remote_ci_monitor/core/setup.py",
+        old="    if chosen is not None and manager is not None:\n",
+        new="    if manager is not None:\n",
+        tests=(
+            "tests/test_guard_production_setup.py::"
+            "test_tr20_a_client_writes_no_service_file_so_its_service_file_flag_is_free",
+            "tests/test_setup.py::test_tr20_setup_writes_exactly_where_the_shared_resolver_says",
+        ),
+    ),
+    Mutant(
+        # setup 이 설치 자리를 대소문자를 가려 견준다 — macOS 에서 `~/library/launchagents` 에
+        # 쓴다(P3 2라운드)
+        name="setup-install-place-case-not-folded",
+        path="src/remote_ci_monitor/core/setup.py",
+        old="    if fold_case:\n",
+        new="    if False:\n",
+        tests=("tests/test_setup.py::test_tr24_an_install_place_in_another_case_is_refused",),
+    ),
+    Mutant(
+        # 라벨 정규식을 앞에서만 맞춘다 — 끝 줄바꿈이 든 라벨이 plist 에 들어간다(P3 2라운드 v1-5)
+        name="setup-label-trailing-newline-accepted",
+        path="src/remote_ci_monitor/core/setup.py",
+        old="    if _LABEL_RE.fullmatch(label):\n",
+        new="    if _LABEL_RE.match(label):\n",
+        tests=(
+            "tests/test_setup.py::test_tr20_a_label_with_a_trailing_line_break_is_a_usage_error",
+        ),
+    ),
+    Mutant(
+        # 파일을 다 쓴 뒤 보고가 터지면 종료 1 이다 — 쓴 설정을 실패로 알린다(§4.1, P3 2라운드)
+        name="setup-report-failure-exit-one",
+        path="src/remote_ci_monitor/setup.py",
+        old=(
+            '        _say(world, f"rcm: files written; the report failed: {_one_line(e)}")\n'
+            "        return EXIT_OK\n"
+        ),
+        new=(
+            '        _say(world, f"rcm: files written; the report failed: {_one_line(e)}")\n'
+            "        return EXIT_FAILED\n"
+        ),
+        tests=("tests/test_setup.py::test_tr28_a_report_that_fails_after_writing_is_exit_zero",),
+    ),
+    Mutant(
+        # guard 가 경로를 대소문자를 가려 견준다 — macOS 에서 `~/.config/RCM` 이 운영 설정 폴더인데
+        # 지나간다(P3 2라운드)
+        name="guard-setup-case-not-folded",
+        path="tools/guard_production.py",
+        old="    if FOLD_CASE:\n",
+        new="    if False:\n",
+        tests=(
+            "tests/test_guard_production_setup.py::"
+            "test_tr20_a_production_path_in_another_case_is_denied_on_a_case_insensitive_disk",
+        ),
+    ),
+    Mutant(
+        # guard 가 setup 의 해석기를 못 들여오면 setup 을 허용한다(fail open, P3 2라운드)
+        name="guard-setup-resolver-import-fails-open",
+        path="tools/guard_production.py",
+        old=(
+            "    except Exception as e:  # noqa: BLE001 — 해석기를 못 들여오면 setup 을 막는다"
+            "(fail closed)\n"
+        ),
+        new=(
+            "    except Exception as e:  # noqa: BLE001 — 해석기를 못 들여오면 setup 을 막는다"
+            "(fail closed)\n        return None\n"
+        ),
+        tests=(
+            "tests/test_guard_production_setup.py::"
+            "test_tr20_the_hook_refuses_setup_when_the_resolver_does_not_load",
+        ),
+    ),
+    Mutant(
+        # guard 가 python 의 인터프리터 플래그를 건너뛰지 않는다 — `python -u -m remote_ci_monitor
+        # setup` 이 setup 규칙을 지난다(P3 2라운드)
+        name="guard-python-flags-not-skipped",
+        path="tools/guard_production.py",
+        old=(
+            '        elif token.startswith("-") and token not in ("-", "--") and not '
+            'token.startswith("-c"):\n'
+        ),
+        new="        elif False:\n",
+        tests=(
+            "tests/test_guard_production_setup.py::"
+            "test_tr20_a_wrapper_path_or_interpreter_flag_still_reaches_setup",
+            # P3 4라운드: 그물이 막는 쪽을 덮으므로 허용 칸이 본다
+            "tests/test_guard_production_setup.py::"
+            "test_tr20_python_flags_with_a_test_home_are_read_not_caught_by_the_net",
+        ),
+    ),
+    # P3 2라운드 v2-2 가 짚은, 변이가 없던 규칙 가운데 싼 것
+    Mutant(
+        # 역할이 쓰지 않는 플래그를 조용히 버린다(P3 v1-7)
+        name="setup-unused-flag-silent",
+        path="src/remote_ci_monitor/setup.py",
+        old="    if unused:\n",
+        new="    if False:\n",
+        tests=("tests/test_setup.py::test_tr22_a_flag_the_role_does_not_use_is_a_warning",),
+    ),
+    Mutant(
+        # 포트가 비었는지 모를 때 아무 말도 하지 않는다(P3 v1-5)
+        name="setup-unknown-port-silent",
+        path="src/remote_ci_monitor/setup.py",
+        old="    elif held is None:  # 모름은 모름이라고 쓴다(P3 v1-5)\n",
+        new="    elif False:  # 모름은 모름이라고 쓴다(P3 v1-5)\n",
+        tests=("tests/test_setup.py::test_tr22_an_unknown_answer_from_the_system_is_said",),
+    ),
+    Mutant(
+        # 호스트 없는 URL(`http://`)을 설정에 쓴다(P3 v2-12)
+        name="setup-url-without-host-accepted",
+        path="src/remote_ci_monitor/setup.py",
+        old="    if not host:  # `http://` · `http:///x` · `http://:8787`",
+        new="    if False:  # `http://` · `http:///x` · `http://:8787`",
+        tests=("tests/test_setup.py::test_tr26_a_url_without_a_host_is_a_usage_error",),
+    ),
+    Mutant(
+        # UTF-8 이 아닌 인자를 쓰기 전에 거르지 않는다(P3 v2-10)
+        name="setup-not-utf8-accepted",
+        path="src/remote_ci_monitor/setup.py",
+        old='            value.encode("utf-8")\n',
+        new='            value.encode("utf-8", "surrogateescape")\n',
+        tests=("tests/test_setup.py::test_tr28_a_path_that_is_not_utf8_is_a_usage_error",),
+    ),
+    Mutant(
+        # 되돌리지 못한 파일을 삼킨다 — 「nothing was written」이라고 거짓말한다(P3 v1-6)
+        name="setup-rollback-failure-swallowed",
+        path="src/remote_ci_monitor/setup.py",
+        old="                plan.unrestored.append(written.path)\n",
+        new="                pass\n",
+        tests=("tests/test_setup.py::test_tr7_a_rollback_that_fails_is_named",),
+    ),
+    Mutant(
+        # 시작하지 않았을 때 조용히 끝난다 — `|| echo "not started …"` 가 없다(P3 v1-9)
+        name="setup-not-started-silent",
+        path="src/remote_ci_monitor/core/setup.py",
+        old="    return [folders, copy, same + start + said]\n",
+        new="    return [folders, copy, same + start]\n",
+        tests=("tests/test_setup.py::test_tr36_the_start_line_says_when_it_did_not_start",),
+    ),
+    Mutant(
+        # systemd ExecStart 의 `$` 를 `$$` 로 쓰지 않는다 — `$HOME` 이 든 경로를 systemd 가
+        # 펼친다(P3 v2-4)
+        name="setup-unit-dollar-unescaped",
+        path="src/remote_ci_monitor/core/setup.py",
+        old='        text = text.replace("$", "$$")\n',
+        new="        text = text\n",
+        tests=("tests/test_setup.py::test_tr11_execstart_writes_a_dollar_twice",),
+    ),
+    # ── M5t-a PR4 P3 3라운드 — setup 규칙의 「운영」을 집의 정의 하나로(batch-5) ──
+    Mutant(
+        # setup 규칙이 운영 설정 폴더만 「운영」으로 본다 — 체크아웃 · 서비스 venv · data_dir 에
+        # 쓰는 setup 이 지나간다(P3 3라운드 v1-1, 근본 원인)
+        name="guard-setup-narrow-production-list",
+        path="tools/guard_production.py",
+        old=(
+            "            hit = production_root(target, prod) or production_root(_real(target), "
+            "real_prod)\n"
+        ),
+        new="            hit = production_root(target, Production(config_dir=prod.config_dir))\n",
+        tests=(
+            "tests/test_guard_production_setup.py::"
+            "test_tr20_setup_may_not_write_its_config_into_any_production_root",
+            "tests/test_guard_production_setup.py::"
+            "test_tr20_the_setup_rule_and_the_edit_rule_share_one_production_list",
+        ),
+    ),
+    Mutant(
+        # setup 이 서비스 관리자가 읽는 자리 안의 `--config` 를 쓴다 — 운영 서비스 파일을
+        # `--force config` 로 덮는다(P3 3라운드 v1-1)
+        name="setup-config-in-install-place-written",
+        path="src/remote_ci_monitor/setup.py",
+        old="    place = _install_place(found.config, world)\n",
+        new="    place = None\n",
+        tests=("tests/test_setup.py::test_tr24_setup_refuses_a_config_inside_an_install_place",),
+    ),
+    Mutant(
+        # 닫는 쪽의 그물이 없다 — `sudo -u` · `if …; then` · `python -Im` 뒤의 setup 이 setup 규칙을
+        # 거치지 않는다(P3 3라운드 v1-2 · v1-3 · v2-3). P3 4라운드부터 그물은 `_setup_net` 하나다
+        name="guard-setup-unread-call-allowed",
+        path="tools/guard_production.py",
+        old="    if prod.known and _setup_net(command):\n",
+        new="    if False:\n",
+        tests=(
+            "tests/test_guard_production_setup.py::"
+            "test_tr20_a_setup_the_hook_cannot_read_as_a_plain_call_is_denied",
+        ),
+    ),
+    Mutant(
+        # mutcheck 가 문법 오류인 변이를 「잡혔다」로 센다 — 들여쓰기를 잃은 변이가 시험 없이
+        # 통과했다(P3 3라운드 v2-1)
+        name="mutcheck-syntax-error-counted-as-caught",
+        path="scripts/mutcheck.py",
+        old="    problem = syntax_problem(m.path, changed)\n",
+        new="    problem = None\n",
+        tests=(
+            "tests/test_guard_production_setup.py::"
+            "test_mutcheck_reports_a_mutant_that_does_not_parse_as_a_failure",
+        ),
+    ),
+    Mutant(
+        # 파일을 다 쓴 뒤 보고 중의 Ctrl-C 가 130 이다 — 쓴 설정을 실패로 알린다(§4.1, P3
+        # 3라운드 v2-2)
+        name="setup-report-interrupt-exit-130",
+        path="src/remote_ci_monitor/setup.py",
+        old=(
+            "        return EXIT_OK\n"
+            "    except Exception as e:  # noqa: BLE001 — 파일은 이미 다 썼다\n"
+        ),
+        new=(
+            "        return EXIT_INTERRUPTED\n"
+            "    except Exception as e:  # noqa: BLE001 — 파일은 이미 다 썼다\n"
+        ),
+        tests=("tests/test_setup.py::test_tr28_ctrl_c_while_reporting_after_writing_is_exit_zero",),
+    ),
+    Mutant(
+        # 해석기가 `~user` 를 제 손으로 passwd 에서 읽는다 — core 의 순수성이 깨진다(P3 3라운드
+        # v1-5)
+        name="setup-resolver-reads-passwd",
+        path="src/remote_ci_monitor/core/setup.py",
+        old="        text = expand_user(raw)\n",
+        new="        text = os.path.expanduser(raw)\n",
+        tests=(
+            "tests/test_setup.py::test_tr20_the_resolver_reads_nothing_from_the_machine",
+            "tests/test_setup.py::"
+            "test_tr20_where_takes_the_user_lookup_and_the_case_rule_from_its_caller",
+        ),
+    ),
+    Mutant(
+        # setup 판정 중 훅이 터지면 허용한다(fail open, P3 3라운드)
+        name="guard-setup-crash-allowed",
+        path="tools/guard_production.py",
+        old="        if not _about_setup(payload):\n",
+        new="        if True:\n",
+        tests=(
+            "tests/test_guard_production_setup.py::test_tr20_a_crash_while_judging_setup_is_a_deny",
+        ),
+    ),
+    # ── M5t-a PR4 P3 4라운드 — setup 판정은 허용 목록이다(batch-6) ──
+    Mutant(
+        # 허용 모양 검사가 메타 문자 하나(`&`)를 놓친다 — `rcm setup --help & rcm setup …` 이
+        # 도움말로 읽혀 지나간다(P3 4라운드)
+        name="guard-setup-plain-misses-a-metachar",
+        path="tools/guard_production.py",
+        old='_PLAIN_FORBIDDEN = frozenset(";&|$`(){}<>\\\\*?[]#!^")\n',
+        new='_PLAIN_FORBIDDEN = frozenset(";|$`(){}<>\\\\*?[]#!^")\n',
+        tests=(
+            "tests/test_guard_production_setup.py::"
+            "test_tr20_round4_shell_tricks_around_setup_are_denied",
+            "tests/test_guard_production_setup.py::"
+            "test_tr20_setup_help_passes_only_in_the_plain_shape",
+        ),
+    ),
+    Mutant(
+        # setup 의 상대 경로를 받는다 — 훅이 짐작한 cwd 로 풀어 시험 폴더로 본다(P3 4라운드)
+        name="guard-setup-relative-path-allowed",
+        path="tools/guard_production.py",
+        old="                if value is not None and not _anchored(value):\n",
+        new="                if False:\n",
+        tests=(
+            "tests/test_guard_production_setup.py::"
+            "test_tr33_a_relative_path_is_denied_wherever_the_session_stands",
+            "tests/test_guard_production_setup.py::"
+            "test_tr33_a_relative_data_dir_is_denied_in_any_working_folder",
+        ),
+    ),
+    Mutant(
+        # 심볼릭 링크를 풀지 않는다 — 운영 뿌리를 가리키는 링크 아래 경로가 지나간다(P3 4라운드
+        # LOW 6)
+        name="guard-setup-realpath-skipped",
+        path="tools/guard_production.py",
+        old="    return Path(_realpath(str(path)))\n",
+        new="    return path\n",
+        tests=(
+            "tests/test_guard_production_setup.py::"
+            "test_tr20_a_symlink_into_a_production_root_is_denied",
+        ),
+    ),
+    Mutant(
+        # 그물이 rcm 다음 하위 명령 자리를 보지 않는다 — `rcm ${S}tup` · `$R ${S}tup` 이 낱말 setup
+        # 없이 지나간다(P3 4라운드)
+        name="guard-setup-subcommand-place-unchecked",
+        path="tools/guard_production.py",
+        old="    for position in range(index + 1, len(tokens)):\n",
+        new="    return False\n    for position in range(index + 1, len(tokens)):\n",
+        tests=(
+            "tests/test_guard_production_setup.py::"
+            "test_tr20_a_subcommand_the_shell_makes_after_rcm_is_denied",
+            "tests/test_guard_production_setup.py::"
+            "test_tr20_round4_shell_tricks_around_setup_are_denied",
+        ),
+    ),
+    # ── M5t-a PR4 P3 5라운드 · P6 (batch 7) — guard 의 남은 길과 변이 없던 규칙 ──
+    Mutant(
+        # 인자를 넘기는 런처(xargs · parallel · find -exec · fd -x …) 낱말을 그물이 보지 않는다 —
+        # `… | xargs rcm` 이 낱말 setup 없이 setup 에 닿는다(P3 5라운드 v1-1, P6 재확인 1)
+        name="guard-setup-xargs-feeder-allowed",
+        path="tools/guard_production.py",
+        old="    if names & _FEEDERS or _FEEDER_FLAGS.intersection(words):\n",
+        new="    if False:\n",
+        tests=(
+            "tests/test_guard_production_setup.py::"
+            "test_b8_1_a_launcher_word_anywhere_with_an_rcm_word_is_denied",
+        ),
+    ),
+    Mutant(
+        # 터미널을 주는 런처(script · unbuffer · expect · tmux …) 낱말을 그물이 보지 않는다 —
+        # `script -q /dev/null rcm` 의 첫 실행 질문이 setup 을 돌린다(P3 5라운드 v1-2, P6 재확인 1)
+        name="guard-setup-pty-bare-rcm-allowed",
+        path="tools/guard_production.py",
+        old="    if names & _PTY_LAUNCHERS:\n",
+        new="    if False:\n",
+        tests=(
+            "tests/test_guard_production_setup.py::"
+            "test_b8_1_a_launcher_word_anywhere_with_an_rcm_word_is_denied",
+        ),
+    ),
+    Mutant(
+        # 펼쳐 rcm 이 되는 글롭(`r?m`)을 rcm 낱말로 보지 않는다 — 리다이렉션이 앞에 붙어 명령 자리
+        # 규칙이 못 보는 `<f xargs ./.venv/bin/r?m` 이 지나간다(P6 재확인 1)
+        name="guard-launcher-glob-rcm-missed",
+        path="tools/guard_production.py",
+        old='    if any(c in name for c in "*?[") and any(\n',
+        new="    if False and any(\n",
+        tests=(
+            "tests/test_guard_production_setup.py::"
+            "test_b8_1_a_launcher_word_anywhere_with_an_rcm_word_is_denied",
+        ),
+    ),
+    Mutant(
+        # 셸이 바꾸는 글자(리다이렉션 `<` 포함)가 든 낱말을 모두 rcm 으로 본다 — rcm 이 없는
+        # `xargs python3 x.py < /tmp/a` 를 막는다(과잉 차단, P6 재확인 1 · v2-5)
+        name="guard-launcher-any-shaped-word-counts",
+        path="tools/guard_production.py",
+        old='    if "$" in token or "`" in token:\n',
+        new="    if any(c in _SHAPING for c in token):\n        return True\n    if False:\n",
+        tests=(
+            "tests/test_guard_production_setup.py::test_b8_1_a_launcher_without_an_rcm_word_passes",
+        ),
+    ),
+    Mutant(
+        # 서비스가 실행하는 venv 의 원본이 링크된 워크트리면 운영에서 뺀다 — 워크트리에서 도는
+        # 운영 서비스의 체크아웃 · venv 를 편집 · setup 규칙이 모른다(P3 5라운드 v1-3)
+        name="guard-linked-worktree-service-dropped",
+        path="tools/guard_production.py",
+        old="        if _is_linked_worktree(checkout) and not runs:\n",
+        new="        if _is_linked_worktree(checkout):\n",
+        tests=(
+            "tests/test_guard_production_setup.py::"
+            "test_g3_a_service_venv_that_installs_a_linked_worktree_is_production",
+        ),
+    ),
+    Mutant(
+        # 체크아웃 안의 venv 는 서비스가 실행해도 운영에서 뺀다 — 서비스가 워크트리의 `.venv` 를
+        # 실행하는 머신에서 운영 보호가 꺼진다(P6 재확인 2 · v2-2)
+        name="guard-service-venv-inside-checkout-dropped",
+        path="tools/guard_production.py",
+        old="        if checkout is None or (inside(venv, checkout) and not runs):\n",
+        new="        if checkout is None or inside(venv, checkout):\n",
+        tests=(
+            "tests/test_guard_production_setup.py::"
+            "test_b8_2_a_service_that_runs_the_venv_inside_its_checkout_is_production",
+        ),
+    ),
+    Mutant(
+        # `nice` 를 떼지 않는다 — `nice -n 5 rcm token --config <운영>` 이 지나간다(P6 재확인 7)
+        name="guard-nice-not-stripped",
+        path="tools/guard_production.py",
+        old='        if _name(head) == "nice":\n',
+        new="        if False:\n",
+        tests=(
+            "tests/test_guard_production_setup.py::test_b8_7_nice_timeout_and_env_split_do_not_hide_rcm",
+        ),
+    ),
+    Mutant(
+        # timeout 의 시간 낱말을 남긴다 — `timeout 30 rcm serve` 의 명령이 `30` 이 된다(P6 재확인 7)
+        name="guard-timeout-duration-kept",
+        path="tools/guard_production.py",
+        old="            if index < len(tokens) and _DURATION.fullmatch(tokens[index]):\n",
+        new="            if False:\n",
+        tests=(
+            "tests/test_guard_production_setup.py::test_b8_7_nice_timeout_and_env_split_do_not_hide_rcm",
+        ),
+    ),
+    Mutant(
+        # `env -S '…'` 의 글을 나누지 않는다 — 그 안의 rcm 을 보지 못한다(P6 재확인 7)
+        name="guard-env-split-string-ignored",
+        path="tools/guard_production.py",
+        old="            if split is not None:\n",
+        new="            if False:\n",
+        tests=(
+            "tests/test_guard_production_setup.py::test_b8_7_nice_timeout_and_env_split_do_not_hide_rcm",
+        ),
+    ),
+    Mutant(
+        # `remote_ci_monitor` 경로 조각(`src/remote_ci_monitor/…`)을 rcm 낱말로 센다 — 그 폴더를
+        # 읽는 `find … -exec ruff` · `git ls-files … | xargs` 가 막힌다(P6 재확인 354 · v2-1)
+        name="guard-rcm-word-path-fragment-counts",
+        path="tools/guard_production.py",
+        old='    r"|(?:(?<![\\w/-])|(?<![\\w])-[A-Za-z]*m)remote_ci_monitor(?![\\w/-])",\n',
+        new='    r"|(?:(?<![\\w-])|(?<![\\w])-[A-Za-z]*m)remote_ci_monitor(?![\\w-])",\n',
+        tests=(
+            "tests/test_guard_production_setup.py::"
+            "test_b9_354_a_path_fragment_or_an_argument_variable_beside_a_launcher_passes",
+        ),
+    ),
+    Mutant(
+        # 펼친 끝 조각을 보지 않는다 — `xargs ruff check "$PWD/x"` 가 막힌다(P6 재확인 354 · v2-2)
+        name="guard-launcher-variable-tail-ignored",
+        path="tools/guard_production.py",
+        old="        return after and _open_tail(token)\n",
+        new="        return after\n",
+        tests=(
+            "tests/test_guard_production_setup.py::"
+            "test_b9_354_a_path_fragment_or_an_argument_variable_beside_a_launcher_passes",
+        ),
+    ),
+    Mutant(
+        # 런처 앞의 변수도 센다 — `echo $HOME | xargs ls` 가 막힌다(P6 재확인 354)
+        name="guard-launcher-variable-before-counts",
+        path="tools/guard_production.py",
+        old="        return after and _open_tail(token)\n",
+        new="        return _open_tail(token)\n",
+        tests=(
+            "tests/test_guard_production_setup.py::"
+            "test_b9_354_a_path_fragment_or_an_argument_variable_beside_a_launcher_passes",
+        ),
+    ),
+    Mutant(
+        # 런처 규칙의 거절이 원인과 나누는 법을 말하지 않는다(P6 재확인 354)
+        name="guard-launcher-deny-cause-dropped",
+        path="tools/guard_production.py",
+        old="        return _not_plain(_launcher_cause(command))\n",
+        new="        return _not_plain()\n",
+        tests=(
+            "tests/test_guard_production_setup.py::test_b9_354_the_launcher_deny_names_its_cause_and_says_split",
+        ),
+    ),
+    Mutant(
+        # timeout 의 시간을 `\d+(.\d+)?` 로만 읽는다 — `timeout .5 rcm serve` 의 명령이 `.5` 가
+        # 된다(P6 재확인 v1-6 · v2-5)
+        name="guard-timeout-strtod-duration-missed",
+        path="tools/guard_production.py",
+        old=(
+            '    r"(?:(?:\\d+(?:\\.\\d*)?|\\.\\d+)(?:e[+-]?\\d+)?|inf(?:inity)?)[smhd]?", '
+            "re.IGNORECASE\n"
+        ),
+        new='    r"\\d+(?:\\.\\d+)?[smhd]?"\n',
+        tests=(
+            "tests/test_guard_production_setup.py::test_b9_timeout_durations_that_strtod_reads_are_stripped",
+        ),
+    ),
+    Mutant(
+        # 감싸기를 이름(basename)이 아니라 글자로 본다 — `/usr/bin/env rcm token --config <운영>`
+        # · `/usr/bin/nohup rcm serve` 가 지나간다(P3 5라운드 v2-1)
+        name="guard-wrapper-path-missed",
+        path="tools/guard_production.py",
+        old="        if _name(head) in WRAPPERS:\n",
+        new="        if head in WRAPPERS:\n",
+        tests=(
+            "tests/test_guard_production_setup.py::"
+            "test_g4_a_wrapper_named_by_its_path_does_not_hide_rcm",
+        ),
+    ),
+    Mutant(
+        # 반복한 값 플래그의 앞 값을 보지 않는다 — `--data-dir <운영> --data-dir /tmp/d` 처럼 앞에
+        # 둔 운영 값이 빠진다(P3 5라운드 v2-3)
+        name="guard-setup-earlier-values-skipped",
+        path="tools/guard_production.py",
+        old="    for flag in _SETUP_VALUE_FLAGS:\n",
+        new="    return out\n    for flag in _SETUP_VALUE_FLAGS:\n",
+        tests=(
+            "tests/test_guard_production_setup.py::"
+            "test_g6_an_earlier_value_of_a_repeated_flag_is_judged_too",
+        ),
+    ),
+    Mutant(
+        # 앞머리의 상대 HOME · XDG_CONFIG_HOME 을 받는다 — 작업 폴더에 기댄 자리를 훅이 믿는다
+        # (P3 5라운드 v2-3)
+        name="guard-setup-relative-home-allowed",
+        path="tools/guard_production.py",
+        old=(
+            '        if value and not (value.startswith("/") or (name in _ENV_TILDE_OK and '
+            "_anchored(value))):\n"
+        ),
+        new="        if False:\n",
+        tests=(
+            "tests/test_guard_production_setup.py::"
+            "test_tr33_a_relative_home_or_config_home_in_front_is_denied",
+        ),
+    ),
+    Mutant(
+        # 앞머리 값의 맨 앞이 아닌 `~`(`a:~/b`)를 받는다 — 셸은 펼치고 훅은 글자로 본다(P3 5라운드
+        # v2-3)
+        name="guard-setup-inner-tilde-allowed",
+        path="tools/guard_production.py",
+        old='        if "~" in value[1:]:\n',
+        new="        if False:\n",
+        tests=(
+            "tests/test_guard_production_setup.py::"
+            "test_g6_a_tilde_past_the_start_of_a_prefix_value_is_not_the_plain_shape",
+        ),
+    ),
+    Mutant(
+        # 경로 값의 `~` 를 셸(세션의 HOME)로 푸는 갈래를 뺀다 — `HOME=<시험> rcm setup --data-dir
+        # ~/.local/share/rcm` 이 운영 data_dir 을 겨눠도 지나간다(P3 5라운드 v2-3)
+        name="guard-setup-session-tilde-skipped",
+        path="tools/guard_production.py",
+        old="            options.append(_home_joined(session_home, value))\n",
+        new="            pass\n",
+        tests=(
+            "tests/test_guard_production_setup.py::"
+            "test_tr33_the_shell_expands_tilde_and_variables_with_its_own_home_not_the_prefix",
+        ),
+    ),
+    Mutant(
+        # 허용 모양의 `--help` 도 해석기에 넘긴다 — 해석기가 거절해 평범한 `rcm setup --help` 가
+        # 막힌다(P3 5라운드 v2-3)
+        name="guard-setup-help-judged",
+        path="tools/guard_production.py",
+        old="    if _wants_help(list(plain.args)):\n        return None\n",
+        new="",
+        tests=(
+            "tests/test_guard_production_setup.py::"
+            "test_tr20_the_plain_shapes_reach_the_resolver_and_pass",
+        ),
+    ),
+    # ── M5t-a PR4 P5 GAP (batch 7) — setup 의 출력 · 조회 · 스캔 ──
+    Mutant(
+        # launchctl 의 0 아닌 종료를 모두 「올라가지 않음」으로 읽는다 — 도메인이 없는 머신에서
+        # 「모름」 경고 없이 시작 명령을 찍는다(P5 A-E2)
+        name="setup-launchd-unknown-read-as-absent",
+        path="src/remote_ci_monitor/setup.py",
+        old="        return False if LAUNCHD_NO_SERVICE in text else None\n",
+        new="        return False\n",
+        tests=("tests/test_setup.py::test_s7_launchd_only_a_missing_service_is_not_loaded",),
+    ),
+    Mutant(
+        # systemctl 의 버스 실패(1)도 「올라가지 않음」으로 읽는다(P5 A-E2)
+        name="setup-systemd-unknown-read-as-absent",
+        path="src/remote_ci_monitor/setup.py",
+        old="    if active is None or active[0] != SYSTEMD_INACTIVE:\n",
+        new="    if active is None:\n",
+        tests=("tests/test_setup.py::test_s7_systemd_only_an_inactive_unit_is_not_loaded",),
+    ),
+    Mutant(
+        # is-active 의 3 을 stdout 과 상관없이 「없음」으로 읽는다 — activating · reloading 인
+        # 유닛이 「올라가지 않음」이 된다(P6 재확인 4 · v1-2)
+        name="setup-systemd-activating-read-as-absent",
+        path="src/remote_ci_monitor/setup.py",
+        old="    return False if state in SYSTEMD_ABSENT_STATES else None\n",
+        new="    return False\n",
+        tests=("tests/test_setup.py::test_b8_4_systemd_exit_3_is_absent_only_for_an_absent_state",),
+    ),
+    Mutant(
+        # `--bind` 의 이름을 받는다 — 묶어 보는 자리에서 DNS · mDNS 로 이름을 푼다(P5 A-E7)
+        name="setup-bind-name-resolved",
+        path="src/remote_ci_monitor/setup.py",
+        old=(
+            "        problem = core.address_problem(bind)  "
+            "# 이름은 풀지 않는다 — DNS · mDNS 를 묻지 않는다\n"
+        ),
+        new=(
+            "        problem = None if world.is_local_address(bind) else "
+            "core.address_problem(bind)\n"
+        ),
+        tests=("tests/test_setup.py::test_s10_bind_takes_an_address_not_a_name",),
+    ),
+    Mutant(
+        # 괄호를 친 IPv6 주소(`[::1]`)를 이름이라고 거절한다 — 무엇을 고칠지 틀리게 말한다
+        # (P6 재확인 6)
+        name="setup-bind-brackets-called-a-name",
+        path="src/remote_ci_monitor/core/setup.py",
+        old="        return BRACKETED_ADDRESS\n",
+        new="        return NAME_NOT_ADDRESS\n",
+        tests=("tests/test_setup.py::test_b8_6_a_bracketed_bind_is_told_to_drop_the_brackets",),
+    ),
+    Mutant(
+        # 모두 0 인 IPv6(`0:0:0:0:0:0:0:0`)를 그대로 적는다 — `::` 과 다른 글자라 「모든 주소」
+        # 규칙이 보지 못한다(P6 재확인 6)
+        name="setup-bind-ipv6-not-normalized",
+        path="src/remote_ci_monitor/setup.py",
+        old="        bind = core.normal_address(bind)\n",
+        new="        pass\n",
+        tests=(
+            "tests/test_setup.py::test_b8_6_an_all_zero_ipv6_bind_is_written_as_the_all_address",
+        ),
+    ),
+    Mutant(
+        # 역할 스캔이 읽지 못한 설정으로 setup 을 멈춘다 — TOML · UTF-8 이 아닌 server.toml 하나가
+        # 워커 setup 도, `--force config` 로 고치는 길도 막는다(P5 A-E5)
+        name="setup-unreadable-config-blocks",
+        path="src/remote_ci_monitor/setup.py",
+        old="    roles_here, unread = scan_roles(os.environ)\n",
+        new="    roles_here, unread = existing_roles(os.environ), None\n",
+        tests=("tests/test_setup.py::test_s9_an_unreadable_existing_config_is_a_warning",),
+    ),
+    Mutant(
+        # 읽지 못한 서버 설정의 길에서 클라이언트 역할을 찾지 않는다 — client.toml · RCM_SERVER 가
+        # 있어도 역할 목록에서 빠진다(P6 재확인 5 · v1-3)
+        name="setup-unreadable-config-drops-the-client",
+        path="src/remote_ci_monitor/setup.py",
+        old=(
+            '        if client is not None or environ.get("RCM_SERVER") or '
+            'environ.get("RCM_TOKEN"):\n'
+        ),
+        new="        if False:\n",
+        tests=(
+            "tests/test_setup.py::"
+            "test_b8_5_an_unreadable_server_config_still_finds_the_client_role",
+        ),
+    ),
+    Mutant(
+        # setup 의 systemd 워커 유닛이 `init worker` 의 것으로 돌아간다 — 라벨 로그 · HOME 이 없고
+        # 머리 주석이 `rcm init worker` 를 말한다(P5 B-E13 · A-E9)
+        name="setup-worker-unit-without-log-and-home",
+        path="src/remote_ci_monitor/setup.py",
+        old="    return core.worker_unit(\n",
+        new="    return cli.worker_unit(rcm, plan.config, home)\n    return core.worker_unit(\n",
+        tests=(
+            "tests/test_setup.py::test_s6_the_systemd_worker_unit_logs_to_its_label_and_sets_home",
+        ),
+    ),
+    Mutant(
+        # 서비스 관리자가 없는 OS 에서 토큰 명령을 찍지 않는다 — 코디네이터를 손으로 띄운 사람이
+        # 같은 빌드로 토큰을 만드는 길을 모른다(P5 A-E3)
+        name="setup-tokens-dropped-without-a-manager",
+        path="src/remote_ci_monitor/setup.py",
+        old='            plan.tokens = core.token_commands(rcm or Path("rcm"), plan.config)\n',
+        new="            pass\n",
+        tests=("tests/test_setup.py::test_s8_tokens_are_printed_without_a_service_manager",),
+    ),
+    Mutant(
+        # 바꿔 끼우는 순서를 찍지 않는다 — `--force service` 로 다시 쓴 파일이나 이미 올라간 라벨을
+        # `cp -n` 과 bootstrap 만으로는 바꿀 수 없다(P5 B-E2)
+        name="setup-swap-order-not-printed",
+        path="src/remote_ci_monitor/setup.py",
+        old="    plan.replacing = bool(loaded) or (bool(forced) and staged.exists())\n",
+        new="    plan.replacing = False\n",
+        tests=(
+            "tests/test_setup.py::test_s1_a_loaded_label_prints_the_launchd_swap_order",
+            "tests/test_setup.py::test_s1_force_service_prints_the_systemd_swap_order",
+        ),
+    ),
+    Mutant(
+        # linger 줄을 시작 명령 뒤로 돌린다 — 헤드리스 Linux 에서 user manager 없이 시작 명령이 먼저
+        # 실패한다(P5 B-E5)
+        name="setup-linger-after-the-start",
+        path="src/remote_ci_monitor/setup.py",
+        old='            err.write(f"  {LINGER_LINE}\\n")\n',
+        new="            pass\n",
+        tests=("tests/test_setup.py::test_s3_on_linux_linger_comes_before_the_start",),
+    ),
+    Mutant(
+        # 워커도 서비스 시작 명령을 토큰보다 먼저 찍는다 — 토큰 없이 시작한 워커는 거절당하며
+        # 재시작을 되풀이한다(P5 B-E9)
+        name="setup-worker-starts-before-its-token",
+        path="src/remote_ci_monitor/setup.py",
+        old="    token_first = plan.role == dc.ROLE_WORKER\n",
+        new="    token_first = False\n",
+        tests=(
+            "tests/test_setup.py::test_s5_a_worker_puts_the_token_in_before_starting_the_service",
+        ),
+    ),
+    Mutant(
+        # 제거하는 한 줄을 찍지 않는다 — 되돌리는 길(bootout · disable, 설치한 파일)을 모른다
+        # (P5 B-E3)
+        name="setup-remove-line-dropped",
+        path="src/remote_ci_monitor/setup.py",
+        old='    err.write(f"{removal}\\n")\n',
+        new="    pass\n",
+        tests=(
+            "tests/test_setup.py::test_s2_the_output_says_how_to_remove_it",
+            "tests/test_setup.py::test_s2_a_client_is_told_which_file_to_remove",
+        ),
+    ),
+    Mutant(
+        # 제거 줄이 설치 자리의 파일을 cmp 없이 지운다 — setup 이 쓰지 않은 같은 이름의 서비스를
+        # 내리고 지우라고 한다(P6 재확인 3 · v2-3)
+        name="setup-remove-line-without-cmp",
+        path="src/remote_ci_monitor/core/setup.py",
+        old=(
+            '            service = f"{same} && {{ launchctl bootout {gui_domain(uid)}/{q(label)}; '
+            '{gone}; }}; "\n'
+        ),
+        new=(
+            '            service = f"{{ launchctl bootout {gui_domain(uid)}/{q(label)}; '
+            '{gone}; }}; "\n'
+        ),
+        tests=(
+            "tests/test_setup.py::"
+            "test_b8_3_the_remove_line_takes_the_installed_file_only_when_setup_wrote_it",
+        ),
+    ),
+    Mutant(
+        # 이미 올라간 라벨이어도 제거 줄이 아무 말을 하지 않는다 — setup 이 「건드리지 않는다」고
+        # 한 서비스를 setup 의 것처럼 지우라고 읽힌다(P6 재확인 3)
+        name="setup-remove-line-silent-on-a-preloaded-label",
+        path="src/remote_ci_monitor/core/setup.py",
+        old="    if service and preloaded:\n",
+        new="    if False:\n",
+        tests=("tests/test_setup.py::test_b8_3_a_label_already_loaded_may_not_be_setups",),
+    ),
+    Mutant(
+        # 제거 줄이 내리기의 성공에 지우기를 건다 — 이미 내려간 서비스면 설치 자리의 파일이
+        # 남는다(P6 재확인 v1-5 · v2-4)
+        name="setup-remove-line-unload-gates-the-rm",
+        path="src/remote_ci_monitor/core/setup.py",
+        old=(
+            '            service = f"{same} && {{ launchctl bootout {gui_domain(uid)}/{q(label)}; '
+            '{gone}; }}; "\n'
+        ),
+        new=(
+            '            service = f"{same} && launchctl bootout {gui_domain(uid)}/{q(label)} && '
+            '{gone}; "\n'
+        ),
+        tests=(
+            "tests/test_setup.py::"
+            "test_b9_the_remove_line_removes_setups_file_even_when_the_unload_fails",
+        ),
+    ),
+    Mutant(
+        # is-active 의 `failed` 를 「없음」으로 읽는다 — 실패한 채 올라가 있는 같은 라벨을 setup 이
+        # 모른다(P6 재확인 v1-7)
+        name="setup-systemd-failed-read-as-absent",
+        path="src/remote_ci_monitor/setup.py",
+        old="    if state == SYSTEMD_FAILED:\n",
+        new="    if False:\n",
+        tests=("tests/test_setup.py::test_b9_systemd_failed_means_the_unit_is_there",),
+    ),
+    Mutant(
+        # 운영 data_dir 「안」을 보지 않는다 — `--data-dir <운영>/x` 가 지나간다(결정 352)
+        name="setup-production-inside-missed",
+        path="src/remote_ci_monitor/core/setup.py",
+        old='    return text == top or text.startswith(top.rstrip("/") + "/")\n',
+        new="    return text == top\n",
+        tests=(
+            "tests/test_setup.py::test_b9_352_setup_refuses_a_production_target_whatever_shell_built_it",
+        ),
+    ),
+    Mutant(
+        # 읽지 못한 rcm 서비스를 건너뛴다 — 무엇을 쓰는지 모르는데 쓴다(결정 352, 닫는 쪽)
+        name="setup-production-unreadable-ignored",
+        path="src/remote_ci_monitor/core/setup.py",
+        old="        if svc.problem is not None:\n",
+        new="        if False:\n",
+        tests=("tests/test_setup.py::test_b9_352_an_rcm_service_setup_cannot_read_closes",),
+    ),
+    Mutant(
+        # 운영 라벨을 보지 않는다 — 운영 서비스와 같은 라벨의 서비스 파일을 쓴다(결정 352)
+        name="setup-production-label-ignored",
+        path="src/remote_ci_monitor/core/setup.py",
+        old="        if mine.intersection(names(svc.names)) and not own(svc):\n",
+        new="        if False:\n",
+        tests=(
+            "tests/test_setup.py::test_b9_352_the_production_label_needs_force_service_and_the_same_file",
+        ),
+    ),
+    Mutant(
+        # `--force service` 만으로 운영 라벨을 받는다 — 설치 파일이 setup 이 쓴 것인지(cmp) 보지
+        # 않는다(결정 352)
+        name="setup-production-own-without-cmp",
+        path="src/remote_ci_monitor/core/setup.py",
+        old="        return named and placed and svc.data is not None and svc.data in written\n",
+        new="        return named and placed\n",
+        tests=(
+            "tests/test_setup.py::test_b9_352_the_production_label_needs_force_service_and_the_same_file",
+            "tests/test_setup.py::test_b9_352_setups_own_installed_service_still_guards_its_config",
+        ),
+    ),
+    Mutant(
+        # setup 자신의 서비스(라벨 · `--force service` · 같은 바이트)면 설정 · data_dir · venv ·
+        # 체크아웃도 견주지 않는다 — 같은 인자에 `--force all` 이면 그 서비스의 설정을 덮는다
+        # (batch 10 H1)
+        name="setup-production-own-skips-every-piece",
+        path="src/remote_ci_monitor/core/setup.py",
+        old="        for svc in services:\n            for attr, what in PRODUCTION_PIECES:\n",
+        new=(
+            "        for svc in services:\n            if own(svc):\n                continue\n"
+            "            for attr, what in PRODUCTION_PIECES:\n"
+        ),
+        tests=(
+            "tests/test_setup.py::test_b9_352_setups_own_installed_service_still_guards_its_config",
+            "tests/test_setup.py::test_b10_h1_setups_own_service_is_free_of_the_label_check_only",
+        ),
+    ),
+    Mutant(
+        # 쓰기 직전의 두 번째 확인이 없다 — 스캔 뒤에 생긴 유닛을 못 본다(결정 352)
+        name="setup-production-second-check-dropped",
+        path="src/remote_ci_monitor/setup.py",
+        old="        _check_production(args, plan, world)  # 쓰기 직전에 한 번 더(결정 352)\n",
+        new="        pass  # 쓰기 직전에 한 번 더(결정 352)\n",
+        tests=(
+            "tests/test_setup.py::test_b9_352_a_unit_that_appears_after_the_scan_is_seen_before_writing",
+        ),
+    ),
+    Mutant(
+        # 대상의 심볼릭 링크를 풀지 않는다 — 운영 data_dir 을 가리키는 링크가 지나간다(결정 352)
+        name="setup-production-symlink-not-resolved",
+        path="src/remote_ci_monitor/setup.py",
+        old="        {flag: real_path(path) for flag, path in targets.items()},\n",
+        new="        dict(targets),\n",
+        tests=("tests/test_setup.py::test_b9_352_a_symlink_to_the_production_data_dir_is_refused",),
+    ),
+    Mutant(
+        # darwin 에서도 대소문자를 가린다 — 대소문자만 다른 운영 경로가 지나간다(결정 352)
+        name="setup-production-case-not-folded",
+        path="src/remote_ci_monitor/setup.py",
+        old="        fold_case=fold,\n        installed=",
+        new="        fold_case=False,\n        installed=",
+        tests=("tests/test_setup.py::test_b9_352_darwin_compares_paths_without_case",),
+    ),
+    Mutant(
+        # `$XDG_CONFIG_HOME/systemd/user` 를 찾지 않는다(결정 352)
+        name="setup-scan-xdg-units-missed",
+        path="src/remote_ci_monitor/setup.py",
+        old='        found.append((Path(xdg) / "systemd" / "user", False, first))\n',
+        new="        pass\n",
+        tests=("tests/test_setup.py::test_b9_352_systemd_units_in_every_supported_place_are_seen",),
+    ),
+    Mutant(
+        # 시스템 자리(`/Library/LaunchDaemons` · `/etc/systemd/system` …)를 찾지 않는다(결정 352)
+        name="setup-scan-system-places-missed",
+        path="src/remote_ci_monitor/setup.py",
+        old=(
+            "    found += [(place, place.name in _ROOT_PLACES, first) for place in "
+            "SYSTEM_SERVICE_PLACES]\n"
+        ),
+        new="    found += []\n",
+        tests=("tests/test_setup.py::test_b9_352_systemd_units_in_every_supported_place_are_seen",),
+    ),
+    Mutant(
+        # 스캔이 `$HOME` 만 본다 — `HOME=/tmp/x rcm setup --config <진짜 홈>/…` 가 진짜 홈의
+        # 운영 설정을 덮는다(batch 10 H3)
+        name="setup-scan-account-home-missed",
+        path="src/remote_ci_monitor/setup.py",
+        old="    return [Path.home(), account]\n",
+        new="    return [Path.home()]\n",
+        tests=("tests/test_setup.py::test_b10_h3_the_scan_reads_the_account_home_not_only_home",),
+    ),
+    Mutant(
+        # `--service-file` 이 가리키는 아무 파일의 바이트가 `written` 에 든다 — 운영 plist 의
+        # 사본을 주면 운영 라벨이 setup 의 것이 된다(batch 10 H2)
+        name="setup-production-written-reads-any-service-file",
+        path="src/remote_ci_monitor/setup.py",
+        old="        real_path(plan.service), real_path(plan.config.parent), fold_case=fold\n",
+        new="        real_path(plan.service), real_path(plan.service), fold_case=fold\n",
+        tests=(
+            "tests/test_setup.py::"
+            "test_b10_h2_a_copy_outside_the_config_folder_does_not_make_the_label_setups",
+        ),
+    ),
+    Mutant(
+        # own 이 서비스 파일이 그 라벨의 설치 자리인지 보지 않는다(batch 10 H2)
+        name="setup-production-own-anywhere",
+        path="src/remote_ci_monitor/core/setup.py",
+        old=(
+            "        placed = installed is not None and same_or_inside(svc.file, installed, "
+            "fold_case=fold_case)\n"
+        ),
+        new="        placed = True\n",
+        tests=(
+            "tests/test_setup.py::"
+            "test_b10_h2_own_needs_the_install_place_and_the_service_file_is_refused_first",
+        ),
+    ),
+    Mutant(
+        # 설치 자리를 글자로만 견준다 — LaunchAgents 를 가리키는 폴더 링크 안에 쓴다(batch 10 H2)
+        name="setup-install-place-links-not-resolved",
+        path="src/remote_ci_monitor/core/setup.py",
+        old="        if resolve is not None and same_or_inside(\n",
+        new="        if False and same_or_inside(\n",
+        tests=("tests/test_setup.py::test_b10_h2_an_install_place_is_found_through_links_and_xdg",),
+    ),
+    Mutant(
+        # `$XDG_CONFIG_HOME/systemd/user` 가 설치 자리가 아니다 — setup 이 그 안에 쓴다(batch 10 H2)
+        name="setup-install-place-xdg-missed",
+        path="src/remote_ci_monitor/core/setup.py",
+        old='        user += (xdg / "systemd" / "user",)\n',
+        new="        pass\n",
+        tests=("tests/test_setup.py::test_b10_h2_an_install_place_is_found_through_links_and_xdg",),
+    ),
+    Mutant(
+        # 유닛의 `--data-dir` 플래그와 env 값을 data_dir 로 보지 않는다(batch 10 M1)
+        name="setup-scan-flag-and-env-data-dirs-missed",
+        path="src/remote_ci_monitor/setup.py",
+        old=(
+            "        raws += [raw for raw in (sf.env.get(env_name), "
+            'launch.get("data_dir")) if raw]\n'
+        ),
+        new="        raws += []\n",
+        tests=("tests/test_setup.py::test_b10_m1_every_data_dir_a_unit_can_use_is_protected",),
+    ),
+    Mutant(
+        # 다른 data_dir 들을 모아도 견주지 않는다(batch 10 M1)
+        name="setup-production-other-data-dirs-unchecked",
+        path="src/remote_ci_monitor/core/setup.py",
+        old='    ("data_dirs", "data_dir"),\n',
+        new="",
+        tests=("tests/test_setup.py::test_b10_m1_every_data_dir_a_unit_can_use_is_protected",),
+    ),
+    Mutant(
+        # `bin/python` 의 심볼릭 링크를 따라간다 — `python -m` 유닛의 venv 를 놓친다(batch 10 M2)
+        name="setup-scan-python-symlink-followed",
+        path="src/remote_ci_monitor/setup.py",
+        old="    for exe in (Path(os.path.abspath(found)), Path(os.path.realpath(found))):\n",
+        new="    for exe in (Path(os.path.realpath(found)),):\n",
+        tests=(
+            "tests/test_setup.py::test_b10_m2_a_python_m_unit_names_the_venv_its_python_sits_in",
+        ),
+    ),
+    Mutant(
+        # `python -m remote_ci_monitor` 꼴을 rcm 의 하위 명령으로 풀지 않는다(batch 10 M2)
+        name="setup-scan-package-module-unread",
+        path="src/remote_ci_monitor/setup.py",
+        old="        if argv[1:3] == _PACKAGE_MODULE:\n",
+        new="        if False:\n",
+        tests=(
+            "tests/test_setup.py::test_b10_m2_a_python_m_unit_names_the_venv_its_python_sits_in",
+        ),
+    ),
+    Mutant(
+        # `EnvironmentFile=` · 펼치지 않은 지정자 · 읽지 못한 줄이 있는 rcm 유닛을 그대로 믿는다
+        # (batch 10 M3)
+        name="setup-scan-unfollowed-lines-trusted",
+        path="src/remote_ci_monitor/setup.py",
+        old="    skipped = [*sf.unfollowed, *sf.unreadable_lines]\n",
+        new="    skipped = []\n",
+        tests=("tests/test_setup.py::test_b10_m3_a_unit_with_lines_setup_does_not_follow_closes",),
+    ),
+    Mutant(
+        # stat 의 PermissionError 가 「unexpected error」로 새어 나간다 — 파일 이름이 없다
+        # (batch 10 L1)
+        name="setup-scan-stat-error-escapes",
+        path="src/remote_ci_monitor/setup.py",
+        old="            except OSError as e:  # stat 할 권한이 없다",
+        new="            except ArithmeticError as e:  # stat 할 권한이 없다",
+        tests=(
+            "tests/test_setup.py::"
+            "test_b10_l1_a_service_file_setup_may_not_read_closes_without_a_traceback",
+        ),
+    ),
+    Mutant(
+        # 제거 줄이 내리기의 실패와 상관없이 설치 파일을 지운다는 안내가 없다(batch 10 L2)
+        name="setup-remove-note-dropped",
+        path="src/remote_ci_monitor/setup.py",
+        old='        err.write(f"{core.REMOVE_NOTE}\\n")\n',
+        new="        pass\n",
+        tests=(
+            "tests/test_setup.py::"
+            "test_b10_l2_the_remove_line_says_it_deletes_even_when_the_unload_fails",
+        ),
+    ),
+    Mutant(
+        # 읽지 못한 rcm 같은 파일을 rcm 이 아닌 것으로 본다(결정 352, 닫는 쪽)
+        name="setup-scan-unreadable-rcm-skipped",
+        path="src/remote_ci_monitor/setup.py",
+        old="            return core.RcmService(stem, file, (stem,), problem=reason)\n",
+        new="            return None\n",
+        tests=("tests/test_setup.py::test_b9_352_an_rcm_service_setup_cannot_read_closes",),
+    ),
+    Mutant(
+        # `--config` 없는 rcm 서비스를 건너뛴다 — 어느 설정 · data_dir 인지 모르는데 쓴다(결정 352)
+        name="setup-scan-no-config-allowed",
+        path="src/remote_ci_monitor/setup.py",
+        old=(
+            '            return problem("it names no --config, so setup cannot tell which config '
+            'it reads")\n'
+        ),
+        new="            return None\n",
+        tests=("tests/test_setup.py::test_b9_352_an_rcm_service_setup_cannot_read_closes",),
+    ),
+    Mutant(
+        # 서비스 venv 의 editable 소스(체크아웃)를 모른다(결정 352)
+        name="setup-scan-checkout-missed",
+        path="src/remote_ci_monitor/setup.py",
+        old="    checkout = _editable_checkout(venv) if venv is not None else None\n",
+        new="    checkout = None\n",
+        tests=(
+            "tests/test_setup.py::test_b9_352_setup_refuses_a_production_target_whatever_shell_built_it",
+        ),
+    ),
+    Mutant(
+        # 서비스가 실행하는 venv 를 모른다(결정 352)
+        name="setup-scan-venv-missed",
+        path="src/remote_ci_monitor/setup.py",
+        old="    venv = _venv_of(sf.program, sf.env)\n",
+        new="    venv = None\n",
+        tests=(
+            "tests/test_setup.py::test_b9_352_setup_refuses_a_production_target_whatever_shell_built_it",
+        ),
+    ),
+    Mutant(
+        # 마지막 doctor 줄이 맨 이름 rcm 이다 — PATH 의 다른 빌드가 그 머신을 잰다(P5 B-E7)
+        name="setup-doctor-line-bare-rcm",
+        path="src/remote_ci_monitor/core/setup.py",
+        old='    words = [q(str(rcm)) if rcm is not None else "rcm", "doctor", "--role", role]\n',
+        new='    words = ["rcm", "doctor", "--role", role]\n',
+        tests=(
+            "tests/test_setup.py::test_s4_the_last_doctor_line_names_the_rcm_and_the_paths_given",
+        ),
+    ),
+    Mutant(
+        # 사용자가 준 `--config` 를 마지막 doctor 줄에 붙이지 않는다 — doctor 가 기본 자리의 다른
+        # 설정을 잰다(P5 B-E7)
+        name="setup-doctor-line-drops-the-config",
+        path="src/remote_ci_monitor/setup.py",
+        old="    plan.doctor_config = plan.config if args.config is not None else None\n",
+        new="    plan.doctor_config = None\n",
+        tests=(
+            "tests/test_setup.py::test_s4_the_last_doctor_line_names_the_rcm_and_the_paths_given",
+        ),
+    ),
+    # ── batch 11 (PR #272): 유닛을 systemd 처럼 읽기 · 읽지 못한 파일의 이름 · 남은 LOW ──
+    Mutant(
+        # 줄 끝 역슬래시로 이어진 ExecStart= 를 잇지 않는다 — argv 가 비어 이름이 rcm 같지 않은
+        # 유닛을 건너뛴다(batch 11 HIGH)
+        name="doctor-unit-lines-not-continued",
+        path="src/remote_ci_monitor/doctor.py",
+        old='        if (len(raw) - len(raw.rstrip("\\\\"))) % 2:\n',
+        new="        if False:\n",
+        tests=(
+            "tests/test_setup.py::"
+            "test_b11_h_a_continued_execstart_unit_is_read_as_systemd_reads_it",
+        ),
+    ),
+    Mutant(
+        # 주석 줄을 버리지 않는다 — 잇는 중의 주석이 argv 에 섞이고, 역슬래시로 끝나는 주석이
+        # 다음 ExecStart= 를 삼킨다(batch 11 HIGH)
+        name="doctor-unit-comments-joined",
+        path="src/remote_ci_monitor/doctor.py",
+        old='        if raw.lstrip()[:1] in ("#", ";"):\n            continue\n',
+        new="        if False:\n            continue\n",
+        tests=(
+            "tests/test_setup.py::"
+            "test_b11_h_a_continued_execstart_unit_is_read_as_systemd_reads_it",
+            "tests/test_setup.py::"
+            "test_b11_h_a_comment_ending_in_a_backslash_does_not_swallow_the_next_line",
+        ),
+    ),
+    Mutant(
+        # `ExecStart = …` 의 `=` 앞 빈칸을 남긴다 — 키가 ExecStart 가 아니게 된다(batch 11 HIGH)
+        name="doctor-unit-key-spaces-kept",
+        path="src/remote_ci_monitor/doctor.py",
+        old="        key, value = key.strip(), value.strip()\n",
+        new="        pass\n",
+        tests=(
+            "tests/test_setup.py::"
+            "test_b11_h_a_continued_execstart_unit_is_read_as_systemd_reads_it",
+        ),
+    ),
+    Mutant(
+        # 끝내 읽지 못한 ExecStart= 에 rcm 바이트가 있어도 이름만 보고 건너뛴다(batch 11 HIGH)
+        name="setup-scan-unread-execstart-rcm-bytes-skipped",
+        path="src/remote_ci_monitor/setup.py",
+        old="        if exec_unread and data is not None and _RCM_BYTES.search(data):\n",
+        new="        if False:\n",
+        tests=(
+            "tests/test_setup.py::test_b11_h_an_execstart_setup_cannot_read_with_rcm_bytes_closes",
+        ),
+    ),
+    Mutant(
+        # 읽지 못한 파일을 이름과 상관없이 경고만 하고 건너뛴다 — rcm 이름의 파일도 지나간다
+        # (batch 11 MED)
+        name="setup-scan-unread-rcm-name-warned",
+        path="src/remote_ci_monitor/setup.py",
+        old="    if unread_may_be_rcm(path):\n",
+        new="    if False:\n",
+        tests=("tests/test_setup.py::test_b11_m_an_unreadable_file_with_an_rcm_name_still_closes",),
+    ),
+    Mutant(
+        # 읽지 못한 파일을 이름과 상관없이 거절한다 — 다른 프로그램의 파일 하나가 setup 전체를
+        # 막는다(batch 11 MED)
+        name="setup-scan-unread-other-name-refused",
+        path="src/remote_ci_monitor/setup.py",
+        old="    if unread_may_be_rcm(path):\n",
+        new="    if True:\n",
+        tests=(
+            "tests/test_setup.py::test_b11_m_an_unreadable_file_another_program_names_only_warns",
+        ),
+    ),
+    Mutant(
+        # 링크가 가리키는 파일의 이름을 보지 않는다 — `ci-hub.service` → rcm-server.service 가
+        # 경고만 받는다(batch 11 MED)
+        name="setup-scan-unread-link-target-name-missed",
+        path="src/remote_ci_monitor/setup.py",
+        old="        names = dict.fromkeys((path.name, real_path(path).name))\n",
+        new="        names = dict.fromkeys((path.name,))\n",
+        tests=("tests/test_setup.py::test_b11_m_an_unreadable_file_with_an_rcm_name_still_closes",),
+    ),
+    Mutant(
+        # UTF-8 이 아닌 이름을 다른 프로그램의 이름으로 본다 — 판단할 수 없는 이름이 지나간다
+        # (batch 11 MED)
+        name="setup-scan-unread-undecodable-name-trusted",
+        path="src/remote_ci_monitor/setup.py",
+        old="        except UnicodeDecodeError:\n            return True\n",
+        new="        except UnicodeDecodeError:\n            return False\n",
+        tests=("tests/test_setup.py::test_b11_m_a_name_setup_cannot_judge_closes",),
+    ),
+    Mutant(
+        # 자기 서비스의 조각을 지키는 거절이 다음 할 일을 말하지 않는다(batch 11 L1)
+        name="setup-production-own-hint-dropped",
+        path="src/remote_ci_monitor/core/setup.py",
+        old='                        hint = f"; {OWN_SERVICE_NEXT}" if ours(svc) else ""\n',
+        new='                        hint = ""\n',
+        tests=(
+            "tests/test_setup.py::test_b11_l1_the_own_service_refusal_says_to_remove_it_first",
+            "tests/test_setup.py::test_b11_l1_the_hint_is_only_for_the_service_setup_wrote",
+            "tests/test_setup.py::"
+            "test_b11_l2_force_service_alone_on_the_installed_service_is_refused",
+        ),
+    ),
+    Mutant(
+        # passwd 에서 홈을 찾지 못해도 거절하지 않는다 — `$HOME` 만 믿는다(batch 11 L3)
+        name="setup-scan-missing-account-home-trusted",
+        path="src/remote_ci_monitor/setup.py",
+        old="    if account is None:\n        raise SetupFailed(\n",
+        new="    if account is None:\n        return [Path.home()]\n        raise SetupFailed(\n",
+        tests=("tests/test_setup.py::test_b11_l3_no_account_home_refuses",),
+    ),
+    Mutant(
+        # ExecStart 의 `$VAR` · `${VAR}` 를 글자 그대로 믿는다(batch 11 L4)
+        name="setup-scan-exec-variables-trusted",
+        path="src/remote_ci_monitor/setup.py",
+        old="    if sf.launch_vars:  # systemd 는 펼치고 setup 은 펼치지 않는다(batch 11 L4)\n",
+        new="    if False:\n",
+        tests=(
+            "tests/test_setup.py::"
+            "test_b11_l4_an_execstart_with_variables_setup_cannot_expand_closes",
+        ),
+    ),
+    Mutant(
+        # `$$`(글자 `$`)도 변수로 본다 — 변수가 없는 유닛을 거절한다(batch 11 L4)
+        name="doctor-exec-variable-dollar-dollar-counted",
+        path="src/remote_ci_monitor/doctor.py",
+        old='        if word.startswith("$$", i):\n',
+        new="        if False:\n",
+        tests=(
+            "tests/test_setup.py::"
+            "test_b11_l4_an_execstart_with_variables_setup_cannot_expand_closes",
+        ),
+    ),
+    Mutant(
+        # darwin 에서 라벨을 대소문자 그대로 견준다(batch 11 L5)
+        name="setup-production-label-case-not-folded",
+        path="src/remote_ci_monitor/core/setup.py",
+        old=(
+            '        return {unicodedata.normalize("NFC", n).casefold() if fold_case else n '
+            "for n in of}\n"
+        ),
+        new="        return set(of)\n",
+        tests=("tests/test_setup.py::test_b11_l5_darwin_compares_labels_without_case",),
+    ),
+    Mutant(
+        # 다른 이름의 링크가 가리키는 rcm 을 rcm 으로 보지 않는다(batch 12 MED)
+        name="setup-scan-rcm-program-link-missed",
+        path="src/remote_ci_monitor/setup.py",
+        old='    if real.name == "rcm":\n        return True\n',
+        new='    if real.name == "rcm":\n        return False\n',
+        tests=("tests/test_setup.py::test_b12_m_a_program_that_is_rcm_under_another_name_is_read",),
+    ),
+    Mutant(
+        # rcm 이 설치된 venv 의 다른 이름 실행 파일을 rcm 으로 보지 않는다(batch 12 MED)
+        name="setup-scan-rcm-venv-script-missed",
+        path="src/remote_ci_monitor/setup.py",
+        old='    return (venv / "pyvenv.cfg").is_file() and any(installed)\n',
+        new="    return False\n",
+        tests=("tests/test_setup.py::test_b12_m_a_program_that_is_rcm_under_another_name_is_read",),
+    ),
+    Mutant(
+        # rcm 이 설치된 venv 의 파이썬도 rcm 으로 본다 — 다른 스크립트를 띄우는 서비스를
+        # 거절한다(batch 12 MED)
+        name="setup-scan-rcm-venv-python-counted",
+        path="src/remote_ci_monitor/setup.py",
+        old='    if real.name.startswith("python") or real.parent.name != "bin":\n',
+        new='    if real.parent.name != "bin":\n',
+        tests=("tests/test_setup.py::test_b12_m_a_program_in_a_venv_that_is_not_rcm_passes",),
+    ),
+    Mutant(
+        # rcm 이 설치되지 않은 venv 의 실행 파일도 rcm 으로 본다(batch 12 MED)
+        name="setup-scan-rcm-venv-not-installed-counted",
+        path="src/remote_ci_monitor/setup.py",
+        old='    return (venv / "pyvenv.cfg").is_file() and any(installed)\n',
+        new='    return (venv / "pyvenv.cfg").is_file()\n',
+        tests=("tests/test_setup.py::test_b12_m_a_program_in_a_venv_that_is_not_rcm_passes",),
+    ),
+    Mutant(
+        # 다른 이름의 rcm 의 인자를 rcm 의 파서로 읽지 않는다 — 그 서비스의 config 를
+        # 모른다(batch 12 MED)
+        name="setup-launch-rcm-program-not-parsed",
+        path="src/remote_ci_monitor/setup.py",
+        old='        return doctor.rcm_launch("rcm", ["rcm", *argv[1:]])\n',
+        new="        return None\n",
+        tests=("tests/test_setup.py::test_b12_m_a_program_that_is_rcm_under_another_name_is_read",),
+    ),
+    Mutant(
+        # 명령 줄의 rcm 낱말을 보지 않는다 — `sh -c "cd x;rcm …"` 를 건너뛴다(batch 12 MED)
+        name="setup-scan-rcm-command-words-skipped",
+        path="src/remote_ci_monitor/setup.py",
+        old="        if any(_RCM_COMMAND.search(word) for argv in commands for word in argv):\n",
+        new="        if False:\n",
+        tests=("tests/test_setup.py::test_b12_m_a_shell_command_line_that_runs_rcm_closes",),
+    ),
+    Mutant(
+        # 경로 마디 `/rcm/` 도 rcm 으로 센다 — ci-watch plist 를 거절한다(batch 12 MED)
+        name="setup-scan-rcm-command-path-segment-counted",
+        path="src/remote_ci_monitor/setup.py",
+        old="rcm(?![\\w./-])|",
+        new="rcm(?![\\w.-])|",
+        tests=("tests/test_setup.py::test_b12_m_a_command_line_without_rcm_passes",),
+    ),
+    Mutant(
+        # `[Service]` 밖의 줄도 서비스의 것으로 읽는다(batch 12 L1)
+        name="doctor-unit-other-section-read",
+        path="src/remote_ci_monitor/doctor.py",
+        old='        if section not in (None, "Service"):\n',
+        new="        if False:\n",
+        tests=("tests/test_setup.py::test_b12_l1_the_parser_knows_the_section_and_the_reset",),
+    ),
+    Mutant(
+        # 빈 `ExecStart=` 가 앞의 명령을 지우지 않는다(batch 12 L1)
+        name="doctor-unit-execstart-reset-ignored",
+        path="src/remote_ci_monitor/doctor.py",
+        old="                    execs.clear()\n",
+        new="                    pass\n",
+        tests=("tests/test_setup.py::test_b12_l1_the_parser_knows_the_section_and_the_reset",),
+    ),
+    Mutant(
+        # ExecStart= 가 여럿이면 마지막 줄만 읽는다 — 앞줄의 rcm 을 놓친다(batch 12 L1)
+        name="doctor-unit-first-rcm-execstart-not-chosen",
+        path="src/remote_ci_monitor/doctor.py",
+        old="        (e for e in execs if e[2] is not None), last\n",
+        new="        (e for e in execs if False), last\n",
+        tests=("tests/test_setup.py::test_b12_l1_every_execstart_of_the_service_section_is_read",),
+    ),
+    Mutant(
+        # rcm 을 띄우는 ExecStart= 가 둘이어도 하나만 읽고 지나간다(batch 12 L1)
+        name="setup-scan-several-rcm-execstarts-allowed",
+        path="src/remote_ci_monitor/setup.py",
+        old="    if sum(_runs_rcm(argv, sf.env) for argv in sf.exec_argvs) > 1:\n",
+        new="    if sum(_runs_rcm(argv, sf.env) for argv in sf.exec_argvs) > 2:\n",
+        tests=("tests/test_setup.py::test_b12_l1_several_execstarts_close_when_setup_cannot_tell",),
+    ),
+    Mutant(
+        # 권한이 아닌 이유로 읽지 못한 파일을 조용히 건너뛴다(batch 12 L2)
+        name="setup-scan-unread-oserror-skipped",
+        path="src/remote_ci_monitor/setup.py",
+        old=(
+            '            return _unread(path, f"setup cannot read it '
+            '({why or type(e).__name__})")\n'
+        ),
+        new="            return None\n",
+        tests=(
+            "tests/test_setup.py::"
+            "test_b12_l2_a_file_another_error_kept_from_setup_is_not_skipped_quietly",
+        ),
+    ),
+    Mutant(
+        # `~/.local/share/systemd/user` 를 보지 않는다(batch 12 L3)
+        name="setup-scan-data-home-missed",
+        path="src/remote_ci_monitor/setup.py",
+        old='        found.append((home / ".local" / "share" / "systemd" / "user", False, home))\n',
+        new="",
+        tests=("tests/test_setup.py::test_b12_l3_units_in_the_data_home_are_seen",),
+    ),
+    Mutant(
+        # `$XDG_DATA_HOME/systemd/user` 를 보지 않는다(batch 12 L3)
+        name="setup-scan-xdg-data-missed",
+        path="src/remote_ci_monitor/setup.py",
+        old='    for name in ("XDG_CONFIG_HOME", "XDG_DATA_HOME"):\n',
+        new='    for name in ("XDG_CONFIG_HOME",):\n',
+        tests=("tests/test_setup.py::test_b12_l3_units_in_the_data_home_are_seen",),
+    ),
+    Mutant(
+        # `/usr/local/lib/systemd/system` 를 보지 않는다(batch 12 L3)
+        name="setup-scan-usr-local-places-missed",
+        path="src/remote_ci_monitor/setup.py",
+        old='    Path("/usr/local/lib/systemd/system"),\n',
+        new="",
+        tests=("tests/test_setup.py::test_b12_l3_the_system_places_include_xdg_and_usr_local",),
+    ),
+    # ── M5t-a PR3 — 분배 전용 코디네이터 `lanes = 0` (docs/m5t-workplan.md §7 변이 검사) ──
+    Mutant(
+        # `lanes = 0` 에서 `@local` 을 살아 있다고 본다 — 레인이 없는 서버의 머신 목록이 로컬
+        # 머신을 받을 수 있는 자리로 보이고 머신 탭 · 점검 스위퍼가 그것을 믿는다(TL7)
+        name="m5t-lanes-zero-local-alive",
+        path="src/remote_ci_monitor/capabilities.py",
+        old="                alive=self._has_local_lanes(),\n",
+        new="                alive=True,\n",
+        tests=("tests/test_lanes_zero.py::test_tl7_at_local_is_not_alive",),
+    ),
+    Mutant(
+        # 기본 풀을 늘 뺀다 — 분배 전용 서버에서 기본 풀 워커가 다 죽어도 `pools_without_workers`
+        # 가 비어 `rcm check` 의 pools 경보가 꺼진다(TL13, batch 2 항목 3)
+        name="m5t-lanes-zero-default-pool-skipped",
+        path="src/remote_ci_monitor/remote_workers.py",
+        old="            if row.pool == DEFAULT_POOL and local_lanes:\n",
+        new="            if row.pool == DEFAULT_POOL:\n",
+        tests=(
+            "tests/test_lanes_zero.py::"
+            "test_tl13_pools_without_workers_counts_the_default_pool_only_without_local_lanes",
+        ),
+    ),
+    Mutant(
+        # 후보 함수가 `lanes = 0` 에서도 `@local` 을 남긴다 — 대기 잡이 로컬 레인을 기다리고
+        # 재시작 뒤에도 그렇다(TL4 · TL9, P5 G7)
+        name="m5t-lanes-zero-candidates-keep-local",
+        path="src/remote_ci_monitor/capabilities.py",
+        old='            views = [v for v in views if v.kind != "local"]  # 분배 전용',
+        new="            views = list(views)  # 분배 전용",
+        tests=(
+            "tests/test_lanes_zero.py::test_tl4_a_waiting_job_goes_to_the_worker_that_attaches",
+            "tests/test_lanes_zero.py::test_tl9_the_queue_survives_a_restart",
+        ),
+    ),
+    Mutant(
+        # `--machine @local` 을 분배 전용 서버에서도 받는다 — 409 대신 「machine @local is down
+        # — start rcm worker there」라는 엉뚱한 조언이 간다(TL2, P5 G7)
+        name="m5t-lanes-zero-machine-local-accepted",
+        path="src/remote_ci_monitor/server.py",
+        old="            if view.id == LOCAL_WORKER and not self._has_local_lanes():\n",
+        new="            if view.id == LOCAL_WORKER and False:\n",
+        tests=(
+            "tests/test_lanes_zero.py::"
+            "test_tl2_without_workers_a_job_waits_without_an_eta_and_at_local_is_409",
+        ),
+    ),
+    Mutant(
+        # 로컬 레인이 없어도 `@local` 의 프로브를 잰다 — 잰 보고가 있으면 `@local` 이 「받을 수
+        # 있다」로 보인다(TL8, P5 G7)
+        name="m5t-lanes-zero-local-probes-run",
+        path="src/remote_ci_monitor/capabilities.py",
+        old=(
+            "        if not self._has_local_lanes():\n"
+            "            return\n"
+            "        with self._measure_lock:\n"
+        ),
+        new="        with self._measure_lock:\n",
+        tests=("tests/test_lanes_zero.py::test_tl8_the_local_probes_do_not_run",),
+    ),
+    Mutant(
+        # 서버가 capacity 를 못 센(null) 답을 옛 서버처럼 읽어 행을 빼다 — 분배 전용 서버에서
+        # 갈 곳을 셀 수 없는데 `rcm check` 가 0 으로 끝난다(batch 2 항목 1, PLAN.md 「rcm check」)
+        name="m5t-lanes-zero-capacity-null-hidden",
+        path="src/remote_ci_monitor/cli.py",
+        old=(
+            '        return ("capacity", False if health.get("lanes") == 0 else None, '
+            "CAPACITY_UNKNOWN_TEXT)\n"
+        ),
+        new="        return None\n",
+        tests=(
+            "tests/test_lanes_zero.py::"
+            "test_tl3_rcm_check_draws_capacity_unknown_when_the_server_could_not_count",
+        ),
+    ),
+    Mutant(
+        # 분배 전용 서버의 `@local` 다시 점검이 MachineDown 으로 떨어진다 — 「start rcm worker
+        # there」라는 엉뚱한 조언(batch 2 항목 6 · P5 G6)
+        name="m5t-lanes-zero-recheck-local-down",
+        path="src/remote_ci_monitor/capabilities.py",
+        old=(
+            "        if view.id == LOCAL and not self._has_local_lanes():\n"
+            "            raise NoLocalLanes(view.id)\n"
+        ),
+        new="",
+        tests=(
+            "tests/test_lanes_zero.py::"
+            "test_tl7_recheck_on_at_local_says_this_server_has_no_local_lanes",
+        ),
+    ),
+    Mutant(
+        # `rcm check` 의 machines 행이 레인 없는 `@local` 을 센다 — 워커가 없는데 「1 machine」
+        # (batch 2 항목 6)
+        name="m5t-lanes-zero-machines-row-counts-local",
+        path="src/remote_ci_monitor/cli.py",
+        old=(
+            "    machines = [m for m in machines "
+            'if not (m.get("kind") == "local" and m.get("lanes") == 0)]\n'
+        ),
+        new="",
+        tests=(
+            "tests/test_lanes_zero.py::test_tl7_rcm_check_does_not_count_at_local_as_a_machine",
+        ),
+    ),
+    Mutant(
+        # 갈 곳 잃은 잡이 이유 메모 없이 돌아간다 — 화면이 「no capable machine · unknown」(P5 G5)
+        name="m5t-lanes-zero-no-local-lanes-note-dropped",
+        path="src/remote_ci_monitor/capabilities.py",
+        old="                if local is not None and not self._has_local_lanes():\n",
+        new="                if False:\n",
+        tests=("tests/test_lanes_zero.py::test_tl15_a_job_with_nowhere_to_go_says_no_local_lanes",),
+    ),
+    Mutant(
+        # 꼴이 깨진 capacity(문자열 · 빠진 키 · total 0 · reachable > total)를 옛 서버처럼 읽어
+        # 행을 빼다 — 분배 전용 서버의 `rcm check` 가 0 으로 끝난다(batch 3 항목 1, fail-open)
+        name="m5t-lanes-zero-capacity-malformed-hidden",
+        path="src/remote_ci_monitor/cli.py",
+        old='        return ("capacity", unknown_grade, CAPACITY_UNKNOWN_TEXT)\n',
+        new="        return None\n",
+        tests=(
+            "tests/test_lanes_zero.py::"
+            "test_tl3_rcm_check_fails_on_a_malformed_capacity_from_a_dispatch_only_server",
+            "tests/test_lanes_zero.py::test_tl3_a_malformed_capacity_draws_the_same_unknown_row_as_null",
+        ),
+    ),
+    Mutant(
+        # `/api/health` 가 불릴 때마다 같은 capacity 예외를 다시 남긴다 — `last_error` 의 다른
+        # 오류를 덮고 로그가 찬다(batch 3 항목 2)
+        name="m5t-lanes-zero-capacity-error-every-call",
+        path="src/remote_ci_monitor/server.py",
+        old="            if fresh:\n                self.record_error(err[0], detail=err[1])\n",
+        new="            if True:\n                self.record_error(err[0], detail=err[1])\n",
+        tests=(
+            "tests/test_lanes_zero.py::"
+            "test_tl3_a_capacity_error_is_logged_once_not_on_every_health_call",
+        ),
+    ),
+    Mutant(
+        # 코어가 카탈로그의 도구 이름(node)을 상수로 갖는다 — 이식성 규칙(명세 §4.5, TD23)
+        name="m5t-core-names-a-catalog-tool",
+        path="src/remote_ci_monitor/hostsample.py",
+        old='PACKAGE_MANAGERS = ("brew", "apt-get", "dnf", "pacman")\n',
+        new='PACKAGE_MANAGERS = ("brew", "apt-get", "dnf", "pacman", "node")\n',
+        tests=("tests/test_toolchain_catalog.py::test_td23_core_code_names_no_catalog_tool",),
+    ),
+    Mutant(
+        # setup 그물이 터지면 setup 이 아니라고 본다 — main() 이 경고만 남기고 그 명령을 허용한다
+        # (PR #274 P3 LOW, fail-open)
+        name="guard-net-crash-not-setup",
+        path="tools/guard_production.py",
+        old=(
+            "    except Exception:  # noqa: BLE001 — 그물이 터지면 setup 이 어디에 쓸지 모른다\n"
+            "        return True\n"
+        ),
+        new=(
+            "    except Exception:  # noqa: BLE001 — 그물이 터지면 setup 이 어디에 쓸지 모른다\n"
+            "        return False\n"
+        ),
+        tests=(
+            "tests/test_guard_production_setup.py::"
+            "test_pr274_a_crash_inside_the_net_counts_as_reaching_setup",
+            "tests/test_guard_production_setup.py::"
+            "test_pr274_a_crash_inside_the_net_is_a_deny_from_the_hook",
+        ),
+    ),
+    Mutant(
+        # 실기 하네스의 포트 검사가 8787(운영) · 8788 을 받는다 — 시험 서버가 운영 포트에 뜬다
+        # (M5t-a PR7, 명세 §7 · TR16)
+        name="m5t-live-port-check-takes-8787",
+        path="scripts/acceptance/m5t_live.sh",
+        old='  [ "$1" -ge 8790 ] && [ "$1" -le 8899 ]\n',
+        new='  [ "$1" -ge 8787 ] && [ "$1" -le 8899 ]\n',
+        tests=(
+            "tests/test_acceptance_m5t_live.py::"
+            "test_tr16_port_check_refuses_production_and_out_of_range_ports",
+        ),
+    ),
+    Mutant(
+        # 실기 하네스가 plist 의 HOME 을 보지 않는다 — 진짜 홈으로 도는 시험 서비스를 bootstrap 한다
+        # (M5t-a PR7, 명세 §7 · TR16)
+        name="m5t-live-plist-home-unchecked",
+        path="scripts/acceptance/m5t_live.sh",
+        old='  { [ "$v" = "$th" ] && is_test_path "$v" "$base" "$home"; } || {\n',
+        new="  true || {\n",
+        tests=("tests/test_acceptance_m5t_live.py::test_tr16_plist_check_takes_test_values_only",),
+    ),
+    Mutant(
+        # 실기 하네스가 HOME 을 시험 폴더로 바꾸지 않는다 — setup 이 진짜 홈의 LaunchAgents · 로그
+        # 자리를 고른다 (PR #276 P3 MED 3, 명세 §7)
+        name="m5t-live-home-not-isolated",
+        path="scripts/acceptance/m5t_live.sh",
+        old='  export HOME="$b/home"\n',
+        new="  :\n",
+        tests=(
+            "tests/test_acceptance_m5t_live.py::"
+            "test_tr16_isolate_env_drops_rcm_and_points_home_and_xdg_into_the_base",
+        ),
+    ),
+    Mutant(
+        # 실기 하네스가 셸의 RCM_* 를 지우지 않는다 — RCM_SERVER · RCM_TOKEN 이 운영 서버로 이끈다
+        # (PR #276 P3 MED 3, 명세 §7)
+        name="m5t-live-rcm-env-kept",
+        path="scripts/acceptance/m5t_live.sh",
+        old=r"""  for v in $(env | sed -n 's/^\(RCM_[A-Za-z0-9_]*\)=.*/\1/p'); """
+        + 'do unset "$v"; done\n',
+        new="  :\n",
+        tests=(
+            "tests/test_acceptance_m5t_live.py::"
+            "test_tr16_isolate_env_drops_rcm_and_points_home_and_xdg_into_the_base",
+        ),
+    ),
+    Mutant(
+        # 실기 하네스가 bootout 직전에 라벨을 다시 보지 않는다 — 바뀐 LABEL 이면 운영 서비스를
+        # 내린다 (PR #276 P3 MED 3, 명세 §7 · TR16)
+        name="m5t-live-bootout-label-unchecked",
+        path="scripts/acceptance/m5t_live.sh",
+        old='  if is_test_label "$LABEL"; then\n',
+        new="  if true; then\n",
+        tests=(
+            "tests/test_acceptance_m5t_live.py::"
+            "test_tr16_bootout_checks_the_label_again_and_removes_only_a_test_file",
+        ),
+    ),
+    Mutant(
+        # 시험 설치의 setup 이 기본 자리의 worker.toml(운영 설치의 것)을 「이 머신에 이미 있다」고
+        # 제 것처럼 말한다(온보딩 시험 OB1)
+        name="ob1-setup-worker-toml-of-another-install-as-own",
+        path="src/remote_ci_monitor/setup.py",
+        old=(
+            "    if worker.is_file() and core.place_key(real_path(worker.parent), "
+            "fold_case=fold) != here:\n"
+        ),
+        new="    if False:\n",
+        tests=(
+            "tests/test_onboarding_findings.py::"
+            "test_ob1_a_worker_toml_outside_this_configs_folder_is_another_installs",
+        ),
+    ),
+    Mutant(
+        # doctor 가 찾은 서비스가 다른 설정으로 떠도 「the service starts rcm with …」 만 말한다 —
+        # 시험 설치에서 그 서비스가 남의 것인지 알 수 없다(온보딩 시험 OB2)
+        name="ob2-doctor-another-installs-service-unnamed",
+        path="src/remote_ci_monitor/doctor.py",
+        old='                f"no service starts rcm with --config {shown} — {label} "\n',
+        new='                f"the service starts rcm with --config {shown} — {label} "\n',
+        tests=(
+            "tests/test_onboarding_findings.py::"
+            "test_ob2_doctor_says_the_service_it_found_runs_another_config",
+        ),
+    ),
+    Mutant(
+        # setup 이 찍는 launchctl 줄이 셸 치환 `gui/$(id -u)` 로 돌아간다 — 사람이 붙여 넣는 줄에
+        # 치환이 있고, 안전 훅이 그 줄을 막는다(온보딩 시험 OB3)
+        name="ob3-setup-gui-domain-command-substitution",
+        path="src/remote_ci_monitor/core/setup.py",
+        old='    return f"gui/{os.getuid() if uid is None else uid}"\n',
+        new='    return "gui/$(id -u)"\n',
+        tests=(
+            "tests/test_onboarding_findings.py::"
+            "test_ob3_setup_prints_the_numeric_uid_not_a_command_substitution",
+            "tests/test_onboarding_findings.py::test_ob3_core_commands_take_the_uid_they_are_given",
+        ),
+    ),
+    Mutant(
+        # doctor 가 `--config` 옆 `service/` 의 서비스 파일을 보지 않는다 — 시험 설치가 자기
+        # 서비스 파일을 못 찾고 도는 설치의 서비스로 잰다(온보딩 시험 OB2 의 근본 원인)
+        name="ob2-doctor-skips-this-configs-service-file",
+        path="src/remote_ci_monitor/doctor.py",
+        old="    if config_file is not None:\n        own = _own_service_file(\n",
+        new="    if False:\n        own = _own_service_file(\n",
+        tests=(
+            "tests/test_onboarding_findings.py::"
+            "test_ob2_doctor_measures_the_service_file_setup_put_next_to_this_config",
+            "tests/test_onboarding_findings.py::"
+            "test_ob2_doctor_prefers_the_installed_copy_of_this_configs_service_file",
+        ),
+    ),
+    Mutant(
+        # 같은 라벨의 설치본이 setup 사본을 이기지 않고 늘 setup 사본을 고른다 — 설치본 우선
+        # (6-B-V2)이 깨져 손으로 고친 설치본 대신 설치하지 않은 사본으로 잰다
+        name="ob2-doctor-staged-copy-beats-the-installed-copy",
+        path="src/remote_ci_monitor/doctor.py",
+        old="        out.append(there if there is not None and there.is_file() else p)\n",
+        new="        out.append(p)\n",
+        tests=(
+            "tests/test_onboarding_findings.py::"
+            "test_ob2_trial_config_measures_the_installed_copy_of_the_same_label",
+            "tests/test_onboarding_findings.py::"
+            "test_ob2_doctor_prefers_the_installed_copy_of_this_configs_service_file",
+        ),
+    ),
+    Mutant(
+        # 기본 설정 폴더의 `--config` 에서도 새 단계가 돈다 — 설치하지 않은 setup 사본이 표준
+        # 라벨의 설치된 서비스를 이겨 예전 결과가 바뀐다(PR #277 검토 MED 1)
+        name="ob2-doctor-new-stage-runs-for-the-default-config",
+        path="src/remote_ci_monitor/doctor.py",
+        old="    if _default_config_dir(config, home, config_dir):\n        return None\n",
+        new="    if False:\n        return None\n",
+        tests=(
+            "tests/test_onboarding_findings.py::"
+            "test_ob2_default_config_keeps_the_old_order_over_a_staged_only_file",
+        ),
+    ),
+    Mutant(
+        # 설정 옆 `service/` 에 이 역할의 파일이 여럿이어도 새 단계가 하나를 고른다 — 예전
+        # 순서로 넘기지 않는다(PR #277 검토 MED 2)
+        name="ob2-doctor-picks-one-of-several-next-to-the-config",
+        path="src/remote_ci_monitor/doctor.py",
+        old="    if skipped or len(found) != 1:\n        return None\n    return found[0]\n",
+        new="    if skipped or not found:\n        return None\n    return found[0]\n",
+        tests=(
+            "tests/test_onboarding_findings.py::"
+            "test_ob2_several_files_next_to_the_config_fall_back_to_the_old_order",
+        ),
+    ),
+    Mutant(
+        # `rcm init worker --service-file` 의 `next:` 줄이 셸 치환 `gui/$(id -u)` 로 돌아간다
+        # (온보딩 시험 OB3 의 남은 한 곳)
+        name="ob3-init-worker-gui-domain-command-substitution",
+        path="src/remote_ci_monitor/cli.py",
+        old='            f"launchctl bootstrap {gui_domain()} {target}"\n',
+        new='            f"launchctl bootstrap gui/$(id -u) {target}"\n',
+        tests=(
+            "tests/test_onboarding_findings.py::"
+            "test_ob3_init_worker_service_file_hint_prints_the_numeric_uid",
+        ),
+    ),
 )
 
 
@@ -2210,6 +4918,18 @@ def run_mutant(m: Mutant, keep: bool) -> tuple[bool | None, str]:
     return ok, info
 
 
+def syntax_problem(path: str, text: str) -> str | None:
+    """변이를 넣은 `.py` 가 파이썬으로 읽히지 않으면 그 까닭. 문법 오류인 변이는 시험을 빨갛게
+    만들어도 감지가 아니다 — 들여쓰기를 잃은 `new` 가 「잡혔다」로 세어졌다(P3 3라운드 v2-1)."""
+    if not path.endswith(".py"):
+        return None
+    try:
+        ast.parse(text)
+    except SyntaxError as e:
+        return f"the mutant does not parse as Python ({e.msg}, line {e.lineno}) — fix its `new`"
+    return None
+
+
 def _run_in_copy(m: Mutant, tmp: Path, env: dict[str, str]) -> tuple[bool, str]:
     # `.rcm` — 시험이 레포의 `.rcm/ci.toml` 을 읽는다(R15)
     for name in ("src", "tests", "tools", "scripts", ".rcm", "pyproject.toml"):
@@ -2222,6 +4942,10 @@ def _run_in_copy(m: Mutant, tmp: Path, env: dict[str, str]) -> tuple[bool, str]:
     text = target.read_text(encoding="utf-8")
     if text.count(m.old) != 1:
         return False, f"pattern not found exactly once in {m.path}: {m.old!r}"
+    changed = text.replace(m.old, m.new)
+    problem = syntax_problem(m.path, changed)
+    if problem is not None:
+        return False, problem
     if m.runner == "node":
         node = shutil.which("node")
         if node is None:
@@ -2235,7 +4959,7 @@ def _run_in_copy(m: Mutant, tmp: Path, env: dict[str, str]) -> tuple[bool, str]:
         return False, f"control run timed out: {' '.join(cmd)}"
     if control[0] != 0:
         return False, f"control run is RED without the mutant (exit {control[0]})\n{control[2]}"
-    _write_mutant(target, text.replace(m.old, m.new))
+    _write_mutant(target, changed)
     mutated = _pytest(cmd, tmp, env)
     if mutated is None:
         return False, f"mutant run timed out: {' '.join(cmd)}"

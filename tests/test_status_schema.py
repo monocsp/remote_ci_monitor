@@ -38,6 +38,8 @@ ROW_KEYS = {
     "concurrency_scope",
     "host_key",
     "placement_detail",
+    # M5t-a 결정 248 f — 시작한 잡이 돈 머신(원격 `worker`, 로컬은 이 머신 이름, 모르면 null)
+    "ran_on",
     "superseded_by",  # M5o — 새 잡에 밀려 취소 중이면 그 잡(키 추가만)
     "state",
     "reason",
@@ -103,6 +105,8 @@ RECENT_KEYS = {
     "target_worker",
     "host_key",
     "worker",
+    # M5t-a 결정 248 f — 돈 머신의 이름. `worker` 의 null(로컬) 관례는 그대로(키 추가만)
+    "ran_on",
     "superseded_by",  # M5o — 새 잡에 밀려 취소됐으면 그 잡(키 추가만)
     "state",
     "exit_code",
@@ -455,6 +459,7 @@ SCHEDULED_KEYS = {
     "max_attempts",
     "reason",
     "action",
+    "ran_on",  # M5t-a 결정 248 f — 예약 잡은 시작 전이라 늘 null
 }
 
 

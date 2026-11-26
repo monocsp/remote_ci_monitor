@@ -338,9 +338,10 @@ def test_claimant_has_the_spec_fields_and_defaults():
         "gated",
         "accept_any",
         "known",  # 엣지 검증: 설정에 없는 프리셋의 any-capable 잡을 집어 바로 끝낸다
+        "excluded",  # M5t-a 결정 254: 이 워커가 어느 갈래로도 못 집는 local_only 프리셋
     ]
     c = Claimant(worker="mbp", pool="mbp", host_key=HOST_B, fingerprint_hash=FP_B)
-    assert (c.capable, c.gated, c.accept_any, c.known) == ((), (), True, ())
+    assert (c.capable, c.gated, c.accept_any, c.known, c.excluded) == ((), (), True, (), ())
     with pytest.raises(dataclasses.FrozenInstanceError):
         c.pool = "x"  # type: ignore[misc]
 

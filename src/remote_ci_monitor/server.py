@@ -48,10 +48,13 @@ from remote_ci_monitor import __version__
 from remote_ci_monitor.capabilities import (
     CHECK_LABEL,
     CHECK_REQUESTER,
+    NO_LOCAL_LANES_MESSAGE,
     AmbiguousMachine,
     CapabilitiesMixin,
     CapabilityError,
     MachineDown,
+    NoLocalLanes,
+    NotACandidate,
 )
 from remote_ci_monitor.clientwheel import (
     CANCEL_MIN_CLIENT_VERSION,
@@ -76,6 +79,7 @@ from remote_ci_monitor.config import (
     server_base_url,
     supersede_skipped_presets,
     supersede_warnings,
+    tool_warnings,
 )
 from remote_ci_monitor.core import admission, jobenv, outcome
 from remote_ci_monitor.core import artifacts as art
@@ -99,6 +103,7 @@ from remote_ci_monitor.core.model import (
     PRIORITY_HIGH,
     QUEUED,
     REASON_NEEDS_ACTION,
+    REASON_NO_CAPABLE_MACHINE,
     SCHEDULED,
     SUCCEEDED,
     TIMED_OUT,
@@ -533,6 +538,8 @@ class App(RemoteWorkersMixin, CapabilitiesMixin, ShelfAppMixin):
         self.stop = threading.Event()
         self.workers: list[Worker] = []
         self._last_error: str | None = None
+        #: `/api/health` 의 capacity 예외 중 마지막으로 남긴 것 — 같은 예외는 다시 안 남긴다
+        self._capacity_error: tuple[str, str] | None = None
         self._lock = threading.Lock()
         self._janitor: threading.Thread | None = None
         self.retention: Janitor | None = None
@@ -609,7 +616,7 @@ class App(RemoteWorkersMixin, CapabilitiesMixin, ShelfAppMixin):
         self._driver_status_guard = threading.Lock()
         # 잡이 보게 될 환경을 **서버의 `os.environ` 으로** 잰 것(core/jobenv.py). 기동 때 한 번
         # 재고 health 가 그대로 싣는다 — `shutil.which` 를 요청마다 돌리지는 않는다.
-        self.preset_env: dict[str, dict[str, list[str]]] = {}
+        self.preset_env: dict[str, dict[str, Any]] = {}
         self._remote_init()
         self._capabilities_init()
         self._shelf_init()  # 보관함(M5p) — 전용 전송 슬롯 · zip hold · manifest 캐시
@@ -704,6 +711,7 @@ class App(RemoteWorkersMixin, CapabilitiesMixin, ShelfAppMixin):
             log=self.log,
             base_url=self.base_url(),
             stop=self.stop,
+            local_machine=self.local_machine,  # M5t-a — 훅의 RCM_MACHINE
         )
         self.notifier.start()
         hooks = [n.name for n in self.config.notify]
@@ -734,6 +742,8 @@ class App(RemoteWorkersMixin, CapabilitiesMixin, ShelfAppMixin):
         for warning in admission_warnings(s, self.config.host):
             self.log(warning)
         for warning in supersede_warnings(self.config):
+            self.log(warning)
+        for warning in tool_warnings(self.config):  # 아무 데도 안 나올 `[[tools]]` 안내(TD9)
             self.log(warning)
         self.responder = None
         if advertise_enabled(self.config.server):
@@ -3772,6 +3782,7 @@ class App(RemoteWorkersMixin, CapabilitiesMixin, ShelfAppMixin):
             presets=tuple(self.config.presets),
             pools=tuple(pools),
             base_url=self.base_url(host),
+            local_machine=self.local_machine(),  # M5t-a — 로컬 레인 잡의 `ran_on`
         )
         tails: dict[int, list[str]] = {}
         if queue and token is not None:
@@ -3840,13 +3851,19 @@ class App(RemoteWorkersMixin, CapabilitiesMixin, ShelfAppMixin):
         log_tail = None
         if tail > 0 and row.job.state in BUSY_STATES and self.can_read_log(row.job, token):
             log_tail = tail_lines(self.log_path(job_id), min(tail, MAX_TAIL))
-        return self._with_artifacts(
-            queue_row_json(row, base_url=self.base_url(host), log_tail=log_tail), row.job, host
+        doc = queue_row_json(
+            row, base_url=self.base_url(host), log_tail=log_tail, local=self.local_machine()
         )
+        return self._with_artifacts(doc, row.job, host)
 
     def _terminal_view(self, job: Job, host: str | None) -> dict[str, Any]:
         """종료 잡의 문서 — 최근 행 모양 + 산출물 + 스텝 타임라인(M5j) + 이름별 이력(M5h)."""
-        doc = recent_json(job, base_url=self.base_url(host), action=self._last_action(job.id))
+        doc = recent_json(
+            job,
+            base_url=self.base_url(host),
+            action=self._last_action(job.id),
+            local=self.local_machine(),
+        )
         step_names = self._with_step_timeline(self._with_artifacts(doc, job, host), job)
         return self._with_failures(doc, job, step_names=step_names)
 
@@ -3940,7 +3957,10 @@ class App(RemoteWorkersMixin, CapabilitiesMixin, ShelfAppMixin):
         priority = self._parse_priority(body.get("priority"), preset.priority)
         pool = self._requested_pool(body, preset)
         if preset.placement == PLACEMENT_CAPABLE and body.get("pool") is None:
-            return self._eta_capable(snap, preset, inputs, priority, pool, now)
+            return self._eta_placed(snap, preset, inputs, priority, pool, now, PLACEMENT_CAPABLE)
+        if preset.local_only:
+            # 풀의 레인 전부로 세면 원격 레인이 끼어든다 — 후보 함수를 거치는 배치로 센다(결정 254)
+            return self._eta_placed(snap, preset, inputs, priority, pool, now, PLACEMENT_POOL)
         row, ahead = eta_for_new(
             snap.jobs,
             preset=preset,
@@ -3960,7 +3980,7 @@ class App(RemoteWorkersMixin, CapabilitiesMixin, ShelfAppMixin):
         doc["url"] = None
         return {"job": doc, "ahead": ahead, "generated_at": iso(now)}
 
-    def _eta_capable(
+    def _eta_placed(
         self,
         snap: _DbSnapshot,
         preset: Preset,
@@ -3968,9 +3988,17 @@ class App(RemoteWorkersMixin, CapabilitiesMixin, ShelfAppMixin):
         priority: int,
         pool: str,
         now: datetime,
+        placement: str,
     ) -> dict[str, Any]:
-        """any-capable 프리셋의 가상 잡 — 모든 레인 위에서, 맞는 머신 중 가장 일찍 끝날 곳으로
-        (M5n §7.2). 앞선 잡은 그 잡이 들어갈 수 있는 워커에서 돌거나 먼저 설 잡이다."""
+        """가상 잡을 모든 레인 위에 세우고 `placement_for` 로 들어갈 머신을 고른다. any-capable
+        프리셋(M5n §7.2)과 `local_only` 프리셋(M5t-a 결정 254)이 이 길로 온다. 앞선 잡은 그 잡이
+        들어갈 수 있는 워커에서 돌거나 먼저 설 잡이다. pool 배치면 같은 풀의 대기 잡만 센다.
+
+        `local_only` 프리셋은 다르게 센다(위임 결정 7). 후보 레인이 없으면 `ahead` 는 null 이다 —
+        0 은 「바로 선다」로 읽힌다. 있으면 그 레인을 실제로 다투는 대기 잡, 곧 `placement_for` 의
+        워커가 후보와 겹치는 잡만 센다. 원격 지정 잡처럼 그 레인에 오지 않는 잡을 세면 없는 순서를
+        지어낸다."""
+        capable = placement == PLACEMENT_CAPABLE
         ghost = Job(
             id=max((j.id for j in snap.jobs), default=0) + 1,
             preset=preset.name,
@@ -3984,23 +4012,32 @@ class App(RemoteWorkersMixin, CapabilitiesMixin, ShelfAppMixin):
             queued_at=now,
             priority=priority,
             pool=pool,
-            placement=PLACEMENT_CAPABLE,
-            display_pool=pool,
+            placement=placement,
+            display_pool=pool if capable else None,
             concurrency_scope=preset.concurrency_scope,
         )
         rows = self._queue_rows(now, replace(snap, jobs=[*snap.jobs, ghost]))
         row = next(r for r in rows if r.job.id == ghost.id)
         views = self.machine_views(now)
-        mine = self.placement_for(ghost, now, views).workers
-        ahead = sum(
-            1
-            for r in rows
-            if r.job.id != ghost.id
-            and (
-                (r.job.is_busy and r.job.worker_name in mine)
-                or (r.job.is_waiting and r.job.priority >= priority)
+        memo: dict[Any, Any] = {}
+        mine = self.placement_for(ghost, now, views, memo).workers
+
+        def contends(job: Job) -> bool:
+            if preset.local_only:
+                return bool(self.placement_for(job, now, views, memo).workers & mine)
+            return capable or job.pool == pool
+
+        ahead: int | None = None
+        if mine or not preset.local_only:
+            ahead = sum(
+                1
+                for r in rows
+                if r.job.id != ghost.id
+                and (
+                    (r.job.is_busy and r.job.worker_name in mine)
+                    or (r.job.is_waiting and r.job.priority >= priority and contends(r.job))
+                )
             )
-        )
         doc = queue_row_json(row, base_url=None)
         doc["id"] = None
         doc["url"] = None
@@ -4049,6 +4086,14 @@ class App(RemoteWorkersMixin, CapabilitiesMixin, ShelfAppMixin):
         pool = self._requested_pool(body, preset)
         placed = self._placement_fields(body, preset, token, pool)
         pool = placed.pop("pool")
+        # 원격 금지(M5t-a 결정 254) — 후보가 빈 `local_only` 제출은 잡을 만들기 전에, 합류와
+        # supersede 보다 먼저 거절한다(TO13). 합류하면 거절해야 할 제출이 남의 잡에 붙는다
+        refused = self.local_only_refusal(
+            preset, target=placed["target_worker"], pool=pool, placement=placed["placement"]
+        )
+        if refused is not None:
+            code, why = refused
+            raise ApiError(409, why, code=code, error_code=code, preset=preset.name)
         # 이번 제출은 아무것도 치우지 않는다(M5o 결정 116). 켜기는 없다 — 프리셋 주인이 정한다
         supersede = body.get("supersede", True)
         if not isinstance(supersede, bool):
@@ -4293,6 +4338,14 @@ class App(RemoteWorkersMixin, CapabilitiesMixin, ShelfAppMixin):
                 raise ApiError(400, f"unknown machine {machine!r} — see rcm machines") from e
             except AmbiguousMachine as e:
                 raise ApiError(400, str(e)) from e
+            if view.id == LOCAL_WORKER and not self._has_local_lanes():
+                # 분배 전용(`lanes = 0`) — 「down」이 아니다. 기다려도 오지 않는다(결정 243)
+                raise ApiError(
+                    409,
+                    f"{NO_LOCAL_LANES_MESSAGE}; send it to a worker or leave --machine out",
+                    error_code=REASON_NO_CAPABLE_MACHINE,
+                    machine=view.id,
+                )
             if not view.alive:
                 raise ApiError(
                     409,
@@ -4348,9 +4401,17 @@ class App(RemoteWorkersMixin, CapabilitiesMixin, ShelfAppMixin):
         ):
             raise ApiError(400, "checks must be a list of check preset names")
         try:
-            jobs = self.recheck(machine, names)
+            answer = self.recheck(machine, names)
         except KeyError as e:
             raise ApiError(404, f"no such machine {machine!r}") from e
+        except NoLocalLanes as e:
+            # 분배 전용 서버의 `@local` — 제출(`--machine @local`)과 같은 409 다(결정 243)
+            raise ApiError(
+                409,
+                f"{NO_LOCAL_LANES_MESSAGE}; there is nothing to recheck on it",
+                error_code=REASON_NO_CAPABLE_MACHINE,
+                machine=str(e),
+            ) from e
         except MachineDown as e:
             # `rcm run --machine` 과 같은 규칙(결정 106) — 걸어 봐야 기다리기만 한다
             raise ApiError(
@@ -4358,10 +4419,13 @@ class App(RemoteWorkersMixin, CapabilitiesMixin, ShelfAppMixin):
                 f"machine {e} is down — start rcm worker there, then recheck",
                 machine=str(e),
             ) from e
+        except NotACandidate as e:
+            # 그 머신은 이 점검의 후보가 아니다(`local_only`) — 걸어 봐야 아무도 못 집는다
+            raise ApiError(409, str(e), code="local_only", error_code="local_only") from e
         except ValueError as e:
             raise ApiError(400, str(e)) from e
         self._publish_server()
-        return {"jobs": jobs}
+        return answer  # {"jobs": [...], "skipped": [...]} — 건너뛴 점검은 실패가 아니다
 
     def submit_internal_check(self, preset: Preset, view: Any, *, fingerprint_hash: str | None):
         """rcm 이 스스로 거는 점검 잡 — 그 워커를 지정한 git_ref 잡(§4.4). 해석 실패는 예외."""
@@ -5158,6 +5222,8 @@ class App(RemoteWorkersMixin, CapabilitiesMixin, ShelfAppMixin):
         self.log(f"reload: {reload_summary(changed)} · from {fresh.path}")
         for warning in supersede_warnings(fresh):
             self.log(warning)
+        for warning in tool_warnings(fresh):
+            self.log(warning)
         return {"reloaded": True, **files, **changed}
 
     def pause(self, token: TokenInfo) -> dict[str, Any]:
@@ -5308,10 +5374,11 @@ class App(RemoteWorkersMixin, CapabilitiesMixin, ShelfAppMixin):
         """
         import os
 
+        from remote_ci_monitor.core.doctor import preset_env_digest
         from remote_ci_monitor.runner import missing_tools, public_tool_name
 
         env_source = os.environ if environ is None else environ
-        measured: dict[str, dict[str, list[str]]] = {}
+        measured: dict[str, dict[str, Any]] = {}
         for preset in self.config.presets:
             if not preset.requires and not preset.env_passthrough:
                 continue
@@ -5326,6 +5393,9 @@ class App(RemoteWorkersMixin, CapabilitiesMixin, ShelfAppMixin):
                 "missing_tools": [
                     public_tool_name(name) for name in missing_tools(tuple(preset.requires), env)
                 ],
+                # 어느 정의를 쟀는지(M5t-a, P6 GAP E4) — `rcm doctor` 가 디스크의 설정과 견준다.
+                # 지문만 싣는다: 선언 경로 · env 값은 나가지 않는다
+                "digest": preset_env_digest(preset.requires, preset.env_passthrough, preset.env),
             }
         self.preset_env = measured
 
@@ -5378,6 +5448,21 @@ class App(RemoteWorkersMixin, CapabilitiesMixin, ShelfAppMixin):
             idle_pools = self.pools_without_workers(self.now_fn())
         except Exception:  # noqa: BLE001
             idle_pools = []
+        try:
+            capacity: dict[str, Any] | None = self.capacity()
+        except Exception as e:  # noqa: BLE001 — 정보 칸이다. 못 세면 null(모름)이지 0 이 아니다
+            # 왜 못 셌는지는 서버 로그에 남긴다 — `rcm check` 는 null 을 「못 셌다」로 그린다.
+            # health 는 자주 불린다. 같은 예외를 부를 때마다 남기면 `last_error` 의 다른 오류를
+            # 덮고 로그가 찬다 — 바뀔 때만(처음 · 다른 예외 · 나았다가 다시) 남긴다
+            err = (f"capacity: {type(e).__name__}", _safe(str(e)))
+            with self._lock:
+                fresh, self._capacity_error = err != self._capacity_error, err
+            if fresh:
+                self.record_error(err[0], detail=err[1])
+            capacity = None
+        else:
+            with self._lock:
+                self._capacity_error = None
         strict_cancel = bool(self.config.server.cancel_requires_submission_token)
         body = {
             "ok": ok,
@@ -5388,6 +5473,9 @@ class App(RemoteWorkersMixin, CapabilitiesMixin, ShelfAppMixin):
             "version": self.version,
             "storage": self._health_storage(),  # 부피 회계(M5g, 정보 — 503 조건은 아니다)
             "pools_without_workers": idle_pools,  # 등록된 원격 워커가 전부 down 인 풀(정보)
+            # 갈 수 있는 머신이 있는 프리셋 수 / 전체 프리셋 수(M5t-a 결정 243, 정보 — 503 조건은
+            # 아니다, ⛔ Q5). `rcm check` 가 0 이면 FAIL, 일부면 warn 으로 그린다
+            "capacity": capacity,
             "advertise": self._advertise_json(),  # mDNS 광고 상태(M5c, 정보)
             # 클라이언트가 서버 버전을 따라오는 길(M5i I8 · 결정 81·83, 정보 — 503 조건은 아니다)
             "client_wheel": self.client_wheel(),
@@ -5783,7 +5871,12 @@ class Handler(ShelfHandlerMixin, BaseHTTPRequestHandler):
             self._only(method, "GET")
             self._read_only_ok()
             self._no_worker_token()
-            self._send_json(200, self.app.machines_doc())
+            # 새 호스트 사실은 토큰이 있는 응답에만(Bearer 나 basic 의 자격, M5t-a TD31 · TD44).
+            # 워커 토큰은 `_no_worker_token` 이 Bearer 만 막으므로 Basic 으로 올 수 있다 — 사람의
+            # 읽기가 아니므로 싣지 않는다(P3 2라운드 검증자 2 #2)
+            reader = self._read_token()
+            authenticated = reader is not None and reader.kind != TOKEN_WORKER
+            self._send_json(200, self.app.machines_doc(authenticated=authenticated))
             return
         m = _RECHECK_RE.match(path)
         if m:

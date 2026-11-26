@@ -26,7 +26,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from remote_ci_monitor.config import ServerConfig, server_base_url
-from remote_ci_monitor.core.model import Action, Job
+from remote_ci_monitor.core.model import Action, Job, LocalMachine
 from remote_ci_monitor.core.notify import (
     NotifyRule,
     failure_lines,
@@ -108,6 +108,7 @@ class Notifier:
         opener: urllib.request.OpenerDirector | None = None,
         base_url: str | None = None,
         stop: threading.Event | None = None,
+        local_machine: Callable[[], LocalMachine | None] | None = None,
     ):
         self.store = store
         self.config = config
@@ -119,6 +120,8 @@ class Notifier:
         # `0.0.0.0` 은 링크에 넣지 않는다 — 다른 기기에서 안 열린다(M5o 결정 120)
         self.base_url = base_url or server_base_url(config.server, hostname=socket.gethostname())
         self.stop_event = stop or threading.Event()
+        # 이 서버 머신(M5t-a) — 로컬 레인 잡의 `RCM_MACHINE`. 없으면 그 값은 빈 문자열이다
+        self.local_machine = local_machine
         self.failures = 0
         self.delivered = 0
         self._thread: threading.Thread | None = None
@@ -216,7 +219,9 @@ class Notifier:
         matched = rules_for(job.state, job.preset, self.rules)
         if not matched:
             return 0
-        row = recent_json(job, base_url=self.base_url, action=self._action(job))
+        row = recent_json(
+            job, base_url=self.base_url, action=self._action(job), local=self._local()
+        )
         row["summary"] = sanitize_text(row.get("summary"))
         # 잡이 찍은 순서의 대장(M5o 결정 119). 성공 · 취소 잡은 행이 없다
         failures = self.store.failure_names(job.id)
@@ -235,6 +240,16 @@ class Notifier:
                     self.failures += 1
             count += 1
         return count
+
+    def _local(self) -> LocalMachine | None:
+        """이 서버 머신. 못 읽으면 None — 머신 이름 때문에 알림을 멈추지 않는다(빈 RCM_MACHINE)."""
+        if self.local_machine is None:
+            return None
+        try:
+            return self.local_machine()
+        except Exception as e:  # noqa: BLE001 — 알림 스레드가 머신 이름 하나로 죽지 않게
+            self.log(f"notify: cannot tell this machine: {type(e).__name__}")
+            return None
 
     def _action(self, job: Job) -> Action | None:
         """잡의 마지막 「사람이 할 일」 표식(M5s). 못 읽으면 None — 알림은 표식 때문에 멈추지

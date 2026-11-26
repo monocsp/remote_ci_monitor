@@ -233,6 +233,9 @@ class Preset:
     #: 종료코드 반복(M5s 결정 210). `[presets.retry]` 를 선언한 프리셋만 — None 이면 그 종료코드도
     #: 여느 실패다(rcm-ci 의 75 = 인프라 실패를 지킨다). 제출할 때 잡 열로 얼린다(결정 229)
     retry: RetryPolicy | None = None
+    #: 원격 금지(M5t-a 결정 254). 참이면 이 프리셋에게 서버의 머신 목록은 `@local` 하나뿐이다 —
+    #: 원격 워커는 집지도, 후보로 보이지도 않는다. 비밀을 쓰는 release · deploy 프리셋에 단다
+    local_only: bool = False
 
     def input_spec(self, name: str) -> InputSpec | None:
         for spec in self.inputs:
@@ -732,6 +735,19 @@ class Pool:
 
 
 @dataclass(frozen=True)
+class LocalMachine:
+    """이 서버 머신 — 로컬 레인 잡의 `ran_on` 을 계산할 때 쓴다(M5t-a 결정 248 f).
+
+    `name` 은 이 머신의 표시 이름(`gethostname` 의 첫 조각)이고 모르면 None 이다. 지어낸 이름
+    (`"host"`)을 넣지 않는다. `host_key` 는 로컬 레인이 claim 때 잡에 박는 값과 같은 것이다 —
+    다른 물리 머신에서 돈 로컬 잡(데이터 폴더를 옮겼다)을 이 머신 이름으로 부르지 않으려고 쓴다.
+    """
+
+    name: str | None
+    host_key: str | None = None
+
+
+@dataclass(frozen=True)
 class StatusModel:
     generated_at: datetime
     display_timezone: str | None
@@ -739,3 +755,5 @@ class StatusModel:
     presets: tuple[Preset, ...]
     pools: tuple[Pool, ...]
     base_url: str | None = None
+    #: 이 서버 머신(M5t-a). 없으면 로컬 레인 잡의 `ran_on` 은 null 이다
+    local_machine: LocalMachine | None = None
