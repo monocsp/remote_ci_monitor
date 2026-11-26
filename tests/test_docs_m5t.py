@@ -423,6 +423,78 @@ def test_template_lanes_comment_names_zero():
     assert re.search(r"\b0\b", line.split("#", 1)[1]), line
 
 
+# ── operating.md: setup 그물 단락 ────────────────────────────────────────────
+
+
+def setup_net_paragraphs() -> str:
+    """operating.md 에서 훅의 setup 그물을 말하는 단락들 — `PreToolUse` 단락부터 「The hook is
+    the first line」 단락 끝까지."""
+    text = flat(read(OPERATING))
+    start = text.index("Claude Code sessions have this wired as a `PreToolUse` hook")
+    end = text.index("The *service virtualenv* is the one", start)
+    return text[start:end]
+
+
+def test_operating_says_a_failing_net_refuses():
+    """그물이 터지면(내부 예외) 훅은 그 명령을 setup 에 닿는 쪽으로 보아 거절한다(번들 F ·
+    PR #274 의 결정)."""
+    sec = setup_net_paragraphs()
+    assert re.search(
+        r"If the net itself fails \(an internal error\), the hook treats the command as one "
+        r"that can reach `rcm setup` and refuses it\.",
+        sec,
+    ), "operating.md does not say what a failing net does"
+
+
+def test_operating_names_the_net_over_refusal_and_the_way_round():
+    """그물은 평범한 명령도 막는다 — 받아들인 비용이다. 단락은 무엇이 막히는지와 우회(글은
+    파일로, 긴 사슬은 나눈다)를 말한다. 거둔 설계(번들 F batch-1 · batch-2 의 문장)는 쓰지
+    않는다."""
+    sec = setup_net_paragraphs()
+    assert re.search(r"refuses some ordinary commands too", sec), "no over-refusal sentence"
+    assert re.search(r"quoted text next to `\$` or `\(`", sec), "the quoted-text case is missing"
+    assert re.search(r"`expect`", sec) and re.search(r"`fd -x`", sec), "no launcher example"
+    assert re.search(r"This is accepted", sec), "the cost is not said to be accepted"
+    for way in (
+        "git commit -F <file>",
+        "gh pr create --body-file <file>",
+        "gh pr comment --body-file <file>",
+    ):
+        assert f"`{way}`" in sec, f"the way round lacks {way}"
+    assert re.search(r"split long chains into separate commands", sec), "no split advice"
+    for withdrawn in ("A launcher counts only where a command stands", "One kind of refusal"):
+        assert withdrawn not in sec, f"withdrawn design written down: {withdrawn!r}"
+
+
+# ── documentation.md: README 은 입구 ─────────────────────────────────────────
+
+DOCUMENTATION = ROOT / "docs" / "documentation.md"
+
+
+def map_row(name: str) -> str:
+    """문서 규칙 「The map」 표에서 `name` 의 줄."""
+    m = re.search(rf"^\| `{re.escape(name)}`[^\n]*$", read(DOCUMENTATION), re.M)
+    assert m, f"documentation.md map has no row for {name}"
+    return m.group(0)
+
+
+def test_documentation_sends_the_first_setup_to_usage_getting_started():
+    """README 줄은 입구라고 하고 처음 설정의 단계별 안내를 사용 안내 「Getting started」 로
+    보낸다. 줄 수를 적으면 지어낸 값이 아니다 — 지금 README 가 그 안에 든다."""
+    row = map_row("README.md")
+    assert "front door" in row, row
+    assert re.search(r"step-by-step first setup[^|]*`docs/usage\.md`[^|]*Getting started", row), row
+    lines = len(read(README).splitlines())
+    for number in re.findall(r"(\d+) lines", row):
+        assert int(number) >= lines, f"documentation.md says {number} lines, README has {lines}"
+
+
+def test_documentation_map_lists_usage_getting_started():
+    row = map_row("docs/usage.md")
+    assert "Getting started" in row, row
+    assert re.search(r"test install", row), row
+
+
 SMOKE = ROOT / "scripts" / "smoke_install.sh"
 
 
