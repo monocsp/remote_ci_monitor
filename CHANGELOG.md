@@ -226,6 +226,7 @@ of a key bumps that number and is listed here.
   `grep -n expect` are not launchers any more; redirections and wrappers in front
   (`<f xargs rcm`, `nice xargs rcm`) still are. A command with a heredoc or an unclosed quote is
   judged as before. Text naming both rcm and `setup` is still refused.
+  ([#274](https://github.com/monocsp/remote_ci_monitor/pull/274))
 
 ## [0.10.0] - 2026-11-23
 
