@@ -504,6 +504,10 @@ def test_rl5_a_409_job_closed_on_a_log_chunk_kills_only_an_irreversible_job(
     fake.log_error = ClientError(409, "job #7 is lost", {"code": "job_closed", "state": LOST})
     runner, t = start_job(w, monkeypatch, claimed(irreversible=irreversible))
     runner.observer.output(b"x" * (rw.LOG_BATCH_BYTES + 1))
+    # 배치는 따로 한 스레드가 보낸다(RL5 — 펌프를 막지 않는다). 그 전송의 409 를 기다린다
+    deadline = time.monotonic() + 5
+    while not runner.observer.closed_by_server and time.monotonic() < deadline:
+        time.sleep(0.01)
     assert runner.observer.closed_by_server is True
     time.sleep(0.1)
     assert runner.observer.should_cancel() is stops

@@ -179,6 +179,7 @@ class _RemoteObserver:
         self._last_flush = time.monotonic()
         self._lock = threading.Lock()
         self._pending_failures = 0
+        self._sender: threading.Thread | None = None  # 지금 배치를 보내는 스레드(많아야 하나)
         self.closed_by_server = False  # 409: 서버가 이미 닫았다(lost 판정 등) — 로그만 멈춘다
         self.irreversible = irreversible
         self.grace_seconds = grace_seconds  # claim 에 얼린 G_J(결정 257)
@@ -201,7 +202,20 @@ class _RemoteObserver:
                 or time.monotonic() - self._last_flush >= LOG_FLUSH_SECONDS
             )
         if due:
-            self.flush()
+            self._send_later()
+
+    def _send_later(self) -> None:
+        """배치 전송을 따로 한 스레드에서 한다. 펌프 스레드(러너)가 부르는 `output()` 은
+        네트워크를 기다리지 않는다 — 분단 중 전송 하나는 요청 시한(60초 이상)까지 매달리고,
+        그동안 펌프가 멈추면 워커 로컬 `log.txt` 가 자라지 않고 취소 · 시간초과 · 자기 멈춤
+        점검도 멈춘다(RL5). 보내는 스레드는 한 번에 하나라 배치의 순서가 그대로다."""
+        with self._lock:
+            if self._sender is not None and self._sender.is_alive():
+                return  # 앞 배치가 아직 매달려 있다 — 남은 바이트는 다음 배치 · 끝의 전송이 싣는다
+            self._sender = threading.Thread(
+                target=self.flush, name=f"rcm-log-{self.job_id}", daemon=True
+            )
+            self._sender.start()
 
     def flush(self) -> None:
         """로그 배치를 한 번만 보낸다 — 펌프(취소·정지 감지)를 재시도로 막지 않는다. 서버에 못
@@ -237,7 +251,12 @@ class _RemoteObserver:
         self._pending_failures = 0
 
     def final_flush(self) -> None:
-        """종료 직전 — 남은 로그는 재시도까지 해서 보낸다(그 뒤 finish 가 간다)."""
+        """종료 직전 — 남은 로그는 재시도까지 해서 보낸다(그 뒤 finish 가 간다). 매달린 배치
+        전송이 있으면 그것이 끝나기를 먼저 기다린다 — 바이트의 순서를 지킨다."""
+        with self._lock:
+            sender = self._sender
+        if sender is not None:
+            sender.join()
         self.flush()
         with self._lock:
             chunk = bytes(self._buf)
