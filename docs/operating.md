@@ -179,7 +179,8 @@ way; a `data_dir` and its database stay until you delete them. setup prints this
 unloaded and its installed file deleted only when `cmp -s` finds the installed file is the one
 setup wrote (`cmp -s <staged> <installed> && { launchctl bootout …; rm -f <installed>; }`), and
 deleted even when the unload fails (a service already stopped); a file someone else installed
-under that name is left alone. When a service with the label was already
+under that name is left alone. The line just above it says so: if the service is still running
+when the unload fails, stop it first. When a service with the label was already
 loaded before setup ran, the line adds that it may not be one setup wrote.
 
 **What it refuses or warns about.**
@@ -188,20 +189,31 @@ loaded before setup ran, the line adds that it may not be one setup wrote.
   write, setup looks for the rcm services on this machine: every `*.plist` in
   `~/Library/LaunchAgents`, `/Library/LaunchAgents` and `/Library/LaunchDaemons`, and every
   `*.service` in `~/.config/systemd/user`, `$XDG_CONFIG_HOME/systemd/user`, `/etc/systemd/user`
-  and `/etc/systemd/system` that starts `rcm` or `python -m remote_ci_monitor.cli` (or is named
-  like one). For each it reads the `--config` the service starts with, that config's `data_dir`
-  (TOML only; no database is opened), the virtualenv of the executable it runs and that
-  virtualenv's editable source checkout. A config file, service file or `data_dir` that is one of
-  these or inside one is refused with exit 1, `this is <label>'s <config|data_dir|venv|checkout>
-  — refusing`, and nothing is written; no flag overrides it. A label equal to an installed rcm
-  service's label (or unit name) is refused the same way unless you pass `--force service` and the
-  installed file is the one setup wrote (`cmp`). An rcm-looking service setup cannot read, or
-  whose `--config` or `data_dir` it cannot resolve (no `--config`, `sh -c`, a `~` with no known
-  home), also stops it, naming the file. Paths are compared with symbolic links resolved and, on
-  macOS, without case. This holds for the services setup can find in those places only: a server
-  started by hand, another user's services, units under `/run` or `/usr/lib`, template and
-  transient units, drop-ins and `EnvironmentFile=`, and a unit created after the last check are
-  not seen.
+  and `/etc/systemd/system` that starts `rcm` or `python -m remote_ci_monitor[.cli]` (or is named
+  like one). The user places are read under both `$HOME` and the account's home from the password
+  database, so a `HOME` pointed elsewhere does not hide them. For each service it reads the
+  `--config` it starts with, every `data_dir` it may use (the config's, the unit's `--data-dir`
+  and the data-dir variable in its environment, all of them, whichever wins), the virtualenv of
+  the executable it runs (for `<venv>/bin/python -m …`, the folder that holds `bin/python`) and
+  that virtualenv's editable source checkout; it opens no database. A config file, service file
+  or `data_dir` that is one of these or inside one is refused with exit 1, `this is <label>'s
+  <service file|config|data_dir|venv|checkout> — refusing`, and nothing is written; no flag
+  overrides it. A label equal to an installed rcm service's label (or unit name) is refused the
+  same way unless you pass `--force service`, that service's file sits in the label's install
+  place and it is byte for byte the one setup writes now (or the copy under its config folder).
+  That exception covers the label only: the service's config, `data_dir`, virtualenv and checkout
+  stay refused, so to rewrite a service setup installed, remove it first. An rcm-looking service
+  setup cannot read or stat, whose `--config` or `data_dir` it cannot resolve (no `--config`,
+  `sh -c`, a `~` with no known home), or that has lines setup does not follow
+  (`EnvironmentFile=`, a specifier in `Environment=`, a line it cannot parse), also stops it,
+  naming the file. Paths are compared with symbolic links resolved and, on macOS, without case;
+  install places are compared the same way, so a link to a folder the service manager reads is
+  that folder. This holds for the services setup can find in those places only. It does not see
+  a server started by hand, another user's services, units under `/run` or `/usr/lib`, template
+  (`name@.service`) and transient units, drop-ins (`<unit>.d/`), the contents of an
+  `EnvironmentFile=` (it refuses instead), a unit created after the last check, or a wrapper
+  script that starts rcm from a service whose label and command do not look like rcm. Nothing in
+  setup stands between those and their files.
 - An existing config or service file is kept: the run stops with exit 1 and writes nothing.
   `--force config`, `--force service` or `--force` (both) replace them. When a write fails part
   way, what was already written is undone. An existing `server.toml` that is not TOML or not

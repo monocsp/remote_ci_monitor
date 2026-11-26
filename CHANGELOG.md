@@ -42,7 +42,12 @@ of a key bumps that number and is listed here.
   services it can find on this machine (launchd and systemd, user and system places) and refuses,
   with exit 1 and no override, a config file, service file or `data_dir` that is one of theirs or
   inside their config, `data_dir`, virtualenv or source checkout, and their label unless
-  `--force service` rewrites a file it wrote; an rcm-looking service it cannot read stops it too.
+  `--force service` and the installed file is the one setup wrote (even then that service's config,
+  `data_dir`, virtualenv and checkout stay refused). It looks under both `$HOME` and the account's
+  home, counts a service's `--data-dir` and data-dir variable as its `data_dir` too, finds the
+  virtualenv of a `python -m` service, and compares install places, `$XDG_CONFIG_HOME/systemd/user`
+  among them, with symbolic links resolved. An rcm-looking service it cannot read or stat, or one
+  with lines it does not follow (`EnvironmentFile=`), stops it too.
   ([#272](https://github.com/monocsp/remote_ci_monitor/pull/272))
 - **`lanes = 0` runs a server that only hands jobs out.** It runs no job itself: `@local` is not
   alive and never a candidate, its probes do not run, `--machine @local`, `rcm recheck @local`
