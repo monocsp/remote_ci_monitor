@@ -1,0 +1,586 @@
+"""워커 세션 · 펜싱 · 프로토콜 2(M5t-b §4.2 · §4.7 · 결정 255 · 258 · 261 · 262 · 265 · 336 · 339-a).
+
+서버는 in-process HTTP(`test_worker_api.WorkerServer`, 주입 시계)다. 워커 이름마다 한 프로세스를
+흉내 내고 `new_process` 가 같은 토큰의 새 프로세스를 만든다. 세션 id 는 실행 중에 만든다(§8).
+"""
+
+from __future__ import annotations
+
+import secrets
+import threading
+from typing import Any
+
+import pytest
+
+from remote_ci_monitor import __version__
+from remote_ci_monitor.client import ClientError
+from remote_ci_monitor.config import WorkerConfig, parse_preset
+from remote_ci_monitor.core.model import CANCELLING, LOST, QUEUED, RUNNING, SUCCEEDED
+from remote_ci_monitor.remote_worker import RemoteWorker, WorkerExit
+from test_worker_api import WORKER_PRESETS, WorkerServer, sh
+
+PROTOCOL_TEXT = "worker protocol 2 required: upgrade rcm on this worker"
+EXIT_PROTOCOL = 3  # 프로토콜 불일치 — 감독자가 되살린다(결정 258)
+PRESETS = [
+    *WORKER_PRESETS,
+    sh("ship", "echo ship", irreversible=True),  # 그룹 없음 → irreversible:ship · global
+]
+
+
+@pytest.fixture
+def srv(tmp_path):
+    s = WorkerServer(tmp_path, presets=PRESETS)
+    yield s
+    s.close()
+
+
+def job_of(srv: WorkerServer, jid: int):
+    return srv.store.get_job(jid)
+
+
+def hold_rows(srv: WorkerServer) -> list[dict[str, Any]]:
+    return [dict(r) for r in srv.store._conn().execute("SELECT * FROM irreversible_holds")]
+
+
+def running(srv: WorkerServer, worker: str = "build-02", *, preset: str = "ok", lane: int = 1):
+    jid = srv.queued_job(preset=preset)
+    assert srv.claimed(worker, lane) == jid
+    return jid
+
+
+# ── 펜싱(T8 · W5 · RL10 · RL11) ────────────────────────────────────────────────
+
+
+def test_rl10_a_second_process_fences_the_first_and_the_first_can_only_confirm(srv):
+    srv.registered("build-02", lanes=2)
+    jid = running(srv)
+    old = srv.new_process("build-02")  # 같은 토큰으로 프로세스 B
+    srv.registered("build-02", lanes=2)
+    rows = (
+        srv.store._conn()
+        .execute(
+            "SELECT id, fenced_at, fenced_by FROM worker_sessions WHERE worker_name='build-02'"
+        )
+        .fetchall()
+    )
+    current = [r["id"] for r in rows if r["fenced_at"] is None]
+    assert current == [srv.session("build-02")]  # B 가 유일한 현재 세션
+    assert {r["id"]: r["fenced_by"] for r in rows}[old] == srv.session("build-02")
+    # 확인 전까지 X 는 busy — 그룹 · 레인이 풀리지 않고 B 의 그 레인 claim 은 204
+    assert job_of(srv, jid).state == RUNNING
+    srv.queued_job()
+    assert srv.claim("build-02", 1)[0] == 204
+    # A 의 다음 요청은 무엇이든 409 session_fenced(job_closed 와 구별)
+    a = {"worker_session_id": old}
+    for status, body in (
+        srv.req(
+            "POST",
+            "/worker/heartbeat",
+            token="build-02",
+            json_body={**a, "seq": 9, "claims_settled": 1, "jobs": [jid]},
+        ),
+        srv.req(
+            "POST",
+            f"/worker/jobs/{jid}/phase",
+            token="build-02",
+            json_body={**a, "phase": "executing"},
+        ),
+        srv.req(
+            "POST",
+            f"/worker/jobs/{jid}/finish",
+            token="build-02",
+            json_body={**a, "outcome": "failed", "exit_code": 1},
+        ),
+        srv.req(
+            "POST",
+            f"/worker/jobs/{jid}/log",
+            token="build-02",
+            body=b"x\n",
+            headers={"Content-Type": "application/octet-stream", "X-RCM-Worker-Session": old},
+        ),
+    ):
+        assert status == 409 and body["code"] == "session_fenced", body
+    assert job_of(srv, jid).state == RUNNING
+    # 좁은 확인 finish 만 받는다 — lost + worker_replaced, group_gone 참이면 홀드 0
+    status, body = srv.req(
+        "POST",
+        f"/worker/jobs/{jid}/finish",
+        token="build-02",
+        json_body={
+            **a,
+            "outcome": "lost",
+            "exit_code": None,
+            "summary_code": "worker_replaced",
+            "summary_args": {},
+            "group_gone": True,
+        },
+    )
+    assert status == 200, body
+    j = job_of(srv, jid)
+    assert j.state == LOST and j.summary_code == "worker_replaced"
+    assert j.summary_args == {"name": "build-02"}
+    assert hold_rows(srv) == []
+    # 펜싱된 세션의 재등록은 409 session_fenced — 핑퐁 없음
+    status, body = srv.register("build-02", worker_session_id=old, lanes=2)
+    assert status == 409 and body["code"] == "session_fenced"
+
+
+def test_rl10_an_irreversible_job_confirmed_without_group_gone_holds(srv):
+    srv.registered("build-02")
+    jid = running(srv, preset="ship")
+    old = srv.new_process("build-02")
+    srv.registered("build-02")
+    status, body = srv.req(
+        "POST",
+        f"/worker/jobs/{jid}/finish",
+        token="build-02",
+        json_body={
+            "worker_session_id": old,
+            "outcome": "lost",
+            "exit_code": None,
+            "summary_code": "worker_replaced",
+            "group_gone": False,
+        },
+    )
+    assert status == 200, body
+    assert [(h["job_id"], h["cause"], h["concurrency_group"]) for h in hold_rows(srv)] == [
+        (jid, "group_not_gone", "irreversible:ship")
+    ]
+    # RL44 (e): 홀드가 남는다. 그 뒤 group_gone: true 좁은 확인은 홀드를 푼다(확인 2)
+    status, body = srv.req(
+        "POST",
+        f"/worker/jobs/{jid}/finish",
+        token="build-02",
+        json_body={
+            "worker_session_id": old,
+            "outcome": "lost",
+            "exit_code": None,
+            "summary_code": "worker_replaced",
+            "group_gone": True,
+        },
+    )
+    assert status == 200 and body["hold_released"] is True, body
+    (h,) = hold_rows(srv)
+    assert h["release_kind"] == "worker" and h["released_by"] == "build-02"
+
+
+def test_rl11_unknown_foreign_and_malformed_sessions(srv):
+    srv.registered("build-02")
+    srv.registered("build-03")
+    jid = running(srv)
+    # 표에 없는 세션 → 409 not_registered(남의 토큰 403 과 구별)
+    stranger = secrets.token_hex(16)
+    status, body = srv.req(
+        "POST",
+        "/worker/heartbeat",
+        token="build-02",
+        json_body={"worker_session_id": stranger, "seq": 1, "claims_settled": 0, "jobs": []},
+    )
+    assert status == 409 and body["code"] == "not_registered", body
+    # 다른 이름의 토큰이 남의 현재 세션 id 를 실으면 403, `heard` 가 오르지 않는다
+    theirs = srv.session("build-02")
+    before = srv.app.heard_at(theirs)
+    srv.clock.advance(30)
+    for status, body in (
+        srv.req(
+            "POST",
+            "/worker/heartbeat",
+            token="build-03",
+            json_body={"worker_session_id": theirs, "seq": 1, "claims_settled": 0, "jobs": [jid]},
+        ),
+        srv.req(
+            "POST",
+            "/worker/register",
+            token="build-03",
+            json_body={
+                "worker_session_id": theirs,
+                "pool": "default",
+                "lanes": 1,
+                "version": __version__,
+            },
+        ),
+        srv.req(
+            "POST",
+            f"/worker/jobs/{jid}/finish",
+            token="build-03",
+            json_body={"worker_session_id": theirs, "outcome": "succeeded", "exit_code": 0},
+        ),
+    ):
+        assert status == 403 and set(body) == {"error"}, body
+    assert srv.app.heard_at(theirs) == before
+    assert job_of(srv, jid).state == RUNNING
+    # 모양이 틀린 세션 헤더 · 본문은 400 이고 본문 키는 error 하나
+    status, body = srv.req(
+        "POST",
+        f"/worker/jobs/{jid}/log",
+        token="build-02",
+        body=b"x\n",
+        headers={"Content-Type": "application/octet-stream", "X-RCM-Worker-Session": "nope"},
+    )
+    assert status == 400 and set(body) == {"error"}, body
+    status, body = srv.req(
+        "POST",
+        "/worker/heartbeat",
+        token="build-02",
+        json_body={"worker_session_id": "XYZ", "seq": 1, "claims_settled": 0},
+    )
+    assert status == 400 and set(body) == {"error"}
+
+
+def test_rl11_two_processes_registering_at_once_leave_exactly_one_current_session(srv):
+    sids = [secrets.token_hex(16) for _ in range(6)]
+    out: list[int] = []
+
+    def reg(sid: str) -> None:
+        status, _ = srv.req(
+            "POST",
+            "/worker/register",
+            token="build-02",
+            json_body={
+                "worker_session_id": sid,
+                "pool": "default",
+                "lanes": 1,
+                "version": __version__,
+            },
+        )
+        out.append(status)
+
+    threads = [threading.Thread(target=reg, args=(s,)) for s in sids]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(10)
+    assert out.count(200) == len(sids)
+    current = (
+        srv.store._conn()
+        .execute(
+            "SELECT id FROM worker_sessions WHERE worker_name='build-02' AND fenced_at IS NULL"
+        )
+        .fetchall()
+    )
+    assert len(current) == 1
+
+
+# ── 같은 세션의 재등록 · 순서(T10 · RL12 · RL13) ─────────────────────────────
+
+
+def test_rl12_reregistering_the_same_session_is_idempotent(srv):
+    srv.registered("build-02", lanes=2)
+    a = running(srv, lane=1)
+    srv.registered("build-02", lanes=2)  # 다른 레인이 not_registered 409 를 받아 재등록
+    assert job_of(srv, a).state == RUNNING
+    rows = srv.store._conn().execute("SELECT fenced_at FROM worker_sessions").fetchall()
+    assert [r["fenced_at"] for r in rows] == [None]
+
+
+def test_rl12_spec_does_not_create_a_session(srv):
+    """`rcm worker --check` · `rcm doctor` 는 spec · health · whoami 만 부른다(F46)."""
+    srv.registered("build-02")
+    jid = running(srv)
+    assert srv.req("GET", "/worker/spec", token="build-02")[0] == 200
+    assert srv.store._conn().execute("SELECT count(*) FROM worker_sessions").fetchone()[0] == 1
+    assert srv.heartbeat("build-02", jobs=[jid])[0] == 200
+
+
+def test_rl13_a_version_mismatch_answers_first_with_no_side_effect(srv):
+    srv.registered("build-02")
+    jid = running(srv)
+    srv.new_process("build-02")
+    status, body = srv.register("build-02", version="0.0.1")
+    assert status == 409 and body["server_version"] == __version__
+    assert "code" not in body
+    assert job_of(srv, jid).state == RUNNING
+    assert srv.store._conn().execute("SELECT count(*) FROM worker_sessions").fetchone()[0] == 1
+
+
+# ── 레거시 · 옛 워커(T11 · T12 · T17 · RL24 · RL47) ───────────────────────────
+
+
+def _legacy_running(srv: WorkerServer, preset: str = "ok") -> int:
+    """v26 이전에 claim 된 원격 잡 — 세션 · 얼린 값이 NULL 이다."""
+    jid = srv.queued_job(preset=preset)
+    srv.store._conn().execute(
+        "UPDATE jobs SET state=?, worker_name='build-02', lane=1, started_at=? WHERE id=?",
+        (RUNNING, srv.clock().timestamp(), jid),
+    )
+    return jid
+
+
+def test_rl24_an_old_worker_finishes_its_legacy_job_but_cannot_claim_or_register(srv):
+    srv.store.register_worker(
+        "build-02", pool="default", lanes=1, host_name=None, version=__version__, now=srv.clock()
+    )
+    jid = _legacy_running(srv)
+    srv.queued_job()
+    for path, body in (
+        ("/worker/claim", {"lane": 1}),
+        ("/worker/register", {"pool": "default", "lanes": 1, "version": __version__}),
+    ):
+        status, out = srv.req("POST", path, token="build-02", json_body=body, legacy=True)
+        assert status == 409 and out["code"] == "protocol_required", out
+        assert out["error"] == PROTOCOL_TEXT and "not registered" not in out["error"]
+        assert out["worker_protocol"] == 2
+    # 레거시 busy 잡이 있는 동안 세션 없는 heartbeat · log · finish 는 받는다
+    status, _ = srv.req(
+        "POST", "/worker/heartbeat", token="build-02", json_body={"jobs": [jid]}, legacy=True
+    )
+    assert status == 200
+    status, _ = srv.req(
+        "POST",
+        f"/worker/jobs/{jid}/log",
+        token="build-02",
+        body=b"hi\n",
+        headers={"Content-Type": "application/octet-stream"},
+        legacy=True,
+    )
+    assert status == 200
+    status, out = srv.req(
+        "POST",
+        f"/worker/jobs/{jid}/finish",
+        token="build-02",
+        json_body={"outcome": "succeeded", "exit_code": 0},
+        legacy=True,
+    )
+    assert status == 200, out
+    assert job_of(srv, jid).state == SUCCEEDED
+    status, out = srv.req(
+        "POST", "/worker/heartbeat", token="build-02", json_body={"jobs": []}, legacy=True
+    )
+    assert status == 409 and out["code"] == "protocol_required"
+    # claim 은 한 건도 나가지 않았다
+    assert [j.state for j in srv.store.list_active() if j.preset == "ok"] == [QUEUED]
+
+
+@pytest.mark.parametrize(("preset", "held"), [("ship", True), ("ok", False)])
+def test_rl47_the_first_session_closes_legacy_jobs_and_holds_irreversible_ones(srv, preset, held):
+    srv.store.register_worker(
+        "build-02", pool="default", lanes=1, host_name=None, version=__version__, now=srv.clock()
+    )
+    jid = _legacy_running(srv, preset)
+    srv.registered("build-02")
+    j = job_of(srv, jid)
+    assert j.state == LOST and j.summary_code == "worker_restarted_without_job"
+    rows = hold_rows(srv)
+    if held:
+        assert [(h["job_id"], h["cause"], h["concurrency_group"]) for h in rows] == [
+            (jid, "worker_restarted_without_job", "irreversible:ship")
+        ]
+    else:
+        assert rows == []
+        nxt = srv.queued_job()
+        assert srv.claimed("build-02", 1) == nxt  # 409 없이 다음 잡
+
+
+def test_rl47_legacy_and_session_heard_do_not_feed_each_other(srv):
+    srv.store.register_worker(
+        "build-02", pool="default", lanes=2, host_name=None, version=__version__, now=srv.clock()
+    )
+    jid = _legacy_running(srv)
+    key = "legacy:build-02"
+    srv.clock.advance(10)
+    srv.req("POST", "/worker/heartbeat", token="build-02", json_body={"jobs": [jid]}, legacy=True)
+    legacy_at = srv.app.heard_at(key)
+    srv.clock.advance(10)
+    srv.registered("build-02", lanes=2)  # 첫 등록이 레거시 잡을 닫는다
+    assert srv.app.heard_at(key) == legacy_at
+    assert srv.app.heard_at(srv.session("build-02")) > legacy_at
+
+
+# ── T5 순번 · 끝난 claim(RL9 · RL50) ───────────────────────────────────────────
+
+
+@pytest.mark.parametrize(("preset", "held"), [("ok", False), ("ship", True)])
+def test_rl9_a_lost_claim_answer_closes_after_the_claim_settled_and_holds_if_irreversible(
+    srv, preset, held
+):
+    srv.registered("build-02")
+    jid = srv.queued_job(preset=preset)
+    status, _ = srv.claim("build-02", 1)  # 서버는 확정 — 워커는 응답을 잃었다고 친다
+    assert status == 200
+    assert srv.heartbeat("build-02", jobs=[])[0] == 200
+    j = job_of(srv, jid)
+    assert j.state == LOST and j.summary_code == "worker_restarted_without_job"
+    causes = [(h["job_id"], h["cause"]) for h in hold_rows(srv)]
+    assert causes == ([(jid, "worker_restarted_without_job")] if held else [])
+
+
+def test_rl50_stale_or_unsettled_heartbeats_do_not_close_a_running_job(srv):
+    srv.registered("build-02")
+    jid = srv.queued_job(preset="ship")
+    assert srv.claimed("build-02", 1) == jid
+    claim_seq = job_of(srv, jid).claim_seq
+    assert srv.heartbeat("build-02", jobs=[jid], seq=3, claims_settled=claim_seq)[0] == 200
+    assert srv.heartbeat("build-02", jobs=[jid], seq=5, claims_settled=claim_seq)[0] == 200
+    # 늦게 온 seq 4(claim 전에 찍은 목록) — 받아들인 seq 이하라 판정하지 않는다
+    assert srv.heartbeat("build-02", jobs=[], seq=4, claims_settled=claim_seq)[0] == 200
+    assert job_of(srv, jid).state == RUNNING
+    # seq 는 새것이지만 claims_settled 가 그 claim 보다 작다
+    assert srv.heartbeat("build-02", jobs=[], seq=6, claims_settled=claim_seq - 1)[0] == 200
+    assert job_of(srv, jid).state == RUNNING
+    assert hold_rows(srv) == []
+    # 같은 그룹 둘째 잡은 claim 되지 않는다(합성 그룹 · global)
+    srv.registered("build-03")
+    srv.queued_job(preset="ship")
+    assert srv.claim("build-03", 1)[0] == 204
+
+
+@pytest.mark.parametrize("bad", [True, "1", -1, 2**53])
+def test_rl50_seq_and_claims_settled_must_be_json_integers(srv, bad):
+    srv.registered("build-02")
+    status, body = srv.heartbeat("build-02", jobs=[], seq=bad)
+    assert status == 400 and set(body) == {"error"}
+    status, body = srv.req(
+        "POST", "/worker/claim", token="build-02", json_body={"lane": 1, "claim_seq": bad}
+    )
+    assert status == 400 and set(body) == {"error"}
+
+
+# ── 닫힌 잡 통보(RL35) ─────────────────────────────────────────────────────────
+
+
+def test_rl35_heartbeat_reports_this_sessions_closed_jobs_with_had_cancel(srv):
+    srv.registered("build-02", lanes=2)
+    a = running(srv, lane=1)
+    b = running(srv, lane=2)
+    assert srv.cancel(b)[1]["state"] == CANCELLING
+    srv.store.finish(a, LOST, now=srv.clock(), summary="x")
+    srv.store.finish(b, LOST, now=srv.clock(), summary="x")
+    status, body = srv.heartbeat("build-02", jobs=[a, b, 999])
+    assert status == 200
+    assert body["closed_jobs"] == [
+        {"id": a, "state": LOST, "had_cancel": False},
+        {"id": b, "state": LOST, "had_cancel": True},
+    ]
+    srv.registered("build-03")
+    status, body = srv.heartbeat("build-03", jobs=[a, b])
+    assert body["closed_jobs"] == []  # 다른 세션의 잡은 안 실림
+
+
+# ── 홀드 풀기 · 인증된 확인(RL44) ─────────────────────────────────────────────
+
+
+def test_rl44_previous_sessions_release_a_hold_and_a_foreign_name_cannot(srv):
+    srv.registered("build-02")
+    jid = running(srv, preset="ship")
+    srv.store.finish(jid, LOST, now=srv.clock(), summary="x", hold_cause="worker_unreachable")
+    assert len(hold_rows(srv)) == 1
+    old = srv.session("build-02")
+    # (d) 다른 이름의 워커 토큰이 그 세션 id 를 previous_sessions 로 보낸다 → 403, 홀드 그대로
+    srv.registered("build-03")
+    srv.new_process("build-03")
+    status, body = srv.register("build-03", previous_sessions=[old])
+    assert status == 403 and set(body) == {"error"}
+    assert hold_rows(srv)[0]["released_at"] is None
+    # (a) 같은 이름의 새 프로세스가 D 의 그룹이 없음을 확인 → 풀림, 대기 잡이 시작
+    waiting = srv.queued_job(preset="ship")
+    srv.restarted("build-02")
+    (h,) = hold_rows(srv)
+    assert h["release_kind"] == "worker" and h["released_by"] == "build-02"
+    assert srv.claimed("build-02", 1) == waiting
+
+
+def test_rl44_a_late_finish_with_group_gone_releases_the_hold(srv):
+    srv.registered("build-02")
+    jid = running(srv, preset="ship")
+    srv.store.finish(jid, LOST, now=srv.clock(), summary="x", hold_cause="worker_unreachable")
+    status, body = srv.finish("build-02", jid, "lost")  # group_gone 없음 — 그대로
+    assert status == 409 and body["code"] == "job_closed" and body["hold_released"] is False
+    status, body = srv.req(
+        "POST",
+        f"/worker/jobs/{jid}/finish",
+        token="build-02",
+        json_body={"outcome": "lost", "exit_code": None, "group_gone": True},
+    )
+    assert status == 409 and body["hold_released"] is True and body["state"] == LOST
+    assert hold_rows(srv)[0]["release_kind"] == "worker"
+
+
+def test_rl44_a_live_irreversible_finish_without_group_gone_holds(srv):
+    srv.registered("build-02")
+    jid = running(srv, preset="ship")
+    assert srv.finish("build-02", jid, "succeeded", exit_code=0)[0] == 200
+    assert [h["cause"] for h in hold_rows(srv)] == ["group_not_gone"]
+    nxt = srv.queued_job(preset="ship")
+    assert srv.claim("build-02", 1)[0] == 204  # 그 그룹은 막혔다
+    assert job_of(srv, nxt).state == QUEUED
+
+
+# ── 워커 쪽: 등록 전 프로토콜 확인 · 종료 코드(T13 · W5 · W6 · RL25 · RL32) ─────
+
+
+class _OldServer:
+    """프로토콜 키가 없는 옛 서버의 워커 클라이언트 흉내. 부른 것을 적는다."""
+
+    def __init__(self, version: str, *, spec_status: int = 200):
+        self.server = "http://old"
+        self.token = "t"
+        self.calls: list[str] = []
+        self.version = version
+        self.spec_status = spec_status
+
+    def spec(self) -> dict[str, Any]:
+        self.calls.append("GET /worker/spec")
+        if self.spec_status != 200:
+            raise ClientError(self.spec_status, "not found")
+        return {"generation": "1:0", "presets": []}
+
+    def health(self) -> dict[str, Any]:
+        self.calls.append("GET /api/health")
+        return {"version": self.version}
+
+    def register(self, **kw: Any) -> dict[str, Any]:
+        self.calls.append("POST /worker/register")
+        raise ClientError(409, "worker version x, server y", {"server_version": self.version})
+
+
+@pytest.mark.parametrize("spec_status", [200, 404])
+def test_rl25_a_new_worker_against_a_protocol_1_server_exits_3_before_registering(
+    tmp_path, spec_status
+):
+    fake = _OldServer(__version__, spec_status=spec_status)
+    cfg = WorkerConfig(server="http://old", token="t", data_dir=str(tmp_path / "w"))
+    for _ in range(3):  # 감독자가 되살려도 같다
+        w = RemoteWorker(cfg, client=fake, log=lambda m: None)
+        with pytest.raises(WorkerExit) as e:
+            w.run()
+        assert e.value.code == EXIT_PROTOCOL
+        assert "protocol" in e.value.message
+    assert "POST /worker/register" not in fake.calls
+    assert set(fake.calls) <= {"GET /worker/spec", "GET /api/health"}
+    assert not (tmp_path / "w" / "worker-sessions").exists()
+
+
+def test_rl32_a_different_version_goes_the_register_path_and_follows(tmp_path):
+    fake = _OldServer("9.9.9")
+    cfg = WorkerConfig(server="http://old", token="t", data_dir=str(tmp_path / "w"))
+    w = RemoteWorker(cfg, client=fake, log=lambda m: None)
+    with pytest.raises(WorkerExit) as e:
+        w.run()
+    assert e.value.code == 2  # WorkerFollow(따라가기) 또는 종료 2 — 종료 3 이 아니다
+    assert fake.calls[-1] == "POST /worker/register"
+
+
+def test_w5_a_fenced_worker_process_stops_and_exits_zero(srv, tmp_path):
+    """W5: 살아 있는 프로세스의 요청이 409 session_fenced 면 모든 레인을 멈추고 종료 0."""
+    url = f"http://127.0.0.1:{srv.port}"
+    cfg = WorkerConfig(
+        server=url, token=srv.tokens["build-02"], data_dir=str(tmp_path / "w"), lanes=1
+    )
+    w = RemoteWorker(cfg, log=lambda m: None)
+    out: dict[str, Any] = {}
+    t = threading.Thread(target=lambda: out.update(code=w.run()), daemon=True)
+    t.start()
+    for _ in range(200):
+        if srv.store.get_session(w.session_id) is not None:
+            break
+        threading.Event().wait(0.05)
+    srv.new_process("build-02")
+    srv.registered("build-02")  # 같은 토큰의 새 프로세스가 등록 → w 는 펜싱됐다
+    w.heartbeat_once()
+    t.join(30)
+    assert not t.is_alive()
+    assert out["code"] == 0 and w.fenced.is_set()
+
+
+def test_parse_preset_accepts_the_irreversible_key_used_here():
+    assert parse_preset(sh("ship", "echo ship", irreversible=True)).irreversible is True
