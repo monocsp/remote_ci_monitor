@@ -2047,3 +2047,67 @@ def test_b10_m6_the_real_system_places_are_read_without_error(home, monkeypatch)
     monkeypatch.setattr(setup, "SYSTEM_SERVICE_PLACES", REAL_SYSTEM_SERVICE_PLACES)
     found = setup.scan_services(environ={})
     assert isinstance(found, list)
+
+
+def test_b10_h2_a_copy_outside_the_config_folder_does_not_make_the_label_setups(
+    cfg, tmp_path, prod
+):
+    # batch 10 H2(v1-2 · v2-1): `written` 에 `--service-file` 이 가리키는 파일의 지금 바이트가
+    # 들어갔다 — 운영 plist 의 사본을 가리키면 운영 라벨이 setup 의 것이 됐다. `written` 은 렌더한
+    # 바이트와 설정 폴더 아래의 staged 사본뿐이다
+    copy = tmp_path / "elsewhere" / "copy.plist"
+    copy.parent.mkdir()
+    copy.write_bytes(prod["plist"].read_bytes())
+    argv = coordinator_args(tmp_path / "data", "--service-file", str(copy), "--force", "service")
+    argv[argv.index("--label") + 1] = SERVER_LABEL
+    fake = Fake()
+    assert go(fake, *argv) == 1, fake.text
+    assert f"this is {SERVER_LABEL}'s label — refusing" in fake.err.getvalue(), fake.text
+    assert copy.read_bytes() == prod["plist"].read_bytes()
+    _nothing_written(cfg, tmp_path / "data")
+
+
+@pytest.mark.parametrize("how", ["file-link", "dir-link", "xdg", "config-dir-link"])
+def test_b10_h2_an_install_place_is_found_through_links_and_xdg(cfg, home, tmp_path, prod, how):
+    # batch 10 H2: 설치 자리는 심볼릭 링크를 풀어 견주고(`--service-file` 이 설치된 유닛을
+    # 가리키는 링크, 설치 자리를 가리키는 폴더 링크) `$XDG_CONFIG_HOME/systemd/user` 도 설치 자리다
+    agents = home / "Library" / "LaunchAgents"
+    platform, flag = "darwin", "--service-file"
+    if how == "file-link":
+        target = tmp_path / "looks-staged.plist"
+        target.symlink_to(prod["plist"])
+    elif how in ("dir-link", "config-dir-link"):
+        (tmp_path / "la").symlink_to(agents)
+        target = tmp_path / "la" / ("x.toml" if how == "config-dir-link" else "new.plist")
+        flag = "--config" if how == "config-dir-link" else flag
+    else:
+        platform = "linux"
+        target = tmp_path / "xdg-config" / "systemd" / "user" / "test.rcm.server.service"
+    before = sorted(p.name for p in agents.iterdir())
+    plist = prod["plist"].read_bytes()
+    argv = coordinator_args(tmp_path / "data", flag, str(target), "--force", "all")
+    fake = Fake(platform=platform)
+    assert go(fake, *argv) == 2, fake.text
+    assert "an install place the service manager reads" in fake.err.getvalue(), fake.text
+    assert sorted(p.name for p in agents.iterdir()) == before
+    assert prod["plist"].read_bytes() == plist
+    if how == "xdg":
+        assert not target.exists()
+
+
+def test_b10_h2_own_needs_the_install_place_and_the_service_file_is_refused_first():
+    # batch 10 H2: setup 자신의 서비스는 설치 파일이 그 라벨의 설치 자리에 있을 때만이다. 해석된
+    # `--service-file` 이 스캔한 서비스의 파일과 같으면 own 을 보기 전에 거절한다
+    svc = core.RcmService(
+        name="lbl", file=Path("/s/lbl.plist"), names=("lbl",), config=Path("/c/x.toml"), data=b"x"
+    )
+    own = dict(label="lbl", written=(b"x",), force_service=True, fold_case=False)
+    assert core.production_refusal([svc], {}, installed=Path("/s/lbl.plist"), **own) is None
+    elsewhere = core.production_refusal([svc], {}, installed=Path("/i/lbl.plist"), **own)
+    assert "lbl's label — refusing" in (elsewhere or ""), elsewhere
+    assert "lbl's label — refusing" in (core.production_refusal([svc], {}, **own) or "")
+    same = {"--service-file": Path("/s/lbl.plist")}
+    reason = core.production_refusal([svc], same, installed=Path("/s/lbl.plist"), **own)
+    assert reason == (
+        "--service-file /s/lbl.plist: this is lbl's service file — refusing (nothing was written)"
+    )

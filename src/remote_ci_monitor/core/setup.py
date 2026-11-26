@@ -888,6 +888,7 @@ def production_refusal(
     written: Sequence[bytes],
     force_service: bool,
     fold_case: bool,
+    installed: Path | None = None,
 ) -> str | None:
     """setup 이 쓸 자리(`targets`: 플래그 이름 → 경로)가 이 머신의 rcm 서비스가 쓰는 것이면 그
     거절 문장, 아니면 None. 우회 플래그는 없다.
