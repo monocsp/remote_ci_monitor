@@ -5914,14 +5914,8 @@ MUTANTS = (
         # 잡혀 있는지 모른다(RL31)
         name="unverified-session-not-logged",
         path="src/remote_ci_monitor/remote_worker.py",
-        old=(
-            "                self.unverified_sessions.append(dead.session_id)\n"
-            "                self.log(\n"
-        ),
-        new=(
-            "                self.unverified_sessions.append(dead.session_id)\n"
-            "                (lambda m: None)(\n"
-        ),
+        old=("            if not dead.verified:\n                self.log(\n"),
+        new=("            if not dead.verified:\n                (lambda m: None)(\n"),
         tests=(
             "tests/test_worker_session_m5tb.py::"
             "test_rl31_unknown_identity_warns_then_the_recheck_stops_the_same_group",
