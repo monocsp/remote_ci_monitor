@@ -1939,3 +1939,120 @@ def test_b5_6_b_a_readable_outbox_of_a_dead_session_is_not_set_aside(tmp_path, f
     assert not list((w2.config.data_path / rw.SESSIONS_DIR).glob("unreadable-*"))
     assert (job_dir / rw.STREAM_FILE).read_bytes() == b"one\ntwo\n"
     assert rw.JobOutbox.load(job_dir) is not None
+
+
+# ── batch-6: 끝난 잡의 밀린 phase 가 finish 를 막지 않는다 ────────────────────────
+
+
+def _phase_stuck(tmp_path: Path, tick: float, failure: Any):
+    """끝난 잡의 큐에 phase 만 남았고 그 phase 가 늘 `failure` 로 실패한다."""
+    clock = WClock()
+    fake = FakeServer(clock, tick=tick)
+    w, ob, s = live_sender(tmp_path, fake, clock)
+    ob.phase = "running"
+    end_job(w, ob)
+    fake.script["phase"] = [failure] * 100000
+    return clock, fake, w, ob, s
+
+
+def test_b6_1_a_a_finished_job_whose_phase_keeps_getting_5xx_sends_the_finish_after_300s(
+    tmp_path, fast
+):
+    """# batch-6 #1 phase 는 결과가 아니라 진행 표시다. 끝난 잡의 phase 가 5xx 로 계속 막히면
+    로그 · 산출물의 5xx 와 같이 끝난 지 300초 뒤 finish 가 먼저 간다(결정 324). 그러지 않으면
+    살아 있는 워커가 phase 를 끝없이 다시 보내고, 서버의 잡은 running 으로 남아 레인이 잡힌다."""
+    clock, fake, w, ob, s = _phase_stuck(tmp_path, 60, http(503))
+    s.start()
+    try:
+        s.thread.join(5)
+        assert ob.done, "the finish never goes behind a phase that keeps failing"
+    finally:
+        s.halt.set()
+    fins = [c for c in fake.calls if c[0] == "finish"]
+    assert [c[3] for c in fins] == [SUCCEEDED]
+    assert timedelta(seconds=300) <= clock.wall - T0W < timedelta(hours=1)
+    assert fake.calls[fake.calls.index(fins[0]) + 1 :] == []  # 남은 phase 는 버린다
+    said = [x for x in w.logs if "phase" in x and "finish" in x]
+    assert said == [
+        "#7 report: phase still not delivered 300s after the job ended — sending the finish"
+        " first, the phase is dropped"
+    ], w.logs
+
+
+def test_b6_1_b_a_finished_job_whose_phase_fails_unexpectedly_sends_the_finish_after_300s(
+    tmp_path, fast
+):
+    """# batch-6 #1 phase 단계가 예상 못 한 예외로 계속 실패해도 같다 — 끝난 지 300초 뒤 finish
+    가 먼저 간다(P6-1 G4 의 로그 단계와 같은 규칙)."""
+    clock, fake, w, ob, s = _phase_stuck(tmp_path, 0, RuntimeError("boom"))
+    s.start()
+    try:
+        assert wait_for(lambda: any("unexpected" in x for x in w.logs), 5), w.logs
+        time.sleep(0.05)
+        assert not ob.done  # 300초 전에는 순서를 지킨다
+        clock.advance(rw.FINISH_HOLD_SECONDS + 1)
+        s.wake.set()
+        assert wait_for(lambda: ob.done, 5), w.logs
+    finally:
+        s.halt.set()
+    assert [c[3] for c in fake.calls if c[0] == "finish"] == [SUCCEEDED]
+    assert fake.routes()[-1] == "finish"
+    assert sum(1 for x in w.logs if "sending the finish first" in x) == 1, w.logs
+
+
+def test_b6_1_c_a_finished_job_whose_phase_cannot_reach_the_server_sends_the_finish_after_24h(
+    tmp_path, fast
+):
+    """# batch-6 #1 연결 실패면 finish 도 갈 수 없으니 순서를 지킨다(결정 324). 그래도 재전송 창
+    (24시간, 결정 264)이 끝나면 로그처럼 phase 도 포기하고 finish 를 보낸다."""
+    clock, fake, w, ob, s = _phase_stuck(tmp_path, 3 * 3600, conn_fail())
+    s.start()
+    try:
+        s.thread.join(5)
+        assert ob.done, "the finish never goes behind a phase that cannot be sent"
+    finally:
+        s.halt.set()
+    assert [c[3] for c in fake.calls if c[0] == "finish"] == [SUCCEEDED]
+    assert clock.wall - T0W >= timedelta(hours=24)
+    assert "#7 report: phase not delivered in 24h — sending the finish without it" in w.logs
+
+
+def test_b6_2_a_running_job_keeps_retrying_its_phase_and_then_sends_the_log(tmp_path, fast):
+    """# batch-6 #3 잡이 도는 동안에는 phase 가 몇 번 · 몇 시간 실패해도 포기하지 않는다(§4.5
+    「잡이 도는 동안에는 횟수와 시간에 상한이 없다」). 그동안 로그는 phase 뒤에 줄 서고, phase 가
+    가면 이어 간다. 끝나지 않은 잡에는 finish 가 없다."""
+    clock = WClock()
+    fake = FakeServer(clock, tick=600)
+    w, ob, s = live_sender(tmp_path, fake, clock)
+    ob.phase = "running"
+    ob.append(b"one\n")
+    fake.script["phase"] = [http(503)] * 100 + [RuntimeError("boom")] * 100  # 33시간
+    s.start()
+    try:
+        assert wait_for(lambda: bytes(fake.received.get(7, b"")) == b"one\n", 10), w.logs
+        assert s.alive() and not ob.done
+    finally:
+        s.halt.set()
+    routes = fake.routes()
+    assert routes.count("phase") == 201 and "finish" not in routes
+    assert routes.index("log") > max(i for i, r in enumerate(routes) if r == "phase")
+    assert ob.phase is None
+
+
+def test_b6_3_a_dead_queue_whose_phase_fails_locally_still_sends_the_finish_first(tmp_path, fast):
+    """# batch-6 #1 죽은 세션 D 의 끝난 잡에서 phase 만 로컬 오류로 막혀도 등록은 기다린다 — 끝난
+    지 300초 뒤 finish 가 먼저 간다. 기다리지 않으면 그 잡은 restarted-without-job 으로 닫혀 끝난
+    잡의 결과를 잃는다(batch-5 #2 의 로그 단계와 같다)."""
+    clock = WClock()
+    fake = FakeServer(clock, tick=40)
+    w1 = wworker(tmp_path, fake, clock)
+    w1.prepare_sessions()
+    ob = ended_queue(w1, 7, b"")  # 로그는 다 갔다 — 남은 것은 phase 와 finish 뿐
+    ob.phase = "running"
+    ob.save()
+    die(w1)
+    fake.script["phase"] = [RuntimeError("boom")] * 100000
+    w2 = restart(tmp_path, fake, clock)
+    assert _run_bounded(w2.send_dead_queues, w2)
+    assert [c[3] for c in fake.calls if c[0] == "finish"] == [SUCCEEDED], w2.logs
+    assert not any("queue not delivered" in x or "local error" in x for x in w2.logs), w2.logs
