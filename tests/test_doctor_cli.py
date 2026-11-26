@@ -338,7 +338,7 @@ def test_td12_doctor_sends_only_read_requests_to_the_server(worker, srv, capsys)
     assert srv.requests, "doctor never asked the server"
     assert {r.method for r in srv.requests} == {"GET"}, [(r.method, r.path) for r in srv.requests]
     assert not srv.calls("POST", "/worker/capabilities")
-    assert not srv.calls("POST", "/worker/register")
+    assert not srv.calls("POST", "/worker/register")  # RL12 (c): 세션을 만들지 않는다
 
 
 def test_td8_preset_env_values_never_reach_the_output(worker, srv, capsys):

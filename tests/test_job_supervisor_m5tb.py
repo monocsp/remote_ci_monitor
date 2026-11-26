@@ -429,6 +429,20 @@ def test_rl52_a_missing_command_under_the_supervisor_has_the_same_code(tmp_path)
     assert getattr(wrapped.value, "group_gone", None) is True
 
 
+def test_rl52_b_a_non_executable_command_under_the_supervisor_has_the_same_code(tmp_path):
+    """RL52 (b) 실행 권한이 없다 — 러너 수준에서도 감독자 없을 때와 같은 `launch_permission_denied`
+    이고, 감독자의 실패가 명령의 종료 1 이나 `launch_failed` 로 보이지 않는다."""
+    f = tmp_path / "not-executable"
+    f.write_text("#!/bin/sh\necho ran\n", encoding="utf-8")
+    f.chmod(0o644)
+    with pytest.raises(RunnerError) as plain:
+        run_job(spec(tmp_path, [str(f)]), Obs())
+    with pytest.raises(RunnerError) as wrapped:
+        run_job(spec(tmp_path, [str(f)], irreversible=True), Obs())
+    assert plain.value.code == wrapped.value.code == "launch_permission_denied"
+    assert getattr(wrapped.value, "group_gone", None) is True
+
+
 def test_rl52_a_missing_supervisor_file_is_a_broken_install(tmp_path, monkeypatch):
     monkeypatch.setattr(runner, "SUPERVISOR_PATH", tmp_path / "gone.py")
     with pytest.raises(RunnerError) as e:

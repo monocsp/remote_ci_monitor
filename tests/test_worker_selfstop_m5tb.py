@@ -1083,6 +1083,37 @@ def test_rl50_a_late_heartbeat_answer_does_not_undo_a_newer_cancel(tmp_path):
     assert 7 in w.cancel_requested  # 작은 seq 의 빈 cancel 이 새 취소를 지우지 않는다
 
 
+@pytest.mark.parametrize("newer", [True, False])
+def test_rl50_a_late_heartbeat_answer_does_not_undo_a_newer_paused(tmp_path, newer):
+    """RL50 「`seq` 가 이미 적용한 것보다 작은 응답의 `cancel` · `paused` 를 적용하지 않는다」 —
+    `paused` 쪽. 먼저 돌아온 새 응답 B 의 값이 늦게 돌아온 A 의 반대 값에 되돌려지지 않는다."""
+    w, fake, _clocks, _logs = make_worker(tmp_path)
+    w.paused = not newer
+    gate = threading.Event()
+    seqs: list[Any] = []
+
+    def heartbeat(jobs, host=None, *, seq=None, claims_settled=None):
+        seqs.append(seq)
+        if len(seqs) == 1:
+            gate.wait(10)  # A — 늦게 돌아온다
+            return {"cancel": [], "paused": not newer}
+        return {"cancel": [], "paused": newer}  # B — 먼저 돌아온다
+
+    fake.heartbeat = heartbeat
+    t = threading.Thread(target=w.heartbeat_once, daemon=True)
+    t.start()
+    deadline = time.monotonic() + 5
+    while not seqs:
+        assert time.monotonic() < deadline
+        time.sleep(0.01)
+    assert w.heartbeat_once() is True
+    assert w.paused is newer
+    gate.set()
+    t.join(10)
+    assert seqs[0] < seqs[1]
+    assert w.paused is newer  # 작은 seq 의 paused 가 새 상태를 되돌리지 않는다
+
+
 def test_rl50_the_claimed_job_is_running_in_the_lock_section_that_settles_its_claim(tmp_path):
     """R20: heartbeat 이 찍는 「끝난 claim 까지」에 든 claim 의 잡은 그 순간 `running` 에 있다."""
     w, fake, _clocks, _logs = make_worker(tmp_path)

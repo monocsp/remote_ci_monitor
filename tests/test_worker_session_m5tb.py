@@ -415,6 +415,30 @@ def test_rl9_a_lost_claim_answer_closes_after_the_claim_settled_and_holds_if_irr
     assert causes == ([(jid, "worker_restarted_without_job")] if held else [])
 
 
+@pytest.mark.parametrize("answer_lost", [False, True])
+def test_rl9_a_restarted_process_closes_its_dead_sessions_irreversible_job_without_a_hold(
+    srv, answer_lost
+):
+    """RL9 「프로세스가 죽고 다시 시작했으면 이어받기 등록이 닫고(확인, 홀드 0)」. 새 프로세스가
+    D 의 폴더 잠금을 쥐고 D 를 `previous_sessions` 로 넘겼다 — D 의 그룹이 없다는 확인이다.
+    `answer_lost` 는 T5 변형: D 가 claim 응답을 잃고(그 잡을 모른 채) 죽었다."""
+    srv.registered("build-02")
+    jid = srv.queued_job(preset="ship")
+    status, _ = srv.claim("build-02", 1)
+    assert status == 200
+    if not answer_lost:  # D 가 그 잡을 돌렸다
+        assert srv.heartbeat("build-02", jobs=[jid])[0] == 200
+    assert job_of(srv, jid).state == RUNNING
+    srv.clock.advance(5)
+    srv.restarted("build-02")  # 새 프로세스 — previous_sessions=[D]
+    j = job_of(srv, jid)
+    assert j.state == LOST and j.summary_code == "worker_restarted_without_job"
+    assert hold_rows(srv) == []
+    # 그룹(irreversible:ship · global)이 풀려 같은 그룹의 다음 잡이 곧 시작한다
+    nxt = srv.queued_job(preset="ship")
+    assert srv.claimed("build-02", 1) == nxt
+
+
 def test_rl50_stale_or_unsettled_heartbeats_do_not_close_a_running_job(srv):
     srv.registered("build-02")
     jid = srv.queued_job(preset="ship")
@@ -465,6 +489,60 @@ def test_rl35_heartbeat_reports_this_sessions_closed_jobs_with_had_cancel(srv):
     srv.registered("build-03")
     status, body = srv.heartbeat("build-03", jobs=[a, b])
     assert body["closed_jobs"] == []  # 다른 세션의 잡은 안 실림
+
+
+def test_rl35_a_closed_job_missing_from_the_heartbeat_list_is_not_reported(srv):
+    """RL35 「그 세션의 잡만, 목록에 없는 잡 · 다른 세션의 잡은 안 실림」 — 이 세션이 닫힌 잡을
+    가졌어도 워커가 그 잡을 `jobs` 에 싣지 않으면 `closed_jobs` 에 없다. 실은 잡만 실린다."""
+    srv.registered("build-02", lanes=2)
+    a = running(srv, lane=1)
+    b = running(srv, lane=2)
+    srv.store.finish(a, LOST, now=srv.clock(), summary="x")
+    srv.store.finish(b, LOST, now=srv.clock(), summary="x")
+    status, body = srv.heartbeat("build-02", jobs=[b])
+    assert status == 200
+    assert body["closed_jobs"] == [{"id": b, "state": LOST, "had_cancel": False}]
+    status, body = srv.heartbeat("build-02", jobs=[])
+    assert status == 200 and body["closed_jobs"] == []
+
+
+def test_rl11_an_unknown_session_gets_not_registered_on_log_phase_and_finish(srv):
+    """RL11 「표에 없으면 409 `not_registered`」 — heartbeat 만이 아니라 log · phase · finish
+    도. 남의 토큰 403 · 펜싱 409 와 구별되고 잡 상태 · `log.txt` · phase 에 한 바이트도 반영되지
+    않는다."""
+    srv.registered("build-02")
+    jid = running(srv)
+    assert srv.log("build-02", jid, b"::rcm::step::real\n")[0] == 200
+    before_job = srv.view(jid, token="alice")
+    before_sha = _log_sha(srv, jid)
+    stranger = secrets.token_hex(16)
+    for status, body in (
+        srv.req(
+            "POST",
+            f"/worker/jobs/{jid}/log",
+            token="build-02",
+            body=b"::rcm::step::evil\n",
+            headers={"Content-Type": "application/octet-stream", "X-RCM-Worker-Session": stranger},
+        ),
+        srv.req(
+            "POST",
+            f"/worker/jobs/{jid}/phase",
+            token="build-02",
+            json_body={"worker_session_id": stranger, "phase": "executing"},
+        ),
+        srv.req(
+            "POST",
+            f"/worker/jobs/{jid}/finish",
+            token="build-02",
+            json_body={"worker_session_id": stranger, "outcome": "succeeded", "exit_code": 0},
+        ),
+    ):
+        assert status == 409 and body["code"] == "not_registered", (status, body)
+    assert _log_sha(srv, jid) == before_sha
+    after_job = srv.view(jid, token="alice")
+    for key in ("state", "phase", "last_step", "exit_code", "summary"):
+        assert after_job.get(key) == before_job.get(key), key
+    assert job_of(srv, jid).state == RUNNING
 
 
 # ── 홀드 풀기 · 인증된 확인(RL44) ─────────────────────────────────────────────

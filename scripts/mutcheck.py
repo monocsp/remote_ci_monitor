@@ -6035,6 +6035,77 @@ MUTANTS = (
             "test_rl41_c_a_preset_with_requires_and_a_flag_while_preparing_starts_no_process",
         ),
     ),
+    Mutant(
+        # 이어받기 등록이 previous_sessions 의 표식 잡을 닫으며 홀드를 만든다 — 확인인데
+        # 「없음」처럼 다룬다(RL9)
+        name="restart-confirm-holds",
+        path="src/remote_ci_monitor/store.py",
+        old='                    closed.append(int(row["id"]))\n',
+        new=(
+            '                    closed.append(int(row["id"]))\n'
+            '                    self._hold_tx(conn, int(row["id"]), '
+            '"worker_restarted_without_job", ts)\n'
+        ),
+        tests=(
+            "tests/test_worker_session_m5tb.py::"
+            "test_rl9_a_restarted_process_closes_its_dead_sessions_irreversible_job_without_a_hold",
+        ),
+    ),
+    Mutant(
+        # 표에 없는 세션을 그냥 통과시킨다 — log · phase · finish 가 not_registered 대신 403(RL11)
+        name="unknown-session-passes",
+        path="src/remote_ci_monitor/remote_workers.py",
+        old="        row = self.store.get_session(session_id)\n        if row is None:\n",
+        new=(
+            "        row = self.store.get_session(session_id)\n"
+            "        if row is None:\n"
+            "            return\n"
+            "        if row is None:\n"
+        ),
+        tests=(
+            "tests/test_worker_session_m5tb.py::"
+            "test_rl11_an_unknown_session_gets_not_registered_on_log_phase_and_finish",
+        ),
+    ),
+    Mutant(
+        # closed_jobs 가 heartbeat 목록과 상관없이 그 세션의 닫힌 잡을 모두 싣는다(RL35)
+        name="closed-jobs-beyond-the-list",
+        path="src/remote_ci_monitor/store.py",
+        old=(
+            '                f"SELECT id, state, cancel_requested_at FROM jobs WHERE id IN '
+            '({marks}) "\n'
+        ),
+        new=(
+            '                f"SELECT id, state, cancel_requested_at FROM jobs WHERE (1 OR id IN '
+            '({marks})) "\n'
+        ),
+        tests=(
+            "tests/test_worker_session_m5tb.py::"
+            "test_rl35_a_closed_job_missing_from_the_heartbeat_list_is_not_reported",
+        ),
+    ),
+    Mutant(
+        # 늦게 돌아온 heartbeat 응답의 paused 를 seq 와 상관없이 적용한다(RL50)
+        name="stale-hb-paused-applied",
+        path="src/remote_ci_monitor/remote_worker.py",
+        old='                self.paused = bool(out.get("paused"))\n',
+        new='            self.paused = bool(out.get("paused"))\n',
+        tests=(
+            "tests/test_worker_selfstop_m5tb.py::"
+            "test_rl50_a_late_heartbeat_answer_does_not_undo_a_newer_paused",
+        ),
+    ),
+    Mutant(
+        # 감독자가 알린 권한 거부를 러너가 launch_permission_denied 로 읽지 않는다(RL52 b)
+        name="supervisor-permission-denied-unmapped",
+        path="src/remote_ci_monitor/runner.py",
+        old='    if reason == "launch_permission_denied":\n',
+        new="    if False:\n",
+        tests=(
+            "tests/test_job_supervisor_m5tb.py::"
+            "test_rl52_b_a_non_executable_command_under_the_supervisor_has_the_same_code",
+        ),
+    ),
 )
 
 
