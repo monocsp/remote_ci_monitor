@@ -6993,6 +6993,23 @@ MUTANTS = (
         tests=("tests/web/unreachable_m5tb.test.js",),
         runner="node",
     ),
+    Mutant(
+        # worker · coordinator-worker 의 doctor 텍스트가 모르는 홀드(null)를 「없음」처럼 침묵한다
+        # (RL45, P3 r1)
+        name="doctor-holds-unknown-silent",
+        path="src/remote_ci_monitor/core/doctor.py",
+        old=(
+            '    if holds is None and doc.get("role") in HOLD_ROLES:'
+            "  # mutcheck: doctor-holds-unknown-silent\n"
+        ),
+        new="    if False:\n",
+        tests=(
+            "tests/test_hold_display_m5tb.py::"
+            "test_rl45_doctor_text_says_the_holds_are_unknown_on_a_worker",
+            "tests/test_hold_display_m5tb.py::"
+            "test_rl45_doctor_text_says_unknown_on_a_coordinator_worker",
+        ),
+    ),
 )
 
 

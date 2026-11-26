@@ -327,6 +327,40 @@ def test_rl45_doctor_with_no_hold_here_prints_nothing_and_has_an_empty_list(work
     assert "needs action" not in out
 
 
+HOLDS_UNKNOWN = "group holds: unknown — "
+
+
+def test_rl45_doctor_text_says_the_holds_are_unknown_on_a_worker(worker, srv, capsys):
+    """# RL45 P3 r1: 텍스트 출력에서 null(모름)과 [](없음)이 둘 다 아무것도 안 찍으면 모름이
+    「없음」으로 읽힌다. 홀드를 가질 수 있는 역할이면 null 에 한 줄."""
+    _code, doc = worker(capsys)
+    assert doc["irreversible_holds"] is None  # 옛 서버 — 키가 없다
+    _code, out, _err = worker.text(capsys)
+    lines = [ln for ln in out.splitlines() if HOLDS_UNKNOWN in ln]
+    assert len(lines) == 1, out
+    srv.route("GET", "/api/health", {"ok": True, "version": __version__, "irreversible_holds": []})
+    _code, out, _err = worker.text(capsys)
+    assert HOLDS_UNKNOWN not in out  # 없음은 조용하다
+
+
+def test_rl45_doctor_text_says_unknown_on_a_coordinator_worker(
+    env, coordinator, monkeypatch, capsys
+):
+    monkeypatch.setenv("RCM_TOKEN", CLIENT_TOKEN)
+    health = coordinator.routes[("GET", "/api/health")][1]
+    coordinator.route("GET", "/api/health", {**health, "irreversible_holds": None})
+    cfg = server_toml(env, coordinator.port)
+    _code, out, _err = run(capsys, "--role", "coordinator-worker", "--config", str(cfg))
+    assert len([ln for ln in out.splitlines() if HOLDS_UNKNOWN in ln]) == 1, out
+
+
+def test_rl45_doctor_text_is_quiet_about_holds_on_a_client(env, coordinator, monkeypatch, capsys):
+    """client · coordinator 역할의 null 은 「이 머신과 무관」이다 — 지금처럼 조용히."""
+    monkeypatch.setenv("RCM_TOKEN", CLIENT_TOKEN)
+    _code, out, _err = run(capsys, "--role", "client", "--server", coordinator.url)
+    assert HOLDS_UNKNOWN not in out, out
+
+
 def test_rl45_coordinator_worker_sees_the_local_lane_holds(env, coordinator, monkeypatch, capsys):
     monkeypatch.setenv("RCM_TOKEN", CLIENT_TOKEN)
     health = coordinator.routes[("GET", "/api/health")][1]

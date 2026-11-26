@@ -1241,7 +1241,7 @@ People see a hold in words, without the code:
 | `rcm wait --job N` (stderr) | `#821 needs action · group irreversible:ship is held by job #812 — check that machine for a leftover process, then ask an admin to run rcm release-hold 812`; with `--return-on-action` it ends with exit 4 |
 | `rcm top` | the waiting job's reason line: `needs action · group irreversible:ship is held by #812 — rcm release-hold 812 after checking the machine` |
 | `rcm check` | one `warn  irreversible hold` row per hold; a hold is a warning, never a FAIL, so the exit code does not change |
-| `rcm doctor` (roles `worker` and `coordinator-worker`) | a `needs action` line for each hold of a job that ran on this machine: `a job that ran here was closed without a stop confirmation — check for a leftover process, then ask an admin to run rcm release-hold N`; `--json` lists them in `irreversible_holds` (`null` when unknown). The exit code rules do not change |
+| `rcm doctor` (roles `worker` and `coordinator-worker`) | a `needs action` line for each hold of a job that ran on this machine: `a job that ran here was closed without a stop confirmation — check for a leftover process, then ask an admin to run rcm release-hold N`; `--json` lists them in `irreversible_holds` (`null` when unknown). When rcm does not know them, the text output says so in one line, `group holds: unknown — rcm could not learn this machine's group holds from the server`, rather than nothing. The exit code rules do not change |
 
 A job of the server's own local lane has no worker: the web and `rcm check` say «the server's
 local lane» and «check the server». When the server could not read its holds
