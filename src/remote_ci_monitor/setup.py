@@ -213,6 +213,10 @@ _ROOT_PLACES = ("LaunchDaemons", "system")
 _RCM_BYTES = re.compile(rb"(?<![\w.-])rcm(?![\w.-])|remote_ci_monitor|remote-ci-monitor")
 #: 읽지 못한 파일의 이름이 rcm 같은가 — 앞뒤가 글자 · 숫자가 아닌 `rcm`, 패키지 이름(batch 11 MED)
 _RCM_NAME = re.compile(r"(?<![a-z0-9])rcm(?![a-z0-9])|remote[_-]ci[_-]monitor")
+#: 띄우는 명령 줄의 rcm — 앞뒤가 이름 글자가 아닌 `rcm`(경로 마디 `…/rcm/…` 는 아니다), 패키지
+#: 이름. 파일 전체가 아니라 명령 줄만 본다: rcm-ci-connect 의 ci-watch plist 는 라벨과 스크립트 ·
+#: 로그 경로에 rcm 이 들었지만 rcm 서비스가 아니다(batch 12 MED)
+_RCM_COMMAND = re.compile(r"(?<![\w.-])rcm(?![\w./-])|remote_ci_monitor|remote-ci-monitor")
 #: 서비스 하위 명령마다 data_dir 을 읽는 절과 그 환경 변수 · 기본값(config.py 와 같다)
 _DATA_DIRS = {
     "serve": ("server", "RCM_SERVER_DATA_DIR", "~/.local/share/rcm"),
@@ -312,6 +316,26 @@ def _venv_of(program: str | None, env: Mapping[str, str]) -> Path | None:
     return None
 
 
+def rcm_program(program: str | None, env: Mapping[str, str]) -> bool:
+    """서비스가 띄우는 실행 파일이 이름과 상관없이 rcm 인가(batch 12 MED) — 링크를 푼 이름이
+    `rcm` 이거나(`~/.local/bin/ci-hub` → `<venv>/bin/rcm`), remote_ci_monitor 가 설치된
+    venv(`pyvenv.cfg`)의 bin 에 든 파이썬이 아닌 실행 파일이다. 그 venv 의 파이썬은 다른
+    스크립트도 띄우므로 이것만으로는 rcm 이 아니다."""
+    if not program:
+        return False
+    found = program if os.path.isabs(program) else shutil.which(program, path=env.get("PATH"))
+    if not found:
+        return False
+    real = Path(os.path.realpath(found))
+    if real.name == "rcm":
+        return True
+    if real.name.startswith("python") or real.parent.name != "bin":
+        return False
+    venv = real.parent.parent
+    installed = venv.glob("lib/python*/site-packages/remote_ci_monitor-*.dist-info")
+    return (venv / "pyvenv.cfg").is_file() and any(installed)
+
+
 #: 띄우는 명령이 `python -m remote_ci_monitor` 인가 — 패키지 이름만 준 꼴(batch 10 M2)
 _PACKAGE_MODULE = ["-m", "remote_ci_monitor"]
 
@@ -324,6 +348,8 @@ def _launch(sf: Any) -> dict[str, Any] | None:
     if sf.launch is not None:
         return dict(sf.launch)
     argv = list(sf.argv)
+    if rcm_program(sf.program, sf.env):  # 다른 이름의 rcm — rcm 의 인자로 읽는다(batch 12 MED)
+        return doctor.rcm_launch("rcm", ["rcm", *argv[1:]])
     if sf.program and os.path.basename(sf.program).startswith("python"):
         if argv[1:3] == _PACKAGE_MODULE:
             return doctor.rcm_launch(
@@ -417,9 +443,16 @@ def _rcm_service(path: Path, *, home: Path, root: bool) -> core.RcmService | Non
             # 띄우는 명령 줄을 끝내 읽지 못했는데 바이트에 rcm 이 있다 — 이름이 rcm 같지 않아도
             # 닫는 쪽이다(doctor 의 `_matching` 과 같은 규칙, batch 11 HIGH)
             return problem(f"setup cannot read its {exec_unread[0]}")
-        if not doctor.looks_like_rcm(sf):
-            return None
-        return problem("setup cannot tell which rcm command it starts")
+        if rcm_program(sf.program, sf.env) or doctor.looks_like_rcm(sf):
+            return problem("setup cannot tell which rcm command it starts")
+        if any(_RCM_COMMAND.search(word) for word in [sf.program or "", *sf.argv]):
+            # `sh -c "cd x;rcm serve"` · `(rcm …)` · `'rcm'` · `$(which rcm)` — 낱말로 나눠
+            # 보는 `looks_like_rcm` 이 놓친다. 명령 줄에 rcm 이 보이면 닫는 쪽이다(batch 12 MED)
+            return problem(
+                "its command line runs rcm in a way setup cannot read (through a shell, a "
+                "subshell, a quoted or a substituted name)"
+            )
+        return None
     if sf.launch_unexpanded:
         return problem("its command line has a systemd specifier setup does not expand")
     if sf.launch_vars:  # systemd 는 펼치고 setup 은 펼치지 않는다(batch 11 L4)
