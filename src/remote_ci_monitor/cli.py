@@ -1696,7 +1696,8 @@ def cmd_cancel(args: argparse.Namespace) -> int:
 
 def cmd_release_hold(args: argparse.Namespace) -> int:
     """`rcm release-hold N [--reason TEXT] [--json]`(M5t-b §4.12 · 결정 330). 종료 0 풀었다 · 1 열린
-    홀드 없음(409 `no_hold`) · 2 사용법 · 401/403/404 · 3 서버에 못 닿음."""
+    홀드 없음(409 `no_hold`) · 2 사용법 · 서버의 거절(4xx) · 3 서버에 못 닿음 · 5xx(풀렸는지
+    모름)."""
     client = _client(args)
     try:
         resp = client.release_hold(args.job, reason=args.reason)
@@ -1705,7 +1706,7 @@ def cmd_release_hold(args: argparse.Namespace) -> int:
             _err(f"release-hold: {e.message}")
             return 1
         _err(f"release-hold failed: {e.message}")
-        return USAGE_EXIT if e.status else EXIT_UNKNOWN
+        return USAGE_EXIT if 0 < e.status < 500 else EXIT_UNKNOWN  # mutcheck: release-hold-5xx
     if args.json:
         _print_json(resp)
     _info(

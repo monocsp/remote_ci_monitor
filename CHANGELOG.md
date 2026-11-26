@@ -40,7 +40,7 @@ of a key bumps that number and is listed here.
   open holds in `irreversible_holds`, and `GET /jobs/N` carries `hold`.
   ([#284](https://github.com/monocsp/remote_ci_monitor/pull/284))
 - **`rcm release-hold N [--reason TEXT] [--json]`** releases a group hold after an admin checked
-  the machine (exit 0 released, 1 no open hold, 2 refused, 3 unreachable).
+  the machine (exit 0 released, 1 no open hold, 2 refused, 3 unreachable or a server error).
   ([#284](https://github.com/monocsp/remote_ci_monitor/pull/284))
 - **Hold notifications.** Every notification carries `RCM_EVENT`, `RCM_HOLD`, `RCM_HOLD_GROUP` and
   `RCM_HOLD_NOTE` (and `event` · `hold` in a webhook body); a `[[notify]]` rule with

@@ -1489,6 +1489,17 @@ def test_rl45_rcm_release_hold_exit_codes(monkeypatch, capsys, answer, code):
         assert "released the hold on group g (job #7)" in err
 
 
+@pytest.mark.parametrize("status", [500, 502, 503])
+def test_rl45_rcm_release_hold_reads_a_server_error_as_unknown(monkeypatch, capsys, status):
+    """5xx 는 거절이 아니라 「모름」이다 — 2(사용 오류 · 401/403/404)가 아니라 3. 풀렸는지
+    알 수 없으니 다시 해 볼 일이다(P3 1라운드 LOW)."""
+    from remote_ci_monitor import cli
+
+    fake = _HoldClient(ClientError(status, "internal error"))
+    monkeypatch.setattr(cli, "_client", lambda args: fake)
+    assert cli.main(["release-hold", "7"]) == 3
+
+
 def test_rl45_rcm_release_hold_is_its_own_command_with_a_help_line(capsys):
     from remote_ci_monitor import cli
 

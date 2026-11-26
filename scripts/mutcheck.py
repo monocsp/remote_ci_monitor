@@ -6230,6 +6230,22 @@ MUTANTS = (
             "test_rl44_a_finish_without_group_gone_keeps_the_folder_for_the_next_process",
         ),
     ),
+    # ── M5t-b P3 1라운드 LOW — release-hold 의 5xx ──
+    Mutant(
+        # 서버 오류(5xx)를 거절(2)로 읽는다 — 풀렸는지 모르는데 「고칠 것이 있다」고 말한다
+        name="release-hold-5xx-is-usage",
+        path="src/remote_ci_monitor/cli.py",
+        old=(
+            "        return USAGE_EXIT if 0 < e.status < 500 else EXIT_UNKNOWN  # mutcheck: "
+            "release-hold-5xx"
+        ),
+        new="        return USAGE_EXIT if e.status else EXIT_UNKNOWN",
+        tests=(
+            "tests/test_worker_session_m5tb.py::"
+            "test_rl45_rcm_release_hold_reads_a_server_error_as_unknown",
+            "tests/test_worker_session_m5tb.py::test_rl45_rcm_release_hold_exit_codes",
+        ),
+    ),
 )
 
 

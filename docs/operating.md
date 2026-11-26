@@ -1159,7 +1159,7 @@ rcm release-hold 812 --reason "checked build-02: no process left"
 | `0` | released |
 | `1` | the job has no open hold |
 | `2` | usage, or the server refused: not an admin token (403), no such job (404), no token (401) |
-| `3` | the server could not be reached |
+| `3` | the server could not be reached, or answered with a server error (5xx): try again |
 
 `--json` prints the server's answer. The release is kept as an event on the job, with your token
 name and the reason (control characters removed, up to 200 characters). A worker that comes back
