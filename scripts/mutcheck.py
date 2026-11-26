@@ -7754,17 +7754,6 @@ MUTANTS = (
         ),
     ),
     Mutant(
-        # 로컬 오류로 끝날 길이 없는 D 큐를 등록이 끝없이 기다린다(batch-5 #2 · 결정 337)
-        name="dead-queue-local-error-blocks-register",
-        path="src/remote_ci_monitor/remote_worker.py",
-        old="                if stuck and s.waits_on_nothing():\n",
-        new="                if False:\n",
-        tests=(
-            "tests/test_worker_outbox_m5tb.py::"
-            "test_b5_2_a_a_dead_queue_stuck_on_a_local_error_is_not_counted_as_server_errors",
-        ),
-    ),
-    Mutant(
         # 죽은 세션 큐의 저장 실패 줄에 `dead session` 접두사가 없다(batch-5 #5)
         name="dead-save-unlabelled",
         path="src/remote_ci_monitor/remote_worker.py",
@@ -7837,19 +7826,72 @@ MUTANTS = (
             "test_b6_1_a_a_finished_job_whose_phase_keeps_getting_5xx_sends_the_finish_after_300s",
         ),
     ),
+    # ── M5t-b PR2 · batch-7 ──
     Mutant(
-        # 죽은 세션 큐의 끝난 잡이 phase 만 로컬 오류로 막혀도 기다리지 않는다 — 결과를
-        # 잃는다(batch-6)
-        name="dead-phase-not-waited",
+        # 죽은 세션 큐의 로컬 오류를 300초에 세지 않는다 — finish 가 로컬 오류로 막힌 큐를 등록이
+        # 끝없이 기다린다(batch-7 · batch-5 #2 를 되돌린 것)
+        name="dead-local-error-not-counted",
         path="src/remote_ci_monitor/remote_worker.py",
-        old=(
-            '        ahead = ("phase", "query", "log", "artifacts")'
-            "  # mutcheck: dead-phase-not-waited\n"
-        ),
-        new='        ahead = ("query", "log", "artifacts")\n',
+        old="        self.answered = True  # mutcheck: dead-local-error-not-counted\n",
+        new="        self.answered = False\n",
         tests=(
             "tests/test_worker_outbox_m5tb.py::"
-            "test_b6_3_a_dead_queue_whose_phase_fails_locally_still_sends_the_finish_first",
+            "test_b5_2_a_a_dead_queue_stuck_on_a_local_error_says_local_errors_after_300s",
+        ),
+    ),
+    Mutant(
+        # 상한의 줄이 섞인 로컬 오류를 서버 탓으로 말한다(batch-7)
+        name="local-errors-blamed-on-the-server",
+        path="src/remote_ci_monitor/remote_worker.py",
+        old='                why = "server errors or local errors" if local else "server errors"\n',
+        new='                why = "server errors"\n',
+        tests=(
+            "tests/test_worker_outbox_m5tb.py::"
+            "test_b7_1_a_a_dead_queue_whose_query_and_finish_fail_locally_registers_after_300s",
+        ),
+    ),
+    Mutant(
+        # 오프셋 질의를 막힌 로그로 보지 않는다 — 질의만 막힌 끝난 잡의 finish 가 안
+        # 간다(batch-7 #1)
+        name="stuck-query-holds-finish",
+        path="src/remote_ci_monitor/remote_worker.py",
+        old=(
+            "        log_left = ob.pending() > 0 or self.query_first"
+            "  # mutcheck: stuck-query-holds-finish\n"
+        ),
+        new="        log_left = ob.pending() > 0\n",
+        tests=(
+            "tests/test_worker_outbox_m5tb.py::"
+            "test_b7_1_b_a_finished_job_whose_offset_query_fails_unexpectedly_sends_the_finish_after_300s",
+        ),
+    ),
+    Mutant(
+        # 로컬 오류 뒤의 연결 실패 시간까지 센다(결정 337 · batch-7 #2)
+        name="local-answer-kept-on-connection-failure",
+        path="src/remote_ci_monitor/remote_worker.py",
+        old=(
+            "        self.answered = bool(e.status)"
+            "  # mutcheck: local-answer-kept-on-connection-failure\n"
+        ),
+        new="        self.answered = self.answered or bool(e.status)\n",
+        tests=(
+            "tests/test_worker_outbox_m5tb.py::"
+            "test_b7_2_b_a_connection_failure_after_a_local_error_still_does_not_count",
+        ),
+    ),
+    Mutant(
+        # 등록 대기 상한이 한 번도 가 보지 않은 끝난 잡의 finish 를 끊는다 — 결과를
+        # 잃는다(batch-7 #2)
+        name="untried-finish-cut-off",
+        path="src/remote_ci_monitor/remote_worker.py",
+        old=(
+            "                    if s.alive() and s.owes_finish():"
+            "  # mutcheck: untried-finish-cut-off\n"
+        ),
+        new="                    if False:\n",
+        tests=(
+            "tests/test_worker_outbox_m5tb.py::"
+            "test_b7_2_c_the_300s_cap_does_not_cut_off_a_finish_that_has_not_been_tried",
         ),
     ),
 )

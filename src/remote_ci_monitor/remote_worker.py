@@ -388,10 +388,13 @@ class _JobSender:
         self.query_first = resumed
         self.delay = 0.0
         self.last_5xx = False  # 지금 막힌 항목의 마지막 시도가 HTTP 5xx 였다(결정 324)
-        # 마지막 시도가 서버의 오류 응답이었다 — 죽은 세션 D 의 등록 대기 300초가 세는 시간(결정
-        # 337: 서버가 응답하는 시간만). 큐마다 두고 성공 · 연결 실패 · 로컬 오류에 내린다(P3
-        # 1라운드, batch-5 #2)
+        # 마지막 시도가 서버의 오류 응답이나 로컬 오류(예상 못 한 예외 · 못 읽는 스풀)였다 — 죽은
+        # 세션 D 의 등록 대기 300초가 세는 시간(결정 337 은 연결 실패 시간을 세지 않는다). 로컬
+        # 오류도 한 번 지나가는 것일 수 있어 같은 상한 안에서 다시 해 본다(batch-7). 큐마다 두고
+        # 성공 · 연결 실패에 내린다(P3 1라운드). `answered_local` 은 그 시도가 로컬 오류였다는
+        # 표식이다 — 상한의 줄이 서버 탓만 하지 않게 한다
         self.answered = False
+        self.answered_local = False
         # 마지막 로그 시도가 스풀을 못 읽었다 — 끝난 잡이면 5xx 와 같은 300초 뒤 finish 가 먼저
         # 간다(결정 324, P3 2라운드). 스풀을 다시 읽으면 내린다
         self.spool_unreadable = False
@@ -400,10 +403,9 @@ class _JobSender:
         # 마지막 시도가 예상 못 한 예외였다(P6-1 G4) — 못 읽는 스풀처럼 끝난 잡이면 300초 뒤
         # finish 가 먼저 간다. 시도가 성공하거나 서버 · 연결 오류로 끝나면 내린다
         self.local_error = False
-        # 마지막 로컬 오류(예상 못 한 예외 · 못 읽는 스풀)의 단계와 줄에 쓸 말 — D 의 큐가 그
-        # 오류로 막혔을 때 등록이 기다릴지 정한다(`waits_on_nothing`, batch-5 #2)
-        self.local_step: str | None = None
-        self.local_why: str | None = None
+        # 이 큐의 finish 를 한 번이라도 보내 봤다 — D 의 등록 대기 상한은 끝난 잡의 finish 를 한
+        # 번은 가 보게 둔다(`owes_finish`, batch-7)
+        self.finish_tried = False
         self._unexpected_said = False
         self._local_first_said = False
         self._phase_first_said = False
@@ -470,7 +472,10 @@ class _JobSender:
         ob = self.ob
         if ob.finish is None or ob.ended_at is None:
             return False
-        blocked = (not ob.log_stopped and ob.pending() > 0) or self._art_due()
+        # 오프셋 질의도 막힌 로그다 — `acked == written` 이라도 질의가 끝나야 로그 단계가
+        # 끝난다(batch-7 #1). 빠뜨리면 질의만 막힌 끝난 잡의 finish 가 영원히 안 간다
+        log_left = ob.pending() > 0 or self.query_first  # mutcheck: stuck-query-holds-finish
+        blocked = (not ob.log_stopped and log_left) or self._art_due()
         # phase 는 결과가 아니라 진행 표시다. 끝난 잡의 밀린 phase 도 로그 · 산출물과 같은 300초
         # · 24시간 규칙을 따른다 — 아니면 phase 만 남은 끝난 잡의 finish 가 영원히 안 간다(batch-6)
         phase = ob.phase is not None and not self.fenced.is_set()  # mutcheck: phase-holds-finish
@@ -663,6 +668,7 @@ class _JobSender:
                     "sha256": (receipt or {}).get("bundle_sha256"),
                 }
             else:
+                self.finish_tried = True
                 fenced = self.fenced.is_set()  # mutcheck: fenced-finish-keeps-its-outcome
                 self._send_finish(fenced)
                 ob.done = True
@@ -683,6 +689,7 @@ class _JobSender:
         self.local_error = False
         self.last_5xx = False
         self.answered = False
+        self.answered_local = False
         self.failures = 0
         return True
 
@@ -711,16 +718,15 @@ class _JobSender:
         """한 단계가 예상 못 한 예외를 냈다(버그 · 로컬 고장). 스레드를 끝내지 않고 백오프로 다시
         해 본다 — 같은 결정적 원인이 매번 스레드를 죽이면 살아 있는 프로세스는 레인과 잡을
         재시작까지 잡고, 다음 프로세스의 죽은 큐 보내기도 같은 오류로 죽는다(P6-1 G4). 줄은 한
-        번이다. 끝난 잡이면 300초 뒤 finish 가 먼저 간다(`_finish_first`). 서버 탓이 아니라 D 의
-        등록 대기 300초에는 세지 않는다(결정 337) — 그 대신 등록은 finish 가 그렇게 갈 수 없는 D 의
-        큐를 기다리지 않는다(`waits_on_nothing`, batch-5 #2)."""
+        번이다. 끝난 잡이면 300초 뒤 finish 가 먼저 간다(`_finish_first`). D 의 큐면 등록 대기
+        300초가 이 시간도 센다 — 한 번 지나가는 오류일 수 있어 서버 오류와 같은 상한 안에서 다시
+        해 보고, 상한의 줄은 로컬 오류도 말한다(batch-7)."""
         if not self._unexpected_said:
             self._unexpected_said = True
             self.proc.log(f"{self._label(step)}: unexpected {type(e).__name__} — retrying")
         self.local_error = True
-        self.local_step = step
-        self.local_why = f"unexpected {type(e).__name__} in {step}"
-        self.answered = False
+        self.answered = True  # mutcheck: dead-local-error-not-counted
+        self.answered_local = True
         self.failures += 1
         return False
 
@@ -744,30 +750,26 @@ class _JobSender:
         """`stream.log` 를 못 읽었다(없다 · 잘렸다). 빈 조각을 보내 성공으로 세지 않는다 —
         그러면 `acked` 는 그대로인 채 쉬지 않고 돈다. 백오프로 다시 해 보고 로그는 한 줄이다.
         끝난 잡이면 5xx 와 같이 끝난 지 300초 뒤 finish 가 먼저 간다(`_finish_first`, 결정 324)
-        — 24시간 묶이면 서버에서 잡이 `running` 이고 레인도 잡혀 있다(P3 2라운드 MED). 로컬
-        오류라 D 의 등록 대기 300초에는 세지 않는다(결정 337, batch-5 #2). `_unexpected` 와 같다."""
+        — 24시간 묶이면 서버에서 잡이 `running` 이고 레인도 잡혀 있다(P3 2라운드 MED). D 의
+        등록 대기 300초는 `_unexpected` 처럼 이 시간도 센다(batch-7)."""
         if not self._read_failed_said:
             self._read_failed_said = True
             self.proc.log(f"#{self.job_id} report: cannot read the spooled log — retrying")
         self.spool_unreadable = True
-        self.local_step = "log"
-        self.local_why = "the spooled log cannot be read"
-        self.answered = False
+        self.answered = True
+        self.answered_local = True
         return False
 
-    def waits_on_nothing(self) -> bool:
-        """D 의 큐가 로컬 오류로 막혔고 그 오류를 끝낼 길이 없다(batch-5 #2). 끝난 잡의 phase ·
-        로그 · 산출물만 막혔으면 끝난 지 300초 뒤 finish 가 먼저 간다(`_finish_first`, phase 는
-        batch-6) — 벽시계로 길이가 정해진 기다림이라 등록은 기다린다. finish 자체가 막혔거나
-        끝나지 않은 잡이면 다시 해 봐도 같으니 등록은 그 큐를 기다리지 않는다. 서버가 응답하지
-        않은 시간이라 300초에 세면 등록이 매번 300초 늦고 줄은 「server errors」라고 거짓을
-        말한다(결정 337)."""
-        if not (self.local_error or self.spool_unreadable):
-            return False
+    def owes_finish(self) -> bool:
+        """끝난 잡의 finish 를 아직 한 번도 보내 보지 않았고, 앞을 막은 것이 서버 오류나 로컬
+        오류다(batch-7). 그러면 끝난 지 300초 뒤 finish 가 먼저 간다(`_finish_first`). D 의 등록
+        대기 상한이 그 전에 이 큐를 멈추면 물러서 있던 보내는 스레드는 finish 를 한 번도 못 보내고,
+        잡은 restarted-without-job 으로 닫혀 끝난 잡의 결과를 잃는다. 잡이 끝난 직후 다시 뜬
+        프로세스면 두 300초가 거의 같이 온다. 연결 실패면 finish 도 갈 수 없으니 기다리지 않는다."""
         ob = self.ob
-        finish_goes = ob.finish is not None and ob.ended_at is not None
-        ahead = ("phase", "query", "log", "artifacts")  # mutcheck: dead-phase-not-waited
-        return not (finish_goes and self.local_step in ahead)
+        if ob.finish is None or ob.ended_at is None or ob.done or self.fenced.is_set():
+            return False
+        return not self.finish_tried and self.answered
 
     def _send_finish(self, fenced: bool) -> None:
         rec = dict(self.ob.finish or {})
@@ -888,7 +890,8 @@ class _JobSender:
         # 쪽이니 예상 못 한 예외의 300초 규칙은 내린다 — 연결 실패는 순서를 지킨다
         self.local_error = False
         self.last_5xx = bool(e.status)
-        self.answered = bool(e.status)
+        self.answered = bool(e.status)  # mutcheck: local-answer-kept-on-connection-failure
+        self.answered_local = False
         self.failures += 1
         n = self.failures
         if n in (1, 10) or n % 60 == 0:
@@ -1924,8 +1927,9 @@ class RemoteWorker:
         """등록 전에 D 의 큐를 D 의 세션 id 로 보낸다(§4.4 의 7 · 결정 326 · 337). 등록이 D 를
         펜싱하면
         D 의 finish 가 버려지기 때문이다. 서버가 응답하는(HTTP 상태가 오는) 시간으로 300초가 지나면
-        남은 큐를 디스크에 둔 채 등록한다 — 연결 실패 시간과 로컬 오류는 세지 않는다. 로컬 오류로
-        막혀 끝날 길이 없는 큐(`waits_on_nothing`)는 기다리지 않는다(batch-5 #2)."""
+        남은 큐를 디스크에 둔 채 등록한다 — 연결 실패 시간은 세지 않는다. 로컬 오류(예상 못 한
+        예외 · 못 읽는 스풀)는 한 번 지나가는 것일 수 있어 같은 상한 안에서 다시 해 보고, 그
+        시간이 섞였으면 줄이 그렇게 말한다(batch-7)."""
         senders = self.dead_queues()
         if not senders:
             return
@@ -1935,6 +1939,8 @@ class RemoteWorker:
         for s in senders:
             s.start()
         answered = 0.0
+        local = False  # 센 시간에 로컬 오류가 섞였다
+        cut: set[int] = set()  # 상한에 닿아 멈춘 큐
         last = self._epoch()
         while any(s.alive() for s in senders):
             if self.stopping.wait(0.05):
@@ -1946,29 +1952,31 @@ class RemoteWorker:
             answering = any(s.alive() and s.answered for s in senders)
             if answering:
                 answered += max(0.0, now - last)
+                if any(s.alive() and s.answered and s.answered_local for s in senders):
+                    local = True
             last = now
-            for s in senders:
-                stuck = s.alive() and not s.halt.is_set() and not s.ob.done
-                # mutcheck: dead-queue-local-error-blocks-register
-                if stuck and s.waits_on_nothing():
-                    assert s.dead is not None
-                    self.log(
-                        f"dead session {s.dead.session_id[:8]} job #{s.job_id}: stopped on a"
-                        f" local error ({s.local_why}) — registering without waiting;"
-                        f" job #{s.job_id} will close as restarted-without-job"
-                    )
-                    s.halt.set()
             if answered >= DEAD_SESSION_WAIT_SECONDS:  # mutcheck: dead-session-wait-forever
+                why = "server errors or local errors" if local else "server errors"
+                owed = False
                 for s in senders:
+                    if id(s) in cut:
+                        continue
+                    # 한 번도 가 보지 않은 끝난 잡의 finish 는 먼저 한 번 가 보게 둔다 — 끝난 지
+                    # 300초 뒤 먼저 가니 기다림은 벽시계로 정해져 있다(batch-7 #2)
+                    if s.alive() and s.owes_finish():  # mutcheck: untried-finish-cut-off
+                        owed = True
+                        continue
                     if s.alive() and not s.ob.done:
                         assert s.dead is not None
                         self.log(
                             f"dead session {s.dead.session_id[:8]} queue not delivered after"
-                            f" {DEAD_SESSION_WAIT_SECONDS}s of server errors — registering;"
+                            f" {DEAD_SESSION_WAIT_SECONDS}s of {why} — registering;"
                             f" job #{s.job_id} will close as restarted-without-job"
                         )
                     s.halt.set()
-                break
+                    cut.add(id(s))
+                if not owed:
+                    break
         for s in senders:
             s.halt.set()
         for s in senders:
