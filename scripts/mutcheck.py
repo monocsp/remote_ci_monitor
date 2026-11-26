@@ -3962,20 +3962,6 @@ MUTANTS = (
         tests=("tests/test_setup.py::test_b10_m3_a_unit_with_lines_setup_does_not_follow_closes",),
     ),
     Mutant(
-        # 읽을 권한이 없는 서비스 파일을 이름이 rcm 같지 않으면 건너뛴다(batch 10 L1)
-        name="setup-scan-permission-denied-skipped",
-        path="src/remote_ci_monitor/setup.py",
-        old=(
-            "        if isinstance(e, PermissionError):\n"
-            "            # 읽을 권한이 없으면 바이트로 가릴 수 없다"
-        ),
-        new="        if False:\n            # 읽을 권한이 없으면 바이트로 가릴 수 없다",
-        tests=(
-            "tests/test_setup.py::"
-            "test_b10_l1_a_service_file_setup_may_not_read_closes_without_a_traceback",
-        ),
-    ),
-    Mutant(
         # stat 의 PermissionError 가 「unexpected error」로 새어 나간다 — 파일 이름이 없다
         # (batch 10 L1)
         name="setup-scan-stat-error-escapes",

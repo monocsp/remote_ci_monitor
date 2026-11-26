@@ -434,12 +434,9 @@ def _rcm_service(path: Path, *, home: Path, root: bool) -> core.RcmService | Non
         data = path.read_bytes()
         sf = doctor.read_service_file(path, user_home=None if root else str(home), system=root)
     except (OSError, doctor.ServiceFileUnreadable) as e:
-        if isinstance(e, PermissionError):
-            # 읽을 권한이 없으면 바이트로 가릴 수 없다 — 이름으로 가린다(batch 10 L1 · 11 MED)
-            return _unread(path, f"setup cannot read it ({e.strerror or type(e).__name__})")
         if isinstance(e, OSError) or isinstance(e.__cause__, OSError):
-            # 다른 이유(EIO …)로도 읽지 못했으면 바이트가 없다 — 조용히 건너뛰지 않고 권한
-            # 거부처럼 이름으로 가린다(batch 12 L2)
+            # 읽지 못했으면(권한 거부 · EIO …) 바이트로 가릴 수 없다 — 조용히 건너뛰지 않고
+            # 이름으로 가린다(batch 10 L1 · 11 MED · 12 L2)
             why = e.strerror if isinstance(e, OSError) else e.reason
             return _unread(path, f"setup cannot read it ({why or type(e).__name__})")
         named = doctor.looks_like_rcm(doctor.ServiceFile(path=path, label=stem))
