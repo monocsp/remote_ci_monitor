@@ -1413,7 +1413,9 @@ MUTANTS = (
         path="src/remote_ci_monitor/remote_workers.py",
         old="        if version != self.version:\n            # 이 검사는",
         new=(
-            '        self.store.mark_lost_for_worker(token.name, self.now_fn(), "lost")\n'
+            # 그 워커의 도는 잡을 lost 로 닫는다(옛 `mark_lost_for_worker` 는 지웠다)
+            "        for _j in self.store.jobs_of_worker(token.name):\n"
+            '            self.store.finish(_j.id, "lost", now=self.now_fn(), summary="lost")\n'
             "        if version != self.version:\n            # 이 검사는"
         ),
         tests=("tests/test_server_m5q_worker.py",),
@@ -5172,7 +5174,9 @@ MUTANTS = (
             "eregister-closes-own-jobs\n"
         ),
         new=(
-            '            self.store.mark_lost_for_worker(token.name, self.now_fn(), "x")\n'
+            # 그 이름의 busy 잡을 닫는다(옛 `mark_lost_for_worker` 는 지웠다)
+            "            for _j in self.store.jobs_of_worker(token.name):\n"
+            '                self.store.finish(_j.id, "lost", now=self.now_fn(), summary="x")\n'
             "            row = self.store.register_worker(\n"
         ),
         tests=(
@@ -6274,21 +6278,6 @@ MUTANTS = (
         tests=(
             "tests/test_worker_session_m5tb.py::"
             "test_rl45_status_says_null_not_empty_when_the_holds_cannot_be_read",
-        ),
-    ),
-    # ── M5t-b P3 1라운드 LOW — 홀드 없이 닫는 mark_lost_for_worker ──
-    Mutant(
-        # 워커를 잃어 닫는 길이 표식 잡의 그룹을 홀드하지 않는다
-        name="mark-lost-for-worker-no-hold",
-        path="src/remote_ci_monitor/store.py",
-        old=(
-            "                # mutcheck: mark-lost-for-worker-no-hold\n"
-            '                self._hold_tx(conn, int(row["id"]), "worker_unreachable", ts)\n'
-        ),
-        new="                pass\n",
-        tests=(
-            "tests/test_irreversible_hold_m5tb.py::"
-            "test_rl42_mark_lost_for_worker_follows_the_hold_rule",
         ),
     ),
     # ── M5t-b P3 1라운드 LOW — 확인과 닫기 사이 janitor ──

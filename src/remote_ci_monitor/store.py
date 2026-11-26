@@ -4088,8 +4088,9 @@ class Store:
     def recover_on_start(self, now: datetime) -> tuple[list[int], list[int]]:
         """서버 시작 정리. 로컬 레인의 running·cancelling → lost, uploading → cancelled.
 
-        원격 워커(`worker_name`)의 잡은 건드리지 않는다 — 워커는 살아 있을 수 있고, 아니면
-        `mark_lost_for_worker` 가 heartbeat 시각으로 닫는다(M5b-2).
+        원격 워커(`worker_name`)의 잡은 건드리지 않는다 — 워커는 살아 있을 수 있다. 그 세션을
+        유예(`disconnect_grace_seconds`) 넘게 못 들으면 janitor(`mark_lost_workers`)가 잡마다
+        `finish(…, hold_cause=…)` 로 닫는다(M5t-b §4.3 · 결정 330).
 
         예약(M5s §4.1)도 같은 트랜잭션에서 정리한다 — 워커가 뜨기 **전**이다. 서버가 꺼진 동안
         시작 마감을 넘긴 예약 · 대기 잡은 `expired` 로 닫고, 시각은 지났지만 마감 안인 예약은
@@ -4923,51 +4924,6 @@ class Store:
             f"SELECT * FROM jobs WHERE worker_name=? AND state IN ({busy}) ORDER BY lane, id",
             (name, *sorted(BUSY_STATES)),
         )
-
-    def mark_lost_for_worker(
-        self,
-        name: str,
-        now: datetime,
-        summary: str,
-        *,
-        summary_code: str | None = None,
-        summary_args: dict[str, Any] | None = None,
-    ) -> list[int]:
-        """그 워커의 running·cancelling 잡을 전부 lost 로. 닫은 잡 id 목록.
-
-        확인 없는 닫힘이라 표식 잡이면 같은 트랜잭션에서 그 그룹을 홀드한다(M5t-b 결정 330 —
-        `finish(hold_cause=…)` 와 같은 규칙). 홀드를 알리는 것은 호출자의 몫이다
-        (`_hold_created`)."""
-        conn = self._conn()
-        ts = _ts(now)
-        busy = ",".join("?" * len(BUSY_STATES))
-        lost: list[int] = []
-        conn.execute("BEGIN IMMEDIATE")
-        try:
-            for row in conn.execute(
-                f"SELECT id FROM jobs WHERE worker_name=? AND state IN ({busy}) ORDER BY id",
-                (name, *sorted(BUSY_STATES)),
-            ).fetchall():
-                self._set_state(
-                    conn,
-                    row["id"],
-                    LOST,
-                    ts,
-                    finished_at=ts,
-                    summary=summary[:200],
-                    summary_code=summary_code,
-                    summary_args=dump_args(summary_args),
-                    lane=None,
-                    phase=None,
-                )
-                # mutcheck: mark-lost-for-worker-no-hold
-                self._hold_tx(conn, int(row["id"]), "worker_unreachable", ts)
-                lost.append(int(row["id"]))
-            conn.execute("COMMIT")
-        except Exception:
-            conn.execute("ROLLBACK")
-            raise
-        return lost
 
     # ── 워커 세션 (M5t-b 결정 255 · 265 · 336) ────────────────────────────────
 

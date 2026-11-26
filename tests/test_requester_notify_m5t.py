@@ -692,7 +692,7 @@ def test_tn9_a_local_lane_job_lost_to_a_restart_keeps_this_machine(tmp_path):
 
 
 def test_tn9_a_remote_job_lost_with_its_worker_keeps_the_worker_name(tmp_path):
-    """원격 워커를 잃어 lost 가 된 잡(`mark_lost_for_worker`)은 claim 때의 워커 이름 그대로다."""
+    """원격 워커를 잃어 lost 가 된 잡(janitor 의 유예 닫기)은 claim 때의 워커 이름 그대로다."""
     srv = Server(tmp_path, workers=False)
     try:
         status, body = srv.submit()
@@ -700,7 +700,14 @@ def test_tn9_a_remote_job_lost_with_its_worker_keeps_the_worker_name(tmp_path):
         assert srv.upload(jid)[0] == 200
         now = datetime.now(UTC)
         assert srv.store.claim(1, now, worker_name="build-02") is not None
-        assert srv.store.mark_lost_for_worker("build-02", now, "worker went away") == [jid]
+        assert srv.store.finish(  # janitor 의 닫기(`mark_lost_workers`)와 같은 호출
+            jid,
+            "lost",
+            now=now,
+            summary="worker went away",
+            only_from=("running", "cancelling"),
+            hold_cause="worker_unreachable",
+        )
         status, doc = srv.req("GET", f"/jobs/{jid}")
         assert doc["state"] == "lost" and doc["worker"] == "build-02", doc
         assert doc.get("ran_on") == "build-02", doc

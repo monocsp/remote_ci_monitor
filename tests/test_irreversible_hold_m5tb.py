@@ -376,19 +376,6 @@ def test_rl42_a_confirmed_close_does_not_hold(store):
     assert holds(store) == []
 
 
-def test_rl42_mark_lost_for_worker_follows_the_hold_rule(store):
-    """M5b-2 의 `mark_lost_for_worker` 는 확인 없이 닫는다 — 표식 잡이면 다른 닫힘처럼 그룹을
-    홀드한다(P3 1라운드 LOW). 일반 잡은 홀드 0."""
-    register(store, "build-02")
-    a = enqueue(store, "deploy", group=SYNTH, scope=SCOPE_GLOBAL)
-    claim_remote(store, "build-02", 1, session_id="a" * 32, claim_seq=1, grace_seconds=600)
-    b = enqueue(store, "gate", group="devices", tree="g")
-    claim_remote(store, "build-02", 2, session_id="a" * 32, claim_seq=2, grace_seconds=600)
-    assert store.mark_lost_for_worker("build-02", at(100), "worker went away") == [a.id, b.id]
-    assert [(h["job_id"], h["cause"]) for h in holds(store)] == [(a.id, "worker_unreachable")]
-    assert hold_events(store, a.id) == ["created"]
-
-
 def test_rl42_local_irreversible_job_lost_on_restart_holds(tmp_path):
     path = tmp_path / "rcm.db"
     s = Store(path)
