@@ -318,6 +318,25 @@ def test_rl12_reregistering_the_same_session_is_idempotent(srv):
     assert [r["fenced_at"] for r in rows] == [None]
 
 
+def test_rl12_two_registers_of_one_new_session_racing_both_succeed(srv, monkeypatch):
+    """같은 새 세션 id 의 등록 둘이 겹친다(레인 둘이 동시에 처음 등록). 늦은 쪽은 세션 행 PK 충돌로
+    500 이 아니라 그 세션의 재등록처럼 멱등 200 이다(P3 1라운드 LOW)."""
+    real_open = srv.store.open_session
+    other: list[Any] = []
+
+    def the_other_lane_first(name: str, session_id: str, **kw: Any):
+        if not other:
+            other.append(real_open(name, session_id, **kw))  # 다른 레인의 등록이 먼저 커밋했다
+        return real_open(name, session_id, **kw)
+
+    monkeypatch.setattr(srv.store, "open_session", the_other_lane_first)
+    status, body = srv.register("build-02", lanes=2)
+    assert len(other) == 1
+    assert status == 200, body
+    rows = srv.store._conn().execute("SELECT id, fenced_at FROM worker_sessions").fetchall()
+    assert [(r["id"], r["fenced_at"]) for r in rows] == [(srv.session("build-02"), None)]
+
+
 def test_rl12_spec_does_not_create_a_session(srv):
     """`rcm worker --check` · `rcm doctor` 는 spec · health · whoami 만 부른다(F46)."""
     srv.registered("build-02")

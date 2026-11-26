@@ -6311,6 +6311,21 @@ MUTANTS = (
             "test_rl44_c_a_finish_racing_the_janitor_close_gets_job_closed_and_releases",
         ),
     ),
+    # ── M5t-b P3 1라운드 LOW — 같은 새 세션의 동시 등록 ──
+    Mutant(
+        # 같은 새 세션 id 의 늦은 등록이 PK 충돌로 500 이 된다
+        name="register-race-500",
+        path="src/remote_ci_monitor/remote_workers.py",
+        old=(
+            "            if self.store.get_session(session) is None:  # mutcheck: "
+            "register-race-500\n"
+        ),
+        new="            if True:\n",
+        tests=(
+            "tests/test_worker_session_m5tb.py::"
+            "test_rl12_two_registers_of_one_new_session_racing_both_succeed",
+        ),
+    ),
 )
 
 

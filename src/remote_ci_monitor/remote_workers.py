@@ -608,17 +608,24 @@ class RemoteWorkersMixin:
         if any(n != token.name for n in names.values()):
             # 남의 이름에 걸린 잡과 홀드를 풀 수 없게(T19 · V1-8)
             raise _api_error(403, SESSION_FOREIGN)
-        opened = self.store.open_session(
-            token.name,
-            session,
-            previous=previous,
-            unverified=unverified,
-            now=now,
-            pool=pool,
-            lanes=lanes,
-            host_name=host_name,
-            version=version,
-        )
+        try:
+            opened = self.store.open_session(
+                token.name,
+                session,
+                previous=previous,
+                unverified=unverified,
+                now=now,
+                pool=pool,
+                lanes=lanes,
+                host_name=host_name,
+                version=version,
+            )
+        except sqlite3.IntegrityError:
+            # 같은 새 세션 id 의 등록이 겹쳐 다른 요청이 먼저 세션 행을 넣었다(같은 프로세스의
+            # 레인 둘). 이 요청은 그 세션의 재등록이다 — 위의 멱등 길로 다시 답한다
+            if self.store.get_session(session) is None:  # mutcheck: register-race-500
+                raise
+            return self.worker_register(token, body)
         self._forget_session_memory(opened.fenced)
         self._hear(session)
         for job_id in opened.closed:
