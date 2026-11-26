@@ -1659,3 +1659,35 @@ def test_p6_1_g4_e_a_finished_job_stuck_on_an_unexpected_error_sends_the_finish_
         s.halt.set()
     assert fake.routes()[-1] == "finish"
     assert fake.calls[-1][5]["log_bytes"] == 4
+
+
+def test_p6_1_g6_the_worker_reads_late_result_recorded_and_hold_released(srv, tmp_path, fast):
+    """# P6-1 G6 lost 로 닫힌 잡에 보낸 finish 의 409 `job_closed` 에는 `late_result_recorded` ·
+    `hold_released` 가 온다. 워커가 그 키를 읽지 않아, 기록되지 않은 늦은 결과(경합)가 조용히
+    버려졌다. 진짜 서버 → 진짜 워커로 — 두 키를 읽어 줄을 남긴다."""
+    from remote_ci_monitor.client import WorkerClient
+
+    jid = running(srv, "ship")
+    close_lost(srv, jid, hold="worker_unreachable")
+    assert srv.store.has_open_hold(jid)
+    clock = WClock()
+    client = WorkerClient(f"http://127.0.0.1:{srv.port}", srv.tokens[W])
+    w = wworker(tmp_path, client, clock)  # type: ignore[arg-type]
+    w.session_id = srv.session(W)
+    w._bind_session(w.client)
+    w.session_dir = tmp_path / "wd" / rw.SESSIONS_DIR / w.session_id
+    ob = ended_queue(w, jid, b"")
+    s = rw._JobSender(w, jid, ob).start()
+    s.thread.join(10)
+    assert ob.done, w.logs
+    assert f"#{jid} late result recorded" in w.logs, w.logs
+    assert f"#{jid} hold released" in w.logs, w.logs
+    assert not srv.store.has_open_hold(jid)
+    # 같은 finish 가 또 간다(재시작한 워커의 큐) — 서버는 기록하지 않았다고 답한다
+    ob2 = ended_queue(w, jid, b"")
+    s2 = rw._JobSender(w, jid, ob2).start()
+    s2.thread.join(10)
+    assert ob2.done, w.logs
+    not_recorded = [x for x in w.logs if x.startswith(f"#{jid} late result not recorded — ")]
+    assert len(not_recorded) == 1, w.logs
+    assert len(late_events(srv, jid)) == 1

@@ -7702,6 +7702,17 @@ MUTANTS = (
             "test_p6_1_g4_e_a_finished_job_stuck_on_an_unexpected_error_sends_the_finish_after_300s",
         ),
     ),
+    Mutant(
+        # 409 job_closed 의 late_result_recorded · hold_released 를 읽지 않는다(P6-1 G6)
+        name="late-answer-keys-ignored",
+        path="src/remote_ci_monitor/remote_worker.py",
+        old="                self._late_answer(e.body)  # mutcheck: late-answer-keys-ignored\n",
+        new="                pass\n",
+        tests=(
+            "tests/test_worker_outbox_m5tb.py::"
+            "test_p6_1_g6_the_worker_reads_late_result_recorded_and_hold_released",
+        ),
+    ),
 )
 
 

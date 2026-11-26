@@ -671,6 +671,22 @@ class _JobSender:
         self.failures += 1
         return False
 
+    def _late_answer(self, body: dict[str, Any]) -> None:
+        """닫힌 잡에 보낸 finish 의 409 `job_closed` 가 실은 두 키를 읽는다(§4.6 · 결정 330, P6-1
+        G6). `lost` 잡에서 `late_result_recorded: false` 면 서버가 이미 가진 결과를 그대로 두었다는
+        뜻이다(먼저 온 사본 · 이 세션의 finish 가 닫은 잡 · 경합) — 조용히 버리지 않고 말한다. 옛
+        서버처럼 키가 없으면 말하지 않는다."""
+        jid = self.job_id
+        recorded = body.get("late_result_recorded")
+        if recorded is True:
+            self.proc.log(f"#{jid} late result recorded")
+        elif recorded is False and body.get("state") == LOST:
+            self.proc.log(
+                f"#{jid} late result not recorded — the server keeps the result it already has"
+            )
+        if body.get("hold_released") is True:
+            self.proc.log(f"#{jid} hold released")
+
     def _spool_unreadable(self) -> bool:
         """`stream.log` 를 못 읽었다(없다 · 잘렸다). 빈 조각을 보내 성공으로 세지 않는다 —
         그러면 `acked` 는 그대로인 채 쉬지 않고 돈다. 백오프로 다시 해 보고 로그는 한 줄이다.
@@ -782,6 +798,8 @@ class _JobSender:
             # job_closed(또는 옛 서버의 코드 없는 409) — 서버가 이미 닫았다. 로그는 멈추고(스풀은
             # 남긴다) 산출물은 건너뛰며 finish 는 지운다(`late_result` 여부는 서버가 정했다)
             proc.log(f"{what}: server says {e.message}")
+            if step == "finish" and code == "job_closed":
+                self._late_answer(e.body)  # mutcheck: late-answer-keys-ignored
             if code == "job_closed" and dead is None:
                 proc._closed_by_409(jid, e)
             self._drop_item(step, failed=False)
