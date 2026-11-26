@@ -1200,10 +1200,11 @@ the code:
 |---|---|
 | web queue and «Needs a look» | `lost contact with build-02 — the job goes on if the worker is back within the grace period`, listed right after `worker down` |
 | `rcm top` | the same sentence on the job's reason line, `eta —` |
-| `rcm wait` (stderr) | `#812 lost contact with worker build-02 — the job goes on if the worker is back within the grace period` once, and `#812 worker build-02 is back — the job goes on` if it returns |
+| `rcm wait` and `rcm run`, while they wait (stderr) | `#812 lost contact with worker build-02 — the job goes on if the worker is back within the grace period` once, and `#812 worker build-02 is back — the job goes on` if it returns |
 
-`rcm wait` does not end during the grace: it ends with the job's own result when the worker comes
-back, or with exit 3 when the grace runs out, or at its own `--timeout` with exit 3. A job that
+Neither `rcm wait` nor `rcm run` ends during the grace: each ends with the job's own result when
+the worker comes back, or with exit 3 when the grace runs out, or at its own `--timeout` with
+exit 3. A job that
 ends without its worker is `lost` (exit 3, no step) and its `summary_code` says why. `rcm wait`
 prints that reason as one line, for example `#812 lost: worker build-02 unreachable for 660s`,
 and the web shows the same sentence in both languages:
@@ -1222,7 +1223,8 @@ result`; the job stays `lost` and the exit code stays 3. When the worker could n
 job's log, `rcm wait` and the end of `rcm logs N` (on stderr) say
 `#812 log incomplete — the worker could not keep all of it; rcm logs 812 shows what arrived`, and
 the web log view adds `log incomplete` to its header line. Neither line appears for a server that
-does not send `late_result` or `log_complete`.
+does not send `late_result` or `log_complete`. The lines printed after the job ends (the `lost`
+reason, the late result, the incomplete log) are `rcm wait`'s; `rcm run` ends as it did before.
 
 ## When a group is held: `rcm release-hold`
 
@@ -1238,7 +1240,7 @@ People see a hold in words, without the code:
 | where | what it shows |
 |---|---|
 | web «Needs a look» | one entry per hold, even when no job waits on that group: `Group irreversible:ship is held: job #812 (ship) on build-02 closed without a stop confirmation. Check build-02 for a leftover process, then run rcm release-hold 812.` The held job's row in Recent carries a `group held` chip |
-| `rcm wait --job N` (stderr) | `#821 needs action · group irreversible:ship is held by job #812 — check that machine for a leftover process, then ask an admin to run rcm release-hold 812`; with `--return-on-action` it ends with exit 4 |
+| `rcm wait` and `rcm run`, while they wait (stderr) | `#821 needs action · group irreversible:ship is held by job #812 — check that machine for a leftover process, then ask an admin to run rcm release-hold 812`; `rcm wait --return-on-action` ends there with exit 4 |
 | `rcm top` | the waiting job's reason line: `needs action · group irreversible:ship is held by #812 — rcm release-hold 812 after checking the machine` |
 | `rcm check` | one `warn  irreversible hold` row per hold; a hold is a warning, never a FAIL, so the exit code does not change |
 | `rcm doctor` (roles `worker` and `coordinator-worker`) | a `needs action` line for each hold of a job that ran on this machine: `a job that ran here was closed without a stop confirmation — check for a leftover process, then ask an admin to run rcm release-hold N`; `--json` lists them in `irreversible_holds` (`null` when unknown). When rcm does not know them, the text output says so in one line, `group holds: unknown — rcm could not learn this machine's group holds from the server`, rather than nothing. The exit code rules do not change |

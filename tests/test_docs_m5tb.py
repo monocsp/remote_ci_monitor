@@ -9,6 +9,8 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
+import pytest
+
 from remote_ci_monitor import config as config_mod
 from remote_ci_monitor.core.notify import notify_env
 
@@ -441,6 +443,42 @@ def test_operating_drain_paragraph_follows_spec_4_5_and_has_the_300_second_cap()
         " job #<id> will close as restarted-without-job`" in body
     )
     assert "`worker_restarted_without_job`" in body
+
+
+def test_rl28_docs_say_rcm_run_prints_the_waiting_lines_too():
+    """# RL28 P3 r1: 끊김 · 돌아옴 · 홀드 줄은 기다리는 동안의 줄이라 `rcm run` 도 찍는다(같은
+    `_wait`). 끝난 뒤의 줄(유실 원인 · 늦은 결과 · 불완전한 로그)만 `rcm wait` 의 것이다."""
+    unreachable = flat(section(OPERATING, UNREACHABLE))
+    held = flat(section(OPERATING, HELD))
+    row = "| `rcm wait` and `rcm run`, while they wait (stderr) |"
+    assert row in unreachable and row in held
+    changelog = flat((ROOT / "CHANGELOG.md").read_text())
+    assert "`rcm wait` and `rcm run` print one line while they wait when contact is lost" in (
+        changelog
+    )
+    assert "`rcm wait` and `rcm run` (while they wait) and `rcm top` name the group" in changelog
+    usage = flat(section((ROOT / "docs" / "usage.md").read_text(), "When a worker stops"))
+    assert "`rcm wait` and `rcm run` keep waiting through the grace" in usage
+    usage_ko = flat(section((ROOT / "docs" / "usage.ko.md").read_text(), "워커가 멈추면"))
+    assert "`rcm wait` 과 `rcm run` 은 유예 동안에도 계속 기다리고" in usage_ko
+
+
+PR3_ENTRIES = (
+    "**A job whose worker is out of reach says so in words.**",
+    "**Group holds are shown to people.**",
+    "**The web's unreachable-worker banner no longer says the running jobs are lost.**",
+    "**Korean screens pick the right particle after a name like `mac2-worker`.**",
+)
+
+
+@pytest.mark.parametrize("head", PR3_ENTRIES)
+def test_changelog_pr3_entries_link_their_pull_request(head):
+    """P3 r1: CHANGELOG 의 이 PR 항목 넷은 PR 링크를 단다(docs 스킬 체크리스트 1)."""
+    text = (ROOT / "CHANGELOG.md").read_text()
+    start = text.index(head)
+    end = min(i for i in (text.find("\n- ", start), text.find("\n\n", start)) if i != -1)
+    entry = text[start:end]
+    assert "([#285](https://github.com/monocsp/remote_ci_monitor/pull/285))" in entry, entry
 
 
 def test_operating_doctor_json_key_table_has_irreversible_holds():

@@ -850,7 +850,8 @@ yours to do. Open or close it yourself and that choice is remembered.
    as if nothing happened. If the grace runs out first, the job ends `lost` with the reason in
    words: submit it again once the worker is back.
 
-`rcm wait` keeps waiting through the grace and says what happened, one line each time:
+`rcm wait` and `rcm run` keep waiting through the grace and say what happened, one line each
+time:
 
 ```text
 #11 lost contact with worker mac2-worker — the job goes on if the worker is back within the grace period

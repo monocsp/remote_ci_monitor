@@ -282,6 +282,30 @@ def test_rl28_rcm_wait_says_once_that_the_worker_is_unreachable_and_keeps_waitin
     assert last_json(out)["wait_exit_code"] == 0
 
 
+def test_rl28_rcm_run_prints_the_same_lines_while_it_waits(fake, capsys):
+    """# RL28 P3 r1: `rcm run` 도 같은 `_wait` 로 기다린다 — 끊김 · 돌아옴 줄을 `rcm wait` 와
+    똑같이 한 번씩 찍는다(문서는 「rcm wait 과 rcm run 이 기다리는 동안」)."""
+    fake.fake.route("GET", "/api/whoami", {"name": "alice", "admin": False})
+    fake.fake.route(
+        "GET",
+        "/api/status",
+        {"presets": [{"name": "ship", "source_modes": ["git_ref"], "inputs": [], "keep": False}]},
+    )
+    fake.fake.route(
+        "POST",
+        "/jobs",
+        {"job_id": JOB, "state": "queued", "joined": False, "url": f"{fake.fake.url}/#/jobs/{JOB}"},
+    )
+    fake.docs = [doc(), doc(reason=GRACE), doc(reason=GRACE), doc(), doc("succeeded")]
+    code, _out, err = run(capsys, ["run", "ship", "--ref", "main", "--poll"])
+    assert code == 0, err
+    assert [ln for ln in err.splitlines() if "lost contact" in ln or "is back" in ln] == [
+        LOST_LINE,
+        BACK_LINE,
+    ], err
+    assert GRACE not in err
+
+
 def test_rl28_rcm_wait_says_when_the_worker_is_back(fake, capsys):
     fake.docs = [doc(reason=GRACE), doc(reason=GRACE), doc(), doc(), doc("succeeded")]
     code, _out, err = run(capsys, ["wait", "--job", str(JOB), "--poll"])

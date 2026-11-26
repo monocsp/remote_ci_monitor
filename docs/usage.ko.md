@@ -815,7 +815,7 @@ curl "http://macmini.local:8787/api/shelf/latest/app-map-shots?branch=dev"   # �
    것처럼 이어 간다. 유예가 먼저 끝나면 작업은 `lost` 로 끝나고 이유가 말로 남는다. 그때는
    워커가 돌아온 뒤 다시 내면 된다.
 
-`rcm wait` 은 유예 동안에도 계속 기다리고, 일이 생길 때마다 한 줄씩 알린다.
+`rcm wait` 과 `rcm run` 은 유예 동안에도 계속 기다리고 일이 생길 때마다 한 줄씩 알린다.
 
 ```text
 #11 lost contact with worker mac2-worker — the job goes on if the worker is back within the grace period
