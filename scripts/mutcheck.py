@@ -201,6 +201,12 @@
   #246 격리 검증 — 넷: 새 커밋으로 풀린 제출을 닫힌 PR 잡으로 취소함 · 다시 열린 PR 을 건너뜀 · PR
      목록의 첫 쪽만 읽음 · `guard_merge` 가 저장소 옵션을 한 번만 봄
 
+  qa-1 mdns — `md-responder-skips-the-loopback-join` · `md-querier-skips-the-loopback-send`: 같은
+     호스트의 서버가 루프백으로 듣지 · 묻지 않음
+     (`mdns.py`, `tests/test_mdns_servers_on_one_host.py`)
+  qa-2 mdns — `md-responder-counts-the-loopback-join`: 루프백 가입만 되어도 광고가 켜진 것으로 침
+     (`mdns.py`, `tests/test_mdns_servers_on_one_host.py`)
+
 사용: python scripts/mutcheck.py [--keep] [--only NAME] [--list] [-j N]
 
 `-j N` 은 변이 N 개를 동시에 돌린다(기본 1 — 직렬, `0` 이면 CPU 수의 절반). 변이마다 이미 자기
@@ -4812,6 +4818,43 @@ MUTANTS = (
         tests=(
             "tests/test_onboarding_findings.py::"
             "test_ob3_init_worker_service_file_hint_prints_the_numeric_uid",
+        ),
+    ),
+    Mutant(
+        # 응답기가 루프백에 가입하지 않는다 — LAN 멀티캐스트를 못 받는 서버 프로세스가 같은
+        # 호스트의 질의를 하나도 못 듣는다(qa-1 2026-11-26, `rcm discover` 가 운영 서버만 봄)
+        name="md-responder-skips-the-loopback-join",
+        path="src/remote_ci_monitor/mdns.py",
+        old='        for iface in ("0.0.0.0", *local_ipv4s(), LOOPBACK_IF):\n',
+        new='        for iface in ("0.0.0.0", *local_ipv4s()):\n',
+        tests=(
+            "tests/test_mdns_servers_on_one_host.py::"
+            "test_md2_the_responder_socket_also_listens_on_the_loopback",
+        ),
+    ),
+    Mutant(
+        # 질의기가 루프백으로 다시 묻지 않는다 — 같은 호스트의 서버 셋 중 LAN 을 듣는 것만 보인다
+        # (qa-1 2026-11-26)
+        name="md-querier-skips-the-loopback-send",
+        path="src/remote_ci_monitor/mdns.py",
+        old="    if before == loopback:\n        return sent\n",
+        new="    if True:\n        return sent\n",
+        tests=(
+            "tests/test_mdns_servers_on_one_host.py::test_md1_three_servers_on_one_host_are_all_found",
+            "tests/test_mdns_servers_on_one_host.py::"
+            "test_md7_each_round_asks_the_lan_then_the_loopback_and_restores_the_interface",
+        ),
+    ),
+    Mutant(
+        # 응답기가 루프백 가입도 센다 — 실제 인터페이스 가입이 모두 실패해도(오프라인 Mac) 광고가
+        # 켜진 것으로 찍히고 /health 에 error 가 없다(qa-2 2026-11-26, PLAN 「fail-open 금지」)
+        name="md-responder-counts-the-loopback-join",
+        path="src/remote_ci_monitor/mdns.py",
+        old="            joined += iface != LOOPBACK_IF\n",
+        new="            joined += 1\n",
+        tests=(
+            "tests/test_mdns_servers_on_one_host.py::"
+            "test_md8_only_the_loopback_joined_means_advertise_is_off",
         ),
     ),
 )
