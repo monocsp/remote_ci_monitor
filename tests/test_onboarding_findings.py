@@ -289,6 +289,21 @@ def test_ob3_the_linux_lines_hold_no_command_substitution(cfg, home, tmp_path):
     assert "$(" not in fake.err.getvalue(), fake.err.getvalue()
 
 
+def test_ob3_init_worker_service_file_hint_prints_the_numeric_uid(
+    home, tmp_path, monkeypatch, capsys
+):
+    """# OB3 — `rcm init worker --service-file` 의 `next:` 줄도 사람이 붙여 넣는 줄이다. setup 과
+    같게 숫자 uid 를 찍는다."""
+    import sys
+
+    monkeypatch.setattr(sys, "platform", "darwin")
+    target = tmp_path / "svc" / "com.remote-ci-monitor.worker.plist"
+    assert cli.main(["init", "worker", "--service-file", str(target)]) == 0
+    err = capsys.readouterr().err
+    assert "$(" not in err, err
+    assert f"launchctl bootstrap gui/{os.getuid()} {target}" in err, err
+
+
 def test_ob3_core_commands_take_the_uid_they_are_given():
     """# OB3 — 순수 함수는 받은 uid 를 쓴다(시험 · 다른 계정의 안내)."""
     import inspect
