@@ -7351,6 +7351,19 @@ MUTANTS = (
         tests=("tests/web/unreachable_m5tb.test.js",),
         runner="node",
     ),
+    Mutant(
+        # 잡 문서가 첫 로그 답보다 늦게 오면 끝난 잡의 서랍에 「로그 불완전」이 끝내 나오지 않는다
+        # (P6-2 G8)
+        name="drawer-late-doc-not-redrawn",
+        path="src/remote_ci_monitor/web/app.js",
+        old=(
+            "      if (drawerTakeDoc(state.drawer, id, job)) renderDrawerSub();"
+            "   // mutcheck: drawer-late-doc-not-redrawn"
+        ),
+        new="      drawerTakeDoc(state.drawer, id, job);",
+        tests=("tests/web/unreachable_m5tb.test.js",),
+        runner="node",
+    ),
 )
 
 

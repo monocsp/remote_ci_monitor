@@ -582,6 +582,20 @@
   function drawerLogNote(row, doc, lang) {
     return logCompleteNote(row || doc, lang);   // mutcheck: drawer-log-note-ignores-job-doc
   }
+  /** 서랍 아랫줄의 글(P6-2 G8). 로그 답(`drawer.log`)이 아직 없으면 null 이다 — 쓰지 않는다. 로그
+   *  답과 잡 문서 중 어느 쪽이 늦게 와도 같은 글이 된다. */
+  function drawerSubText(drawer, row, lang) {
+    var log = drawer && drawer.log;
+    if (!log) return null;
+    var gap = drawerLogNote(row, drawer.doc, lang);
+    return T(lang, log.more ? "drawer.live" : "drawer.finished", { bytes: fmtBytes(log.next) }) + (gap ? " · " + gap : "");
+  }
+  /** 늦게 온 잡 문서를 서랍에 받는다. 그 사이 다른 잡의 서랍으로 바뀌었으면 받지 않는다(거짓). */
+  function drawerTakeDoc(drawer, id, job) {
+    if (!job || !drawer || drawer.jobId !== id) return false;
+    drawer.doc = job;
+    return true;
+  }
   /** 워커에서 지금 소식이 오는 행인가(P6-1 G6). 끊김 유예 중이면 아는 것은 마지막으로 들은 값뿐이다 —
    *  단계 · 경과 초를 스스로 세지 않고, 막대도 세지 않는다. */
   function heardLive(row) {
@@ -3647,7 +3661,7 @@
     ordinal: ordinal, truncate: truncate, stateWord: stateWord, stateGlyph: stateGlyph, personLabel: personLabel,
     reasonText: reasonText, confidenceBadge: confidenceBadge, etaText: etaText,
     elapsedText: elapsedText, notMoving: notMoving, yourJobs: yourJobs, isMine: isMine,
-    holdChip: holdChip, logCompleteNote: logCompleteNote, drawerLogNote: drawerLogNote, stuckBand: stuckBand, heardLive: heardLive, laneClass: laneClass,
+    holdChip: holdChip, logCompleteNote: logCompleteNote, drawerLogNote: drawerLogNote, drawerSubText: drawerSubText, drawerTakeDoc: drawerTakeDoc, stuckBand: stuckBand, heardLive: heardLive, laneClass: laneClass,
     scheduledOf: scheduledOf, scheduledRowModel: scheduledRowModel, notifyFailuresBadge: notifyFailuresBadge, cancelLocked: cancelLocked, hostPressure: hostPressure,
     jobStorageLine: jobStorageLine, hostRunsNoJobs: hostRunsNoJobs, hostFacts: hostFacts,
     queueHeader: queueHeader, sortQueue: sortQueue, workerPills: workerPills, workersCrowded: workersCrowded, workerName: workerName, hostCards: hostCards, headerNote: headerNote, progressHead: progressHead, progressHeadHtml: progressHeadHtml, queueGroups: queueGroups, runningStep: runningStep,
@@ -3690,7 +3704,7 @@
     // `machinesKey` 는 `/api/status` 의 머신 요약이 바뀌었는지 보는 열쇠다(바뀔 때만 다시 받는다).
     machines: null, machinesMissing: false, machinesKey: null, machinesLoading: false,
     es: null, retryTimer: null, pollTimer: null, refetchTimer: null, hiddenSince: null, lostShownAt: null,
-    drawer: { jobId: null, offset: 0, timer: null, lines: 0, doc: null }, cancelTarget: null, hl: null, tz: null,
+    drawer: { jobId: null, offset: 0, timer: null, lines: 0, doc: null, log: null }, cancelTarget: null, hl: null, tz: null,
     // 스토어 탭. `repos` 는 릴리스 프로파일이 있는 저장소(null = 아직 안 물어봄). 비밀 값은 여기 없다.
     view: "queue", store: { api: null, repos: null, reposStatus: null, repo: null, doc: null, secrets: null, screen: null,
       error: null, fetchError: null, fetching: false, verifying: false, loadedAt: null, timer: null, seq: 0, dialogSecret: null,
@@ -5302,16 +5316,23 @@
   }
 
   // 로그 서랍 (항목 13)
+  // 서랍 아랫줄 — 마지막 로그 답(`state.drawer.log`)과 잡 문서로 다시 그린다. 로그 답이 아직 없거나
+  // 로그를 못 읽은 동안이면 그 자리의 말을 덮지 않는다(P6-2 G8)
+  function renderDrawerSub() {
+    var text = drawerSubText(state.drawer, findAnyJob(state.drawer.jobId), L());
+    if (text != null) $("[data-drawer-sub]").textContent = text;
+  }
   function openDrawer(id) {
     var d = $("#drawer");
     var row = findAnyJob(id);
-    state.drawer.jobId = id; state.drawer.offset = 0; state.drawer.lines = 0;
+    state.drawer.jobId = id; state.drawer.offset = 0; state.drawer.lines = 0; state.drawer.log = null;
     state.drawer.key = row ? (row.key || "") : "";
     // 큐 · 최근 목록 밖의 잡(딥 링크 · 홀드 잡 링크)은 `log_complete` 를 잡 문서에서 읽는다 —
-    // 한 번만, 늦게 온 답은 그 사이 다른 잡의 서랍에 붙이지 않는다(P6-1 G8)
+    // 한 번만, 늦게 온 답은 그 사이 다른 잡의 서랍에 붙이지 않는다(P6-1 G8). 끝난 잡은 두 번째
+    // 로그 poll 이 없으므로 문서가 첫 로그 답보다 늦게 오면 아랫줄을 여기서 다시 그린다(P6-2 G8)
     state.drawer.doc = null;
     if (!row) api("/jobs/" + id).then(function (r) { return r.ok ? r.json() : null; }).then(function (job) {
-      if (job && state.drawer.jobId === id) state.drawer.doc = job;
+      if (drawerTakeDoc(state.drawer, id, job)) renderDrawerSub();   // mutcheck: drawer-late-doc-not-redrawn
     }).catch(function () { /* 모르면 아무 말도 하지 않는다 — 「완전함」이라고도 하지 않는다 */ });
     $("[data-drawer-title]").textContent = tr("drawer.job", { id: id, key: state.drawer.key });
     $("[data-drawer-title]").title = tr("drawer.job", { id: id, key: state.drawer.key });
@@ -5335,7 +5356,7 @@
     var id = state.drawer.jobId;
     if (id == null) return;
     api("/jobs/" + id + "/log?offset=" + state.drawer.offset).then(function (r) {
-      if (r.status === 401 || r.status === 403) { $("[data-drawer-sub]").textContent = r.status === 401 ? tr("row.add_token_for_log") : tr("row.not_your_job"); return null; }
+      if (r.status === 401 || r.status === 403) { state.drawer.log = null; $("[data-drawer-sub]").textContent = r.status === 401 ? tr("row.add_token_for_log") : tr("row.not_your_job"); return null; }
       if (!r.ok) throw new Error("http " + r.status);
       var more = r.headers.get("X-RCM-More") === "1";
       var next = parseInt(r.headers.get("X-RCM-Next-Offset") || "0", 10);
@@ -5361,10 +5382,11 @@
       }
       state.drawer.offset = res.next;
       // 워커가 로그 일부를 남기지 못했으면(M5t-b §4.6) 머리 줄에 한 마디 — 잡 행의 `log_complete`
-      var gap = drawerLogNote(findAnyJob(id), state.drawer.doc, L());
-      $("[data-drawer-sub]").textContent = (res.more ? tr("drawer.live", { bytes: fmtBytes(res.next) }) : tr("drawer.finished", { bytes: fmtBytes(res.next) })) + (gap ? " · " + gap : "");
+      // (목록 밖 잡이면 잡 문서, drawerSubText)
+      state.drawer.log = { more: res.more, next: res.next };
+      renderDrawerSub();
       if (res.more) state.drawer.timer = setTimeout(pollLog, 2000);
-    }).catch(function () { $("[data-drawer-sub]").textContent = tr("drawer.load_failed"); state.drawer.timer = setTimeout(pollLog, 5000); });
+    }).catch(function () { state.drawer.log = null; $("[data-drawer-sub]").textContent = tr("drawer.load_failed"); state.drawer.timer = setTimeout(pollLog, 5000); });
   }
 
   // 취소 (항목 13 · 30)

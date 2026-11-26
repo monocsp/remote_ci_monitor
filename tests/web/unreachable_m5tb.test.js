@@ -438,9 +438,16 @@ describe("G8 — 목록 밖 잡의 로그 서랍도 「로그 불완전」을 �
     const open = src.slice(src.indexOf("function openDrawer(id)"), src.indexOf("function closeDrawer("));
     assert.ok(open.indexOf("state.drawer.doc = null") !== -1, "openDrawer 가 잡 문서를 비우지 않는다");
     assert.ok(/if \(!row\) api\("\/jobs\/" \+ id\)/.test(open), "목록 밖 잡의 문서를 읽지 않는다");
-    assert.ok(open.indexOf("state.drawer.jobId === id") !== -1, "늦게 온 답이 다른 잡의 서랍에 붙는다");
+    // P6-2: 늦은 답을 거르는 jobId 검사는 drawerTakeDoc 으로, 아랫줄은 renderDrawerSub 로 옮겼다 —
+    // 순서까지는 아래 「P6-2 G8」 이 실제 소스를 돌려 잠근다
+    assert.ok(open.indexOf("drawerTakeDoc(state.drawer, id, job)") !== -1, "늦게 온 답이 다른 잡의 서랍에 붙는다");
+    assert.equal(rcm.drawerTakeDoc({ jobId: 8, doc: null }, 7, { id: 7 }), false);
     const poll = src.slice(src.indexOf("function pollLog()"), src.indexOf("// 취소 (항목 13 · 30)"));
-    assert.ok(poll.indexOf("drawerLogNote(findAnyJob(id), state.drawer.doc, L())") !== -1, "pollLog 가 잡 문서를 보지 않는다");
+    assert.ok(poll.indexOf("renderDrawerSub()") !== -1, "pollLog 가 아랫줄을 renderDrawerSub 로 그리지 않는다");
+    const sub = src.slice(src.indexOf("function renderDrawerSub()"), src.indexOf("function openDrawer(id)"));
+    assert.ok(sub.indexOf("drawerSubText(state.drawer, findAnyJob(state.drawer.jobId), L())") !== -1, "아랫줄이 잡 문서를 보지 않는다");
+    assert.equal(rcm.drawerSubText({ log: { more: false, next: 0 }, doc: { log_complete: false } }, null, "en"),
+      "finished · " + rcm.fmtBytes(0) + " · log incomplete — the worker could not keep all of it");
   });
 });
 
@@ -483,5 +490,96 @@ describe("P6-2 G6 — 끊긴 잡의 전체 진행 막대는 「예상 초과」�
     assert.ok(ko.indexOf("예상 시간 초과") === -1, ko);
     assert.ok(en.indexOf('data-cond="over"') === -1, en);
     assert.ok(en.indexOf("progress —") !== -1, en);
+  });
+});
+
+describe("P6-2 G8 — 잡 문서가 첫 로그 답보다 늦게 와도 「로그 불완전」을 그린다", () => {
+  // 끝난 잡은 로그 답이 `more` 가 거짓이라 두 번째 poll 이 없다. 잡 문서가 그 뒤에 오면 서랍
+  // 아랫줄을 다시 그려야 한다. openDrawer · pollLog 의 실제 소스를 가짜 DOM · api 위에서 돌려
+  // 답이 오는 순서를 정한다.
+  const BOOT = ["renderDrawerSub", "openDrawer", "pollLog"];
+  function harness() {
+    const src = APP_SRC();
+    const cut = (from, to) => {
+      const i = src.indexOf(from);
+      if (i === -1) return "";
+      return src.slice(i, src.indexOf(to, i));
+    };
+    const body = cut("function renderDrawerSub()", "function openDrawer(id)")
+      + cut("function openDrawer(id)", "function closeDrawer(")
+      + cut("function pollLog()", "// 취소 (항목 13 · 30)");
+    const els = {};
+    const $ = (sel) => (els[sel] = els[sel] || { textContent: "", title: "", innerHTML: "", hidden: true, focus() {}, scrollTop: 0, clientHeight: 0, scrollHeight: 0 });
+    const calls = [];
+    const api = (url) => new Promise((resolve) => calls.push({ url, resolve }));
+    const state = { drawer: { jobId: null, offset: 0, timer: null, lines: 0, doc: null } };
+    const tr = (k, a) => I18N.t("en", k, a);
+    const env = {
+      state, $, api, tr, L: () => "en", findAnyJob: () => null, jobLinkHtml: () => "",
+      history: { pushState() {} }, location: { hash: "" }, fmtBytes: rcm.fmtBytes,
+      drawerLogNote: rcm.drawerLogNote, drawerSubText: rcm.drawerSubText, drawerTakeDoc: rcm.drawerTakeDoc,
+      setTimeout: () => 0, clearTimeout: () => {}
+    };
+    const names = Object.keys(env);
+    const fns = new Function(...names, body + "\nreturn { "
+      + BOOT.map((n) => n + ": typeof " + n + " === 'function' ? " + n + " : null").join(", ") + " };")(
+      ...names.map((n) => env[n]));
+    const take = (url) => {
+      const i = calls.findIndex((c) => c.url === url);
+      assert.ok(i !== -1, "no request " + url + " in " + calls.map((c) => c.url).join(", "));
+      return calls.splice(i, 1)[0];
+    };
+    const logReply = (more, next) => ({
+      status: 200, ok: true,
+      headers: { get: (h) => (h === "X-RCM-More" ? (more ? "1" : "0") : h === "X-RCM-Next-Offset" ? String(next) : null) },
+      text: () => Promise.resolve("")
+    });
+    const docReply = (job) => ({ status: 200, ok: true, json: () => Promise.resolve(job) });
+    const flush = async () => { for (let i = 0; i < 6; i++) await new Promise((r) => setImmediate(r)); };
+    return { fns, take, logReply, docReply, flush, sub: () => $("[data-drawer-sub]").textContent };
+  }
+  const GAP = "log incomplete — the worker could not keep all of it";
+
+  test("p6-2 g8 — 로그 답이 먼저, 잡 문서가 나중: 아랫줄에 「로그 불완전」", async () => {
+    const h = harness();
+    h.fns.openDrawer(7);
+    h.take("/jobs/7/log?offset=0").resolve(h.logReply(false, 2048));
+    await h.flush();
+    assert.equal(h.sub(), "finished · " + rcm.fmtBytes(2048));
+    h.take("/jobs/7").resolve(h.docReply({ id: 7, log_complete: false }));
+    await h.flush();
+    assert.equal(h.sub(), "finished · " + rcm.fmtBytes(2048) + " · " + GAP);
+  });
+  test("p6-2 g8 — 잡 문서가 먼저: 그대로 「로그 불완전」(대조)", async () => {
+    const h = harness();
+    h.fns.openDrawer(7);
+    h.take("/jobs/7").resolve(h.docReply({ id: 7, log_complete: false }));
+    await h.flush();
+    h.take("/jobs/7/log?offset=0").resolve(h.logReply(false, 2048));
+    await h.flush();
+    assert.equal(h.sub(), "finished · " + rcm.fmtBytes(2048) + " · " + GAP);
+  });
+  test("p6-2 g8 — 늦게 온 문서가 그 사이 연 다른 잡의 서랍에 붙지 않는다", async () => {
+    const h = harness();
+    h.fns.openDrawer(7);
+    h.take("/jobs/7/log?offset=0").resolve(h.logReply(false, 2048));
+    await h.flush();
+    h.fns.openDrawer(8);
+    h.take("/jobs/8/log?offset=0").resolve(h.logReply(false, 100));
+    await h.flush();
+    h.take("/jobs/7").resolve(h.docReply({ id: 7, log_complete: false }));
+    await h.flush();
+    assert.equal(h.sub(), "finished · " + rcm.fmtBytes(100));
+  });
+  test("p6-2 g8 — 로그를 못 읽은 동안 온 문서는 그 말을 덮지 않는다", async () => {
+    const h = harness();
+    h.fns.openDrawer(7);
+    h.take("/jobs/7/log?offset=0").resolve({ status: 401, ok: false, headers: { get: () => null } });
+    await h.flush();
+    const said = h.sub();
+    assert.ok(said.length > 0);
+    h.take("/jobs/7").resolve(h.docReply({ id: 7, log_complete: false }));
+    await h.flush();
+    assert.equal(h.sub(), said);
   });
 });
