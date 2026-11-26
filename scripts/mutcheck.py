@@ -7314,6 +7314,19 @@ MUTANTS = (
             "test_g9_rl45_rcm_wait_on_the_job_that_holds_its_group_says_so",
         ),
     ),
+    Mutant(
+        # 한국어 홀드 줄이 명령에 조사를 붙인다 — `rcm release-hold 812를` 은 복사하면 종료 2
+        # (P6-1 G11)
+        name="ko-hold-command-with-particle",
+        path="src/remote_ci_monitor/web/i18n.js",
+        old='"에 남은 프로세스가 있는지 확인한 뒤 푸는 명령: rcm release-hold " +\n        a.id;',
+        new=(
+            '"에 남은 프로세스가 있는지 확인한 뒤 rcm release-hold " +\n'
+            '        withJosa(String(a.id), "을/를") + " 실행하세요.";'
+        ),
+        tests=("tests/web/unreachable_m5tb.test.js",),
+        runner="node",
+    ),
 )
 
 

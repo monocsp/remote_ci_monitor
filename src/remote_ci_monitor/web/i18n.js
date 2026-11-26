@@ -1760,9 +1760,10 @@
     "hold.needs_look": function (a) {
       var where = a.worker || "서버의 로컬 레인";
       var look = a.worker || "서버";
+      // 명령에는 조사를 붙이지 않는다 — `rcm release-hold 812를` 을 복사하면 종료 2 다(P6-1 G11)
       return "그룹 " + a.group + " 막힘: 작업 #" + a.id + "(" + a.preset + ")" + josa(String(a.id), "이/가") + " " +
-        where + "에서 멈춤 확인 없이 닫힘. " + look + "에 남은 프로세스가 있는지 확인한 뒤 rcm release-hold " +
-        withJosa(String(a.id), "을/를") + " 실행하세요.";
+        where + "에서 멈춤 확인 없이 닫힘. " + look + "에 남은 프로세스가 있는지 확인한 뒤 푸는 명령: rcm release-hold " +
+        a.id;
     },
     "hold.chip": "그룹 막힘",
     // M5n — 머신 배치. 머신 · 프리셋 · 도구 · 점검 이름은 서버가 보낸 그대로 끼운다.

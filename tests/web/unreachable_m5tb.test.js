@@ -106,10 +106,10 @@ describe("RL45 — 그룹 홀드의 사람용 화면", () => {
     assert.equal(r.lines.length, 2, JSON.stringify(r));
     assert.equal(r.lines[0].text,
       "그룹 irreversible:ship 막힘: 작업 #812(ship)가 build-02에서 멈춤 확인 없이 닫힘. "
-      + "build-02에 남은 프로세스가 있는지 확인한 뒤 rcm release-hold 812를 실행하세요.");
+      + "build-02에 남은 프로세스가 있는지 확인한 뒤 푸는 명령: rcm release-hold 812");
     assert.equal(r.lines[1].text,
       "그룹 devices 막힘: 작업 #815(deploy)가 서버의 로컬 레인에서 멈춤 확인 없이 닫힘. "
-      + "서버에 남은 프로세스가 있는지 확인한 뒤 rcm release-hold 815를 실행하세요.");
+      + "서버에 남은 프로세스가 있는지 확인한 뒤 푸는 명령: rcm release-hold 815");
     r.lines.forEach((l) => noCode(l.text));
   });
   test("홀드는 다른 행동 가능한 줄보다 앞이다(needs_action 자리)", () => {
@@ -317,6 +317,26 @@ describe("RL45 — 홀드 칩의 모양(P3 r1)", () => {
 
 // ── P6-1: P5 엣지 감사의 확인된 GAP ──────────────────────────────────────────────────
 const APP_SRC = () => fs.readFileSync(require("./helpers").APP_PATH, "utf8");
+
+describe("G11 — 한국어 문장의 명령에 조사를 붙이지 않는다", () => {
+  // `rcm release-hold 812를` 을 그대로 복사하면 `812를` 이 정수가 아니라 종료 2 다.
+  const GLUED = /rcm release-hold \d+[가-힣]/;
+  test("g11 — 홀드 줄 · 막힌 대기 잡 줄 · 칩 title 의 명령 뒤에 한글이 붙지 않는다", () => {
+    [812, 7, 10, 3].forEach((id) => {
+      const hold = Object.assign({}, HOLD_A, { job_id: id });
+      const st = status([], { irreversible_holds: [hold, Object.assign({}, HOLD_B, { job_id: id + 1 })] });
+      rcm.notMoving(st, null, "ko").lines.forEach((l) => assert.ok(!GLUED.test(l.text), l.text));
+      assert.ok(!GLUED.test(rcm.holdChip(st, id, "ko").title));
+      const row = waiting(821, { blocked_by: { job_id: id, group: "g", remaining_seconds: null } });
+      const text = rcm.reasonText(row, NOW, status([row]), "ko").text;
+      assert.ok(!GLUED.test(text), text);
+    });
+  });
+  test("g11 — i18n.js 의 한국어에 명령 + 조사 꼴이 없다", () => {
+    const src = fs.readFileSync(I18N_PATH, "utf8");
+    assert.ok(!/release-hold " \+\s*withJosa\(/.test(src), "release-hold 번호에 withJosa 로 조사를 붙인다");
+  });
+});
 
 describe("G1 — 「확인이 필요한 작업」 띠가 넘치면 「그 밖에 없음」이라 하지 않는다", () => {
   // 띠는 세 줄까지 그린다. PR3 이 홀드마다 · 끊긴 잡마다 한 줄을 더해 넷째 줄이 생길 수 있다 —
