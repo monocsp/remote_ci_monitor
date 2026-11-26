@@ -842,8 +842,22 @@ yours to do. Open or close it yourself and that choice is remembered.
 1. A **banner** says what happened.
 2. The worker's pill turns **down**.
 3. Its pool is marked as having no worker, and jobs there wait with that reason and **no ETA** —
-   nothing pretends they are about to start. They are not resumed automatically: submit again once
-   the worker is back.
+   nothing pretends they are about to start. A job that was running on that worker keeps running
+   for the [disconnect grace](configuration.md#a-lost-connection-disconnect_grace_seconds). Its
+   reason says so in words, `lost contact with mac2 — the job goes on if the worker is back within
+   the grace period`, and its ETA is `—`. If the worker comes back in time, the job goes on where
+   it was. If the grace runs out first, the job ends `lost` with the reason in words: submit it
+   again once the worker is back.
+
+`rcm wait` keeps waiting through the grace and says what happened, one line each time:
+
+```text
+#812 lost contact with worker mac2 — the job goes on if the worker is back within the grace period
+#812 worker mac2 is back — the job goes on
+```
+
+What every screen shows, and why a job ends `lost`, is in
+[When a worker cannot be reached](operating.md#when-a-worker-cannot-be-reached).
 
 ### On a phone
 

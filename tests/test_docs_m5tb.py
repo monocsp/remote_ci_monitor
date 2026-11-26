@@ -345,3 +345,28 @@ def test_rl45_operating_says_where_a_hold_shows_and_quotes_the_lines():
     assert doctor.split(": ", 1)[1].replace("812", "N") in body
     assert "`group held` chip" in body and "exit 4" in body
     assert "`unknown — group holds unavailable`" in body
+
+
+def test_rl28_both_usage_guides_show_the_grace_and_the_two_wait_lines():
+    """# RL28 사용 안내 두 거울의 「When a worker stops」 가 유예 중 화면과 `rcm wait` 의 두 줄을
+    같은 뜻 · 같은 번호로 말한다. 옛 「자동으로 재개되지 않는다」 는 남지 않는다."""
+    from remote_ci_monitor.core.render_text import unreachable_text
+
+    usage = (ROOT / "docs" / "usage.md").read_text()
+    usage_ko = (ROOT / "docs" / "usage.ko.md").read_text()
+    for text, heading in ((usage, "When a worker stops"), (usage_ko, "워커가 멈추면")):
+        raw = section(text, heading)
+        body = flat(raw)
+        assert re.findall(r"^(\d+)\. ", raw, re.M) == ["1", "2", "3"], heading
+        assert unreachable_text("mac2") in body, heading
+        assert "`—`" in body, heading
+        assert "(configuration.md#a-lost-connection-disconnect_grace_seconds)" in body, heading
+        assert "(operating.md#when-a-worker-cannot-be-reached)" in body, heading
+        assert f"#812 {unreachable_text('worker mac2')}\n" in raw, heading
+        assert "#812 worker mac2 is back — the job goes on\n" in raw, heading
+        assert "`lost`" in body, heading
+    assert "not resumed automatically" not in usage
+    assert "자동으로 재개되지도 않는다" not in usage_ko
+    assert "워커 mac2와 연락이 끊김 · 유예 시간 안에 돌아오면 이어서 진행" in flat(
+        section(usage_ko, "워커가 멈추면")
+    )

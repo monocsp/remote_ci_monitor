@@ -803,7 +803,23 @@ curl "http://macmini.local:8787/api/shelf/latest/app-map-shots?branch=dev"   # �
 1. **띠**가 무슨 일인지 말한다.
 2. 그 워커의 필이 **down** 으로 바뀐다.
 3. 그 풀은 워커 없음으로 표시되고, 거기 작업들은 그 이유와 함께 **ETA 없이** 기다린다. 곧 시작할
-   것처럼 굴지 않는다. 자동으로 재개되지도 않는다. 워커가 돌아오면 다시 내면 된다.
+   것처럼 굴지 않는다. 그 워커에서 돌던 작업은
+   [끊김 유예](configuration.md#a-lost-connection-disconnect_grace_seconds) 동안 계속 돈다.
+   이유 칸은 그 사정을 말로 적는다. 한국어 화면에서는 `워커 mac2와 연락이 끊김 · 유예 시간 안에
+   돌아오면 이어서 진행`, 영어 화면에서는 `lost contact with mac2 — the job goes on if the
+   worker is back within the grace period` 이고 ETA 는 `—` 다. 워커가 제때 돌아오면
+   작업은 하던 자리에서 이어 간다. 유예가 먼저 끝나면 작업은 `lost` 로 끝나고 이유가 말로
+   남는다. 그때는 워커가 돌아온 뒤 다시 내면 된다.
+
+`rcm wait` 은 유예 동안에도 계속 기다리고, 일이 생길 때마다 한 줄씩 알린다.
+
+```text
+#812 lost contact with worker mac2 — the job goes on if the worker is back within the grace period
+#812 worker mac2 is back — the job goes on
+```
+
+화면마다 무엇이 보이는지, 작업이 왜 `lost` 로 끝나는지는
+[When a worker cannot be reached](operating.md#when-a-worker-cannot-be-reached) 에 있다.
 
 ### 폰에서
 
