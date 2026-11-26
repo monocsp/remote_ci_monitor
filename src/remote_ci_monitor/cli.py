@@ -1454,7 +1454,8 @@ def _notifier_argv(title: str, message: str) -> tuple[str, list[str]] | None:
         script = "display notification (item 2 of argv) with title (item 1 of argv)"
         return "osascript", ["-e", "on run argv", "-e", script, "-e", "end run", title, message]
     if sys.platform.startswith("linux"):
-        return "notify-send", [title, message]
+        # `--` 뒤는 옵션이 아니다 — `-` 로 시작하는 본문(잡 이름 · 표식 note)이 옵션으로 읽히지 않게
+        return "notify-send", ["--", title, message]
     return None
 
 

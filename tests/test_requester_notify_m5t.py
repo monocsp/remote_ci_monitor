@@ -574,3 +574,17 @@ def test_tn7_a_delivery_failure_is_what_the_notification_says(monkeypatch, tmp_p
     assert title == "rcm"
     assert message.startswith("#381 artifact delivery failed · exit 5"), message
     assert message.endswith("job succeeded on build-02 · 6m 31s · artifacts ready"), message
+
+
+def test_tn7_notify_send_reads_a_dash_message_as_text(monkeypatch, tmp_path):
+    """`notify-send` 인자 앞에 `--` 를 둔다. `-` 로 시작하는 본문이 옵션으로 읽히지 않는다."""
+    monkeypatch.setattr(sys, "platform", "linux")
+    assert cli._notifier_argv("rcm", "-u critical") == (
+        "notify-send",
+        ["--", "rcm", "-u critical"],
+    )
+    bin_dir, marker = stub_path(tmp_path, ("notify-send",))
+    monkeypatch.setenv("PATH", str(bin_dir))
+    assert cli.os_notify("rcm", "--help") is None
+    (call,) = marker.read_text().splitlines()
+    assert call == f"{bin_dir / 'notify-send'}|--|rcm|--help|", call
