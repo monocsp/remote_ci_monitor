@@ -1432,7 +1432,13 @@ NOTIFY_TIMEOUT_SECONDS = 10.0
 
 
 def _notify_text(job: Any, job_id: int, code: int, end: str | None) -> str:
-    """OS 알림의 본문 — 끝줄이 있으면 그 줄, 표식에서 돌아왔으면 표식, 아니면 종료 코드."""
+    """OS 알림의 본문 — 끝줄이 있으면 그 줄, 표식에서 돌아왔으면 표식, 아니면 종료 코드.
+
+    `code` 는 이 기다림의 **최종** 종료 코드다. 받기(`--fetch-artifacts`)가 실패해 5 가 됐으면
+    그 결과를 앞에 적는다 — 잡의 「succeeded」 끝줄을 그대로 알리지 않는다."""
+    if code == EXIT_DELIVERY:
+        said = f"#{job_id} artifact delivery failed · exit {code}"
+        return f"{said} · job {end.split(' ', 1)[1]}" if end and " " in end else said
     if end:
         return end
     if code == EXIT_ACTION and isinstance(job, dict):

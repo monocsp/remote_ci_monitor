@@ -539,3 +539,38 @@ def test_tn7_ctrl_c_during_the_notification_keeps_the_exit_code_and_the_json(
     assert last_json(out)["wait_exit_code"] == 1
     warned = [ln for ln in err.splitlines() if "--notify" in ln]
     assert warned == ["rcm: warning: --notify: interrupted — no notification sent"], err
+
+
+def capture_notifications(monkeypatch) -> list[tuple[str, str]]:
+    sent: list[tuple[str, str]] = []
+
+    def fake(title: str, message: str) -> None:
+        sent.append((title, message))
+        return None
+
+    monkeypatch.setattr(cli, "os_notify", fake)
+    return sent
+
+
+def test_tn7_a_delivery_failure_is_what_the_notification_says(monkeypatch, tmp_path, capsys):
+    """받기 실패로 종료 코드가 5 가 되면 알림도 그 결과를 말한다. 「succeeded」로 시작하지 않는다.
+
+    지금 CLI 에서는 둘이 함께 오지 않는다(`--fetch-artifacts` 는 `rcm run`, `--notify` 는
+    `rcm wait`). 그래서 `_wait` 를 직접 불러 알림 문구가 최종 종료 코드를 보는지 잠근다."""
+    sent = capture_notifications(monkeypatch)
+    done = wait_doc(artifacts=artifacts("ready"))
+    monkeypatch.setattr(cli, "wait_for_job", lambda client, job_id, **kw: (0, done, None))
+    monkeypatch.setattr(
+        cli, "_fetch_artifacts", lambda *a, **kw: {"ok": False, "reason": "write_failed"}
+    )
+    spec = cli._FetchSpec(root=tmp_path, baseline={})
+    code = cli._wait(
+        object(), JOB_ID, timeout=None, joined=False, fetch=spec, end_summary=True, notify=True
+    )
+    out = capsys.readouterr().out
+    assert code == cli.EXIT_DELIVERY
+    assert last_json(out)["artifact_fetch"]["ok"] is False
+    ((title, message),) = sent
+    assert title == "rcm"
+    assert message.startswith("#381 artifact delivery failed · exit 5"), message
+    assert message.endswith("job succeeded on build-02 · 6m 31s · artifacts ready"), message
