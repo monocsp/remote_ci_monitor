@@ -4002,10 +4002,7 @@ MUTANTS = (
         # 읽지 못한 rcm 같은 파일을 rcm 이 아닌 것으로 본다(결정 352, 닫는 쪽)
         name="setup-scan-unreadable-rcm-skipped",
         path="src/remote_ci_monitor/setup.py",
-        old=(
-            "            return core.RcmService(stem, file, (stem,), "
-            'problem=f"setup cannot read it ({reason})")\n'
-        ),
+        old="            return core.RcmService(stem, file, (stem,), problem=reason)\n",
         new="            return None\n",
         tests=("tests/test_setup.py::test_b9_352_an_rcm_service_setup_cannot_read_closes",),
     ),
@@ -4200,6 +4197,134 @@ MUTANTS = (
         ),
         new="        return set(of)\n",
         tests=("tests/test_setup.py::test_b11_l5_darwin_compares_labels_without_case",),
+    ),
+    Mutant(
+        # 다른 이름의 링크가 가리키는 rcm 을 rcm 으로 보지 않는다(batch 12 MED)
+        name="setup-scan-rcm-program-link-missed",
+        path="src/remote_ci_monitor/setup.py",
+        old='    if real.name == "rcm":\n        return True\n',
+        new='    if real.name == "rcm":\n        return False\n',
+        tests=("tests/test_setup.py::test_b12_m_a_program_that_is_rcm_under_another_name_is_read",),
+    ),
+    Mutant(
+        # rcm 이 설치된 venv 의 다른 이름 실행 파일을 rcm 으로 보지 않는다(batch 12 MED)
+        name="setup-scan-rcm-venv-script-missed",
+        path="src/remote_ci_monitor/setup.py",
+        old='    return (venv / "pyvenv.cfg").is_file() and any(installed)\n',
+        new="    return False\n",
+        tests=("tests/test_setup.py::test_b12_m_a_program_that_is_rcm_under_another_name_is_read",),
+    ),
+    Mutant(
+        # rcm 이 설치된 venv 의 파이썬도 rcm 으로 본다 — 다른 스크립트를 띄우는 서비스를
+        # 거절한다(batch 12 MED)
+        name="setup-scan-rcm-venv-python-counted",
+        path="src/remote_ci_monitor/setup.py",
+        old='    if real.name.startswith("python") or real.parent.name != "bin":\n',
+        new='    if real.parent.name != "bin":\n',
+        tests=("tests/test_setup.py::test_b12_m_a_program_in_a_venv_that_is_not_rcm_passes",),
+    ),
+    Mutant(
+        # rcm 이 설치되지 않은 venv 의 실행 파일도 rcm 으로 본다(batch 12 MED)
+        name="setup-scan-rcm-venv-not-installed-counted",
+        path="src/remote_ci_monitor/setup.py",
+        old='    return (venv / "pyvenv.cfg").is_file() and any(installed)\n',
+        new='    return (venv / "pyvenv.cfg").is_file()\n',
+        tests=("tests/test_setup.py::test_b12_m_a_program_in_a_venv_that_is_not_rcm_passes",),
+    ),
+    Mutant(
+        # 다른 이름의 rcm 의 인자를 rcm 의 파서로 읽지 않는다 — 그 서비스의 config 를
+        # 모른다(batch 12 MED)
+        name="setup-launch-rcm-program-not-parsed",
+        path="src/remote_ci_monitor/setup.py",
+        old='        return doctor.rcm_launch("rcm", ["rcm", *argv[1:]])\n',
+        new="        return None\n",
+        tests=("tests/test_setup.py::test_b12_m_a_program_that_is_rcm_under_another_name_is_read",),
+    ),
+    Mutant(
+        # 명령 줄의 rcm 낱말을 보지 않는다 — `sh -c "cd x;rcm …"` 를 건너뛴다(batch 12 MED)
+        name="setup-scan-rcm-command-words-skipped",
+        path="src/remote_ci_monitor/setup.py",
+        old="        if any(_RCM_COMMAND.search(word) for argv in commands for word in argv):\n",
+        new="        if False:\n",
+        tests=("tests/test_setup.py::test_b12_m_a_shell_command_line_that_runs_rcm_closes",),
+    ),
+    Mutant(
+        # 경로 마디 `/rcm/` 도 rcm 으로 센다 — ci-watch plist 를 거절한다(batch 12 MED)
+        name="setup-scan-rcm-command-path-segment-counted",
+        path="src/remote_ci_monitor/setup.py",
+        old="rcm(?![\\w./-])|",
+        new="rcm(?![\\w.-])|",
+        tests=("tests/test_setup.py::test_b12_m_a_command_line_without_rcm_passes",),
+    ),
+    Mutant(
+        # `[Service]` 밖의 줄도 서비스의 것으로 읽는다(batch 12 L1)
+        name="doctor-unit-other-section-read",
+        path="src/remote_ci_monitor/doctor.py",
+        old='        if section not in (None, "Service"):\n',
+        new="        if False:\n",
+        tests=("tests/test_setup.py::test_b12_l1_the_parser_knows_the_section_and_the_reset",),
+    ),
+    Mutant(
+        # 빈 `ExecStart=` 가 앞의 명령을 지우지 않는다(batch 12 L1)
+        name="doctor-unit-execstart-reset-ignored",
+        path="src/remote_ci_monitor/doctor.py",
+        old="                    execs.clear()\n",
+        new="                    pass\n",
+        tests=("tests/test_setup.py::test_b12_l1_the_parser_knows_the_section_and_the_reset",),
+    ),
+    Mutant(
+        # ExecStart= 가 여럿이면 마지막 줄만 읽는다 — 앞줄의 rcm 을 놓친다(batch 12 L1)
+        name="doctor-unit-first-rcm-execstart-not-chosen",
+        path="src/remote_ci_monitor/doctor.py",
+        old="        (e for e in execs if e[2] is not None), last\n",
+        new="        (e for e in execs if False), last\n",
+        tests=("tests/test_setup.py::test_b12_l1_every_execstart_of_the_service_section_is_read",),
+    ),
+    Mutant(
+        # rcm 을 띄우는 ExecStart= 가 둘이어도 하나만 읽고 지나간다(batch 12 L1)
+        name="setup-scan-several-rcm-execstarts-allowed",
+        path="src/remote_ci_monitor/setup.py",
+        old="    if sum(_runs_rcm(argv, sf.env) for argv in sf.exec_argvs) > 1:\n",
+        new="    if sum(_runs_rcm(argv, sf.env) for argv in sf.exec_argvs) > 2:\n",
+        tests=("tests/test_setup.py::test_b12_l1_several_execstarts_close_when_setup_cannot_tell",),
+    ),
+    Mutant(
+        # 권한이 아닌 이유로 읽지 못한 파일을 조용히 건너뛴다(batch 12 L2)
+        name="setup-scan-unread-oserror-skipped",
+        path="src/remote_ci_monitor/setup.py",
+        old=(
+            '            return _unread(path, f"setup cannot read it '
+            '({why or type(e).__name__})")\n'
+        ),
+        new="            return None\n",
+        tests=(
+            "tests/test_setup.py::"
+            "test_b12_l2_a_file_another_error_kept_from_setup_is_not_skipped_quietly",
+        ),
+    ),
+    Mutant(
+        # `~/.local/share/systemd/user` 를 보지 않는다(batch 12 L3)
+        name="setup-scan-data-home-missed",
+        path="src/remote_ci_monitor/setup.py",
+        old='        found.append((home / ".local" / "share" / "systemd" / "user", False, home))\n',
+        new="",
+        tests=("tests/test_setup.py::test_b12_l3_units_in_the_data_home_are_seen",),
+    ),
+    Mutant(
+        # `$XDG_DATA_HOME/systemd/user` 를 보지 않는다(batch 12 L3)
+        name="setup-scan-xdg-data-missed",
+        path="src/remote_ci_monitor/setup.py",
+        old='    for name in ("XDG_CONFIG_HOME", "XDG_DATA_HOME"):\n',
+        new='    for name in ("XDG_CONFIG_HOME",):\n',
+        tests=("tests/test_setup.py::test_b12_l3_units_in_the_data_home_are_seen",),
+    ),
+    Mutant(
+        # `/usr/local/lib/systemd/system` 를 보지 않는다(batch 12 L3)
+        name="setup-scan-usr-local-places-missed",
+        path="src/remote_ci_monitor/setup.py",
+        old='    Path("/usr/local/lib/systemd/system"),\n',
+        new="",
+        tests=("tests/test_setup.py::test_b12_l3_the_system_places_include_xdg_and_usr_local",),
     ),
     # ── M5t-a PR3 — 분배 전용 코디네이터 `lanes = 0` (docs/m5t-workplan.md §7 변이 검사) ──
     Mutant(

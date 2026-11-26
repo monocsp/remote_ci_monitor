@@ -2617,8 +2617,9 @@ def _agent(home: Path, label: str, argv: list[str]) -> Path:
 def test_b12_m_a_program_that_is_rcm_under_another_name_is_read(cfg, home, tmp_path, how):
     # batch 12 MED(v1-1): 이름과 라벨이 rcm 같지 않아도 프로그램이 rcm 이면 rcm 서비스다 —
     # realpath 로 푼 이름이 rcm 이거나(`~/.local/bin/ci-hub` → `<venv>/bin/rcm`), remote_ci_monitor
-    # 가 설치된 venv 의 bin 에 있다. 그 서비스의 config 를 지킨다
-    venv = _rcm_venv(tmp_path)
+    # 가 설치된 venv 의 bin 에 있다. 그 서비스의 config 를 지킨다. 링크 칸의 venv 에는 dist-info 를
+    # 두지 않는다 — 이름 규칙 하나만으로 잡히는지 본다
+    venv = _rcm_venv(tmp_path) if how == "a-script-in-an-rcm-venv" else _server_venv(tmp_path)
     if how == "a-link-named-otherwise":
         program = home / ".local" / "bin" / "ci-hub"
         program.parent.mkdir(parents=True)
