@@ -4614,92 +4614,151 @@ MUTANTS = (
             "test_tl3_a_capacity_error_is_logged_once_not_on_every_health_call",
         ),
     ),
-    # ── m5t-a-w3 F: setup 그물의 과잉 차단 줄이기 ──
+    # ── m5t-a-w3 F · PR #274 P3: 옛 그물(#272)이 바닥이고 면제는 닫힌 허용 목록이다 ──
     Mutant(
-        # 런처 낱말을 명령 자리가 아니어도 센다 — `grep -n expect x; rcm status` 의 `expect` ·
-        # `git log --grep xargs` 의 `xargs` 가 런처가 된다(m5t-a-w3 F1)
-        name="guard-launcher-word-in-any-place-counts",
+        # 셸처럼 읽지 못한 글(히어독 · 주석 · 닫히지 않은 따옴표)도 면제한다 — `# don't` 줄의
+        # 아포스트로피 뒤 `rcm $S` 가 지난다(PR #274 P3 MED 1)
+        name="guard-exempt-unreadable-text",
         path="tools/guard_production.py",
-        old="                if commandish or script:\n",
-        new="                if True:\n",
+        old="        items = _lex(text)\n    except _Unreadable:\n        return False\n",
+        new="        items = _lex(text)\n    except _Unreadable:\n        return True\n",
+        tests=(
+            "tests/test_guard_production_setup.py::"
+            "test_p3f1_what_the_272_net_refused_is_still_refused",
+        ),
+    ),
+    Mutant(
+        # `#` 주석을 글자로 읽는다 — 글 자리에 선 `#'` 가 다음 줄의 명령을 따옴표 글로 만든다
+        # (PR #274 P3 MED 1)
+        name="guard-exempt-comment-read-as-text",
+        path="tools/guard_production.py",
+        old='            elif c == "#" and not piece.parts:\n',
+        new="            elif False:\n",
+        tests=(
+            "tests/test_guard_production_setup.py::"
+            "test_p3f1_what_the_272_net_refused_is_still_refused",
+        ),
+    ),
+    Mutant(
+        # 평범한 명령의 따옴표 인자를 모두 글 자리로 본다 — `echo 'rcm $S'` · `gh pr create
+        # --base 'rcm ${S}tup'` 의 rcm 글이 그물을 지난다(PR #274 P3, 면제 조건 「글 자리만」)
+        name="guard-exempt-any-quoted-argument-is-text",
+        path="tools/guard_production.py",
+        old="    simple.slots = [(args[index], prefix) for index, prefix in slots]\n",
+        new="    simple.slots = [(word, '') for word in args if word.quoted]\n",
+        tests=(
+            "tests/test_guard_production_setup.py::"
+            "test_p3f1_what_the_272_net_refused_is_still_refused",
+        ),
+    ),
+    Mutant(
+        # 글 자리 밖에도 쓰인 변수를 글 변수로 본다 — `T='rcm $S'; git commit -m "$T"; echo $T`
+        # 가 지난다(PR #274 P3, 면제 조건 「변수가 글 자리에서만」)
+        name="guard-exempt-variable-used-outside-text",
+        path="tools/guard_production.py",
+        old="    texts = {name for name in assigned if name not in outside}\n",
+        new="    texts = set(assigned)\n",
+        tests=(
+            "tests/test_guard_production_setup.py::"
+            "test_p3f1_what_the_272_net_refused_is_still_refused",
+        ),
+    ),
+    Mutant(
+        # 명령 이름을 평범한 명령 목록에 견주지 않는다 — `git commit -m 'rcm …' && git log … | sh`
+        # 의 sh 가 커밋 메시지를 실행한다(PR #274 P3 F1 · F2, 면제 조건 「명령 자리가 모두 평범」)
+        name="guard-exempt-any-command-name",
+        path="tools/guard_production.py",
+        old="    if name not in _PLAIN_COMMANDS:\n        return None\n",
+        new="    if False:\n        return None\n",
+        tests=(
+            "tests/test_guard_production_setup.py::"
+            "test_p3f1_what_the_272_net_refused_is_still_refused",
+            "tests/test_guard_production_setup.py::"
+            "test_p3m4_the_new_net_refuses_whatever_the_272_net_refused_but_the_listed_exemptions",
+        ),
+    ),
+    Mutant(
+        # 평범한 명령의 인자로 쓰인 런처 낱말을 런처로 센다 — `tar -x` · `grep -n expect` ·
+        # `git log --grep xargs` 가 다시 막힌다(m5t-a-w3 F1)
+        name="guard-exempt-argument-launcher-counts",
+        path="tools/guard_production.py",
+        old="            simple.launchers.append(word)\n",
+        new="            pass\n",
         tests=(
             "tests/test_guard_production_setup.py::"
             "test_f1_a_launcher_word_that_is_not_in_a_command_place_is_not_a_launcher",
         ),
     ),
     Mutant(
-        # `-x` · `-X` 를 명령이 fd 가 아니어도 fd 의 실행 플래그로 본다 — `tar -x` 가 런처가 된다
-        # (m5t-a-w3 F1)
-        name="guard-dash-x-of-another-command-counts",
-        path="tools/guard_production.py",
-        old='    return bool(names & _FD) and bool({"-x", "-X"}.intersection(words))\n',
-        new='    return bool({"-x", "-X"}.intersection(words))\n',
-        tests=(
-            "tests/test_guard_production_setup.py::"
-            "test_f1_a_launcher_word_that_is_not_in_a_command_place_is_not_a_launcher",
-        ),
-    ),
-    Mutant(
-        # `-exec` 를 명령이 find 가 아니어도 실행 플래그로 본다 — `grep -- -exec` 가 런처가 된다
-        # (m5t-a-w3 F1)
-        name="guard-dash-exec-of-another-command-counts",
-        path="tools/guard_production.py",
-        old="    if names & _FINDS and _FIND_FLAGS.intersection(words):\n",
-        new="    if _FIND_FLAGS.intersection(words):\n",
-        tests=(
-            "tests/test_guard_production_setup.py::"
-            "test_f1_a_launcher_word_that_is_not_in_a_command_place_is_not_a_launcher",
-        ),
-    ),
-    Mutant(
-        # 실행되지 않는 따옴표 글(제목 · 커밋 메시지 · 본문) 안의 rcm 낱말을 센다 — `T='feat(cli):
-        # rcm wait …'` 뒤의 `"$T"` · `"$H/…"` 가 막힌다(m5t-a-w3 F2)
-        name="guard-quoted-text-rcm-word-counts",
-        path="tools/guard_production.py",
-        old="        script, inert = prose and live_prose, prose and not live_prose\n",
-        new="        script, inert = prose, False\n",
-        tests=(
-            "tests/test_guard_production_setup.py::"
-            "test_f2_rcm_words_inside_quoted_text_do_not_arm_the_net",
-        ),
-    ),
-    Mutant(
-        # 실행되는 따옴표 글(`sh -c '…'` · `eval '…'` · `xargs sh -c`)까지 세지 않는다 — 그 안의
-        # rcm 이 그물을 지난다(m5t-a-w3 F2)
-        name="guard-running-quoted-text-ignored",
-        path="tools/guard_production.py",
-        old="        script, inert = prose and live_prose, prose and not live_prose\n",
-        new="        script, inert = False, prose\n",
-        tests=(
-            "tests/test_guard_production_setup.py::"
-            "test_f2_quoted_text_that_runs_and_launchers_in_a_command_place_are_still_denied",
-        ),
-    ),
-    Mutant(
-        # 히어독 본문을 명령 줄로 자른다 — `python3 - <<'EOF'` 의 pty 프로그램이 다른 명령이 되어
-        # 런처가 사라진다(m5t-a-w3 F)
-        name="guard-heredoc-read-as-commands",
+        # 낱말 setup 을 담은 글 자리도 `x` 로 바꾼다 — `git commit -m "fix rcm setup"` 이 지나
+        # 그물이 받아들인 과잉 차단(파일로 쓰라는 안내)이 사라진다(m5t-a-w3 F)
+        name="guard-exempt-setup-text-masked",
         path="tools/guard_production.py",
         old=(
-            "                    raise _Unreadable  # 히어독 본문은 명령이 아니다 — 줄 단위로 "
-            "자르면 틀린다\n"
+            "        return not word.subst and word.variables <= texts and not "
+            "_SETUP_WORD.search(_letters(word))\n"
         ),
-        new="                    pass\n",
+        new="        return not word.subst and word.variables <= texts\n",
+        tests=("tests/test_guard_production_setup.py::test_tr20_the_net_says_how_to_write_it",),
+    ),
+    Mutant(
+        # 출력 리다이렉션이 `.git` 아래에도 쓴다 — 커밋 메시지(글 자리)를 `git log > .git/hooks/…`
+        # 로 훅 파일에 써서 다음 커밋이 실행한다(PR #274 P3)
+        name="guard-exempt-redirect-into-git-hooks",
+        path="tools/guard_production.py",
+        old='    if ".." in parts or ".git" in parts:\n',
+        new='    if ".." in parts:\n',
         tests=(
             "tests/test_guard_production_setup.py::"
-            "test_f2_quoted_text_that_runs_and_launchers_in_a_command_place_are_still_denied",
+            "test_p3f1_what_the_272_net_refused_is_still_refused",
         ),
     ),
     Mutant(
-        # `eval` · `sh -c` 가 실행할 글을 치환이 만드는 꼴을 보지 않는다 — `eval "$(printf 'rcm
-        # %s' …)"` 가 지난다(m5t-a-w3 F)
-        name="guard-shell-built-code-allowed",
+        # git 의 실행 · 쓰기 플래그(`--output` · `--exec` · `--upload-pack`)를 받는다 — `git log
+        # --output=.git/hooks/…` 가 커밋 메시지를 훅 파일에 쓴다(PR #274 P3)
+        name="guard-exempt-git-risky-flag",
         path="tools/guard_production.py",
-        old="        if seat.shell and variable and names_rcm:\n",
+        old=(
+            '        if any(arg.startswith(_GIT_RISKY) or arg.startswith("-o") for arg in '
+            "letters[at + 1 :]):\n"
+        ),
         new="        if False:\n",
         tests=(
             "tests/test_guard_production_setup.py::"
-            "test_f2_quoted_text_that_runs_and_launchers_in_a_command_place_are_still_denied",
+            "test_p3f1_what_the_272_net_refused_is_still_refused",
+        ),
+    ),
+    Mutant(
+        # git 의 인자 자리에 이 명령이 만든 값(`$(cat …)`)을 받는다 — 그 값이 `--output=…` 플래그가
+        # 된다(PR #274 P3)
+        name="guard-exempt-built-git-argument",
+        path="tools/guard_production.py",
+        old=(
+            '            if word.subst or "?" in word.variables or (word.variables & '
+            "assigned.keys()) - known:\n"
+        ),
+        new="            if False:\n",
+        tests=(
+            "tests/test_guard_production_setup.py::"
+            "test_p3f1_what_the_272_net_refused_is_still_refused",
+        ),
+    ),
+    Mutant(
+        # 그물이 터지면 setup 에 닿지 않는 쪽으로 본다 — main() 의 fail-closed 가 그물의 예외에서
+        # 허용으로 샌다(PR #274 P3 LOW)
+        name="guard-net-crash-not-setup",
+        path="tools/guard_production.py",
+        old=(
+            "    except Exception:  # noqa: BLE001 — 그물이 터지면 setup 이 어디에 쓸지 모른다\n"
+            "        return True\n"
+        ),
+        new=(
+            "    except Exception:  # noqa: BLE001 — 그물이 터지면 setup 이 어디에 쓸지 모른다\n"
+            "        return False\n"
+        ),
+        tests=(
+            "tests/test_guard_production_setup.py::"
+            "test_p3l1_a_crash_inside_the_net_counts_as_reaching_setup",
         ),
     ),
 )

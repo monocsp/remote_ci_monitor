@@ -1695,6 +1695,9 @@ P3_FLOOR_KEEPS = [
     "git commit -m 'S=se; S=${S}tup; rcm $S' && git log -1 --output=.git/hooks/post-commit "
     "&& git commit --allow-empty -m y",
     "git commit -m 'S=se; S=${S}tup; rcm $S' && git log -1 --format=%B > .git/hooks/post-commit",
+    # /tmp 아래의 레포 — `/tmp` 는 받는 자리지만 `.git` 아래는 아니다
+    "cd /tmp/r && git commit -m 'S=se; S=${S}tup; rcm $S' && git log -1 --format=%B "
+    "> /tmp/r/.git/hooks/post-commit && git commit --allow-empty -m y",
     "printf '%s' 'S=se; S=${S}tup; rcm $S' > /tmp/t.txt && find /tmp/t.txt -exec sh {} \\;",
     "git commit -m 'S=se; S=${S}tup; rcm $S' && S=$(git rev-parse --output=.git/hooks/x) "
     "&& git log -1 $S",
