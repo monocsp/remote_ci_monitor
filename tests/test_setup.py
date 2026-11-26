@@ -578,7 +578,7 @@ def test_tr24_the_service_file_goes_under_the_config_folder_not_launch_agents(cf
     assert not agents.exists()
     err = fake.err.getvalue()
     assert f"cp -n {staged} {agents / 'test.rcm.server.plist'}" in err
-    assert f"launchctl bootstrap gui/$(id -u) {agents / 'test.rcm.server.plist'}" in err
+    assert f"launchctl bootstrap gui/{os.getuid()} {agents / 'test.rcm.server.plist'}" in err
     other = tmp_path / "elsewhere" / "svc.plist"
     assert (
         go(Fake(), *coordinator_args(tmp_path / "data", "--force", "--service-file", str(other)))
@@ -1295,9 +1295,9 @@ def test_s1_a_loaded_label_prints_the_launchd_swap_order(cfg, home, tmp_path):
     staged = cfg / "service" / "test.rcm.server.plist"
     installed = home / "Library" / "LaunchAgents" / "test.rcm.server.plist"
     lines = _lines(fake)
-    out = _at(lines, "launchctl bootout gui/$(id -u)/test.rcm.server")
+    out = _at(lines, f"launchctl bootout gui/{os.getuid()}/test.rcm.server")
     copy = _at(lines, f"cp {staged} {installed}")
-    start = _at(lines, f"launchctl bootstrap gui/$(id -u) {installed}")
+    start = _at(lines, f"launchctl bootstrap gui/{os.getuid()} {installed}")
     assert out < copy < start
     # 「not started」 줄도 그 길을 가리킨다
     said = next(line for line in lines if "not started" in line)
@@ -1336,7 +1336,7 @@ def test_s2_the_output_says_how_to_remove_it(cfg, home, tmp_path, platform):
     assert remove.startswith("to remove: "), lines[-3:]
     if platform == "darwin":
         installed = home / "Library" / "LaunchAgents" / "test.rcm.server.plist"
-        assert "launchctl bootout gui/$(id -u)/test.rcm.server" in remove
+        assert f"launchctl bootout gui/{os.getuid()}/test.rcm.server" in remove
     else:
         installed = home / ".config" / "systemd" / "user" / "test.rcm.server.service"
         assert "systemctl --user disable --now test.rcm.server.service" in remove

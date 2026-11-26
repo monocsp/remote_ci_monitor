@@ -136,6 +136,12 @@ def service_file_name(label: str, manager: str) -> str:
     return unit_name(label) if manager == SYSTEMD else f"{label}.plist"
 
 
+def staged_service_dir(config: Path) -> Path:
+    """`--service-file` 이 없을 때 setup 이 서비스 파일을 두는 폴더 — 설정 파일 옆 `service/`.
+    doctor 가 `--config` 의 서비스 파일을 찾는 자리도 이 함수다(온보딩 시험 OB2)."""
+    return config.parent / "service"
+
+
 def log_file_name(label: str) -> str:
     """로그 파일 이름은 라벨에서 만든다. 표준 라벨은 지금의 이름(`server.log` ·
     `worker.log`) 그대로다(6-B-V7) — 운영 문서와 doctor 가 그 이름을 읽는다."""
@@ -486,8 +492,21 @@ def log_dir(manager: str, home: Path) -> Path:
     return home / ".local" / "state" / "rcm"
 
 
+def gui_domain(uid: int | None = None) -> str:
+    """launchd 의 사용자 도메인 `gui/<uid>` — 숫자 uid 를 그대로 쓴다. 사람이 복사해 붙이는 줄에
+    셸 치환(`$(id -u)`)을 두지 않는다(온보딩 시험 OB3, 2026-11-26). uid 를 주지 않으면 이
+    프로세스의 것이다."""
+    return f"gui/{os.getuid() if uid is None else uid}"
+
+
 def install_commands(
-    manager: str, *, staged: Path, installed: Path, label: str, log: Path
+    manager: str,
+    *,
+    staged: Path,
+    installed: Path,
+    label: str,
+    log: Path,
+    uid: int | None = None,
 ) -> list[str]:
     """사람이 칠 명령(⛔ Q9: setup 은 등록도 시작도 하지 않는다).
 
@@ -501,7 +520,7 @@ def install_commands(
     # 시작하지 않았으면 조용히 끝나지 않는다(P3 v1-9). `a && b || c` 라 시작이 실패해도 이 줄이
     # 나온다 — 그래서 문장이 둘 다 말하고, 바꿔 끼우는 길도 가리킨다(P5 B-E2)
     if manager == LAUNCHD:
-        start = f"launchctl bootstrap gui/$(id -u) {q(str(installed))}"
+        start = f"launchctl bootstrap {gui_domain(uid)} {q(str(installed))}"
         swap = "launchctl bootout, cp without -n, launchctl bootstrap"
     else:
         unit = installed.name
@@ -515,17 +534,20 @@ def install_commands(
     return [folders, copy, same + start + said]
 
 
-def replace_commands(manager: str, *, staged: Path, installed: Path, label: str) -> list[str]:
+def replace_commands(
+    manager: str, *, staged: Path, installed: Path, label: str, uid: int | None = None
+) -> list[str]:
     """이미 올라간 서비스를 setup 이 쓴 파일로 바꿔 끼우는 순서(P5 B-E2) — 내리고, 덮어
     쓰고(`cp`, `-n` 없이), 다시 올린다. `--force service` 로 다시 썼을 때와 같은 라벨이 이미
     올라가 있을 때 찍는다."""
     q = shlex.quote
     copy = f"cp {q(str(staged))} {q(str(installed))}"
     if manager == LAUNCHD:
+        gui = gui_domain(uid)
         return [
-            f"launchctl bootout gui/$(id -u)/{q(label)}",
+            f"launchctl bootout {gui}/{q(label)}",
             copy,
-            f"launchctl bootstrap gui/$(id -u) {q(str(installed))}",
+            f"launchctl bootstrap {gui} {q(str(installed))}",
         ]
     unit = q(installed.name)
     return [
@@ -553,6 +575,7 @@ def remove_line(
     files: Sequence[Path],
     staged: Path | None = None,
     preloaded: bool = False,
+    uid: int | None = None,
 ) -> str:
     """setup 이 한 일을 되돌리는 한 줄(P5 B-E3) — 서비스를 내리고(launchd `bootout`, systemd
     `disable --now`), 설치한 서비스 파일과 setup 이 쓴 파일을 지운다. data_dir 은 지우지 않는다.
@@ -570,7 +593,7 @@ def remove_line(
         # 내리기가 실패해도(이미 내려간 서비스 · 닿지 않는 버스) cmp 가 같으면 지운다 — `&&` 로
         # 이으면 내리기의 실패가 `rm -f` 를 건너뛰었다(P6 재확인 v1-5 · v2-4)
         if manager == LAUNCHD and label:
-            service = f"{same} && {{ launchctl bootout gui/$(id -u)/{q(label)}; {gone}; }}; "
+            service = f"{same} && {{ launchctl bootout {gui_domain(uid)}/{q(label)}; {gone}; }}; "
         elif manager == SYSTEMD:
             unit = q(installed.name)
             service = (
@@ -855,7 +878,7 @@ def where(
         if service_file is not None:
             service = abs_path(service_file, home=home, cwd=cwd, expand_user=expand_user)
         else:
-            service = conf.parent / "service" / service_file_name(chosen, manager)
+            service = staged_service_dir(conf) / service_file_name(chosen, manager)
         place = install_place_of(
             service, home, fold_case=fold_case, xdg=xdg_config_home(environ), resolve=resolve
         )

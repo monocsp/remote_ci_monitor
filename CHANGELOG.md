@@ -178,6 +178,23 @@ of a key bumps that number and is listed here.
   ([#268](https://github.com/monocsp/remote_ci_monitor/pull/268))
 
 ### Fixed
+- **A test install next to a running one no longer reads as if the running install were its
+  own.** `rcm setup` with a `--config` outside the folder of an existing `worker.toml` names that
+  file as another rcm install's, separate from this config, instead of saying this machine
+  already has one. When `FILE` is outside the default config folder, `rcm doctor --config FILE`
+  measures the service file `rcm setup` put in the `service/` folder next to `FILE` (or its
+  installed copy, when one with the same label is installed) before the standard places, so a
+  test install measures its own service instead of the running install's; with the default
+  config, or when that folder holds none of the role's files, several or an unreadable one,
+  doctor looks where it did before. A service found there that starts rcm with another config is
+  named by label and file with the config it uses, and doctor says no service starts rcm with
+  `FILE` (with `--service-file`, only that the given file starts rcm with another config); the
+  exit code and the `--json` keys are unchanged. The `launchctl` lines `rcm setup` prints (`next —`, the swap order,
+  `to remove:`) and the `next:` line of `rcm init worker --service-file` carry your numeric user
+  id, `gui/501`, instead of `gui/$(id -u)`. The usage guide's test install runs its job from a small empty folder, keeps
+  its commands in one terminal and says which commands still show the running install; its first
+  job step tells the short `rcm run` line from the `rcm wait` end line and how to see a
+  `--notify` notification. ([#277](https://github.com/monocsp/remote_ci_monitor/pull/277))
 - **`rcm init worker --service-file` writes a systemd unit whose paths hold a space, `%` or `$`
   the way systemd reads them**, quoted, `%%` and `$$`, and refuses a path with a line break or
   another control character with exit 2 instead of writing a broken unit.
