@@ -394,6 +394,9 @@ class RemoteWorkersMixin:
         self._synthetic_said: set[str] = set()  # 합성 그룹 로그는 프리셋마다 한 번(결정 330)
         # 잡별 로그 잠금(§4.5 step 3) — 사전 접근은 `_remote_lock` 아래, 잡이 끝나면 지운다
         self._job_log_locks: dict[int, threading.Lock] = {}
+        # 요청 스레드가 처리 중인 finish 본문 — 닫힌 잡의 답(`_closed_answer`)이 늦은 결과를 남길 때
+        # 읽는다(M5t-b §4.6)
+        self._finish_body = threading.local()
 
     def _sync_irreversible(self) -> None:
         """설정의 표식 프리셋 표를 저장소에 넣는다(M5t-b 결정 257 · 330). 기동과 reload 마다 부른다.
@@ -1281,6 +1284,13 @@ class RemoteWorkersMixin:
         return 201, {"job_id": job.id, "bundle_sha256": digest, "bytes": length}
 
     def worker_finish(self, token: TokenInfo, job_id: int, body: Any) -> dict[str, Any]:
+        self._finish_body.value = body
+        try:
+            return self._worker_finish(token, job_id, body)
+        finally:
+            self._finish_body.value = None
+
+    def _worker_finish(self, token: TokenInfo, job_id: int, body: Any) -> dict[str, Any]:
         from remote_ci_monitor.worker import outcome_for
 
         if not isinstance(body, dict):
@@ -1293,7 +1303,7 @@ class RemoteWorkersMixin:
                 return self._narrow_confirm(token, job_id, session, body, gone)
         job = self._session_job(token, job_id, session)
         if job.state not in BUSY_STATES:
-            raise self._closed_answer(token, job, session, gone, body)
+            raise self._closed_answer(token, job, session, gone)
         reported = body.get("outcome")
         if reported not in WORKER_OUTCOMES:
             raise _api_error(400, f"outcome must be one of {', '.join(WORKER_OUTCOMES)}")
@@ -1395,8 +1405,7 @@ class RemoteWorkersMixin:
             st = current.state if current else "unknown"
             if current is not None and st not in BUSY_STATES:
                 # 확인과 닫기 사이에 janitor 가 닫았다 — 늦은 보고와 같은 답(P3 1라운드 LOW)
-                # mutcheck: race-closed
-                raise self._closed_answer(token, current, session, gone, body)
+                raise self._closed_answer(token, current, session, gone)  # mutcheck: race-closed
             racing = preflight is not None or state == RETRIED
             if not racing or current is None or st != CANCELLING:
                 raise _api_error(409, f"job #{job.id} is {st}", state=st)
@@ -1415,7 +1424,7 @@ class RemoteWorkersMixin:
                 st = current.state if current else "unknown"
                 if current is not None and st not in BUSY_STATES:
                     # 재시도 직전에 janitor 가 닫았다 — 위와 같은 답 · mutcheck: race-closed-retry
-                    raise self._closed_answer(token, current, session, gone, body)
+                    raise self._closed_answer(token, current, session, gone)
                 raise _api_error(409, f"job #{job.id} is {st}", state=st)
         if hold_cause is not None and self.store.has_open_hold(job.id):
             self._hold_created(job.id)
@@ -1425,19 +1434,15 @@ class RemoteWorkersMixin:
         return {"job_id": job.id, "state": state}
 
     def _closed_answer(
-        self,
-        token: TokenInfo,
-        job: Job,
-        session: str | None,
-        gone: bool | None,
-        body: dict[str, Any] | None = None,
+        self, token: TokenInfo, job: Job, session: str | None, gone: bool | None
     ) -> Exception:
         """이미 닫힌 잡에 온 finish(T14)의 답 — 409 `code: job_closed`. 같은 세션의 `group_gone:
         true` 는 그 잡의 열린 홀드를 푼다 — 확인은 뒤에 와도 참이다(§4.12 표의 1). 잡이 `lost` 면
         늦은 결과를 한 번 남긴다(§4.6 · 결정 256 · 274) — 기록과 홀드 풀기는 한 트랜잭션이다. 앞에서
         닫혀 있었든 확인과 닫기 사이에 닫혔든 같은 답이다."""
         late = None
-        if job.state == LOST and session is not None and body is not None:
+        body = getattr(self._finish_body, "value", None)  # 이 스레드가 받은 finish 본문
+        if job.state == LOST and session is not None and isinstance(body, dict):
             late = self._record_late(token, job, session, gone, body)
         if late is not None:
             recorded, released = late
