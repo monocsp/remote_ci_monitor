@@ -2478,3 +2478,43 @@ V1 은 반박자 1, V2 는 반박자 2 다. 「3판」 열의 줄은 WP3 이다.
 | 4R-10 | LOW | 버려진 늦은 heartbeat 응답에만 실린 취소의 행방이 없음 | 다음 응답에 다시 온다(목록은 잡 상태로 만든다, 한 주기 늦음) | 고침 |
 
 ## 13. 구현하며 바뀐 것 (Changed while implementing)
+
+### PR1 세션 · 펜싱 · 유예 · 감독자 · 그룹 홀드 (#284)
+
+PR #284 본문의 「Differs from the spec」 과 같은 목록이다. 항목은 구현 라운드(P2-1~P2-11, P6-1~P6-2)에서 적은 그대로 옮겼다.
+
+| # | 명세와 다름 / 명세에 없음 |
+|---|---|
+| 1 | App mono_fn default — not in spec: an App given a test now_fn and no mono_fn takes its monotonic clock from now_fn().timestamp(); production keeps time.monotonic. |
+| 2 | WorkerClient without explicit claim_seq / seq — not in spec: it makes its own session id and counts claim_seq · seq itself; RemoteWorker always passes its own. |
+| 3 | T5 close transaction — differs: one store.finish transaction per job (each with its hold row), all inside the session lock, instead of all jobs in one transaction (§4.2). |
+| 4 | Hold scope match in claim SQL — differs: broader than the busy-job rule (either side global, host match or unknown, equal pools) — fail-closed (§4.12). |
+| 5 | Late finish with group_gone on a terminal job — differs: PR1 already releases the open hold on the same session's group_gone: true finish (409 job_closed + hold_released); late_result still PR2 (RL1 · RL2 need it). |
+| 6 | e2e server disconnect_grace_seconds = 90 — follows §7.5; the killed-worker test waits G (@slow). |
+| 7 | Session folder job dir is deleted once the finish is reported (PR1 has no disk queue; §4.4 step 10 leaves it to the 7-day sweep). |
+| 8 | Irreversible claim without a frozen G: watchdog and recheck use the smallest valid G (L + 35). |
+| 9 | A heartbeat cut at its 15 s deadline counts as a connection failure (also feeds the M5n rediscovery counter). |
+| 10 | The start scan reads only folders named as a 32-hex session id. |
+| 11 | A release-hold reason empty after cleaning is stored as NULL. |
+| 12 | Supervisor test hooks are keyword arguments of job_supervisor.main, unreachable from the command line (§7.5 asked for hook injection). |
+| 13 | A held waiting job is needs_action ahead of paused, placement and worker_down too (spec: before blocked_by_group, §4.8). |
+| 14 | deliver_hold sends nothing for a hold already released. |
+| 15 | RCM_SUMMARY of a local-lane hold names 「the server's local lane」 / 「check the server」. |
+| 16 | /api/health irreversible_holds is null when the read fails (never []); /api/status reads holds inside the queue section. |
+| 17 | RL6 / RL10 / RL50 e2e scope narrowed at P2-3 (sha256 is PR2; exact orderings in unit / HTTP tests) — RL6 (a) wait JSON keys, RL10 fake supervisor and RL50 relay e2e were later filled by P2-5/P2-6 (items 20, 24 and test_rl10_a_fake_supervisor_does_not_bring_back_a_fenced_process). |
+| 18 | Extra mutants beyond §7.4 (closed-jobs-ignored and the seven m5tb-* P2-2 cases). |
+| 19 | Docs outside owns: README / README.ko.md did not list rcm release-hold yet; CHANGELOG lines carry no PR link (number unknown) — README row added at P2-4 (item 20). |
+| 20 | README release-hold row written `rcm release-hold N [--reason TEXT] [--json]` (N like every other row) instead of `<job>`. |
+| 21 | RL50 e2e: the relay holds the idle heartbeat and refuses later ones; red under t5-ignores-claims-settled; hb-stale-seq-judged cannot be made red by a real worker (R20) and stays killed by tests/test_hb_order_m5tb.py. |
+| 22 | RL14 (b): the kill -9 test runs a new preset longl (sleep 400) instead of slowl (sleep 30), which ended before G. |
+| 23 | T4 / RL8 (a) irreversible: quiet time is not counted — for a cancel requested before a quiet session is heard again, the unconfirmed deadline is resumed + (kill_at - requested_at), then + 2H; a server restart counts as quiet (main session's answer in P2-6-in). |
+| 24 | RL51 (a) marker file not asserted (a TERM in the popen window comes before the command can install a handler); replacement evidence above. Accepted by the main session (P2-7-in). |
+| 25 | RL24 old worker retry spacing / exit 2 not tested (base-version behaviour, no base worker in the tree); replacement evidence above. Accepted by the main session (P2-7-in). |
+| 26 | RL6 (a) base key list written as a literal from the terminal job document minus hold, justified by the diff touching it only through App._with_hold. |
+| 27 | RL41 (c) e2e partition is partial: the relay trickles the snapshot and refuses every other connection (a full pause would trip the 60 s download timeout before the 55 s self-stop). |
+| 28 | RL41 (c) e2e checks marker file and preflight line; supervisor pid 0 stays in the unit row. |
+| 29 | RL41 (c) cancel half runs with the test server's grace_seconds 20. |
+| 30 | popen-check-only-with-requires is not applicable to (c); other mutants show the red. (The RL41 (c) item of P2-6's workplan_diff «not done this round» is closed by this round.) |
+| 31 | register answer key `fenced_sessions` (not in §4.2's key list): P6 GAP8 added it as an int; P6-2 #2 makes it `null` when a server restarted less than worker_timeout_seconds ago has not yet heard a fenced session; the worker logs one 'cannot tell' line on null and nothing when the key is absent |
+| 32 | the narrow confirm (lost + worker_replaced) that a fenced session sends for a finish of any outcome omits `group_gone` when the worker does not know whether the group is gone (it carries `group_gone` only when known); the server then holds an irreversible job's group (`group_not_gone`) instead of rejecting the confirm |
+| 33 | Job.retries_on is false for a job claimed as irreversible (P6-2 #1): a job submitted with [retry] before the mark closes `failed` on its retry exit code, no next attempt, on both lanes |
