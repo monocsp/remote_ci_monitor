@@ -7,6 +7,30 @@ of a key bumps that number and is listed here.
 
 ## [Unreleased]
 
+### Added
+- **Windows (WSL) in the usage guide.** Section 3 has a new «Windows (WSL)» part for a session on
+  a Windows computer: Ubuntu 24.04 in WSL2 (22.04's Python 3.10 is too old), pipx from apt, a
+  client set up with the build machine's IP address, why discovery finds nothing under WSL2's
+  default NAT network and what mirrored networking may change, Tailscale on the Windows side, the
+  repository kept out of `/mnt/c` and free of CRLF scripts, and `--notify` printing a warning
+  only. The README links it, and its install lines say that PEP 668 distributions (Ubuntu 23.04+,
+  Debian 12+) install pipx with `sudo apt install pipx`. The usage guide and the configuration
+  reference also say what happens when several rcm servers answer: a client stops and asks for
+  `--server` or `server` in `client.toml`, a worker picks by `server_name`, and
+  `rcm setup --role client` never searches the network.
+  ([#PR](https://github.com/monocsp/remote_ci_monitor/pulls))
+
+### Fixed
+- **rcm on Windows itself says to use WSL instead of crashing.** Every command, `rcm version`
+  included, died with a `ModuleNotFoundError` traceback there. It now prints
+  `rcm: native Windows is not supported — install and run rcm inside WSL …` and exits 2. Native
+  Windows stays out of scope.
+  ([#PR](https://github.com/monocsp/remote_ci_monitor/pulls))
+- **«No rcm server found» says what to do next.** `rcm discover`, the client commands and
+  `rcm worker` now add `give its address with --server http://<address>:8787`, and inside WSL
+  also that WSL2's default NAT network does not pass multicast.
+  ([#PR](https://github.com/monocsp/remote_ci_monitor/pulls))
+
 ## [0.11.0] - 2026-11-26
 
 ### Breaking changes

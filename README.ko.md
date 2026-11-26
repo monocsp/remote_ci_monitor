@@ -45,7 +45,7 @@
 - **보는 사람을 위한 웹 화면.** 정적 파일 셋, 빌드 단계 없음, 외부 자산 없음, 폰에서도 읽힌다.
 
 빌드 머신은 macOS(Apple Silicon · Intel)와 Linux. Windows 는 범위 밖이고, Windows 의 세션은 WSL
-로 제출한다.
+로 제출한다([Windows (WSL)](docs/usage.ko.md#windows-wsl)).
 
 Status: **v0.11.0, M5t-a 출시 · 다음은 M5t-b 와 M5t-c**. GitHub 백엔드는 없고 계획도 없다. 계획서는 `PLAN.md`, 변경
 이력은 `CHANGELOG.md`.
@@ -61,6 +61,8 @@ uvx --from remote-ci-monitor rcm version            # 설치 없이 uv 로 실�
 ```
 
 `pipx` 가 없으면 `python3 -m pip install --user pipx && python3 -m pipx ensurepath` 뒤 새 셸을 연다.
+PEP 668 을 따르는 배포판(Ubuntu 23.04+, Debian 12+, WSL 의 Ubuntu)은 그 `pip` 줄을 거부한다.
+거기서는 `sudo apt install pipx && pipx ensurepath` 를 쓴다.
 설치 직후 `rcm` 이 "command not found" 면 `~/.local/bin` 이 아직 `PATH` 에 없는 것이다.
 `pipx ensurepath` 뒤 새 셸을 열면 된다. GitHub Releases 의 wheel 도 `pipx install <wheel-url>` 로
 설치된다.

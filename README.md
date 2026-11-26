@@ -48,7 +48,7 @@ or just slow, is the machine on fire, did it pass? rcm answers that in one scree
   a phone.
 
 Build machines run macOS (Apple Silicon or Intel) and Linux. Windows is out of scope; sessions on
-Windows submit through WSL.
+Windows submit through WSL ([Windows (WSL)](docs/usage.md#windows-wsl)).
 
 Status: **v0.11.0, M5t-a released; M5t-b and M5t-c next**. There is no GitHub backend and none is planned. `PLAN.md`
 (Korean) is the plan of record; `CHANGELOG.md` is what changed.
@@ -65,7 +65,8 @@ uvx --from remote-ci-monitor rcm version            # or run it through uv witho
 ```
 
 No `pipx` yet? `python3 -m pip install --user pipx && python3 -m pipx ensurepath`, then open a new
-shell. If `rcm` is "command not found" right after installing, `~/.local/bin` is not on your `PATH`
+shell. Distributions that follow PEP 668 (Ubuntu 23.04+, Debian 12+, and Ubuntu in WSL) refuse that
+`pip` line; there, use `sudo apt install pipx && pipx ensurepath`. If `rcm` is "command not found" right after installing, `~/.local/bin` is not on your `PATH`
 yet — run `pipx ensurepath` and open a new shell. A release wheel from the GitHub Releases page
 also installs with `pipx install <wheel-url>`.
 

@@ -119,7 +119,8 @@ def test_ww4_usage_windows_section_quotes_the_wsl_hint_from_the_code(path: Path)
 
 @pytest.mark.parametrize("path", USAGE_GUIDES)
 def test_ww4_usage_windows_section_links_only_the_microsoft_networking_page(path: Path):
-    links = re.findall(r"https?://[^\s)>\]]+", windows_section(path))
+    """명령과 예시 주소 안의 URL 은 링크가 아니다 — 마크다운 링크 `](…)` 만 센다."""
+    links = re.findall(r"\]\((https?://[^)\s]+)\)", windows_section(path))
     assert links, f"{path.name}: no link to the WSL networking page"
     assert all(MS_NETWORKING.fullmatch(u) for u in links), links
 

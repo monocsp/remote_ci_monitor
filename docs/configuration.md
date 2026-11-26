@@ -2173,6 +2173,17 @@ label = "alice@laptop"                 # who the queue shows as the requester
 `RCM_SERVER`, `RCM_TOKEN` and `RCM_LABEL` override the file; `--server`, `--token` and `--by`
 override both. `RCM_CLIENT_CONFIG` (or `--client-config`) points at another file.
 
+**Several servers on the network.** With an empty `server` (or `"auto"`) a client uses the one rcm
+server discovery finds. When it finds more than one, the client does not pick one: it stops with
+exit 2 and `several rcm servers on this network: … — pick one with --server or client.toml`,
+listing each server's name and address. Pass `--server URL`, or write the URL as `server` in
+`client.toml`. A worker chooses among several by name, with `server_name` in `worker.toml` (below).
+`rcm setup --role client` does not search the network: it needs `--server` and never writes
+`server = "auto"`; remove the line or set `server = "auto"` by hand to use discovery. A server
+answers with its short host name, or with `advertise_name` in `server.toml`; `rcm setup` has no
+flag for that key. In WSL2 under the default NAT network, discovery finds nothing; see
+[Windows (WSL)](usage.md#windows-wsl).
+
 Which code a session runs is not a `client.toml` key, because an older version would refuse the
 key. A session follows the server's version unless `RCM_CLIENT_VERSION` or a one-line file says
 otherwise: `follow`, `installed` (run this install) or a version such as `0.8.0`. The file is
