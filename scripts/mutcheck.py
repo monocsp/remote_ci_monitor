@@ -6544,6 +6544,20 @@ MUTANTS = (
             "test_rl54_a_local_lane_irreversible_job_holds_unless_its_group_is_gone",
         ),
     ),
+    Mutant(
+        # 홀드 판단 자리에 상수 None — 정적 잠금이 이것을 판단으로 세면 판단을 건너뛴 닫기가 숨는다
+        name="hold-decision-constant-none",
+        path="src/remote_ci_monitor/worker.py",
+        old=(
+            '                job, "preset_missing", hold_cause=self._hold_cause(job, gone), '
+            "preset=job.preset\n"
+        ),
+        new='                job, "preset_missing", hold_cause=None, preset=job.preset\n',
+        tests=(
+            "tests/test_hold_notify_m5tb.py::"
+            "test_rl54_every_finish_outside_the_store_decides_the_hold",
+        ),
+    ),
 )
 
 

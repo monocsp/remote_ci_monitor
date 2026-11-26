@@ -643,15 +643,62 @@ def test_rl54_the_server_hands_its_hold_announcer_to_the_local_lanes(tmp_path, m
 
 #: 홀드 판단 없이 잡을 닫아도 되는 `store.finish` — 프로세스가 돈 적 없는 상태에서만 닫는다
 PRE_RUN_ONLY = {"(UPLOADING,)"}
+#: `hold_cause=` 를 받아 `store.finish` 로 넘기는 로컬 레인의 닫기 도우미(`worker.py`). 이것을
+#: 부르는 자리도 홀드를 판단해야 한다 — 기본값이 있으면 판단을 건너뛴 호출이 보이지 않는다
+HOLD_PASSERS = {"_fail_before_start", "_close_cancelled_before_start"}
+
+
+def _undecided_closes(source: str, name: str) -> list[str]:
+    """`source` 에서 홀드를 판단하지 않고 잡을 닫는 호출(`파일:줄`).
+
+    판단은 `hold_cause=` 에 식을 넘기는 것이다. 상수 `None` 은 판단이 아니다 — 「이 닫힘은
+    늘 확인됐다」를 말하려면 그 확인(`_hold_cause(job, True)` 처럼)을 식으로 적는다(P3 3라운드
+    LOW). 문자열 상수는 「늘 홀드」라는 판단이다."""
+    import ast
+
+    tree = ast.parse(source)
+    problems: list[str] = []
+    calls = [*_calls(tree, "finish"), *(c for m in sorted(HOLD_PASSERS) for c in _calls(tree, m))]
+    for call in sorted(calls, key=lambda c: c.lineno):
+        if call.func.attr == "finish" and not (
+            isinstance(call.func.value, ast.Attribute) and call.func.value.attr == "store"
+        ):
+            continue
+        kw = {k.arg: k.value for k in call.keywords}
+        cause = kw.get("hold_cause")
+        if cause is not None and not (isinstance(cause, ast.Constant) and cause.value is None):
+            continue
+        only_from = kw.get("only_from")
+        if cause is None and only_from is not None and ast.unparse(only_from) in PRE_RUN_ONLY:
+            continue
+        problems.append(f"{name}:{call.lineno}")
+    return problems
+
+
+def test_rl54_the_close_check_rejects_a_constant_none_and_a_skipped_helper_argument():
+    """P3 3라운드 LOW(A3): 정적 잠금이 `hold_cause=None` 상수를 판단으로 셌다. 그 잠금 자체를
+    잠근다 — 상수 None · 빠진 인자는 걸리고, 식 · 문자열 상수 · 시작 전 상태의 닫기는 지난다."""
+    src = (
+        "def f(self, job, gone):\n"
+        "    self.store.finish(1, 'lost', hold_cause=None)\n"
+        "    self.store.finish(2, 'lost')\n"
+        "    self._fail_before_start(job, 'preset_missing')\n"
+        "    self._close_cancelled_before_start(job, hold_cause=None)\n"
+        "    self.store.finish(5, 'lost', hold_cause=self._hold_cause(job, gone))\n"
+        "    self.store.finish(6, 'lost', hold_cause='worker_unreachable')\n"
+        "    self.store.finish(7, 'failed', only_from=(UPLOADING,))\n"
+        "    self._fail_before_start(job, 'x', hold_cause=self._hold_cause(job, True))\n"
+        "    other.finish(9)\n"
+    )
+    assert _undecided_closes(src, "f.py") == ["f.py:2", "f.py:3", "f.py:4", "f.py:5"]
 
 
 def test_rl54_every_finish_outside_the_store_decides_the_hold():
     """P2-9 의 짝 맞추기는 `hold_cause=` 를 **넘긴** 호출만 봤다 — 넘기지 않은 호출은 홀드를 만들지
     않으니 알림을 빠뜨릴 수도 없어서 보이지 않았다(로컬 레인이 그 길이었다). 그래서 반대쪽도
-    잠근다: store 밖의 모든 `store.finish` 는 `hold_cause=` 를 넘겨(None 이어도 판단한 것이다)
-    확인 없는 닫힘인지 정하거나, 프로세스가 돈 적 없는 상태(`only_from=(UPLOADING,)`)에서만
-    닫는다."""
-    import ast
+    잠근다: store 밖의 모든 `store.finish` 와 로컬 레인의 닫기 도우미는 `hold_cause=` 에 식을
+    넘겨 확인 없는 닫힘인지 정하거나, 프로세스가 돈 적 없는 상태(`only_from=(UPLOADING,)`)에서만
+    닫는다. 상수 None 은 판단이 아니다(`_undecided_closes`)."""
     from pathlib import Path
 
     import remote_ci_monitor
@@ -661,14 +708,5 @@ def test_rl54_every_finish_outside_the_store_decides_the_hold():
     for path in sorted(root.rglob("*.py")):
         if path.name == "store.py":
             continue
-        tree = ast.parse(path.read_text(encoding="utf-8"))
-        for call in _calls(tree, "finish"):
-            if not (isinstance(call.func.value, ast.Attribute) and call.func.value.attr == "store"):
-                continue
-            kw = {k.arg: k.value for k in call.keywords}
-            if "hold_cause" in kw:
-                continue
-            if "only_from" in kw and ast.unparse(kw["only_from"]) in PRE_RUN_ONLY:
-                continue
-            problems.append(f"{path.name}:{call.lineno}")
+        problems += _undecided_closes(path.read_text(encoding="utf-8"), path.name)
     assert problems == []

@@ -519,10 +519,11 @@ class Worker(threading.Thread):
         out.bundle_path.replace(dest / "bundle.tar")
         return replace(out, bundle_path=dest / "bundle.tar")
 
-    def _close_cancelled_before_start(self, job: Job, *, hold_cause: str | None = None) -> None:
+    def _close_cancelled_before_start(self, job: Job, *, hold_cause: str | None) -> None:
         """`cancelling` 인 잡을 프로세스 없이 `cancelled` 로 — preflight 가 취소를 덮지 않게
         (M5l S4). 그새 다른 종료 상태가 됐다면 아무것도 하지 않는다(`finish` 가 거절한다).
-        `hold_cause` 는 부르는 쪽이 러너의 `group_gone` 으로 정했다(`_hold_cause`)."""
+        `hold_cause` 는 부르는 쪽이 러너의 `group_gone` 으로 정했다(`_hold_cause`). 기본값이 없다 —
+        판단을 건너뛴 호출이 보이도록(P3 3라운드 LOW)."""
         current = self.store.get_job(job.id) or job
         if current.state != CANCELLING:
             return
@@ -544,7 +545,7 @@ class Worker(threading.Thread):
             self._hold_created(job.id)
 
     def _fail_before_start(
-        self, job: Job, code: str, /, *, hold_cause: str | None = None, **args: Any
+        self, job: Job, code: str, /, *, hold_cause: str | None, **args: Any
     ) -> None:
         """프로세스가 뜨기 전에 끝난 잡을 닫는다 — **코드와 함께**, 그리고 취소에 진다.
 
@@ -561,7 +562,8 @@ class Worker(threading.Thread):
         (M5h 불변식) — 스크립트가 선언한 실패가 아니다.
 
         `hold_cause` 는 러너가 띄운 뒤 시작하지 못한 표식 잡(감독자 실패 · 관찰자 실패)의 홀드다
-        (`_hold_cause`). 띄우기 전의 실패는 None 이다.
+        (`_hold_cause`). 띄우기 전의 실패는 `_hold_cause(job, True)`(None)다. 기본값이 없다 —
+        판단을 건너뛴 호출이 보이도록(P3 3라운드 LOW).
         """
         text, summary_code, clean = outcome.summary(code, **args)
         closed = self.store.finish(
@@ -629,7 +631,11 @@ class Worker(threading.Thread):
             # 잡이 큐에 있는 사이 설정에서 프리셋이 사라졌다 — 프리셋 하나를 지우고 재기동하면 그
             # 프리셋의 대기 잡이 한꺼번에 이렇게 죽는다. 코드가 있어야 「게이트가 깨진 게 아니라
             # 방금 한 편집 때문」임을 세어서 말할 수 있다. 문장은 예전과 글자까지 같다.
-            self._fail_before_start(job, "preset_missing", preset=job.preset)
+            # 띄운 적 없다 — 그룹이 없다는 것이 확인됐다(§4.12 확인 표 1행)
+            gone = True
+            self._fail_before_start(
+                job, "preset_missing", hold_cause=self._hold_cause(job, gone), preset=job.preset
+            )
             return
         # 릴리스 프로파일이 있는 저장소의 프리셋: 비밀 폴더를 `<secrets_dir_env>` 로 넘기고(폴더가
         # 있을 때만) value 비밀은 stdout 에서 지운다(계약 §4 「Job stdout is masked」).
@@ -666,7 +672,11 @@ class Worker(threading.Thread):
             # 최종 환경에 도구가 없다 — 프로세스는 뜨지 않았다(M5j G4 · 결정 85). 서버가 만든
             # 코드라 라벨(`failed_step`·`last_step`)도 대장 행도 없다(M5h 불변식). 인자는 이름
             # 하나뿐이다 — PATH 와 경로는 상태에 싣지 않는다(PLAN 「보안」).
-            self._fail_before_start(job, "tool_missing", tool=e.public_name)
+            # 띄운 적 없다 — 그룹이 없다는 것이 확인됐다
+            gone = True
+            self._fail_before_start(
+                job, "tool_missing", hold_cause=self._hold_cause(job, gone), tool=e.public_name
+            )
             if not self.config.server.keep_workspace_on_failure:
                 shutil.rmtree(workspace, ignore_errors=True)
             return
