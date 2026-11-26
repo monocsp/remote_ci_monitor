@@ -151,7 +151,10 @@ LAUNCHD_NO_SERVICE = "Could not find service"
 SYSTEMD_INACTIVE = 3
 #: 3 과 함께 stdout 이 이 낱말일 때만 「없음」이다. `activating` · `reloading` · `deactivating`
 #: 은 그 유닛이 있다는 뜻이라 모른다(P6 재확인 4 · v1-2). 없는 유닛은 `inactive` 다
-SYSTEMD_ABSENT_STATES = frozenset({"inactive", "failed", "unknown"})
+SYSTEMD_ABSENT_STATES = frozenset({"inactive", "unknown"})
+#: 3 과 함께 이 낱말이면 유닛이 있다 — 실패한 유닛은 `reset-failed` 전까지 올라가 있다(P6 재확인
+#: v1-7). 없는 유닛은 `failed` 가 아니라 `inactive` 다
+SYSTEMD_FAILED = "failed"
 
 
 def service_loaded(manager: str, label: str) -> bool | None:
@@ -180,6 +183,8 @@ def service_loaded(manager: str, label: str) -> bool | None:
     if active is None or active[0] != SYSTEMD_INACTIVE:
         return None
     state = active[1].strip().split("\n", 1)[0].strip()
+    if state == SYSTEMD_FAILED:
+        return True
     return False if state in SYSTEMD_ABSENT_STATES else None
 
 

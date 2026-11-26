@@ -1596,7 +1596,6 @@ def test_b8_3_a_label_already_loaded_may_not_be_setups(cfg, tmp_path):
     ("state", "loaded"),
     [
         ("inactive", False),
-        ("failed", False),
         ("unknown", False),
         ("activating", None),
         ("reloading", None),
@@ -1607,7 +1606,7 @@ def test_b8_4_systemd_exit_3_is_absent_only_for_an_absent_state(
     tmp_path, monkeypatch, state, loaded
 ):
     # v1-2 · v2: is-active 가 3 이어도 stdout 이 activating · reloading 이면 모른다. inactive ·
-    # failed · unknown 만 「없음」이다
+    # unknown 만 「없음」이다(failed 는 batch 9 v1-7 에서 「있음」으로 옮겼다)
     script = f'case "$2" in is-active) echo "{state}"; exit 3;; *) echo "disabled"; exit 1;; esac\n'
     _manager_stub(tmp_path / "bin", "systemctl", script)
     monkeypatch.setenv("PATH", str(tmp_path / "bin"))
@@ -1669,7 +1668,7 @@ def test_b8_6_a_typed_bracketed_address_is_asked_again(cfg, tmp_path):
     assert read_toml(cfg / "server.toml")["server"]["bind"] == "127.0.0.1"
 
 
-# ── P6 재확인(batch 9) v1-5 · v2-4 ──
+# ── P6 재확인(batch 9) v1-5 · v2-4 · v1-7 ──
 
 
 @pytest.mark.parametrize("platform", ["darwin", "linux"])
@@ -1697,3 +1696,11 @@ def test_b9_the_remove_line_removes_setups_file_even_when_the_unload_fails(
     assert not staged.exists() and not (cfg / "server.toml").exists()
     called = log.read_text()
     assert "bootout" in called or "disable" in called, called
+
+
+def test_b9_systemd_failed_means_the_unit_is_there(tmp_path, monkeypatch):
+    # v1-7: is-active 의 `failed` 는 유닛이 있다는 뜻이다(없는 유닛은 inactive) — 「없음」이 아니다
+    script = 'case "$2" in is-active) echo failed; exit 3;; *) echo disabled; exit 1;; esac\n'
+    _manager_stub(tmp_path / "bin", "systemctl", script)
+    monkeypatch.setenv("PATH", str(tmp_path / "bin"))
+    assert setup.service_loaded("systemd", "test.rcm.server") is True

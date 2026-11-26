@@ -3753,6 +3753,15 @@ MUTANTS = (
         ),
     ),
     Mutant(
+        # is-active 의 `failed` 를 「없음」으로 읽는다 — 실패한 채 올라가 있는 같은 라벨을 setup 이
+        # 모른다(P6 재확인 v1-7)
+        name="setup-systemd-failed-read-as-absent",
+        path="src/remote_ci_monitor/setup.py",
+        old="    if state == SYSTEMD_FAILED:\n",
+        new="    if False:\n",
+        tests=("tests/test_setup.py::test_b9_systemd_failed_means_the_unit_is_there",),
+    ),
+    Mutant(
         # 마지막 doctor 줄이 맨 이름 rcm 이다 — PATH 의 다른 빌드가 그 머신을 잰다(P5 B-E7)
         name="setup-doctor-line-bare-rcm",
         path="src/remote_ci_monitor/core/setup.py",
