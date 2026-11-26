@@ -3521,6 +3521,21 @@ MUTANTS = (
         tests=("tests/test_setup.py::test_s9_an_unreadable_existing_config_is_a_warning",),
     ),
     Mutant(
+        # 읽지 못한 서버 설정의 길에서 클라이언트 역할을 찾지 않는다 — client.toml · RCM_SERVER 가
+        # 있어도 역할 목록에서 빠진다(P6 재확인 5 · v1-3)
+        name="setup-unreadable-config-drops-the-client",
+        path="src/remote_ci_monitor/setup.py",
+        old=(
+            '        if client is not None or environ.get("RCM_SERVER") or '
+            'environ.get("RCM_TOKEN"):\n'
+        ),
+        new="        if False:\n",
+        tests=(
+            "tests/test_setup.py::"
+            "test_b8_5_an_unreadable_server_config_still_finds_the_client_role",
+        ),
+    ),
+    Mutant(
         # setup 의 systemd 워커 유닛이 `init worker` 의 것으로 돌아간다 — 라벨 로그 · HOME 이 없고
         # 머리 주석이 `rcm init worker` 를 말한다(P5 B-E13 · A-E9)
         name="setup-worker-unit-without-log-and-home",

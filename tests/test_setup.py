@@ -1612,3 +1612,18 @@ def test_b8_4_systemd_exit_3_is_absent_only_for_an_absent_state(
     _manager_stub(tmp_path / "bin", "systemctl", script)
     monkeypatch.setenv("PATH", str(tmp_path / "bin"))
     assert setup.service_loaded("systemd", "test.rcm.server") is loaded
+
+
+@pytest.mark.parametrize("how", ["file", "RCM_SERVER", "RCM_TOKEN"])
+def test_b8_5_an_unreadable_server_config_still_finds_the_client_role(cfg, monkeypatch, how):
+    # v1-3: 읽지 못하는 server.toml 의 길에서도 클라이언트 역할(client.toml · 환경)을 찾는다 —
+    # doctor.infer_roles 와 같은 규칙
+    cfg.mkdir(parents=True)
+    (cfg / "server.toml").write_bytes(b"[server\nport = 1\n")
+    if how == "file":
+        (cfg / "client.toml").write_text('server = "http://10.0.0.5:1"\n')
+    else:
+        monkeypatch.setenv(how, "x")
+    roles, warning = setup.scan_roles(os.environ)
+    assert warning is not None and "could not read" in warning
+    assert roles == ["client"], roles

@@ -257,12 +257,17 @@ def existing_roles(environ: Mapping[str, str]) -> list[str]:
 def scan_roles(environ: Mapping[str, str]) -> tuple[list[str], str | None]:
     """setup 이 쓰는 역할 스캔 — (역할들, 경고). 있는 서버 설정이 TOML · UTF-8 이 아니어서 읽지
     못해도 setup 을 막지 않는다(P5 A-E5): 그 파일은 `--force config` 로 고칠 수 있고, 덮는 것은
-    여전히 `--force config` 일 때만이다(`_check_free`). 그때는 워커 설정만 본다. `$RCM_CONFIG` 가
-    없는 파일을 가리키는 것은 그대로 사용법 오류다(TR38)."""
+    여전히 `--force config` 일 때만이다(`_check_free`). 그때는 워커 · 클라이언트 설정만 본다.
+    `$RCM_CONFIG` 가 없는 파일을 가리키는 것은 그대로 사용법 오류다(TR38)."""
     try:
         return existing_roles(environ), None
     except SetupUsage as e:
-        from remote_ci_monitor.config import ConfigError, find_server_config, user_config_dir
+        from remote_ci_monitor.config import (
+            ConfigError,
+            find_client_config,
+            find_server_config,
+            user_config_dir,
+        )
 
         named = environ.get("RCM_CONFIG")
         if named and not Path(named).expanduser().is_file():
@@ -274,6 +279,13 @@ def scan_roles(environ: Mapping[str, str]) -> tuple[list[str], str | None]:
         roles = []
         if (user_config_dir() / "worker.toml").is_file() or environ.get("RCM_WORKER_TOKEN"):
             roles.append(dc.ROLE_WORKER)
+        # 클라이언트도 doctor.infer_roles 와 같은 규칙으로 찾는다(P6 재확인 5 · v1-3)
+        try:
+            client = find_client_config(None)
+        except ConfigError:
+            client = None
+        if client is not None or environ.get("RCM_SERVER") or environ.get("RCM_TOKEN"):
+            roles.append(dc.ROLE_CLIENT)
         reason = str(e).removeprefix(f"{server}: ") if server is not None else str(e)
         where = server if server is not None else "the existing config"
         return roles, (
