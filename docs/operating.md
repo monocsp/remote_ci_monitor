@@ -1030,6 +1030,23 @@ so it is not started again and the two processes do not take turns. Restarting a
 at once: the server waits the [disconnect grace](configuration.md#a-lost-connection-disconnect_grace_seconds),
 and the new process checks what its last process left behind.
 
+That exit 0 also means a service worker stays down when you start a second `rcm worker` with its
+token by hand. The second process says so when it registers:
+
+```
+[rcm worker] replaced 1 other process of worker build-02 — a service worker with this token has stopped and will not start again by itself
+```
+
+When you are done with the second process, start the service again:
+`launchctl kickstart -k gui/<uid>/<label>` (launchd) or `systemctl --user restart <unit>`
+(systemd).
+
+Change a worker's `server` or `server_name` only while it runs no job: stop the worker and wait for
+its jobs to end first. The worker keeps a session folder per process under its `data_dir`, owned
+by the server it was set up for. After the change it takes its old folders for another worker's,
+so it does not stop what an old job left running and does not tell the server; those jobs close
+as `lost` only when the disconnect grace runs out.
+
 ### The cache
 
 `$XDG_CACHE_HOME/rcm/` (by default `~/.cache/rcm/`) holds `follow.json`, the last version seen per

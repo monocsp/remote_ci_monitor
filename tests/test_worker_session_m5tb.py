@@ -28,7 +28,7 @@ from remote_ci_monitor.client import Client, ClientError
 from remote_ci_monitor.config import WorkerConfig, disconnect_grace, parse_preset
 from remote_ci_monitor.core.model import CANCELLING, LOST, QUEUED, RUNNING, SUCCEEDED
 from remote_ci_monitor.remote_worker import RemoteWorker, WorkerExit
-from test_worker_api import WORKER_PRESETS, WorkerServer, sh
+from test_worker_api import TIMEOUT, WORKER_PRESETS, WorkerServer, sh
 
 PROTOCOL_TEXT = "worker protocol 2 required: upgrade rcm on this worker"
 EXIT_PROTOCOL = 3  # 프로토콜 불일치 — 감독자가 되살린다(결정 258)
@@ -343,6 +343,47 @@ def test_rl11_unknown_foreign_and_malformed_sessions(srv):
         json_body={"worker_session_id": "XYZ", "seq": 1, "claims_settled": 0},
     )
     assert status == 400 and set(body) == {"error"}
+
+
+def test_gap8_register_says_how_many_live_processes_it_replaced(srv):
+    """# GAP8 명세 §9: 같은 토큰의 둘째 프로세스가 서비스 워커를 펜싱하면 서비스는 종료 0 이라
+    다시 뜨지 않는다 — 둘째 프로세스가 시작할 때 그것을 말한다. 등록 응답의 `fenced_sessions` 는
+    이 등록이 펜싱한 다른 세션 가운데 서버가 `worker_timeout_seconds` 안에 들은 것의 수다. 제가
+    죽었다고 넘긴 세션(`previous_sessions`)과 오래 조용한 세션은 세지 않는다."""
+    assert srv.registered("build-02").get("fenced_sessions") == 0  # 처음
+    assert srv.registered("build-02").get("fenced_sessions") == 0  # 같은 세션의 재등록
+    srv.new_process("build-02")
+    assert srv.registered("build-02").get("fenced_sessions") == 1  # 살아 있던 프로세스를 대신했다
+    assert srv.restarted("build-02").get("fenced_sessions") == 0  # 죽었다고 넘긴 세션
+    srv.clock.advance(TIMEOUT + 1)
+    srv.new_process("build-02")
+    assert srv.registered("build-02").get("fenced_sessions") == 0  # 오래 조용했다
+
+
+@pytest.mark.parametrize(("fenced", "said"), [(0, False), (1, True), (3, True)])
+def test_gap8_the_worker_logs_one_line_when_it_replaced_a_live_process(tmp_path, fenced, said):
+    """# GAP8 워커는 `fenced_sessions` 가 0 보다 크면 한 줄을 쓴다 — 서비스 워커가 멈췄고 스스로
+    다시 뜨지 않는다는 것과 되살리는 길(문서)."""
+
+    class _Replacing(_Who):
+        def register(self, **kw: Any) -> dict[str, Any]:
+            return {**super().register(**kw), "fenced_sessions": fenced}
+
+    logs: list[str] = []
+    w = _worker(tmp_path, _Replacing())
+    w.log = logs.append
+    w.register()
+    line = [m for m in logs if "a service worker with this token has stopped" in m]
+    noun = "process" if fenced == 1 else "processes"
+    expected = (
+        [
+            f"replaced {fenced} other {noun} of worker build-02 — a service worker with this"
+            " token has stopped and will not start again by itself"
+        ]
+        if said
+        else []
+    )
+    assert line == expected
 
 
 @pytest.mark.parametrize("key", ["worker_session_id", "previous_sessions", "unverified_sessions"])

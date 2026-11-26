@@ -188,6 +188,7 @@ def test_register_returns_the_protocol_parameters(srv):
         "worker_timeout_seconds": TIMEOUT,
         "claim_wait_seconds": CLAIM_WAIT,
         "worker_protocol": 2,  # M5t-b — 워커 프로토콜 판(키 추가만)
+        "fenced_sessions": 0,  # M5t-b P6 GAP8 — 이 등록이 대신한 살아 있던 프로세스 수(키 추가만)
     }
     row = srv.store.get_worker(WORKER)
     assert row is not None and (row.pool, row.lanes, row.host_name) == ("linux", 2, "b02.local")

@@ -44,6 +44,12 @@ of a key bumps that number and is listed here.
   list open holds in `irreversible_holds` (when the server could not read them,
   `irreversible_holds` is `null`, not an empty list), and `GET /jobs/N` carries `hold`.
   ([#284](https://github.com/monocsp/remote_ci_monitor/pull/284))
+- **A worker says when it replaced a running one.** The register answer carries
+  `fenced_sessions`, the number of live processes of the same worker that this registration
+  replaced, and the new process logs `replaced N other process(es) of worker NAME — a service
+  worker with this token has stopped and will not start again by itself`: start that service again
+  with `launchctl kickstart -k` or `systemctl --user restart`.
+  ([#284](https://github.com/monocsp/remote_ci_monitor/pull/284))
 - **An `irreversible` preset cannot also have `[presets.retry]`.** A retry runs the command
   again, so the server refuses to load that combination
   (`irreversible presets cannot have [retry]`).

@@ -197,6 +197,45 @@ def test_gap4_the_irreversible_section_says_retry_is_refused_with_the_loader_mes
     assert quoted in str(e.value)
 
 
+IRREVERSIBLE = "Jobs that must not run twice: `irreversible`"
+
+
+def test_gap8_irreversible_says_avoid_clock_steps_and_how_it_differs_from_the_release_mode():
+    """# GAP8 명세 §9 의 문서 두 줄: 표식 잡을 도는 워커는 NTP 단계 보정을 피한다(점프가 G − m
+    이상이면 일찍 멈춘다), 그리고 프리셋 키 `irreversible` 은 릴리스 쪽의 「되돌릴 수 없는 입력」과
+    다르다(입력이 rehearsal 이어도 자기 멈춤이 걸린다)."""
+    body = flat(section(CONFIGURATION, IRREVERSIBLE))
+    assert "Keep the worker's clock from jumping." in body
+    assert "`G − m` or more makes the worker stop an irreversible job early" in body
+    assert "`worker_self_stopped`, exit 3 from `rcm wait`" in body
+    assert "let NTP slew the clock instead of stepping it" in body
+    assert "This key is not the release checks' irreversible mode" in body
+    assert "even when its input is a rehearsal" in body
+
+
+def test_gap8_a_replaced_session_split_from_the_server_shows_running_until_the_grace():
+    """# GAP8 펜싱된 세션이 분단이면 그 잡은 G 까지 레인 · 그룹을 잡고 화면은 running 이다."""
+    text = flat(CONFIGURATION)
+    assert "If the first process cannot be reached when it is replaced (a network split)" in text
+    assert "the queue still shows them `running`" in text
+
+
+def test_gap8_operating_says_a_replaced_service_stays_down_and_how_to_restart_it():
+    """# GAP8 같은 토큰의 둘째 프로세스가 서비스를 펜싱하면 서비스는 종료 0 이라 다시 뜨지
+    않는다 — 둘째 프로세스의 로그 줄(워커 코드의 문구)과 되살리는 명령 둘. 그리고 `server` ·
+    `server_name` 을 바꾸기 전에 워커를 멈추고 잡이 끝나기를 기다린다."""
+    text = flat(OPERATING)
+    line = (
+        "[rcm worker] replaced 1 other process of worker build-02 — a service worker with this"
+        " token has stopped and will not start again by itself"
+    )
+    assert line in OPERATING
+    assert "`launchctl kickstart -k gui/<uid>/<label>`" in text
+    assert "`systemctl --user restart <unit>`" in text
+    assert "Change a worker's `server` or `server_name` only while it runs no job" in text
+    assert "stop the worker and wait for its jobs to end first" in text
+
+
 def test_gap5_operating_says_a_worker_whose_job_holds_a_group_is_not_forgotten():
     """# GAP5 일주일 조용한 워커를 잊는 규칙의 예외에 열린 홀드가 든다."""
     text = flat(OPERATING)

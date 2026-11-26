@@ -636,8 +636,11 @@ class RemoteWorkersMixin:
             if self.store.get_session(session) is None:  # mutcheck: register-race-500
                 raise
             return self.worker_register(token, body)
+        replaced = self._live_replaced(opened.fenced, {*previous, *unverified})
         self._forget_session_memory(opened.fenced)
         self._hear(session)
+        if replaced:
+            self.log(f"worker {token.name} session {session[:8]}: replaced {replaced} live")
         for job_id in opened.closed:
             self._publish_job(None, job_id)
         if opened.closed:
@@ -664,11 +667,28 @@ class RemoteWorkersMixin:
         self._publish_server()
         if opened.closed or opened.released:
             self.wake.set()
-        return self._register_answer(row)
+        return self._register_answer(row, fenced=replaced)
 
-    def _register_answer(self, row: WorkerRow) -> dict[str, Any]:
+    def _live_replaced(self, fenced: list[str], listed: set[str]) -> int:
+        """이 등록이 펜싱한 다른 세션 가운데 살아 있던 것으로 보이는 수(P6 GAP8, 명세 §9). 워커가
+        죽었다고 넘긴 세션은 빼고, 서버가 `worker_timeout_seconds` 안에 들은 세션만 센다. 펜싱된
+        프로세스는 종료 0 이라 서비스면 다시 뜨지 않는다 — 새 프로세스가 그것을 로그로 말한다."""
+        now = self.mono_fn()  # type: ignore[attr-defined]
+        timeout = self.config.server.worker_timeout_seconds
+        with self._heard_lock:
+            return sum(
+                1
+                for sid in fenced
+                if sid not in listed  # mutcheck: replaced-counts-listed
+                and sid in self._heard
+                and now - self._heard[sid] <= timeout
+            )
+
+    def _register_answer(self, row: WorkerRow, *, fenced: int = 0) -> dict[str, Any]:
         s = self.config.server
         return {
+            # 이 등록이 대신한 살아 있던 프로세스 수(P6 GAP8) — 같은 세션의 재등록은 0
+            "fenced_sessions": fenced,
             "generation": self.generation,  # type: ignore[attr-defined]
             "name": row.name,
             "pool": row.pool,

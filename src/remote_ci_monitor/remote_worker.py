@@ -1187,6 +1187,14 @@ class RemoteWorker:
             self.claim_wait_seconds = int(out.get("claim_wait_seconds") or 20)
             self.timeout_seconds = int(out.get("worker_timeout_seconds") or 60)
             self.name = str(out.get("name") or self.name)
+            replaced = out.get("fenced_sessions")
+            if isinstance(replaced, int) and not isinstance(replaced, bool) and replaced > 0:
+                # 펜싱된 프로세스는 종료 0 이라 서비스면 다시 뜨지 않는다(명세 §9, P6 GAP8)
+                noun = "process" if replaced == 1 else "processes"
+                self.log(  # mutcheck: replaced-service-silent
+                    f"replaced {replaced} other {noun} of worker {self.name} — a service worker"
+                    " with this token has stopped and will not start again by itself"
+                )
             # 등록은 서버가 이 워커의 보고를 지우는 일이다(M5n §19-5). 등록 응답의 세대를 제 것으로
             # 삼으면 다음 heartbeat 이 「세대 같음」으로 보여 주기(기본 10분)까지 다시 재지 않는다 —
             # 그동안 any-capable 잡을 못 받는다. 아직 이 세대로 보고하지 않았다고 둔다

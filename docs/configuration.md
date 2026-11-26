@@ -1468,7 +1468,10 @@ heartbeat finishes its jobs and restarts the same way, without losing one. `RCM_
 registers. When a second process starts with the same token, it becomes the worker: the first
 one's next request is refused, it stops its running jobs, reports them `lost`
 (`worker build-02 was replaced by a newer process`) and exits 0, so a service manager does not
-start it again. An older worker is refused on its version first and follows the server or stops
+start it again. If the first process cannot be reached when it is replaced (a network split), its
+jobs keep their lane and group until the [disconnect grace](#a-lost-connection-disconnect_grace_seconds)
+runs out, and the queue still shows them `running`: the worker name has a live session, so its
+lanes are not `down`. An older worker is refused on its version first and follows the server or stops
 with exit 2. A new worker that meets a server of its own version without worker protocol 2 stops
 before it registers with
 `the server speaks worker protocol 1 — upgrade rcm on the server (this worker needs protocol 2)`
@@ -1523,6 +1526,17 @@ starts, and `rcm presets` shows that group.
 An irreversible preset cannot have [`[presets.retry]`](#trying-again-later-presetsretry): a retry
 runs the command again, so the server refuses to load such a preset (`irreversible presets cannot
 have [retry]`).
+
+This key is not the release checks' irreversible mode (an input value such as `mode = upload` that
+a [release profile](#release-profile) never makes the default). `irreversible = true` marks the
+whole preset, so its job stops itself on a lost connection even when its input is a rehearsal.
+
+**Keep the worker's clock from jumping.** The worker counts the time since the server last
+answered on the wall clock too, so the time a sleeping machine spends asleep counts. A step
+correction (NTP stepping the clock, or the date set by hand) that moves the clock forward by
+`G − m` or more makes the worker stop an irreversible job early: the job ends `lost`
+(`worker_self_stopped`, exit 3 from `rcm wait`). On a worker that runs irreversible presets, let
+NTP slew the clock instead of stepping it.
 
 The command must not leave daemons or other processes outside its session behind (`setsid`, a
 double-fork daemon): rcm cannot see them, so for those processes this protection is fail-open.

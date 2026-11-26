@@ -6781,6 +6781,28 @@ MUTANTS = (
             "test_gap7_a_session_id_with_a_trailing_newline_is_400",
         ),
     ),
+    Mutant(
+        # GAP8 워커가 죽었다고 넘긴 세션도 「대신한 살아 있던 프로세스」로 센다 — 재시작마다 거짓 줄
+        name="replaced-counts-listed",
+        path="src/remote_ci_monitor/remote_workers.py",
+        old="                if sid not in listed  # mutcheck: replaced-counts-listed\n",
+        new="                if True\n",
+        tests=(
+            "tests/test_worker_session_m5tb.py::"
+            "test_gap8_register_says_how_many_live_processes_it_replaced",
+        ),
+    ),
+    Mutant(
+        # GAP8 둘째 프로세스가 서비스 워커를 대신했다고 말하지 않는다
+        name="replaced-service-silent",
+        path="src/remote_ci_monitor/remote_worker.py",
+        old="                self.log(  # mutcheck: replaced-service-silent\n",
+        new="                (lambda m: None)(  # 변이\n",
+        tests=(
+            "tests/test_worker_session_m5tb.py::"
+            "test_gap8_the_worker_logs_one_line_when_it_replaced_a_live_process",
+        ),
+    ),
 )
 
 
