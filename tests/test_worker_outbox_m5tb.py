@@ -1363,3 +1363,118 @@ def test_rl17_c_f_a_running_job_sends_every_whole_line_up_to_the_last_line_end(
         assert ob.finish is None
     finally:
         s.halt.set()
+
+
+# ── P6-1: P5 엣지 감사의 확인된 GAP ────────────────────────────────────────────
+
+
+def _dead_job_with(tmp_path: Path, fake: FakeServer, clock: WClock, how: str):
+    """끝난 잡의 큐를 남기고 죽은 프로세스 — 그 `outbox.json` 을 `how` 대로 망가뜨린다."""
+    w1 = wworker(tmp_path, fake, clock)
+    w1.prepare_sessions()
+    ended_queue(w1, 7, b"one\ntwo\n")
+    job_dir = w1._job_dir(7)
+    assert job_dir is not None
+    outbox = job_dir / rw.OUTBOX_FILE
+    if how == "empty":
+        outbox.write_bytes(b"")  # rename 은 됐는데 fsync 전에 OS 가 죽었다
+    elif how == "bad_json":
+        outbox.write_bytes(b'{"acked": 0, "fini')
+    else:
+        outbox.unlink()
+    sid = w1.session_id
+    die(w1)
+    return sid, job_dir
+
+
+@pytest.mark.parametrize("how", ["empty", "bad_json", "missing"])
+def test_p6_1_g1_a_dead_queue_whose_outbox_cannot_be_read_says_so_and_keeps_the_spool(
+    tmp_path, fast, how
+):
+    """# P6-1 G1 다시 뜬 워커가 `stream.log` 는 있는데 `outbox.json` 이 없거나 비었거나 깨진 잡
+    폴더를 만난다. 지금까지는 로그 한 줄 없이 건너뛰어, 성공한 잡이 restarted-without-job 으로
+    닫혀도 워커 로그에 이유가 없었다. 한 줄을 남기고, 스풀은 지우지 않고 세션 폴더 밖의 격리
+    폴더로 옮긴다 — 등록이 받은 죽은 세션 폴더를 지워도(`_settle_reported`) 남는다."""
+    clock = WClock()
+    fake = FakeServer(clock)
+    sid, job_dir = _dead_job_with(tmp_path, fake, clock, how)
+    w2 = restart(tmp_path, fake, clock)
+    assert w2.dead_queues() == []
+    line = f"dead session {sid[:8]} job #7: outbox unreadable"
+    said = [x for x in w2.logs if x.startswith(line)]
+    assert len(said) == 1, w2.logs
+    assert "the job will close as restarted-without-job" in said[0]
+    w2._settle_reported([sid])  # 등록이 D 를 받았다 — D 의 폴더를 지운다
+    assert not job_dir.exists()
+    kept = list((w2.config.data_path / rw.SESSIONS_DIR).glob(f"unreadable-{sid}-7*"))
+    assert len(kept) == 1, list((w2.config.data_path / rw.SESSIONS_DIR).iterdir())
+    assert (kept[0] / rw.STREAM_FILE).read_bytes() == b"one\ntwo\n"
+    assert str(kept[0]) in said[0]
+
+
+def test_p6_1_g1_b_a_job_folder_with_neither_file_is_skipped_quietly(tmp_path, fast):
+    """# P6-1 G1 보고를 시작하기 전에 죽은 잡(claim.json · proc.json 만)은 보낼 것이 없다 — 줄도
+    격리 폴더도 없다."""
+    clock = WClock()
+    fake = FakeServer(clock)
+    w1 = wworker(tmp_path, fake, clock)
+    w1.prepare_sessions()
+    w1._write_claim(7, False, 90)
+    die(w1)
+    w2 = restart(tmp_path, fake, clock)
+    assert w2.dead_queues() == []
+    assert not any("outbox unreadable" in x for x in w2.logs), w2.logs
+    assert not list((w2.config.data_path / rw.SESSIONS_DIR).glob("unreadable-*"))
+
+
+def test_p6_1_g1_c_the_outbox_is_synced_to_disk_before_and_after_the_rename(tmp_path, monkeypatch):
+    """# P6-1 G1 원자적 rename 만으로는 OS 가 죽은 뒤 빈 `outbox.json` 이 남을 수 있다. 임시 파일을
+    fsync 한 뒤 이름을 바꾸고, 그 폴더도 fsync 한다."""
+    import stat as stat_mod
+
+    seen: list[str] = []
+    real_fsync, real_replace = os.fsync, os.replace
+
+    def fsync(fd: int) -> None:
+        seen.append("dir" if stat_mod.S_ISDIR(os.fstat(fd).st_mode) else "file")
+        real_fsync(fd)
+
+    def replace(src: Any, dst: Any) -> None:
+        seen.append("rename")
+        real_replace(src, dst)
+
+    monkeypatch.setattr(rw.os, "fsync", fsync)
+    monkeypatch.setattr(rw.os, "replace", replace)
+    ob = rw.JobOutbox(tmp_path / "jobs" / "7")
+    ob.finish = {"outcome": SUCCEEDED, "exit_code": 0, "log_bytes": 0}
+    ob.save()
+    assert seen == ["file", "rename", "dir"], seen
+    loaded = rw.JobOutbox.load(tmp_path / "jobs" / "7")
+    assert loaded is not None and loaded.finish is not None
+
+
+def test_p6_1_g2_a_failed_outbox_save_says_so_once_and_leaves_no_temp_file(tmp_path, monkeypatch):
+    """# P6-1 G2 디스크가 가득 차면 저장이 `OSError` 다. 지금까지는 조용히 삼켜 finish 가 메모리에만
+    있는 줄 몰랐고, 실패한 임시 파일 `.outbox.json.<hex>` 이 가득 찬 디스크에 쌓였다. 한 번 말하고
+    (재시작하면 보고를 잃는다), 임시 파일은 지운다."""
+    import errno
+
+    folder = tmp_path / "jobs" / "7"
+    logs: list[str] = []
+    ob = rw.JobOutbox(folder)
+    ob.log = logs.append
+    ob.save()  # 처음 저장은 된다
+
+    def full(src: Any, dst: Any) -> None:
+        raise OSError(errno.ENOSPC, "No space left on device")
+
+    monkeypatch.setattr(rw.os, "replace", full)
+    ob.finish = {"outcome": SUCCEEDED, "exit_code": 0, "log_bytes": 0}
+    ob.save()
+    ob.acked = 3
+    ob.save()
+    said = [x for x in logs if "cannot save" in x]
+    assert len(said) == 1, logs
+    assert said[0].startswith("#7 report: cannot save outbox.json")
+    assert "a restart before it is sent loses it" in said[0]
+    assert sorted(p.name for p in folder.iterdir()) == [rw.OUTBOX_FILE], list(folder.iterdir())

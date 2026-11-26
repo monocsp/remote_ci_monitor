@@ -7575,6 +7575,67 @@ MUTANTS = (
             "test_p63_1_an_unsent_finish_while_stopping_keeps_the_job_folder_and_parks_nothing",
         ),
     ),
+    Mutant(
+        # 임시 파일을 fsync 하지 않고 이름을 바꾼다 — OS 충돌 뒤 빈 outbox.json(P6-1 G1)
+        name="json-not-synced-before-rename",
+        path="src/remote_ci_monitor/remote_worker.py",
+        old="            os.fsync(fh.fileno())  # mutcheck: json-not-synced-before-rename\n",
+        new="            pass\n",
+        tests=(
+            "tests/test_worker_outbox_m5tb.py::"
+            "test_p6_1_g1_c_the_outbox_is_synced_to_disk_before_and_after_the_rename",
+        ),
+    ),
+    Mutant(
+        # 이름 바꾸기 뒤 폴더를 fsync 하지 않는다 — 충돌 뒤 옛 outbox.json(P6-1 G1)
+        name="json-folder-not-synced",
+        path="src/remote_ci_monitor/remote_worker.py",
+        old="    _fsync_dir(path.parent)\n",
+        new="    pass\n",
+        tests=(
+            "tests/test_worker_outbox_m5tb.py::"
+            "test_p6_1_g1_c_the_outbox_is_synced_to_disk_before_and_after_the_rename",
+        ),
+    ),
+    Mutant(
+        # 죽은 세션의 못 읽는 outbox 를 말없이 건너뛴다 — 잡이 lost 인 이유가 없다(P6-1 G1)
+        name="unreadable-outbox-silent",
+        path="src/remote_ci_monitor/remote_worker.py",
+        old=(
+            "                    self._set_aside(dead, job_dir)"
+            "  # mutcheck: unreadable-outbox-silent\n"
+        ),
+        new="                    pass\n",
+        tests=(
+            "tests/test_worker_outbox_m5tb.py::"
+            "test_p6_1_g1_a_dead_queue_whose_outbox_cannot_be_read_says_so_and_keeps_the_spool",
+        ),
+    ),
+    Mutant(
+        # 저장 실패를 삼킨다 — finish 가 메모리에만 있는 줄 모른다(P6-1 G2)
+        name="outbox-save-failure-silent",
+        path="src/remote_ci_monitor/remote_worker.py",
+        old=(
+            "                if not self._save_failed_said:"
+            "  # mutcheck: outbox-save-failure-silent\n"
+        ),
+        new="                if False:\n",
+        tests=(
+            "tests/test_worker_outbox_m5tb.py::"
+            "test_p6_1_g2_a_failed_outbox_save_says_so_once_and_leaves_no_temp_file",
+        ),
+    ),
+    Mutant(
+        # 실패한 저장의 임시 파일을 남긴다 — 가득 찬 디스크에 쌓인다(P6-1 G2)
+        name="failed-save-leaves-temp",
+        path="src/remote_ci_monitor/remote_worker.py",
+        old="            tmp.unlink(missing_ok=True)  # mutcheck: failed-save-leaves-temp\n",
+        new="            pass\n",
+        tests=(
+            "tests/test_worker_outbox_m5tb.py::"
+            "test_p6_1_g2_a_failed_outbox_save_says_so_once_and_leaves_no_temp_file",
+        ),
+    ),
 )
 
 
