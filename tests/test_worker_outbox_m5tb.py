@@ -1727,3 +1727,215 @@ def test_p6_1_g5_runner_output_never_makes_the_worker_cut_a_line(tmp_path, fast)
     pieces = [c[4] for c in fake.calls if c[0] == "log"]
     assert ob.finish is None and all(p.endswith(b"\n") for p in pieces), [len(p) for p in pieces]
     assert all(len(p) <= rw.LOG_BATCH_BYTES for p in pieces), [len(p) for p in pieces]
+
+
+# ── batch-5: P6 재확인 LOW ────────────────────────────────────────────────────────────────────
+
+
+def test_b5_1_ok_at_is_replaced_without_fsync_while_the_report_queue_is_synced(
+    tmp_path, monkeypatch
+):
+    """# batch-5 #1 `ok_at.json` 은 heartbeat 의 도우미 스레드가 2xx 를 받은 뒤 H 마다 쓴다. 무거운
+    빌드 I/O 에서 fsync 가 멈추면 그 회차가 시한(`HEARTBEAT_DEADLINE_SECONDS`)을 넘겨 실패로
+    세진다. 그 파일은 내구성이 필요한 보고가 아니다 — 원자적 이름 바꾸기만 한다. 보고 큐
+    (`outbox.json`)와 `claim.json` · `proc.json` 은 그대로 fsync 한다."""
+    clock = WClock()
+    fake = FakeServer(clock)
+    w = wworker(tmp_path, fake, clock)
+    w.prepare_sessions()
+    assert w.session_dir is not None
+    synced: list[int] = []
+    real_fsync = os.fsync
+
+    def fsync(fd: int) -> None:
+        synced.append(fd)
+        real_fsync(fd)
+
+    monkeypatch.setattr(rw.os, "fsync", fsync)
+    w.mark_ok(*w._sent_at())
+    ok_at = rw._read_json(w.session_dir / "ok_at.json")
+    assert ok_at is not None and isinstance(ok_at.get("wall"), str), ok_at
+    assert synced == [], "ok_at.json was synced on the heartbeat path"
+    assert not [p for p in w.session_dir.iterdir() if p.name.startswith(".ok_at")]
+    ob = rw.JobOutbox(w._job_dir(7))
+    ob.save()
+    assert len(synced) == 2  # 파일 · 폴더
+    w._write_claim(7, False, 90)
+    w._write_proc(7, None)
+    assert len(synced) == 6
+
+
+def _run_bounded(fn: Any, w: rw.RemoteWorker, seconds: float = 10.0) -> bool:
+    """`fn` 을 스레드에서 부르고 `seconds` 안에 끝나는지 본다. 안 끝나면 워커를 멈춰 거둔다."""
+    t = threading.Thread(target=fn, daemon=True)
+    t.start()
+    t.join(seconds)
+    ended = not t.is_alive()
+    if not ended:
+        w.stopping.set()
+        t.join(5)
+    return ended
+
+
+def test_b5_2_a_a_dead_queue_stuck_on_a_local_error_is_not_counted_as_server_errors(tmp_path, fast):
+    """# batch-5 #2 죽은 세션 D 의 큐에서 finish 가 예상 못 한 로컬 오류로 계속 실패한다. 결정
+    337 은 서버가 응답하는 시간만 300초에 센다. 로컬 오류를 세면 등록이 매번 300초 늦고, 그 줄은
+    「server errors」라고 거짓을 말한다. 로컬 오류는 세지 않고, 그 큐를 기다리지 않고 등록한다."""
+    clock = WClock()
+    fake = FakeServer(clock, tick=40)
+    w1 = wworker(tmp_path, fake, clock)
+    w1.prepare_sessions()
+    ended_queue(w1, 7, b"x\n")
+    sid = w1.session_id
+    die(w1)
+    fake.script["finish"] = [RuntimeError("boom")] * 100000
+    w2 = restart(tmp_path, fake, clock)
+    assert _run_bounded(w2.send_dead_queues, w2), "registration waits forever on a local error"
+    assert not any("of server errors" in x for x in w2.logs), w2.logs
+    said = [x for x in w2.logs if "stopped on a local error" in x]
+    assert said == [
+        f"dead session {sid[:8]} job #7: stopped on a local error (unexpected RuntimeError in"
+        " finish) — registering without waiting; job #7 will close as restarted-without-job"
+    ], w2.logs
+    assert not [c for c in fake.calls if c[0] == "register"]
+
+
+def test_b5_2_b_a_dead_queue_whose_log_fails_locally_still_sends_the_finish_first(tmp_path, fast):
+    """# batch-5 #2 로그 단계만 로컬 오류로 막힌 끝난 잡은 등록이 기다린다 — 끝난 지 300초 뒤
+    finish 가 먼저 간다(`_finish_first`). 그 시간은 300초 등록 대기에 세지 않는다."""
+    clock = WClock()
+    fake = FakeServer(clock, tick=40)
+    w1 = wworker(tmp_path, fake, clock)
+    w1.prepare_sessions()
+    ended_queue(w1, 7, b"x\n")
+    die(w1)
+    fake.script["log"] = [RuntimeError("boom")] * 100000
+    w2 = restart(tmp_path, fake, clock)
+    assert _run_bounded(w2.send_dead_queues, w2)
+    assert [c[3] for c in fake.calls if c[0] == "finish"] == [SUCCEEDED], w2.logs
+    assert not any("queue not delivered" in x or "local error" in x for x in w2.logs), w2.logs
+
+
+@pytest.mark.parametrize(
+    "refusal",
+    [http(400), http(409, "job_closed", state=LOST)],
+    ids=["dropped_4xx", "job_closed"],
+)
+def test_b5_3_a_dropped_item_clears_the_local_error_mark(tmp_path, fast, refusal):
+    """# batch-5 #3 로그 단계가 예상 못 한 예외로 실패해 `local_error` 가 섰다. 다음 시도가 4xx 로
+    버려지거나 409 `job_closed` 로 지워지면 그 표식은 낡았다. 지우지 않으면 끝난 지 300초가
+    지난 잡에서 산출물을 올려 보지도 않고 finish 를 먼저 보낸다(산출물 `upload_failed`)."""
+    clock = WClock()
+    fake = FakeServer(clock)
+    w, ob, s = live_sender(tmp_path, fake, clock)
+    tar = tmp_path / "bundle.tar"
+    tar.write_bytes(bundle_bytes())
+    ob.append(b"one\n")
+    ob.bundle = {"path": str(tar), "state": "pending", "sha256": None}
+    end_job(w, ob, artifacts={"state": "ready", "file_count": 1, "total_bytes": 2})
+    fake.script["log"] = [RuntimeError("boom"), refusal]
+    with pytest.raises(RuntimeError):
+        s.attempt("log")
+    assert s._unexpected("log", RuntimeError("boom")) is False  # 보내는 스레드가 하는 일
+    assert s.attempt("log") is True and ob.log_stopped
+    clock.advance(rw.FINISH_HOLD_SECONDS + 1)
+    assert s.next_step() == "artifacts"
+
+
+def test_b5_5_a_a_failed_save_of_a_dead_queue_names_the_dead_session(tmp_path, fast, monkeypatch):
+    """# batch-5 #5 죽은 세션 D 의 큐에서 저장이 실패하면 그 줄도 다른 D 의 줄처럼 `dead session`
+    으로 시작한다 — `#7` 만 보고는 이 프로세스의 잡 #7 과 구별할 수 없다."""
+    import errno
+
+    clock = WClock()
+    fake = FakeServer(clock)
+    w1 = wworker(tmp_path, fake, clock)
+    w1.prepare_sessions()
+    ended_queue(w1, 7, b"x\n")
+    sid = w1.session_id
+    die(w1)
+    w2 = restart(tmp_path, fake, clock)
+    (sender,) = w2.dead_queues()
+
+    def full(src: Any, dst: Any) -> None:
+        raise OSError(errno.ENOSPC, "No space left on device")
+
+    monkeypatch.setattr(rw.os, "replace", full)
+    sender.ob.save()
+    said = [x for x in w2.logs if "cannot save" in x]
+    assert len(said) == 1, w2.logs
+    assert said[0].startswith(f"dead session {sid[:8]} #7 report: cannot save outbox.json"), said
+
+
+def test_b5_5_b_a_folder_that_cannot_be_synced_is_said_once(tmp_path, fast, monkeypatch):
+    """# batch-5 #5 폴더 fsync 가 실패하면(일부 파일 시스템) 지금까지는 조용히 삼켰다. 이름 바꾸기는
+    끝났으니 저장은 실패가 아니지만, OS 가 죽으면 마지막 저장을 잃을 수 있다 — 프로세스마다 한
+    번 말한다."""
+    import errno
+    import stat as stat_mod
+
+    clock = WClock()
+    fake = FakeServer(clock)
+    w1 = wworker(tmp_path, fake, clock)
+    w1.prepare_sessions()
+    ended_queue(w1, 7, b"x\n")
+    die(w1)
+    real_fsync = os.fsync
+
+    def fsync(fd: int) -> None:
+        if stat_mod.S_ISDIR(os.fstat(fd).st_mode):
+            raise OSError(errno.EINVAL, "Invalid argument")
+        real_fsync(fd)
+
+    monkeypatch.setattr(rw.os, "fsync", fsync)
+    w2 = restart(tmp_path, fake, clock)  # owner.json
+    (sender,) = w2.dead_queues()
+    sender.ob.save()
+    sender.ob.save()
+    w2._write_claim(8, False, 90)
+    said = [x for x in w2.logs if "cannot sync" in x]
+    assert said == [
+        "session folder: cannot sync a folder to disk (Invalid argument) — an OS crash may lose"
+        " the last saved report"
+    ], w2.logs
+    assert not any("cannot save" in x for x in w2.logs), w2.logs
+    assert rw._read_json(w2._job_dir(8) / "claim.json") is not None
+
+
+def test_b5_6_a_a_finish_stuck_on_an_unexpected_error_is_dropped_after_24h(tmp_path, fast):
+    """# batch-5 #6 finish 단계 자체가 예상 못 한 예외로 계속 실패해도 재전송 창(24시간)이 끝나면
+    큐 항목을 버리고 한 줄을 남긴다 — 보내는 스레드가 끝나야 레인이 풀린다(§4.5 「재전송 창」)."""
+    clock = WClock()
+    fake = FakeServer(clock, tick=3 * 3600)
+    w, ob, s = live_sender(tmp_path, fake, clock)
+    ob.append(b"a\n")
+    end_job(w, ob)
+    fake.script["finish"] = [RuntimeError("boom")] * 1000
+    s.start()
+    try:
+        s.thread.join(5)
+        assert not s.thread.is_alive(), "the sender retries the finish past 24h"
+    finally:
+        s.halt.set()
+    assert ob.done
+    assert "#7 report: finish not delivered in 24h — dropping the report" in w.logs, w.logs
+    assert sum(1 for x in w.logs if "unexpected RuntimeError" in x) == 1, w.logs
+
+
+def test_b5_6_b_a_readable_outbox_of_a_dead_session_is_not_set_aside(tmp_path, fast):
+    """# batch-5 #6 못 읽는 outbox 만 격리 폴더로 간다 — 읽히는 outbox 는 그 자리에서 보내고, 줄도
+    격리 폴더도 없다."""
+    clock = WClock()
+    fake = FakeServer(clock)
+    w1 = wworker(tmp_path, fake, clock)
+    w1.prepare_sessions()
+    ended_queue(w1, 7, b"one\ntwo\n")
+    job_dir = w1._job_dir(7)
+    assert job_dir is not None
+    die(w1)
+    w2 = restart(tmp_path, fake, clock)
+    assert [s.job_id for s in w2.dead_queues()] == [7]
+    assert not any("outbox unreadable" in x for x in w2.logs), w2.logs
+    assert not list((w2.config.data_path / rw.SESSIONS_DIR).glob("unreadable-*"))
+    assert (job_dir / rw.STREAM_FILE).read_bytes() == b"one\ntwo\n"
+    assert rw.JobOutbox.load(job_dir) is not None

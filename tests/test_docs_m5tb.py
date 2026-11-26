@@ -386,3 +386,27 @@ def test_p6_1_the_report_queue_section_says_the_masking_limit_and_the_new_lines(
     assert "A resent copy of the finish that closed the job is not a late result" in body
     assert "`#N late result recorded`" in body and "`#N hold released`" in body
     assert "`#N late result not recorded — the server keeps the result it already has`" in body
+
+
+def test_b5_the_report_queue_section_says_ok_at_local_errors_and_a_2xx_that_is_not_json():
+    """# batch-5 #1 · #2 · #4 · #5 `ok_at.json` 은 fsync 하지 않는다, 폴더 fsync 실패의 줄, 등록
+    대기 300초는 서버의 응답만 센다(결정 337), JSON 이 아닌 2xx 에 register 는 종료 2, 죽은 세션
+    큐의 저장 실패 줄."""
+    body = flat(section(CONFIGURATION, "The worker's log and its report queue"))
+    assert "`ok_at.json`" in body and "is replaced the same way but not synced" in body
+    assert (
+        "`session folder: cannot sync a folder to disk (<error>) — an OS crash may lose the last"
+        " saved report`"
+    ) in body
+    assert (
+        "The report queue, claim and heartbeat try again; register stops the worker with exit 2,"
+        " and the service manager starts it again."
+    ) in body
+    assert "the worker sends the same item again" not in body
+    assert "Only time the server answers counts toward the 300 s" in body
+    assert "time the spooled log cannot be read does" not in body
+    assert (
+        "`dead session <id> job #N: stopped on a local error (<what>) — registering without"
+        " waiting; job #N will close as restarted-without-job`"
+    ) in body
+    assert "for a queue a stopped process left, the line starts with `dead session <id>`" in body
