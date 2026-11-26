@@ -6836,17 +6836,9 @@ MUTANTS = (
             "test_p63_1_an_unsent_finish_while_stopping_keeps_the_job_folder_and_parks_nothing",
         ),
     ),
-    Mutant(
-        # P6-2 #3 409 뒤의 좁은 확인을 `keep` 없이 보낸다 — 못 보낸 것을 몰라 폴더를 지운다
-        name="narrow-confirm-without-keep",
-        path="src/remote_ci_monitor/remote_worker.py",
-        old='                self.report(call, f"#{job_id} finish", keep=keep, job_id=job_id)\n',
-        new='                self.report(call, f"#{job_id} finish", job_id=job_id)\n',
-        tests=(
-            "tests/test_worker_session_m5tb.py::"
-            "test_p62_3_a_narrow_confirm_that_cannot_be_sent_is_retried_and_keeps_the_job_folder",
-        ),
-    ),
+    # P6-2 #3 의 narrow-confirm-without-keep 은 M5t-b PR2 에서 report() 가 사라져 지웠다.
+    # 같은 규칙(펜싱 뒤 좁은 확인이 보내질 때까지 폴더 유지)은
+    # unsent-finish-folder-dropped 가 잡는다
     Mutant(
         # P6-3 #2 반복하지 않는 표식 잡의 잡 문서가 얼린 반복 상한을 그대로 보인다
         name="irreversible-retry-limit-shown",

@@ -782,10 +782,15 @@ def test_registering_again_waits_for_a_retry_already_running(rig, monkeypatch):
     assert rig.join() == 0
 
 
-def test_a_job_not_reported_is_given_up_after_the_limit_without_a_drain(rig, monkeypatch):
-    # M5t-b PR2(§4.5 · 결정 264 · 324): 드레인이 아니면 `DRAIN_REPORT_SECONDS` 로 버리지 않는다. 그
-    # 잡의 큐는 끝난 뒤 24시간 창(5xx 면 300초 뒤 finish 먼저)까지 다시 보내고, 그동안 heartbeat
-    # 목록에 남는다(잊힌 잡으로 닫히지 않게 — F10). 옛 「giving up」 길은 없다
+def test_a_job_not_reported_is_kept_and_reported_later_without_a_drain(rig, monkeypatch):
+    """드레인이 아니면 보고 못 한 잡을 `DRAIN_REPORT_SECONDS` 뒤 버리지 않고 남겨 두었다가 보고한다.
+
+    M5q 에서는 「상한(1분) 뒤 포기」였다. M5t-b 가 그 계약을 바꿨다 — 근거는
+    `docs/m5tb-workplan.md` §4.5 「재전송 창」(잡이 끝난 뒤 `RETRANSMIT_SECONDS` 24시간, 결정 264),
+    같은 절 「레인은 자기 잡의 큐가 끝날 때까지 다음 claim 을 하지 않는다 … heartbeat 의 `jobs`
+    목록에는 큐가 안 끝난 잡이 남는다」(F10), 「오늘의 … `_unreported`, `REPORT_RETRIES` … 길은 이
+    큐로 바뀐다」, 결정 272 · 324, 시나리오 RL19. 옛 「giving up」 길은 없다.
+    """
     monkeypatch.setattr(remote_worker, "BACKOFF_START_SECONDS", 0.05)  # M5t-b 보고 큐의 백오프
     monkeypatch.setattr(remote_worker, "BACKOFF_MAX_SECONDS", 0.05)
     monkeypatch.setattr(remote_worker, "DRAIN_REPORT_SECONDS", 1.5)
