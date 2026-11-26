@@ -254,6 +254,127 @@ def test_ob2_doctor_prefers_the_installed_copy_of_this_configs_service_file(
     assert not any("--config" in w for w in doc["warnings"]), doc["warnings"]
 
 
+# PR #277 검토(격리 검증자, head e5a350d): 새 탐색 단계는 예전에 성공하던 경우의 결과를 바꾸지
+# 않는다 — 더할 뿐이다. 기본 설정 폴더면 그 단계가 없고, 설치본이 setup 사본을 이기고, 여럿이거나
+# 못 읽으면 고르지 않고 예전 순서로 간다.
+
+
+def _hand_edited(staged: Path, installed: Path) -> None:
+    """setup 의 사본을 설치 자리에 옮긴 뒤 손으로 고친 설치본 — 바이트가 다르고 `--config` 는
+    상대 경로다(서비스 관리자가 읽는 것은 이 파일이다)."""
+    doc = plistlib.loads(staged.read_bytes())
+    args = list(doc["ProgramArguments"])
+    args[args.index("--config") + 1] = "server.toml"
+    doc["ProgramArguments"] = args
+    doc["EnvironmentVariables"]["PATH"] = "/opt/hand-edited/bin:/usr/bin:/bin"
+    installed.parent.mkdir(parents=True, exist_ok=True)
+    installed.write_bytes(plistlib.dumps(doc))
+
+
+def _default_install(cfg: Path, tmp_path: Path, port: int) -> tuple[Path, Path]:
+    """진짜 `rcm setup` 이 `--config` 없이 기본 설정 폴더에 만든 설치 — 서비스 파일은
+    `<cfg>/service/` 에 둔다."""
+    fake = Fake()
+    assert go(fake, *coordinator_args(tmp_path / "data")) == 0, fake.text
+    conf = cfg / "server.toml"
+    staged = cfg / "service" / f"{TRIAL_LABEL}.plist"
+    assert conf.is_file() and staged.is_file(), fake.text
+    _server_toml(conf, port)
+    return conf, staged
+
+
+def test_ob2_default_config_measures_the_hand_edited_installed_copy(
+    home, cfg, trial_server, tmp_path, capsys
+):
+    """# OB2 — 기본 설정 파일을 `--config` 로 주어도 예전처럼 설치된 사본을 잰다(6-B-V2). 손으로
+    고친 설치본(바이트가 다르고 상대 경로 `--config`)이 setup 사본에 졌다(PR #277 검토 MED 1)."""
+    conf, staged = _default_install(cfg, tmp_path, trial_server.port)
+    installed = home / "Library" / "LaunchAgents" / f"{TRIAL_LABEL}.plist"
+    _hand_edited(staged, installed)
+    _code, raw = _doctor(capsys, "--role", "coordinator-worker", "--config", str(conf), "--json")
+    doc = json.loads(raw)
+    assert doc["service"]["file"] == f"~/Library/LaunchAgents/{TRIAL_LABEL}.plist", doc["service"]
+    assert doc["service"]["path"] == "/opt/hand-edited/bin:/usr/bin:/bin", doc["service"]
+
+
+def test_ob2_default_config_keeps_the_old_order_over_a_staged_only_file(
+    home, cfg, trial_server, tmp_path, capsys
+):
+    """# OB2 — 기본 설정 폴더의 `service/` 는 예전 순서의 마지막 자리다. 설치하지 않은 setup 사본이
+    표준 라벨의 설치된 서비스를 이기지 않는다 — 예전처럼 설치 자리를 먼저 본다."""
+    conf, _staged = _default_install(cfg, tmp_path, trial_server.port)
+    _server_plist(home, conf)
+    _code, raw = _doctor(capsys, "--role", "coordinator-worker", "--config", str(conf), "--json")
+    doc = json.loads(raw)
+    assert doc["service"]["file"] == f"~/Library/LaunchAgents/{PROD_LABEL}.plist", doc["service"]
+    assert doc["service"]["path"] == "/usr/bin:/bin", doc["service"]
+
+
+def test_ob2_trial_config_measures_the_installed_copy_of_the_same_label(
+    home, trial_server, tmp_path, capsys
+):
+    """# OB2 — 기본이 아닌 `--config` 에서도 같은 라벨로 설치 자리에 사본이 있으면 그 사본을 잰다
+    — 바이트 · `--config` 를 견주지 않는다(설치본 우선, 6-B-V2)."""
+    trial, staged = _trial_install(tmp_path, trial_server.port)
+    installed = home / "Library" / "LaunchAgents" / f"{TRIAL_LABEL}.plist"
+    _hand_edited(staged, installed)
+    _code, raw = _doctor(capsys, "--role", "coordinator-worker", "--config", str(trial), "--json")
+    doc = json.loads(raw)
+    assert doc["service"]["file"] == f"~/Library/LaunchAgents/{TRIAL_LABEL}.plist", doc["service"]
+    assert doc["service"]["path"] == "/opt/hand-edited/bin:/usr/bin:/bin", doc["service"]
+
+
+def test_ob2_several_files_next_to_the_config_fall_back_to_the_old_order(
+    home, trial_server, tmp_path, capsys
+):
+    """# OB2 — 설정 옆 `service/` 에 이 역할의 파일이 여럿이면(예전 `--label` setup 이 남긴 낡은
+    파일 + 새 파일) 새 단계는 고르지 않는다. 사용법 오류(exit 2)를 새로 내지 않고 예전 순서로
+    간다(PR #277 검토 MED 2)."""
+    trial, staged = _trial_install(tmp_path, trial_server.port)
+    (staged.parent / "old.rcm.server.plist").write_bytes(staged.read_bytes())
+    _server_plist(home, home / ".config" / "rcm" / "server.toml")
+    argv = ("--role", "coordinator-worker", "--config", str(trial))
+    code, out = _doctor(capsys, *argv)
+    assert code != 2 and "several service files" not in out, out
+    _code, raw = _doctor(capsys, *argv, "--json")
+    doc = json.loads(raw)
+    assert doc["service"]["file"] == f"~/Library/LaunchAgents/{PROD_LABEL}.plist", doc["service"]
+    assert set(doc["service"]) == {"file", "manager", "path", "env_names"}, doc["service"]
+
+
+def test_ob2_an_unreadable_file_next_to_the_config_falls_back_to_the_old_order(
+    home, trial_server, tmp_path, capsys
+):
+    """# OB2 — 그 폴더의 파일을 못 읽으면 새 단계는 고르지 않고 예전 순서로 간다. 예전에 보지 않던
+    자리라 「서비스 파일 없음」(None)이나 새 「판정 못 함」을 내지 않는다(PR #277 검토 MED 2)."""
+    trial, staged = _trial_install(tmp_path, trial_server.port)
+    (staged.parent / "broken.rcm.server.plist").write_bytes(b"\x00not a plist")
+    _server_plist(home, home / ".config" / "rcm" / "server.toml")
+    _code, raw = _doctor(capsys, "--role", "coordinator-worker", "--config", str(trial), "--json")
+    doc = json.loads(raw)
+    assert doc["service"]["file"] == f"~/Library/LaunchAgents/{PROD_LABEL}.plist", doc["service"]
+    assert not any("broken.rcm.server" in u for u in doc["undecided"]), doc["undecided"]
+
+
+def test_ob2_a_given_service_file_names_only_that_file(home, trial_server, tmp_path, capsys):
+    """# OB2 — `--service-file` 로 준 때는 파일 하나만 봤다. 「no service starts rcm with
+    --config X」 는 과장이다 — 준 파일이 다른 설정으로 뜬다고만 말한다(PR #277 검토 LOW)."""
+    prod_config = home / ".config" / "rcm" / "server.toml"
+    given = _server_plist(home, prod_config)
+    trial = _server_toml(tmp_path / "rcm-test" / "server.toml", trial_server.port)
+    argv = ("--role", "coordinator-worker", "--config", str(trial), "--service-file", str(given))
+    _code, out = _doctor(capsys, *argv)
+    warn = [ln for ln in out.splitlines() if ln.startswith("warn  ") and "--config" in ln]
+    assert len(warn) == 1, out
+    line = warn[0]
+    assert "no service starts" not in line and "another install" not in line, line
+    assert (
+        f"the given service file (~/Library/LaunchAgents/{PROD_LABEL}.plist) starts rcm with "
+        f"--config ~/.config/rcm/server.toml, not {trial}" in line
+    ), line
+    assert f"{trial} was measured as given" in line, line
+
+
 # ── OB3: setup 이 찍는 명령의 uid ──────────────────────────────────────────────
 
 
