@@ -18,18 +18,18 @@ of a key bumps that number and is listed here.
   reference also say what happens when several rcm servers answer: a client stops and asks for
   `--server` or `server` in `client.toml`, a worker picks by `server_name`, and
   `rcm setup --role client` never searches the network.
-  ([#PR](https://github.com/monocsp/remote_ci_monitor/pulls))
+  ([#281](https://github.com/monocsp/remote_ci_monitor/pull/281))
 
 ### Fixed
 - **rcm on Windows itself says to use WSL instead of crashing.** Every command, `rcm version`
   included, died with a `ModuleNotFoundError` traceback there. It now prints
   `rcm: native Windows is not supported — install and run rcm inside WSL …` and exits 2. Native
   Windows stays out of scope.
-  ([#PR](https://github.com/monocsp/remote_ci_monitor/pulls))
+  ([#281](https://github.com/monocsp/remote_ci_monitor/pull/281))
 - **«No rcm server found» says what to do next.** `rcm discover`, the client commands and
   `rcm worker` now add `give its address with --server http://<address>:8787`, and inside WSL
   also that WSL2's default NAT network does not pass multicast.
-  ([#PR](https://github.com/monocsp/remote_ci_monitor/pulls))
+  ([#281](https://github.com/monocsp/remote_ci_monitor/pull/281))
 - **`rcm discover` finds every rcm server on the computer it runs on.** It used to see only the
   ones that could hear multicast on the network: a second or third server started from a
   terminal on the same Mac never heard the question, so `rcm discover` listed only the server
