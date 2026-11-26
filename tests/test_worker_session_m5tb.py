@@ -8,13 +8,22 @@
 
 from __future__ import annotations
 
+import json
+import os
 import secrets
+import signal
+import subprocess
+import sys
 import threading
+import time
+from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any
 
 import pytest
 
 from remote_ci_monitor import __version__
+from remote_ci_monitor import remote_worker as rw
 from remote_ci_monitor.client import ClientError
 from remote_ci_monitor.config import WorkerConfig, parse_preset
 from remote_ci_monitor.core.model import CANCELLING, LOST, QUEUED, RUNNING, SUCCEEDED
@@ -569,6 +578,15 @@ def test_w5_a_fenced_worker_process_stops_and_exits_zero(srv, tmp_path):
         server=url, token=srv.tokens["build-02"], data_dir=str(tmp_path / "w"), lanes=1
     )
     w = RemoteWorker(cfg, log=lambda m: None)
+    register = w.register
+
+    def short_polls() -> dict[str, Any]:
+        # 레인의 long-poll 을 1초로 — 펜싱 뒤 레인이 20초 claim 을 다 기다리지 않게(시험 시간만)
+        answer = register()
+        w.claim_wait_seconds = 1
+        return answer
+
+    w.register = short_polls  # type: ignore[method-assign]
     out: dict[str, Any] = {}
     t = threading.Thread(target=lambda: out.update(code=w.run()), daemon=True)
     t.start()
@@ -586,3 +604,301 @@ def test_w5_a_fenced_worker_process_stops_and_exits_zero(srv, tmp_path):
 
 def test_parse_preset_accepts_the_irreversible_key_used_here():
     assert parse_preset(sh("ship", "echo ship", irreversible=True)).irreversible is True
+
+
+# ── 세션 폴더 · 고아 정리(§4.4 · RL14 b · RL15 · RL31 · RL38) ─────────────────
+
+
+def _spawn_group(argv: list[str]) -> subprocess.Popen:
+    p = subprocess.Popen(argv, start_new_session=True, stdout=subprocess.DEVNULL)
+    # 진짜 고아는 init 이 거둔다 — 시험의 자식이 좀비로 남아 그룹을 붙들지 않게 곧바로 거둔다
+    threading.Thread(target=p.wait, daemon=True).start()
+    return p
+
+
+def _kill(pid: int) -> None:
+    try:
+        os.killpg(pid, signal.SIGKILL)
+    except (ProcessLookupError, PermissionError):
+        pass
+
+
+def _dead_job(tmp_path: Path, proc: dict[str, Any] | None, job_id: int = 5) -> Path:
+    d = tmp_path / "jobs" / str(job_id)
+    d.mkdir(parents=True)
+    if proc is not None:
+        (d / "proc.json").write_text(json.dumps(proc), encoding="utf-8")
+    return d
+
+
+def _gone(p: subprocess.Popen, seconds: float = 5.0) -> bool:
+    for _ in range(int(seconds / 0.02)):
+        if p.poll() is not None:
+            return True
+        time.sleep(0.02)
+    return False
+
+
+def test_rl15_linux_start_reads_field_22_after_the_last_parenthesis(tmp_path):
+    root = tmp_path / "proc"
+    (root / "42").mkdir(parents=True)
+    fields = " ".join(["S"] + [str(n) for n in range(4, 22)] + ["987654"] + ["0"] * 30)
+    (root / "42" / "stat").write_text(f"42 (we) ird (name)) {fields}\n", encoding="ascii")
+    assert rw.linux_start(42, root) == "linux:987654"
+    assert rw.linux_start(43, root) is None
+
+
+def test_rl15_ps_is_read_in_the_c_locale_and_utc_and_a_locale_answer_is_unknown(monkeypatch):
+    seen: dict[str, Any] = {}
+
+    def fake_run(argv, **kw):
+        seen.update(kw["env"])
+        return subprocess.CompletedProcess(argv, 0, stdout=seen["answer"], stderr="")
+
+    monkeypatch.setattr(rw.subprocess, "run", fake_run)
+    seen["answer"] = " Wed Nov 25 18:32:46 2026\n"
+    assert rw.ps_start(1) == "ps:Wed Nov 25 18:32:46 2026"
+    assert seen.get("LC_ALL") == "C" and seen.get("TZ") == "UTC"
+    seen["answer"] = "2026년 11월 26일 목요일 03시 32분 46초\n"
+    assert rw.ps_start(1) is None
+
+
+def test_rl15_the_same_group_is_stopped_and_confirmed(tmp_path):
+    p = _spawn_group(["sleep", "30"])
+    try:
+        d = _dead_job(tmp_path, {"pgid": p.pid, "start": rw.process_start(p.pid)})
+        logs: list[str] = []
+        assert rw.judge_orphan(d, 1.0, logs.append) == rw.CONFIRMED
+        assert _gone(p)
+        assert any("stopped process group" in m for m in logs)
+    finally:
+        _kill(p.pid)
+
+
+def test_rl15_a_reused_pid_is_left_alone_and_confirmed(tmp_path):
+    p = _spawn_group(["sleep", "30"])
+    try:
+        other = "ps:Mon Jan  1 00:00:00 2001" if sys.platform != "linux" else "linux:1"
+        d = _dead_job(tmp_path, {"pgid": p.pid, "start": other})
+        assert rw.judge_orphan(d, 1.0, lambda m: None) == rw.CONFIRMED
+        assert p.poll() is None  # 무관한 프로세스가 산다
+    finally:
+        _kill(p.pid)
+
+
+def test_rl31_identity_unknown_cases_send_no_signal(tmp_path, monkeypatch):
+    # (c) pgid null — 띄우는 순간 죽었을 수 있다
+    assert rw.judge_orphan(_dead_job(tmp_path, {"pgid": None, "start": None}, 1), 1, print) == (
+        rw.UNKNOWN
+    )
+    # proc.json 이 없다 — 띄운 적 없음(결정 333)
+    assert rw.judge_orphan(_dead_job(tmp_path, None, 2), 1, print) == rw.CONFIRMED
+    # (a) 신원을 못 읽는다
+    p = _spawn_group(["sleep", "30"])
+    try:
+        d = _dead_job(tmp_path, {"pgid": p.pid, "start": rw.process_start(p.pid)}, 3)
+        monkeypatch.setattr(rw, "process_start", lambda pid: None)
+        assert rw.judge_orphan(d, 1, lambda m: None) == rw.UNKNOWN
+        assert p.poll() is None
+    finally:
+        _kill(p.pid)
+
+
+def test_rl31_a_leaderless_group_is_unknown_and_left_alone(tmp_path):
+    """(b) 리더(pid = pgid)가 죽고 멤버만 산다(F59 · W13)."""
+    pidfile = tmp_path / "member.pid"
+    code = (
+        "import os, time\n"
+        "if os.fork() == 0:\n"
+        f"    open({str(pidfile)!r}, 'w').write(str(os.getpid())); time.sleep(30); os._exit(0)\n"
+        f"while not os.path.exists({str(pidfile)!r}): time.sleep(0.02)\n"
+    )
+    leader = _spawn_group([sys.executable, "-c", code])
+    leader.wait(10)
+    member = int(pidfile.read_text())
+    try:
+        d = _dead_job(tmp_path, {"pgid": leader.pid, "start": "ps:Mon Jan  1 00:00:00 2001"})
+        assert rw.judge_orphan(d, 1, lambda m: None) == rw.UNKNOWN
+        os.kill(member, 0)  # 아직 산다
+    finally:
+        _kill(leader.pid)
+
+
+def _worker(tmp_path: Path, fake: Any, **cfg: Any) -> RemoteWorker:
+    config = WorkerConfig(
+        server="http://srv", token="t", data_dir=str(tmp_path / "w"), lanes=1, **cfg
+    )
+    w = RemoteWorker(config, client=fake, log=lambda m: None)
+    w.config.data_path.mkdir(parents=True, exist_ok=True)
+    return w
+
+
+class _Who:
+    """whoami · register · finish 만 하는 대역."""
+
+    server = "http://srv"
+
+    def __init__(self, name: str = "build-02") -> None:
+        self.name = name
+        self.registered: list[dict[str, Any]] = []
+        self.finished: list[tuple[str, int, dict[str, Any]]] = []
+        self.session_id = ""
+
+    def whoami(self) -> dict[str, Any]:
+        return {"name": self.name, "kind": "worker", "admin": False}
+
+    def register(self, **kw: Any) -> dict[str, Any]:
+        self.registered.append(kw)
+        return {"name": self.name, "heartbeat_seconds": 5, "worker_timeout_seconds": 60}
+
+    def finish(self, job_id: int, outcome: str, rc: Any, summary: Any, **extra: Any) -> dict:
+        self.finished.append((self.session_id, job_id, {"outcome": outcome, **extra}))
+        return {}
+
+
+def _dead_folder(w: RemoteWorker, owner: dict[str, str] | None, jobs: dict[int, Any]) -> Path:
+    sid = secrets.token_hex(16)
+    d = w.config.data_path / rw.SESSIONS_DIR / sid
+    d.mkdir(parents=True)
+    (d / "lock").write_text("", encoding="utf-8")
+    if owner is not None:
+        (d / "owner.json").write_text(json.dumps(owner), encoding="utf-8")
+    for jid, proc in jobs.items():
+        j = d / "jobs" / str(jid)
+        j.mkdir(parents=True)
+        (j / "claim.json").write_text(
+            json.dumps({"irreversible": True, "disconnect_grace_seconds": 600}), encoding="utf-8"
+        )
+        if proc is not None:
+            (j / "proc.json").write_text(json.dumps(proc), encoding="utf-8")
+    return d
+
+
+def test_rl14_dead_sessions_go_to_previous_or_unverified_in_the_first_register(tmp_path):
+    fake = _Who()
+    w = _worker(tmp_path, fake)
+    owner = rw.owner_of(w.config, "build-02")
+    gone = _dead_folder(w, owner, {3: None})  # 띄운 적 없음 → 확인됨
+    unsure = _dead_folder(w, owner, {4: {"pgid": None, "start": None}})  # 모름
+    w.prepare_sessions()
+    w.register()
+    assert fake.registered[0].get("previous_sessions") == [gone.name]
+    assert fake.registered[0]["unverified_sessions"] == [unsure.name]
+    w.register()  # 다시 등록할 때는 싣지 않는다
+    assert "previous_sessions" not in fake.registered[1]
+    own = w.session_dir
+    assert own is not None and own.name == w.session_id
+    assert json.loads((own / "owner.json").read_text()) == owner
+    assert "t" not in json.dumps(owner).replace("token_name", "")  # 토큰 값은 안 적는다
+
+
+def test_rl38_a_foreign_or_ownerless_folder_is_not_locked_judged_or_touched(tmp_path):
+    p = _spawn_group(["sleep", "30"])
+    try:
+        fake = _Who()
+        w = _worker(tmp_path, fake)
+        proc = {"pgid": p.pid, "start": rw.process_start(p.pid)}
+        other = rw.owner_of(
+            WorkerConfig(server="http://other", token="x", data_dir=str(tmp_path)), "tester"
+        )
+        foreign = _dead_folder(w, other, {9: proc})
+        ownerless = _dead_folder(w, None, {10: proc})
+        before = {
+            f: f.read_bytes() for d in (foreign, ownerless) for f in d.rglob("*") if f.is_file()
+        }
+        w.prepare_sessions()
+        assert p.poll() is None  # 남의 고아를 죽이지 않는다
+        assert w.previous_sessions == [] and w.unverified_sessions == []
+        after = {
+            f: f.read_bytes() for d in (foreign, ownerless) for f in d.rglob("*") if f.is_file()
+        }
+        assert after == before
+    finally:
+        _kill(p.pid)
+
+
+def test_rl38_the_sweep_deletes_only_old_and_lockable_folders(tmp_path):
+    fake = _Who()
+    w = _worker(tmp_path, fake)
+    old = _dead_folder(w, None, {})
+    held = _dead_folder(w, None, {})
+    fresh = _dead_folder(w, None, {})
+    week = time.time() - 8 * 86400
+    for d in (old, held):
+        os.utime(d, (week, week))
+    fd = rw.try_lock(held / "lock")
+    try:
+        rw.sweep_sessions(w.config.data_path)
+        assert not old.exists() and held.exists() and fresh.exists()
+    finally:
+        assert fd is not None
+        os.close(fd)
+
+
+def test_rl31_the_recheck_confirms_and_sends_one_narrow_finish_as_the_dead_session(tmp_path):
+    fake = _Who()
+    w = _worker(tmp_path, fake)
+    owner = rw.owner_of(w.config, "build-02")
+    d = _dead_folder(w, owner, {4: {"pgid": None, "start": None}})
+    w.prepare_sessions()
+    (dead,) = w.dead_sessions
+    assert w.recheck(dead, 4) == rw.UNKNOWN and fake.finished == []  # 그래도 모름 — 안 보냄
+    (d / "jobs" / "4" / "proc.json").unlink()  # 이제 확인됨(띄운 적 없음)
+    assert w.recheck(dead, 4) == rw.CONFIRMED
+    (sent,) = fake.finished
+    assert sent[0] == d.name and sent[1] == 4  # D 의 세션 id 로
+    assert sent[2] == {
+        "outcome": LOST,
+        "summary_code": "worker_replaced",
+        "summary_args": {},
+        "group_gone": True,
+    }
+    assert fake.session_id == w.session_id  # 살아 있는 세션의 클라이언트는 그대로
+
+
+def test_rl31_the_recheck_is_scheduled_at_ok_at_plus_g_minus_m(tmp_path, monkeypatch):
+    fake = _Who()
+    w = _worker(tmp_path, fake)
+    owner = rw.owner_of(w.config, "build-02")
+    d = _dead_folder(w, owner, {4: {"pgid": None, "start": None}})
+    ok = w._epoch() - 100
+    (d / "ok_at.json").write_text(
+        json.dumps({"wall": datetime.fromtimestamp(ok, UTC).isoformat()}), encoding="utf-8"
+    )
+    timers: list[float] = []
+
+    class T:
+        def __init__(self, delay, fn, args=()):
+            timers.append(delay)
+            self.daemon = False
+            self.name = ""
+
+        def start(self):
+            pass
+
+    monkeypatch.setattr(rw.threading, "Timer", T)
+    w.prepare_sessions()
+    w.schedule_rechecks()
+    (delay,) = timers
+    assert abs(delay - (600 - 35 - 100)) < 2  # D.ok_at + G − m − 지금
+
+
+def test_rl38_the_session_files_follow_the_job(tmp_path):
+    fake = _Who()
+    w = _worker(tmp_path, fake)
+    w.prepare_sessions()
+    w._write_claim(7, True, 600)
+    w._write_proc(7, None)
+    jd = w.session_dir / "jobs" / "7"
+    assert json.loads((jd / "proc.json").read_text()) == {"pgid": None, "start": None}
+    w._write_proc(7, os.getpid())
+    proc = json.loads((jd / "proc.json").read_text())
+    assert proc["pgid"] == os.getpid() and rw._start_valid(proc["start"])
+    assert json.loads((jd / "claim.json").read_text()) == {
+        "irreversible": True,
+        "disconnect_grace_seconds": 600,
+    }
+    w.mark_ok(w._epoch(), 10_000.0)
+    assert "wall" in json.loads((w.session_dir / "ok_at.json").read_text())
+    w._forget_job_dir(7)
+    assert not jd.exists()
