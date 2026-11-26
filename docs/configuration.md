@@ -1527,7 +1527,7 @@ An irreversible preset cannot have [`[presets.retry]`](#trying-again-later-prese
 runs the command again, so the server refuses to load such a preset (`irreversible presets cannot
 have [retry]`). A job submitted with a retry before you marked its preset keeps that retry, but once
 it is claimed as irreversible it is never retried: its retry exit code ends it `failed`, with no
-next attempt.
+next attempt, and its job document shows `max_attempts: null`.
 
 This key is not the release checks' irreversible mode (an input value such as `mode = upload` that
 a [release profile](#release-profile) never makes the default). `irreversible = true` marks the

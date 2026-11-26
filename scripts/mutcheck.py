@@ -6853,6 +6853,20 @@ MUTANTS = (
             "test_p62_3_a_narrow_confirm_that_cannot_be_sent_is_retried_and_keeps_the_job_folder",
         ),
     ),
+    Mutant(
+        # P6-3 #2 반복하지 않는 표식 잡의 잡 문서가 얼린 반복 상한을 그대로 보인다
+        name="irreversible-retry-limit-shown",
+        path="src/remote_ci_monitor/core/status.py",
+        old=(
+            "            and job.irreversible is not True"
+            "  # mutcheck: irreversible-retry-limit-shown\n"
+        ),
+        new="",
+        tests=(
+            "tests/test_irreversible_hold_m5tb.py::"
+            "test_p63_2_a_job_claimed_as_irreversible_shows_no_retry_limit",
+        ),
+    ),
 )
 
 

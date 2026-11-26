@@ -270,3 +270,10 @@ def test_gap5_operating_says_a_worker_whose_job_holds_a_group_is_not_forgotten()
     text = flat(OPERATING)
     assert "neither is a worker whose job holds a group" in text
     assert "confirm the job's processes are gone and release the hold" in text
+
+
+def test_p63_2_the_irreversible_section_says_its_job_shows_no_retry_limit():
+    """# P6-3 #2 표식 잡으로 claim 된 잡은 반복하지 않는다 — 잡 문서의
+    `max_attempts` 가 null 이다."""
+    body = flat(section(CONFIGURATION, IRREVERSIBLE))
+    assert "its job document shows `max_attempts: null`" in body

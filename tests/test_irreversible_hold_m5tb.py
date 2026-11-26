@@ -286,6 +286,27 @@ def test_gap4_an_irreversible_preset_cannot_have_retry():
     assert parse_preset(base).retry is not None
 
 
+@pytest.mark.parametrize("irreversible, shown", [(True, None), (False, 3), (None, 3)])
+def test_p63_2_a_job_claimed_as_irreversible_shows_no_retry_limit(irreversible, shown):
+    """# P6-3 #2 표식 전에 `[retry]` 로 제출된 잡은 반복 상한(3)을 얼린다. 표식 잡으로 claim
+    되면 반복하지 않는다(`Job.retries_on`, P6-2 #1) — 잡 문서의 `max_attempts` 가 3 을 보이면
+    「3번까지 다시 돈다」로 읽힌다. 반복하지 않는 잡의 관례(`retry: false`)대로 null 이다.
+    아직 claim 전(None)이거나 표식이 아닌 잡은 얼린 상한 그대로다."""
+    from jobfactory import job
+    from remote_ci_monitor.core.status import chain_json
+
+    j = job(
+        7,
+        "deploy",
+        RUNNING,
+        retry_on_exit=75,
+        retry_interval_seconds=60,
+        retry_max_attempts=3,
+        irreversible=irreversible,
+    )
+    assert chain_json(j)["max_attempts"] == shown
+
+
 def test_gap5_a_worker_with_an_open_hold_is_not_forgotten(store):
     """# GAP5 오래 떠나 있던 워커를 잊으면 세션 행도 지워진다. 그 워커가 돌아와 죽은 세션을
     `previous_sessions` 로 넘겨도 서버가 그 세션을 몰라 홀드를 스스로 풀지 못한다. 열린 홀드가
