@@ -563,3 +563,14 @@ def test_p6_2_operating_quotes_the_web_empty_queue_while_a_group_is_held():
     ):
         assert f"`{line}`" in body, line
         assert f'"{line}"' in catalog, line
+
+
+def test_p6_2_operating_quotes_the_late_cancel_line_and_the_still_progress_bar():
+    """# RL28 P6-2: 「이어진다」 뒤에 온 취소의 `rcm wait` 줄과, 끊긴 동안 막대에 시간 눈금이 없다는
+    것. 줄은 코드가 찍는 그대로 인용한다."""
+    from remote_ci_monitor.core.render_text import unreachable_cancel_text
+
+    body = flat(section(OPERATING, UNREACHABLE))
+    assert f"`#812 {unreachable_cancel_text()}`" in body
+    assert "never `overdue` or `stuck` in that time, nor `quiet`" in body
+    assert "no time scale (`progress —`)" in body

@@ -7406,6 +7406,21 @@ MUTANTS = (
             "test_p6_2_rl28_rcm_eta_job_of_a_cancelling_job_in_the_grace_says_it_is_cancelled",
         ),
     ),
+    Mutant(
+        # 「잡이 이어진다」를 찍은 뒤 끊긴 동안 온 취소를 `rcm wait` 이 워커가 돌아올 때까지
+        # 말하지 않는다(P6-2)
+        name="grace-late-cancel-silent",
+        path="src/remote_ci_monitor/cli.py",
+        old=(
+            "                if cancelling and not self.said_cancel:"
+            "  # mutcheck: grace-late-cancel-silent\n"
+        ),
+        new="                if False:\n",
+        tests=(
+            "tests/test_queue_unreachable_m5tb.py::"
+            "test_p6_2_rl28_rcm_wait_says_once_more_when_a_cancel_comes_during_the_grace",
+        ),
+    ),
 )
 
 

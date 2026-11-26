@@ -1210,9 +1210,13 @@ see it in words, never the code:
 A job that was being cancelled does not go on: the worker stops it when it is back. For such a
 job the sentence is `lost contact with build-02 — the job is cancelled when the worker is back, or
 ends as lost after the grace period`, and the line when the worker returns is
-`#812 worker build-02 is back — the job is being cancelled`. While rcm cannot reach the worker it
-knows only what it heard last: the job is never `overdue` or `stuck` in that time, and the web row
-stops counting its step and elapsed time and shows a grey lane instead of the running one.
+`#812 worker build-02 is back — the job is being cancelled`. When the cancel is asked for after
+`rcm wait` already said the job goes on, it prints one more line, `#812 cancel requested — the job
+is cancelled when the worker is back, or ends as lost after the grace period`. While rcm cannot
+reach the worker it knows only what it heard last: the job is never `overdue` or `stuck` in that
+time, nor `quiet`, and the web row stops counting its step and elapsed time, shows a grey lane instead
+of the running one, and its progress bar has no time scale (`progress —`), only the steps it
+heard were done.
 
 One case has no lost-contact line. When a worker process is replaced by a newer one with the same
 token while the first one cannot be reached (a network split), its jobs show `running`, with an

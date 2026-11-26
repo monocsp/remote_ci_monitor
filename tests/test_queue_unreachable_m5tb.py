@@ -679,3 +679,29 @@ def test_p6_2_rl28_rcm_eta_job_of_a_cancelling_job_in_the_grace_says_it_is_cance
     assert f"lost contact with mac2 — {CANCEL_TAIL}" in out, out
     assert "goes on" not in out, out
     assert GRACE not in out
+
+
+def test_p6_2_rl28_rcm_wait_says_once_more_when_a_cancel_comes_during_the_grace(fake, capsys):
+    """# RL28 P6-2: 「잡이 이어진다」를 찍은 뒤 끊긴 동안 취소가 요청되면, 워커가 돌아올 때까지
+    그 말을 바로잡는 줄이 없었다. state 가 cancelling 이 되면 한 번 더 — 돌아오면 취소된다."""
+    grace_cancel = {**doc(), "state": "cancelling", "reason": GRACE}
+    back = {**doc(), "state": "cancelling", "reason": "cancelling"}
+    fake.docs = [
+        doc(),
+        doc(reason=GRACE),
+        grace_cancel,
+        grace_cancel,
+        back,
+        doc("cancelled"),
+    ]
+    _code, _out, err = run(capsys, ["wait", "--job", str(JOB), "--poll"])
+    said = [
+        ln
+        for ln in err.splitlines()
+        if "lost contact" in ln or "is back" in ln or "cancel requested" in ln
+    ]
+    assert said == [
+        LOST_LINE,
+        f"#{JOB} cancel requested — {CANCEL_TAIL}",
+        f"#{JOB} worker mac2 is back — the job is being cancelled",
+    ], err

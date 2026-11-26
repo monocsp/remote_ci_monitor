@@ -758,6 +758,11 @@ _GRACE_CANCEL_TAIL = (
 )
 
 
+def unreachable_cancel_text() -> str:
+    """끊긴 동안 취소가 요청됐을 때의 한 줄(P6-2) — 앞서 「이어진다」고 말한 것을 바로잡는다."""
+    return f"cancel requested — {_GRACE_CANCEL_TAIL}"
+
+
 def unknown_eta_reason(row: Mapping[str, Any]) -> str | None:
     """ETA 가 「—」인 까닭 가운데 M5t-b 가 더한 셋의 사람 문장(`rcm eta`, P6-1 G2 · G4).
 

@@ -127,6 +127,7 @@ from remote_ci_monitor.core.render_text import (
     source_ident,
     storage_row,
     unknown_eta_reason,
+    unreachable_cancel_text,
     unreachable_text,
     verdict_text,
     wait_end_line,
@@ -1362,11 +1363,14 @@ class _GraceWatch:
     잡은 유예 동안 `running` 이고 `rcm wait` 은 끝내지 않는다 — 결과가 오면 그 결과, 유예가 끝나면
     서버가 `lost`(3)로 닫는다. 원문 코드는 드러내지 않는다. 취소 중(`cancelling`)인 잡은 「이어
     간다」가 아니라 「돌아오면 취소된다」고 말한다 — 다시 붙은 워커는 취소 요청이 있는 잡을 멈춘다
-    (명세 결정 322, P6-1 G5)."""
+    (명세 결정 322, P6-1 G5). 「이어진다」를 찍은 뒤 끊긴 동안 취소가 요청되면 그 말을 바로잡는
+    줄을 한 번 더 찍는다(P6-2)."""
 
     def __init__(self, job_id: int) -> None:
         self.job_id = job_id
         self.away = False
+        #: 끊김 줄(또는 바로잡는 줄)이 이미 「돌아오면 취소된다」고 말했나
+        self.said_cancel = False
 
     def observe(self, job: dict[str, Any]) -> str | None:
         if job.get("state") not in (RUNNING, CANCELLING):
@@ -1378,13 +1382,19 @@ class _GraceWatch:
         cancelling = job.get("state") == CANCELLING
         if job.get("reason") == REASON_WORKER_UNREACHABLE_GRACE:
             if self.away:
+                # 끊긴 동안 state 가 cancelling 이 됐다 — 「이어진다」는 이제 틀린 말이다
+                if cancelling and not self.said_cancel:  # mutcheck: grace-late-cancel-silent
+                    self.said_cancel = True
+                    return f"#{jid} " + unreachable_cancel_text()
                 return None
             self.away = True
+            self.said_cancel = cancelling
             who = f"worker {name}" if name else None
             return f"#{jid} " + unreachable_text(who, cancelling=cancelling)
         if not self.away:
             return None
         self.away = False
+        self.said_cancel = False
         who = f"worker {name}" if name else "the worker"
         then = "the job is being cancelled" if cancelling else "the job goes on"
         return f"#{jid} {who} is back — {then}"

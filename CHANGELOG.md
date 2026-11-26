@@ -92,7 +92,9 @@ of a key bumps that number and is listed here.
   progress bar shows no time scale and never `past the estimate` or `quiet`. `rcm eta <preset>`
   now reads the preset's `concurrency_scope` as a submitted job does: for a `host` scope group it
   only waits for that group's jobs on the same machine, so it can show an earlier start than
-  before. ([#285](https://github.com/monocsp/remote_ci_monitor/pull/285))
+  before. When a cancel is asked for after `rcm wait` said the job goes on, it prints
+  `#N cancel requested — the job is cancelled when the worker is back, or ends as lost after the
+  grace period`. ([#285](https://github.com/monocsp/remote_ci_monitor/pull/285))
 - **Hold notifications.** Every notification carries `RCM_EVENT`, `RCM_HOLD`, `RCM_HOLD_GROUP` and
   `RCM_HOLD_NOTE` (and `event` · `hold` in a webhook body); a `[[notify]]` rule with
   `on = ["irreversible_hold"]` is called once for each new hold. The default `on` is unchanged.
