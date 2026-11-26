@@ -2044,15 +2044,26 @@ def test_b6_3_a_dead_queue_whose_phase_fails_locally_still_sends_the_finish_firs
     지 300초 뒤 finish 가 먼저 간다. 기다리지 않으면 그 잡은 restarted-without-job 으로 닫혀 끝난
     잡의 결과를 잃는다(batch-5 #2 의 로그 단계와 같다)."""
     clock = WClock()
-    fake = FakeServer(clock, tick=40)
+    fake = FakeServer(clock)  # 시계는 시험이 민다 — 등록이 그 큐를 기다리는지 먼저 본다
     w1 = wworker(tmp_path, fake, clock)
     w1.prepare_sessions()
     ob = ended_queue(w1, 7, b"")  # 로그는 다 갔다 — 남은 것은 phase 와 finish 뿐
     ob.phase = "running"
     ob.save()
     die(w1)
-    fake.script["phase"] = [RuntimeError("boom")] * 100000
+    fake.script["phase"] = [RuntimeError("boom")] * 1000000
     w2 = restart(tmp_path, fake, clock)
-    assert _run_bounded(w2.send_dead_queues, w2)
+    t = threading.Thread(target=w2.send_dead_queues, daemon=True)
+    t.start()
+    try:
+        assert wait_for(lambda: any("unexpected" in x for x in w2.logs), 5), w2.logs
+        time.sleep(0.3)  # 등록 쪽은 0.05초마다 본다 — 기다리지 않는 큐는 이 사이에 멈춘다
+        assert not any("local error" in x for x in w2.logs), w2.logs
+        clock.advance(rw.FINISH_HOLD_SECONDS + 1)
+        t.join(10)
+        assert not t.is_alive(), "registration still waits after the finish could go first"
+    finally:
+        w2.stopping.set()
+        t.join(5)
     assert [c[3] for c in fake.calls if c[0] == "finish"] == [SUCCEEDED], w2.logs
     assert not any("queue not delivered" in x or "local error" in x for x in w2.logs), w2.logs
