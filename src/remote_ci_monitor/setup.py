@@ -211,6 +211,8 @@ SYSTEM_SERVICE_PLACES: tuple[Path, ...] = (
 _ROOT_PLACES = ("LaunchDaemons", "system")
 #: 읽지 못한 서비스 파일이 rcm 의 것일 수 있나 — 바이트에 rcm 실행 파일 · 패키지 이름이 있다
 _RCM_BYTES = re.compile(rb"(?<![\w.-])rcm(?![\w.-])|remote_ci_monitor|remote-ci-monitor")
+#: 읽지 못한 파일의 이름이 rcm 같은가 — 앞뒤가 글자 · 숫자가 아닌 `rcm`, 패키지 이름(batch 11 MED)
+_RCM_NAME = re.compile(r"(?<![a-z0-9])rcm(?![a-z0-9])|remote[_-]ci[_-]monitor")
 #: 서비스 하위 명령마다 data_dir 을 읽는 절과 그 환경 변수 · 기본값(config.py 와 같다)
 _DATA_DIRS = {
     "serve": ("server", "RCM_SERVER_DATA_DIR", "~/.local/share/rcm"),
@@ -339,6 +341,44 @@ def _service_path(raw: str, *, home: str | None, workdir: str) -> Path | None:
     return real_path(Path(os.path.join(workdir, raw)))
 
 
+def unread_may_be_rcm(path: Path) -> bool:
+    """권한 때문에 읽지 못한 서비스 파일이 rcm 의 것일 수 있나 — 내용을 볼 수 없으니 이름으로
+    가린다(batch 11 MED). 파일 이름이나, 링크면 링크가 가리키는 파일 이름이 rcm 같으면(`_RCM_NAME`,
+    `doctor.looks_like_rcm` 의 라벨 규칙) 참이다. 이름을 판단할 수 없을 때(UTF-8 이 아닌 이름, 빈
+    이름, 링크를 풀지 못함)도 참이다(닫는 쪽)."""
+    from remote_ci_monitor import doctor
+
+    try:
+        names = dict.fromkeys((path.name, real_path(path).name))
+    except (OSError, ValueError):
+        return True
+    for name in names:
+        try:
+            text = os.fsencode(name).decode("utf-8")
+        except UnicodeDecodeError:
+            return True
+        stem = text.rsplit(".", 1)[0]
+        if not stem.strip():
+            return True
+        if _RCM_NAME.search(text.casefold()):
+            return True
+        if doctor.looks_like_rcm(doctor.ServiceFile(path=Path(text), label=stem)):
+            return True
+    return False
+
+
+def _unread(path: Path, reason: str) -> core.RcmService:
+    """읽지 못한 서비스 파일 하나 — 이름이 rcm 같으면 닫는 쪽(`problem`), 분명히 다른 프로그램이면
+    경고만(batch 11 MED: rcm 과 무관한 파일 하나가 setup 전체를 막았다)."""
+    if unread_may_be_rcm(path):
+        return core.RcmService(path.stem, real_path(path), problem=reason)
+    return core.RcmService(
+        path.stem,
+        real_path(path),
+        warning=f"could not read {path} — skipped; if it runs rcm, setup cannot protect it",
+    )
+
+
 def _rcm_service(path: Path, *, home: Path, root: bool) -> core.RcmService | None:
     """서비스 파일 하나 → rcm 서비스의 사실. rcm 의 서비스가 아님이 확실하면 None."""
     from remote_ci_monitor import doctor
@@ -350,10 +390,11 @@ def _rcm_service(path: Path, *, home: Path, root: bool) -> core.RcmService | Non
         data = path.read_bytes()
         sf = doctor.read_service_file(path, user_home=None if root else str(home), system=root)
     except (OSError, doctor.ServiceFileUnreadable) as e:
+        if isinstance(e, PermissionError):
+            # 읽을 권한이 없으면 바이트로 가릴 수 없다 — 이름으로 가린다(batch 10 L1 · 11 MED)
+            return _unread(path, f"setup cannot read it ({e.strerror or type(e).__name__})")
         named = doctor.looks_like_rcm(doctor.ServiceFile(path=path, label=stem))
-        # 읽을 권한이 없으면 이름 · 바이트로 가릴 수도 없다 — 닫는 쪽이다(batch 10 L1)
-        denied = isinstance(e, PermissionError)
-        if denied or named or (data is not None and _RCM_BYTES.search(data)):
+        if named or (data is not None and _RCM_BYTES.search(data)):
             if isinstance(e, doctor.ServiceFileUnreadable):
                 reason = e.reason
             else:
@@ -452,7 +493,10 @@ def scan_services(
                 regular = path.is_file()
             except OSError as e:  # stat 할 권한이 없다 — 그 파일이 무엇인지 모른다(batch 10 L1)
                 reason = f"setup cannot look at it ({e.strerror or type(e).__name__})"
-                out.append(core.RcmService(path.stem, real_path(path), problem=reason))
+                if isinstance(e, PermissionError):  # 이름으로 가린다(batch 11 MED)
+                    out.append(_unread(path, reason))
+                else:
+                    out.append(core.RcmService(path.stem, real_path(path), problem=reason))
                 continue
             if not regular:
                 continue
@@ -903,8 +947,12 @@ def _check_production(args: argparse.Namespace, plan: Plan, world: World) -> Non
             written.append(plan.service.read_bytes())
         except OSError:
             pass
+    services = world.services()
+    for svc in services:  # 읽지 못한 다른 프로그램의 파일 — 보고에 한 번 남긴다(batch 11 MED)
+        if svc.warning is not None and svc.warning not in plan.warnings:
+            plan.warnings.append(svc.warning)
     reason = core.production_refusal(
-        world.services(),
+        services,
         {flag: real_path(path) for flag, path in targets.items()},
         label=plan.label if plan.service is not None else None,
         written=written,

@@ -899,6 +899,9 @@ class RcmService:
     #: 그 서비스가 쓸 수 있는 다른 data_dir — 유닛의 `--data-dir` 플래그와 env 값. 어느 것이
     #: 이기는지 흉내 내지 않고 모두 지킨다(batch 10 M1)
     data_dirs: tuple[Path, ...] = ()
+    #: 읽지 못했지만 이름이 다른 프로그램의 것이라 건너뛴 파일의 경고 — 거절하지 않고 보고에 남긴다
+    #: (batch 11 MED)
+    warning: str | None = None
 
 
 #: 운영 서비스에서 견주는 자리와 거절 문장의 이름

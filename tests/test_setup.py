@@ -2450,3 +2450,14 @@ def test_b11_m_an_unreadable_file_with_an_rcm_name_still_closes(cfg, home, tmp_p
     assert code == 1, fake.text
     assert os.path.realpath(unit) in err and "refusing" in err, err
     _nothing_written(cfg, tmp_path / "data")
+
+
+def test_b11_m_a_name_setup_cannot_judge_closes(tmp_path):
+    # batch 11 MED(v1-2): 이름을 판단할 수 없으면(UTF-8 이 아닌 이름, 확장자뿐인 이름) 닫는 쪽이다.
+    # 분명히 다른 프로그램의 이름만 건너뛴다. 이름 규칙은 대소문자를 가리지 않는다
+    assert setup.unread_may_be_rcm(tmp_path / os.fsdecode(b"\xff\xfe.plist"))
+    assert setup.unread_may_be_rcm(tmp_path / ".service")
+    assert setup.unread_may_be_rcm(tmp_path / "com.example.RCM.plist")
+    assert setup.unread_may_be_rcm(tmp_path / "server.plist")
+    assert not setup.unread_may_be_rcm(tmp_path / "com.example.backup.plist")
+    assert not setup.unread_may_be_rcm(tmp_path / "ci-hub.service")
