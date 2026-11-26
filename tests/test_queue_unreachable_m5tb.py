@@ -118,6 +118,25 @@ def test_rl28_a_job_waiting_behind_an_unreachable_job_in_its_group_has_no_eta():
     assert other.estimate.wait_seconds == 0 and other.estimate.finish_at is not None
 
 
+def test_rl28_a_waiter_behind_an_unreachable_job_leaves_its_lane_to_the_next_job():
+    """# RL28 P3 r2 — 끊긴 잡 뒤의 그룹 대기 잡은 레인을 차지하지 않는다: 같은 레인의 다음 잡은
+    그 대기 잡을 세지 않고 지금 시작한다고 본다(`wait` 0, 앞 잡 없음). 워커가 돌아오면 늦어질 수
+    있는 가정이다(문서 「When a worker cannot be reached」). 대조로 살아 있는 잡 뒤의 대기 잡은
+    그 레인을 차지해 다음 잡이 그 뒤로 밀린다. 골든과 무관하게 이 결정만 잠근다."""
+    jobs = [
+        busy(920, key="qa", group="devices"),
+        job(921, key="qa", group="devices"),
+        job(922, key="deploy-dev"),
+    ]
+    down = rows(jobs, [remote_lane("mac2", "down"), remote_lane("build-02", "idle")])
+    assert down[922].estimate.wait_seconds == 0, down[922].estimate
+    assert down[922].ahead_job_id is None, down[922]
+    assert down[921].reason == "blocked_by_group" and down[921].estimate.wait_seconds is None
+    live = rows(jobs, [remote_lane("mac2", "busy", job_id=920), remote_lane("build-02", "idle")])
+    assert live[921].estimate.wait_seconds is not None
+    assert live[922].estimate.wait_seconds > 0, live[922].estimate  # 두 레인 다 앞이 있다
+
+
 def test_rl28_the_same_waiter_behind_a_live_job_keeps_its_eta():
     """대조: 홀드 잡의 워커가 살아 있으면 오늘처럼 숫자다."""
     lanes = [remote_lane("mac2", "busy", job_id=910), remote_lane("build-02", "idle")]

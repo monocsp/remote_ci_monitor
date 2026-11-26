@@ -150,6 +150,28 @@ def test_rl45_rcm_wait_says_in_words_that_the_group_is_held(fake, capsys):
     no_raw_code(err)
 
 
+def test_rl45_rcm_run_prints_the_hold_line_while_it_waits(fake, capsys):
+    """# RL45 P3 r2: `rcm run` 도 같은 `_wait` 로 기다린다 — 홀드 줄을 `rcm wait` 와 똑같이 한 번
+    찍는다(docs/operating.md 「When a group is held」 표의 「`rcm wait` and `rcm run`, while they
+    wait」)."""
+    fake.fake.route("GET", "/api/whoami", {"name": "alice", "admin": False})
+    fake.fake.route(
+        "GET",
+        "/api/status",
+        {"presets": [{"name": "ship", "source_modes": ["git_ref"], "inputs": [], "keep": False}]},
+    )
+    fake.fake.route(
+        "POST",
+        "/jobs",
+        {"job_id": JOB, "state": "queued", "joined": False, "url": f"{fake.fake.url}/#/jobs/{JOB}"},
+    )
+    fake.docs = [queued(), queued(), queued(held=False), finished()]
+    code, _out, err = cli_run(capsys, ["run", "ship", "--ref", "main", "--poll"])
+    assert code == 0, err
+    assert [ln for ln in err.splitlines() if "needs action ·" in ln] == [HELD_LINE], err
+    no_raw_code(err)
+
+
 def test_rl45_return_on_action_ends_4_on_a_hold(fake, capsys):
     fake.docs = [queued(), finished()]
     code, out, err = cli_run(capsys, ["wait", "--job", str(JOB), "--poll", "--return-on-action"])

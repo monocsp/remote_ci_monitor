@@ -653,7 +653,7 @@ def compute_queue(
                 start = lane_free[key]
                 knows, gf = group_free_at(key)
                 if not knows:
-                    continue
+                    continue  # mutcheck: group-waiter-takes-a-lane
                 if gf is not None:
                     start = max(start, gf)
                 e, src, cnt = expected_on(

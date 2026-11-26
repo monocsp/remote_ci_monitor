@@ -6884,6 +6884,7 @@ MUTANTS = (
         tests=(
             "tests/test_hold_display_m5tb.py::"
             "test_rl45_rcm_wait_says_in_words_that_the_group_is_held",
+            "tests/test_hold_display_m5tb.py::test_rl45_rcm_run_prints_the_hold_line_while_it_waits",
         ),
     ),
     Mutant(
@@ -7102,6 +7103,17 @@ MUTANTS = (
         tests=(
             "tests/test_hold_display_m5tb.py::"
             "test_rl45_coordinator_worker_sees_the_local_lane_holds",
+        ),
+    ),
+    Mutant(
+        # 끊긴 잡 뒤 그룹 대기 잡이 레인을 차지해 같은 레인의 다음 잡이 밀린다(RL28, P3 r2)
+        name="group-waiter-takes-a-lane",
+        path="src/remote_ci_monitor/core/queue.py",
+        old="                    continue  # mutcheck: group-waiter-takes-a-lane\n",
+        new="                    pass\n",
+        tests=(
+            "tests/test_queue_unreachable_m5tb.py::"
+            "test_rl28_a_waiter_behind_an_unreachable_job_leaves_its_lane_to_the_next_job",
         ),
     ),
 )
