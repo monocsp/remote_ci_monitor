@@ -10,7 +10,7 @@
 bind = "127.0.0.1"          # Set your Tailscale IP or 0.0.0.0 to accept remote sessions.
 port = 8787
 data_dir = "~/.local/share/rcm"
-lanes = 1                   # Parallel job lanes. 1 for a single build machine.
+lanes = 1                   # Parallel job lanes. 1 for one build machine; 0 = remote workers only.
 admission = "load"          # Lanes 2+ wait while the host is busy. "always" turns the gate off.
 cpu_max_percent = 80        # Lanes 2+ do not start a job while CPU is above this. Lane 1 always does.
 admission_samples = 3       # This many host samples in a row must be under the cap.
@@ -227,7 +227,8 @@ default = "default"
 # ── Notifications ──────────────────────────────────────────────────────────
 # Run a command (no shell) or POST JSON to a URL when jobs finish. Env for argv: RCM_JOB_ID RCM_STATE
 # RCM_PRESET RCM_KEY RCM_REQUESTER RCM_SUMMARY RCM_FAILED_STEP RCM_EXIT_CODE RCM_JOB_SECONDS RCM_URL
-# RCM_NOTIFY. Exactly one of argv / url. `on` defaults to every terminal state.
+# RCM_NOTIFY RCM_MACHINE (where the job ran). Exactly one of argv / url. `on` defaults to every
+# terminal state.
 # [[notify]]
 # name = "on-failure"
 # on = ["failed", "timed_out", "lost"]

@@ -48,6 +48,14 @@ rcm serve      # http://127.0.0.1:8787 · Ctrl-C 로 깨끗이 멈춘다
 이 터미널은 그대로 둔다. 로그아웃해도 계속 돌게 하려면
 [빌드 머신 운영](operating.md#run-as-a-service)의 서비스 파일을 쓴다.
 
+**`rcm setup` 에 맡겨 서비스까지 쓰게 할 수도 있다.**
+`rcm setup --role coordinator-worker --bind 127.0.0.1 --yes` 는 같은 템플릿으로 같은 `server.toml` 을
+쓰고, `~/.config/rcm/service/` 아래에 launchd 나 systemd 파일도 쓴다. 그리고 그 서비스를 설치하고
+띄우는 줄과 토큰을 만드는 줄을 찍는다. 그 줄은 setup 이 직접 실행하지 않는다. 서비스가 돌고 이
+머신에 클라이언트 토큰이 있으면 `rcm doctor --role coordinator-worker` 가 이 머신이 무엇을 빌드하고
+시험할 수 있는지, 먼저 무엇을 깔아야 하는지 알려 준다. 차례는 README 의
+[처음 설정](../README.ko.md#first-run-pick-a-role-and-set-it-up)에 있다.
+
 ## 3. 내 컴퓨터
 
 세션이 알아야 하는 건 두 가지다. 서버가 **어디** 있는지, 그리고 **내가 누구**인지. 자동이 되는
@@ -91,6 +99,9 @@ label = "alice@laptop"                 # 큐에 요청자로 보일 이름
 EOF
 chmod 600 ~/.config/rcm/client.toml
 ```
+
+`rcm setup --role client --server http://macmini.local:8787 --yes` 는 토큰만 빼고 같은 파일을 쓴다.
+토큰 줄은 직접 넣거나 `RCM_TOKEN` 으로 준다.
 
 진짜 작업을 맡기기 전에 경로 전체를 증명한다:
 
@@ -575,6 +586,15 @@ export RCM_WORKER_TOKEN=<그 토큰>
 rcm worker --check               # 서버 · 토큰 · 지문 · 돌릴 수 있는 프리셋 수
 rcm init worker --service-file ~/Library/LaunchAgents/com.remote-ci-monitor.worker.plist
 ```
+
+`rcm setup --role worker --server http://macmini.local:8787 --pool default --lanes 1 --yes` 는 위의
+첫 명령과 마지막 명령을 한 번에 한다. `worker.toml` 과 서비스 파일을 쓰고, 그 서비스를 설치하고
+띄우는 줄을 찍는다. 서비스를 띄우기 전에 토큰을 그 `worker.toml` 에 `token = "…"` 으로 넣는다.
+서비스는 내 셸의 `RCM_WORKER_TOKEN` 을 보지 못한다. 그다음 `rcm doctor --role worker` 가 이 머신에
+올 프리셋마다 `ready` · `needs check` · `missing` 을 붙이고, 코디네이터의 `[[tools]]` 에 있는 설치
+안내를 함께 찍는다. 올 프리셋이 하나도 없으면 종료 1 이다. 풀을 잘 본다. `--pool` 없는
+`rcm init worker` 는 호스트 이름을 풀 이름으로 쓰고, 그런 워커는 `placement = "any-capable"`
+프리셋만 받는다.
 
 마지막 명령은 launchd 파일(Linux 면 systemd 유닛)을 쓰고, 그것을 띄울 명령 한 줄을 찍는다. 그때부터
 워커는 자기 환경을 재서 보고한다. 서버를 올리면 돌고 있던 워커는 다음 heartbeat 에서 새 버전을

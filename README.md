@@ -15,6 +15,7 @@
 
 <p align="center">
   <a href="#install">Install</a> ·
+  <a href="#first-run-pick-a-role-and-set-it-up">First run</a> ·
   <a href="#build-machine-3-commands">Quick start</a> ·
   <a href="docs/usage.md">Usage guide</a> ·
   <a href="docs/configuration.md">Configuration</a> ·
@@ -67,7 +68,139 @@ shell. If `rcm` is "command not found" right after installing, `~/.local/bin` is
 yet — run `pipx ensurepath` and open a new shell. A release wheel from the GitHub Releases page
 also installs with `pipx install <wheel-url>`.
 
+## First run: pick a role and set it up
+
+Every machine that uses rcm has a role. `rcm setup` writes the files for one:
+
+| role | the machine | what `rcm setup` writes |
+|---|---|---|
+| `client` | sends jobs and reads the results — your laptop | `client.toml` |
+| `worker` | runs the jobs a coordinator hands it | `worker.toml` and a worker service file |
+| `coordinator` | keeps the queue and hands jobs to workers; runs none itself (`lanes = 0`) | `server.toml` and a server service file |
+| `coordinator-worker` | keeps the queue and runs jobs too — one machine does everything | `server.toml` (`lanes = 1`) and a server service file |
+
+Start with `coordinator-worker` on the machine that builds, and make the same machine a `client`
+so you can send it a job. Add a `worker` for each further computer that should build, and a
+`client` for each one that only sends work. A machine may have several roles; rcm reads them back
+from the config files that exist, and writes no role anywhere.
+
+### On one machine
+
+1. **Write the config.** In a terminal on a machine with no rcm config yet, `rcm` with no
+   arguments asks `No rcm config on this machine yet. Set it up now? (y/n) [y]` and walks you
+   through `rcm setup`. Or give every answer at once:
+
+   ```sh
+   rcm setup --role coordinator-worker --bind 127.0.0.1 --yes
+   ```
+
+   `--bind` is the address the server listens on. `127.0.0.1` keeps it on this machine; for other
+   computers give this machine's Tailscale or LAN address, or `0.0.0.0`, and read the warning
+   setup prints about who can then read the queue. setup writes `~/.config/rcm/server.toml` and a
+   service file under `~/.config/rcm/service/`, then prints the lines to run next. It registers
+   nothing, starts nothing, makes no token and opens no database. A file that is already there is
+   kept (exit 1) unless you pass `--force`. On a machine where rcm already runs as a service,
+   follow [a test install next to one that runs](#a-test-install-next-to-one-that-runs)
+   instead.
+2. **Install and start the service.** Run the lines setup printed under `next —`, exactly as
+   printed: on macOS a `mkdir -p`, a `cp -n` into `~/Library/LaunchAgents/` and a
+   `cmp -s … && launchctl bootstrap gui/$(id -u) …`; on Linux `sudo loginctl enable-linger $USER`
+   (so the service outlives your login) and `systemctl --user … enable --now`. Then
+   `curl http://127.0.0.1:8787/api/health` answers. The log is
+   `~/Library/Logs/rcm/server.log` on macOS and `~/.local/state/rcm/server.log` on Linux.
+3. **Make a token.** Run the first line setup printed under `tokens —`,
+   `<rcm> token --config ~/.config/rcm/server.toml add CLIENT_NAME`, with a name of your choice
+   in place of `CLIENT_NAME`. It prints the token once. Use that line's `rcm`, the one the service
+   runs: another build of rcm would open the database and migrate it.
+4. **Make this machine a client too.**
+
+   ```sh
+   rcm setup --role client --server http://127.0.0.1:8787 --yes
+   export RCM_TOKEN=<the token>     # or token = "…" in ~/.config/rcm/client.toml (mode 600)
+   ```
+
+5. **Check it.** `rcm doctor --role coordinator-worker` says what this machine can build and test
+   the way the service will run it, and what to install first: exit 0 ready, 1 something is
+   missing (with the install line), 3 it could not decide (no token, the server is down). Name the
+   role: this machine now has two, and `rcm doctor` without `--role` stops with exit 2. Then
+   `rcm check`: every row says `ok` (a `warn` row still exits 0).
+6. **Send the first job.** From any directory, `rcm run ok` uploads that directory, runs the
+   harmless `ok` preset the template ships and exits 0 with one JSON line on stdout. To leave it
+   running and come back later:
+
+   ```sh
+   rcm run ok --no-wait             # prints the job number and returns
+   rcm wait --job N --notify        # follows job N; a desktop notification when it ends
+   ```
+
+   The wait ends with one line that says where the job ran and how it went,
+   `#1 succeeded on macmini · 1s` (your machine's name), plus the artifact state for a preset that
+   declares artifacts, and a warning line when collecting them failed. The JSON carries the same
+   machine as `ran_on`. The exit code is the job's: 0 succeeded, 1 failed, 2 cancelled or timed
+   out, 3 unknown, which is never a failure ([Exit codes](#exit-codes)).
+7. **Make it yours.** Replace the example presets in `server.toml` with the commands your team runs
+   ([Configuration](docs/configuration.md)); `rcm reload` applies preset changes without a restart.
+   The file ends with a commented toolchain catalog: probes and
+   [install hints](docs/configuration.md#install-hints-tools) for Flutter, Xcode, Android, Node
+   and Python. Mark a release or deploy preset that must never run on another computer
+   [`local_only = true`](docs/configuration.md#keeping-a-preset-on-the-server-local_only).
+
+Everything `rcm setup` writes, refuses and prints is in
+[Set a machine up](docs/operating.md#set-a-machine-up-rcm-setup); every row of the report and its
+exit codes are in [rcm doctor](docs/operating.md#check-a-machine-before-you-use-it-rcm-doctor).
+
+### More machines
+
+- **A worker.** On the coordinator, make a worker token with the second line setup printed,
+  `<rcm> token --config ~/.config/rcm/server.toml add mbp --worker`. On the new computer:
+
+  ```sh
+  rcm setup --role worker --server http://macmini.local:8787 --pool default --lanes 1 --yes
+  ```
+
+  Put the worker token into the `worker.toml` it wrote as `token = "…"` before you start the
+  service: a service does not see the `RCM_WORKER_TOKEN` of your shell. Then run the start lines
+  it printed and `rcm doctor --role worker`, which exits 1 when no preset would come to this
+  machine. `--pool default` takes the coordinator's default-pool presets; another pool takes only
+  presets for that pool and `placement = "any-capable"` ones. A `local_only` preset never goes to
+  a worker. `rcm machines` lists every machine.
+- **Another client.** `rcm setup --role client --server http://macmini.local:8787 --yes` there,
+  with its own client token.
+- **A coordinator that runs nothing.** `rcm setup --role coordinator --bind <address> --yes`
+  writes [`lanes = 0`](docs/configuration.md#a-server-that-only-hands-out-jobs-lanes--0): jobs
+  wait with no ETA until a worker joins, and a `local_only` preset is refused at submit.
+
+### A test install next to one that runs
+
+On a machine that already runs rcm as a service, `rcm setup` refuses to write that service's
+config file, service file or label, and anything inside its `data_dir`, venv or checkout. It stops
+with exit 1 (`this is <label>'s config — refusing`), and no flag overrides that. A test or
+throwaway install gets its own port, label, config and data folder, does not advertise itself on
+the network, and runs in a terminal instead of as a service. Clear `RCM_*` from your shell first,
+so nothing points at the running install:
+
+```sh
+rcm setup --role coordinator-worker --bind 127.0.0.1 --port 8790 --no-advertise --label com.example.rcm-test --config ~/rcm-test/server.toml --data-dir ~/rcm-test/data --yes
+rcm serve --config ~/rcm-test/server.toml      # in a terminal of its own; Ctrl-C stops it
+rcm token --config ~/rcm-test/server.toml add test
+RCM_SERVER=http://127.0.0.1:8790 RCM_TOKEN=<the token> rcm check --config ~/rcm-test/server.toml
+RCM_SERVER=http://127.0.0.1:8790 RCM_TOKEN=<the token> rcm run ok
+```
+
+Never give a test build the running install's `--config` or `--data-dir`: any rcm that opens a
+database migrates it to its own version.
+
+### Undo and uninstall
+
+setup prints a `to remove: …` line with its own paths, just before its last line. Keep it. Run as
+it is, it unloads the service and deletes the installed service file (only when it is the one
+setup wrote), then deletes the config and service files setup wrote. The `data_dir` with the
+database, job logs and workspaces stays until you delete it. `rcm token revoke NAME` ends one token.
+`pipx uninstall remote-ci-monitor` removes rcm itself.
+
 ## Build machine (3 commands)
+
+Without `rcm setup` and without a service, in one terminal:
 
 <!-- every `rcm …` line between smoke:begin and smoke:end is executed by scripts/smoke_install.sh — keep them in sync -->
 <!-- smoke:begin -->

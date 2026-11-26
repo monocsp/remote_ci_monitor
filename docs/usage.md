@@ -50,6 +50,14 @@ rcm serve      # http://127.0.0.1:8787 · Ctrl-C stops it cleanly
 Leave that terminal alone for now. To keep it running after you log out, use the service files in
 [Operating the build machine](operating.md#run-as-a-service).
 
+**Or let `rcm setup` write it, with a service.**
+`rcm setup --role coordinator-worker --bind 127.0.0.1 --yes` writes the same `server.toml` from the
+same template, plus a launchd or systemd file under `~/.config/rcm/service/`, and prints the lines
+that install and start that service and make the tokens; it runs none of them itself. Once the
+service runs and this machine has a client token, `rcm doctor --role coordinator-worker` says
+what the machine can build and test, and what to install first. The README walks through it:
+[first run](../README.md#first-run-pick-a-role-and-set-it-up).
+
 ## 3. Your machine
 
 The session needs to know two things: **where** the server is, and **who you are**. Only the first
@@ -94,6 +102,9 @@ label = "alice@laptop"                 # who the queue will show as the requeste
 EOF
 chmod 600 ~/.config/rcm/client.toml
 ```
+
+`rcm setup --role client --server http://macmini.local:8787 --yes` writes the same file without
+the token; add the token line yourself, or export `RCM_TOKEN`.
 
 Now prove the whole path before you trust it with real work:
 
@@ -609,6 +620,15 @@ export RCM_WORKER_TOKEN=<the token>
 rcm worker --check               # server · token · fingerprint · how many presets it can run
 rcm init worker --service-file ~/Library/LaunchAgents/com.remote-ci-monitor.worker.plist
 ```
+
+`rcm setup --role worker --server http://macmini.local:8787 --pool default --lanes 1 --yes` does the
+first and the last of these in one go: it writes `worker.toml` and the service file and prints the
+lines that install and start it. Put the token into that `worker.toml` as `token = "…"` before you
+start it, since a service does not see the `RCM_WORKER_TOKEN` of your shell. `rcm doctor --role
+worker` then lists each preset that would come to this machine as `ready`, `needs check` or
+`missing`, with the install line from the coordinator's `[[tools]]`, and exits 1 when no preset
+would come here at all. Mind the pool: `rcm init worker` without `--pool` names the pool after
+the host, and such a worker gets only `placement = "any-capable"` presets.
 
 The last command writes a launchd file (a systemd unit on Linux) and prints the one command that
 starts it. From then on the worker measures its own environment and reports it. When the server

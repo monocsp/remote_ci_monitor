@@ -15,6 +15,7 @@
 
 <p align="center">
   <a href="#install">설치</a> ·
+  <a href="#first-run-pick-a-role-and-set-it-up">처음 설정</a> ·
   <a href="#build-machine-3-commands">빠른 시작</a> ·
   <a href="docs/usage.ko.md">사용법</a> ·
   <a href="docs/configuration.md">설정</a> ·
@@ -63,7 +64,141 @@ uvx --from remote-ci-monitor rcm version            # 설치 없이 uv 로 실�
 `pipx ensurepath` 뒤 새 셸을 열면 된다. GitHub Releases 의 wheel 도 `pipx install <wheel-url>` 로
 설치된다.
 
+## First run: pick a role and set it up
+
+rcm 을 쓰는 머신에는 저마다 역할이 있다. `rcm setup` 이 역할 하나에 필요한 파일을 쓴다.
+
+| 역할 | 그 머신이 하는 일 | `rcm setup` 이 쓰는 것 |
+|---|---|---|
+| `client` | 작업을 보내고 결과를 읽는다. 내 노트북이 여기에 든다 | `client.toml` |
+| `worker` | 코디네이터가 나눠 준 작업을 돌린다 | `worker.toml` 과 워커 서비스 파일 |
+| `coordinator` | 큐를 맡고 작업을 워커에 나눠 준다. 자기는 돌리지 않는다(`lanes = 0`) | `server.toml` 과 서버 서비스 파일 |
+| `coordinator-worker` | 큐를 맡으면서 작업도 돌린다. 머신 한 대가 전부 한다 | `server.toml`(`lanes = 1`)과 서버 서비스 파일 |
+
+빌드할 머신에서 `coordinator-worker` 로 시작하고, 그 머신을 `client` 로도 설정해 작업을 보낸다.
+빌드를 더 맡길 컴퓨터마다 `worker` 를 하나씩 붙이고, 작업만 보낼 컴퓨터는 `client` 로 둔다. 한
+머신이 역할을 여럿 가질 수 있다. rcm 은 있는 설정 파일에서 역할을 읽어 내고 역할을 따로 적어 두지
+않는다.
+
+### On one machine
+
+1. **설정을 쓴다.** rcm 설정이 아직 없는 머신의 터미널에서 인자 없이 `rcm` 을 치면
+   `No rcm config on this machine yet. Set it up now? (y/n) [y]` 라고 묻고 `rcm setup` 으로
+   안내한다. 답을 한 번에 줄 수도 있다.
+
+   ```sh
+   rcm setup --role coordinator-worker --bind 127.0.0.1 --yes
+   ```
+
+   `--bind` 는 서버가 받을 주소다. `127.0.0.1` 이면 이 머신 안에서만 닿는다. 다른 컴퓨터에서도
+   쓰려면 이 머신의 Tailscale 주소나 LAN 주소, 또는 `0.0.0.0` 을 주고, 그때 누가 큐를 읽을 수
+   있는지 setup 이 찍는 경고를 읽는다. setup 은 `~/.config/rcm/server.toml` 과
+   `~/.config/rcm/service/` 아래의 서비스 파일을 쓴 뒤 다음에 칠 줄을 찍는다. 서비스를 등록하지도
+   띄우지도 않고, 토큰을 만들지 않고, DB 를 열지 않는다. 이미 있는 파일은 `--force` 를 주지 않으면
+   그대로 두고 종료 1 로 끝난다. rcm 이 이미 서비스로 도는 머신이라면 이 차례 대신
+   [도는 설치 옆의 시험 설치](#a-test-install-next-to-one-that-runs)를 따른다.
+2. **서비스를 설치하고 띄운다.** setup 이 `next —` 아래에 찍은 줄을 찍힌 그대로 친다. macOS 에서는
+   `mkdir -p`, `~/Library/LaunchAgents/` 로 복사하는 `cp -n`,
+   `cmp -s … && launchctl bootstrap gui/$(id -u) …` 다. Linux 에서는
+   `sudo loginctl enable-linger $USER`(로그아웃해도 서비스가 남게 한다)와
+   `systemctl --user … enable --now` 다. 그러면 `curl http://127.0.0.1:8787/api/health` 가
+   답한다. 로그는 macOS 에서 `~/Library/Logs/rcm/server.log`, Linux 에서
+   `~/.local/state/rcm/server.log` 다.
+3. **토큰을 만든다.** setup 이 `tokens —` 아래에 찍은 첫 줄
+   `<rcm> token --config ~/.config/rcm/server.toml add CLIENT_NAME` 을 친다. `CLIENT_NAME` 자리에는
+   원하는 이름을 쓴다. 토큰은 한 번만 찍힌다. 그 줄의 `rcm`, 곧 서비스가 띄우는 `rcm` 을 쓴다. 다른
+   빌드의 rcm 은 DB 를 열면서 자기 판으로 마이그레이션한다.
+4. **이 머신을 클라이언트로도 설정한다.**
+
+   ```sh
+   rcm setup --role client --server http://127.0.0.1:8787 --yes
+   export RCM_TOKEN=<그 토큰>       # 또는 ~/.config/rcm/client.toml 에 token = "…" (모드 600)
+   ```
+
+5. **확인한다.** `rcm doctor --role coordinator-worker` 는 서비스가 도는 환경에서 이 머신이 무엇을
+   빌드하고 시험할 수 있는지, 먼저 무엇을 깔아야 하는지 알려 준다. 종료 0 은 준비됨, 1 은 빠진
+   것이 있음(설치 안내가 같이 찍힌다), 3 은 판정하지 못함(토큰 없음, 서버 꺼짐)이다. 역할을 꼭
+   준다. 이 머신은 이제 역할이 둘이라 `--role` 없는 `rcm doctor` 는 종료 2 로 멈춘다. 그다음
+   `rcm check` 의 행이 모두 `ok` 여야 한다(`warn` 행이 있어도 종료 0 이다).
+6. **첫 작업을 보낸다.** 아무 디렉터리에서 `rcm run ok` 를 치면 그 디렉터리를 올리고, 템플릿에
+   든 무해한 `ok` 프리셋을 돌리고, stdout 에 JSON 한 줄을 찍고 종료 0 으로 끝난다. 돌려 두고
+   나중에 돌아오려면 이렇게 한다.
+
+   ```sh
+   rcm run ok --no-wait             # 작업 번호를 찍고 바로 돌아온다
+   rcm wait --job N --notify        # 작업 N 을 따라간다. 끝나면 데스크톱 알림이 뜬다
+   ```
+
+   기다림은 작업이 어디서 어떻게 돌았는지 말하는 한 줄로 끝난다. 예를 들면
+   `#1 succeeded on macmini · 1s` 이고 머신 이름은 내 머신의 것이다. 산출물을 선언한 프리셋이면 그
+   상태가 붙고, 산출물 수집이 실패했으면 경고 줄이 붙는다. JSON 에는 같은 머신이 `ran_on` 으로
+   실린다. 종료 코드는 작업의 것이다. 0 성공, 1 실패, 2 취소나 시간 초과, 3 모름이고 3 은 실패가
+   아니다([Exit codes](#exit-codes)).
+7. **내 것으로 만든다.** `server.toml` 의 예시 프리셋을 팀이 실제로 돌리는 명령으로 바꾼다
+   ([Configuration](docs/configuration.md)). 프리셋을 바꾼 뒤에는 `rcm reload` 가 재시작 없이
+   적용한다. 파일 끝에는 주석으로 단 툴체인 카탈로그가 있다. Flutter, Xcode, Android, Node,
+   Python 의 프로브와 [설치 안내](docs/configuration.md#install-hints-tools)다. 다른 컴퓨터에서
+   돌면 안 되는 릴리스 · 배포 프리셋에는
+   [`local_only = true`](docs/configuration.md#keeping-a-preset-on-the-server-local_only) 를 단다.
+
+`rcm setup` 이 쓰는 것, 거절하는 것, 찍는 것은
+[Set a machine up](docs/operating.md#set-a-machine-up-rcm-setup)에 있다. 진단표의 행과 종료
+코드는 [rcm doctor](docs/operating.md#check-a-machine-before-you-use-it-rcm-doctor)에 있다.
+
+### More machines
+
+- **워커.** 코디네이터에서 setup 이 찍은 둘째 줄
+  `<rcm> token --config ~/.config/rcm/server.toml add mbp --worker` 로 워커 토큰을 만든다. 새
+  컴퓨터에서는 이렇게 친다.
+
+  ```sh
+  rcm setup --role worker --server http://macmini.local:8787 --pool default --lanes 1 --yes
+  ```
+
+  서비스를 띄우기 전에 워커 토큰을 setup 이 쓴 `worker.toml` 에 `token = "…"` 으로 넣는다.
+  서비스는 내 셸의 `RCM_WORKER_TOKEN` 을 보지 못한다. 그다음 setup 이 찍은 시작 줄을 치고
+  `rcm doctor --role worker` 를 돌린다. 이 머신에 올 프리셋이 하나도 없으면 doctor 가 종료 1 로
+  알린다. `--pool default` 면 코디네이터의 기본 풀 프리셋을 받는다. 다른 풀이면 그 풀의 프리셋과
+  `placement = "any-capable"` 프리셋만 받는다. `local_only` 프리셋은 워커에 가지 않는다.
+  `rcm machines` 가 머신 목록을 보여 준다.
+- **다른 클라이언트.** 그 컴퓨터에서
+  `rcm setup --role client --server http://macmini.local:8787 --yes` 를 치고 그 컴퓨터만의
+  클라이언트 토큰을 쓴다.
+- **아무것도 돌리지 않는 코디네이터.** `rcm setup --role coordinator --bind <address> --yes` 는
+  [`lanes = 0`](docs/configuration.md#a-server-that-only-hands-out-jobs-lanes--0) 을 쓴다. 워커가
+  붙을 때까지 작업은 ETA 없이 기다리고, `local_only` 프리셋은 제출할 때 거절된다.
+
+### A test install next to one that runs
+
+rcm 이 이미 서비스로 도는 머신에서 `rcm setup` 은 그 서비스의 설정 파일, 서비스 파일, 라벨에 쓰지
+않는다. 그 서비스의 `data_dir`, venv, 체크아웃 안에도 쓰지 않는다. 그런 대상이면
+`this is <label>'s config — refusing` 처럼 말하고 종료 1 로 멈추며, 이 거절을 넘기는 플래그는
+없다. 시험용이나 잠깐 쓸 설치는 포트 · 라벨 · 설정 · 데이터 폴더를 따로 두고, 네트워크에 자기를
+알리지 않고, 서비스 대신 터미널에서 띄운다. 먼저 셸의 `RCM_*` 를 지워서 도는 설치를 가리키는
+값이 없게 한다.
+
+```sh
+rcm setup --role coordinator-worker --bind 127.0.0.1 --port 8790 --no-advertise --label com.example.rcm-test --config ~/rcm-test/server.toml --data-dir ~/rcm-test/data --yes
+rcm serve --config ~/rcm-test/server.toml      # 따로 연 터미널에서. Ctrl-C 로 멈춘다
+rcm token --config ~/rcm-test/server.toml add test
+RCM_SERVER=http://127.0.0.1:8790 RCM_TOKEN=<그 토큰> rcm check --config ~/rcm-test/server.toml
+RCM_SERVER=http://127.0.0.1:8790 RCM_TOKEN=<그 토큰> rcm run ok
+```
+
+시험 빌드에 도는 설치의 `--config` 나 `--data-dir` 을 주지 않는다. DB 를 여는 rcm 은 그 DB 를 자기
+판으로 마이그레이션한다.
+
+### Undo and uninstall
+
+setup 은 마지막 줄 바로 앞에 자기 경로가 든 `to remove: …` 줄을 찍는다. 이 줄은 남겨 둔다. 그대로
+치면 서비스를 내리고, 설치된 서비스 파일이 setup 이 쓴 것일 때만 지우고, setup 이 쓴 설정 파일과
+서비스 파일을 지운다. DB · 작업 로그 · 작업 공간이 든 `data_dir` 은 직접 지울 때까지 남는다. 토큰
+하나는 `rcm token revoke NAME` 으로 폐기한다. rcm 자체는 `pipx uninstall remote-ci-monitor` 로
+지운다.
+
 ## Build machine (3 commands)
+
+`rcm setup` 도 서비스도 없이 터미널 하나에서 하는 길이다.
 
 ```sh
 rcm init server            # ~/.config/rcm/server.toml 을 쓴다 — 프리셋과 bind 주소를 고친다
