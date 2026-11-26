@@ -1777,10 +1777,11 @@ def _run_bounded(fn: Any, w: rw.RemoteWorker, seconds: float = 10.0) -> bool:
     return ended
 
 
-def test_b5_2_a_a_dead_queue_stuck_on_a_local_error_is_not_counted_as_server_errors(tmp_path, fast):
-    """# batch-5 #2 죽은 세션 D 의 큐에서 finish 가 예상 못 한 로컬 오류로 계속 실패한다. 결정
-    337 은 서버가 응답하는 시간만 300초에 센다. 로컬 오류를 세면 등록이 매번 300초 늦고, 그 줄은
-    「server errors」라고 거짓을 말한다. 로컬 오류는 세지 않고, 그 큐를 기다리지 않고 등록한다."""
+def test_b5_2_a_a_dead_queue_stuck_on_a_local_error_says_local_errors_after_300s(tmp_path, fast):
+    """# batch-5 #2 죽은 세션 D 의 큐에서 finish 가 예상 못 한 로컬 오류로 계속 실패한다.
+    batch-7 에서 바뀌었다: 로컬 오류도 서버 오류와 같은 300초 상한 안에서 다시 해 본다(한 번
+    지나가는 오류일 수 있다). 상한에 닿으면 등록하고, 그 줄은 서버 탓만 하지 않는다 —
+    「server errors or local errors」."""
     clock = WClock()
     fake = FakeServer(clock, tick=40)
     w1 = wworker(tmp_path, fake, clock)
@@ -1791,12 +1792,12 @@ def test_b5_2_a_a_dead_queue_stuck_on_a_local_error_is_not_counted_as_server_err
     fake.script["finish"] = [RuntimeError("boom")] * 100000
     w2 = restart(tmp_path, fake, clock)
     assert _run_bounded(w2.send_dead_queues, w2), "registration waits forever on a local error"
-    assert not any("of server errors" in x for x in w2.logs), w2.logs
-    said = [x for x in w2.logs if "stopped on a local error" in x]
+    said = [x for x in w2.logs if "queue not delivered" in x or "local error" in x]
     assert said == [
-        f"dead session {sid[:8]} job #7: stopped on a local error (unexpected RuntimeError in"
-        " finish) — registering without waiting; job #7 will close as restarted-without-job"
+        f"dead session {sid[:8]} queue not delivered after 300s of server errors or local errors"
+        " — registering; job #7 will close as restarted-without-job"
     ], w2.logs
+    assert clock.wall - T0W >= timedelta(seconds=300)
     assert not [c for c in fake.calls if c[0] == "register"]
 
 
@@ -2067,3 +2068,192 @@ def test_b6_3_a_dead_queue_whose_phase_fails_locally_still_sends_the_finish_firs
         t.join(5)
     assert [c[3] for c in fake.calls if c[0] == "finish"] == [SUCCEEDED], w2.logs
     assert not any("queue not delivered" in x or "local error" in x for x in w2.logs), w2.logs
+
+
+# ── batch-7: 죽은 세션 큐의 로컬 오류도 300초 상한 안에서 다시 해 본다 ──────────────────
+
+
+def _dead_acked_queue(tmp_path: Path, fake: FakeServer, clock: WClock) -> str:
+    """로그를 다 보낸(`acked == written > 0`) 끝난 잡의 큐를 남기고 죽은 프로세스. 다음 프로세스는
+    로그를 보내기 전에 빈 본문 질의(`query`)부터 한다(V2-13)."""
+    w1 = wworker(tmp_path, fake, clock)
+    w1.prepare_sessions()
+    ended_queue(w1, 7, b"one\n", acked=4)
+    fake.received[7] = bytearray(b"one\n")
+    sid = w1.session_id
+    die(w1)
+    return sid
+
+
+def test_b7_1_a_a_dead_queue_whose_query_and_finish_fail_locally_registers_after_300s(
+    tmp_path, fast
+):
+    """# batch-7 #1 로그를 다 보낸 끝난 잡의 D 큐에서 오프셋 질의와 finish 가 예상 못 한 로컬
+    오류로 계속 실패한다. 등록은 300초 상한에서 멈추고 줄은 로컬 오류도 말한다. 전에는 질의를 막힌
+    단계로 보지 않아 finish 가 먼저 가지도, 300초가 흐르지도 않아 등록이 영원히 기다렸다."""
+    clock = WClock()
+    fake = FakeServer(clock, tick=40)
+    sid = _dead_acked_queue(tmp_path, fake, clock)
+    fake.script["log"] = [RuntimeError("boom")] * 100000
+    fake.script["finish"] = [RuntimeError("boom")] * 100000
+    w2 = restart(tmp_path, fake, clock)
+    assert _run_bounded(w2.send_dead_queues, w2), "registration waits forever on a stuck query"
+    assert [c[3:5] for c in fake.calls if c[0] == "log"][0] == (4, b"")  # 질의였다
+    assert "finish" in fake.routes()  # 끝난 지 300초 뒤 finish 가 먼저 가 봤다
+    said = [x for x in w2.logs if "queue not delivered" in x]
+    assert said == [
+        f"dead session {sid[:8]} queue not delivered after 300s of server errors or local errors"
+        " — registering; job #7 will close as restarted-without-job"
+    ], w2.logs
+    assert not [c for c in fake.calls if c[0] == "register"]
+
+
+def test_b7_1_b_a_finished_job_whose_offset_query_fails_unexpectedly_sends_the_finish_after_300s(
+    tmp_path, fast
+):
+    """# batch-7 #1 다시 뜬 프로세스의 끝난 잡이 로그를 다 보냈고(`acked == written`) 오프셋 질의만
+    예상 못 한 예외로 막혔다. 질의도 막힌 단계다 — 끝난 지 300초 뒤 finish 가 먼저 간다."""
+    clock = WClock()
+    fake = FakeServer(clock)
+    w = wworker(tmp_path, fake, clock)
+    ob = rw.JobOutbox(None)
+    ob.append(b"one\n")
+    ob.acked = 4
+    end_job(w, ob)
+    s = rw._JobSender(w, 7, ob, resumed=True)
+    fake.script["log"] = [RuntimeError("boom")] * 100000
+    s.start()
+    try:
+        assert wait_for(lambda: any("unexpected" in x for x in w.logs), 5), w.logs
+        time.sleep(0.05)
+        assert not ob.done  # 300초 전에는 순서를 지킨다
+        clock.advance(rw.FINISH_HOLD_SECONDS + 1)
+        assert wait_for(lambda: ob.done, 5), w.logs
+    finally:
+        s.halt.set()
+    fins = [c for c in fake.calls if c[0] == "finish"]
+    assert [(c[3], c[5]["log_bytes"]) for c in fins] == [(SUCCEEDED, 4)], fake.calls
+
+
+def test_b7_2_a_a_dead_queue_finish_that_fails_locally_once_still_closes_the_job(
+    tmp_path, fast, monkeypatch
+):
+    """# batch-7 #2 D 큐의 finish 가 로컬 오류로 한 번 실패하고 다음 시도에 간다. 로컬 오류는 한 번
+    지나가는 것일 수 있다 — 등록은 그 큐를 멈추지 않고 기다려 잡이 진짜 결과로 닫힌다. 전에는 첫
+    실패 뒤 0.05초 안에 멈춰 잡이 restarted-without-job 으로 닫혔다."""
+    monkeypatch.setattr(rw, "BACKOFF_START_SECONDS", 0.3)  # 등록 쪽이 여러 번 본다
+    monkeypatch.setattr(rw, "BACKOFF_MAX_SECONDS", 0.3)
+    clock = WClock()
+    fake = FakeServer(clock)
+    w1 = wworker(tmp_path, fake, clock)
+    w1.prepare_sessions()
+    ended_queue(w1, 7, b"x\n")
+    die(w1)
+    fake.script["finish"] = [RuntimeError("boom")]
+    w2 = restart(tmp_path, fake, clock)
+    assert _run_bounded(w2.send_dead_queues, w2)
+    assert [c[3] for c in fake.calls if c[0] == "finish"] == [SUCCEEDED, SUCCEEDED], w2.logs
+    assert not fake.script["finish"]  # 두 번째 finish 는 성공했다
+    assert not any("queue not delivered" in x or "local error" in x for x in w2.logs), w2.logs
+    assert not [c for c in fake.calls if c[0] == "register"]
+
+
+def test_b7_2_b_a_connection_failure_after_a_local_error_still_does_not_count(
+    tmp_path, fast, monkeypatch
+):
+    """# batch-7 #2 결정 337 의 요점은 연결 실패 시간을 세지 않는 것이다. 로컬 오류 뒤에 연결
+    실패가 이어지면 그 시간은 세지 않는다 — 로컬 오류의 표식이 연결 실패 시간까지 세게 하면
+    등록이 서버가 돌아오기 전에 그 큐를 버린다."""
+    monkeypatch.setattr(rw, "BACKOFF_START_SECONDS", 0.3)
+    monkeypatch.setattr(rw, "BACKOFF_MAX_SECONDS", 0.3)
+    clock = WClock()
+    fake = FakeServer(clock)
+    w1 = wworker(tmp_path, fake, clock)
+    w1.prepare_sessions()
+    ended_queue(w1, 7, b"x\n")
+    die(w1)
+    refused = [threading.Event() for _ in range(3)]
+    fake.script["finish"] = [RuntimeError("boom"), conn_fail(), conn_fail(), conn_fail()]
+    real_finish = fake.finish
+
+    def finish(job_id, outcome, rc, summary=None, **extra) -> dict[str, Any]:
+        n = sum(1 for c in fake.calls if c[0] == "finish")  # 이 시도 앞의 수
+        try:
+            return real_finish(job_id, outcome, rc, summary, **extra)
+        finally:
+            if 1 <= n <= 3:
+                refused[n - 1].set()
+
+    fake.finish = finish  # type: ignore[method-assign]
+    w2 = restart(tmp_path, fake, clock)
+    t = threading.Thread(target=w2.send_dead_queues, daemon=True)
+    t.start()
+    try:
+        for ev in refused:
+            assert ev.wait(5), w2.logs
+            time.sleep(0.1)  # 보내는 쪽은 연결 실패 뒤 물러서 있다
+            clock.advance(400)  # 서버가 없는 400초
+        t.join(10)
+        assert not t.is_alive(), w2.logs
+    finally:
+        w2.stopping.set()
+        t.join(5)
+    assert [c[3] for c in fake.calls if c[0] == "finish"] == [SUCCEEDED] * 5, w2.logs
+    assert not any("queue not delivered" in x or "local error" in x for x in w2.logs), w2.logs
+
+
+def test_b7_2_c_the_300s_cap_does_not_cut_off_a_finish_that_has_not_been_tried(
+    tmp_path, fast, monkeypatch
+):
+    """# batch-7 #2 로그 단계가 로컬 오류로 막힌 끝난 잡. 잡이 끝난 직후 다시 뜬 프로세스라 끝난 지
+    300초와 등록 대기 300초가 같이 온다. 등록의 상한이 물러서 있는 보내는 스레드를 먼저 멈추면 한
+    번도 가 보지 않은 finish 를 잃는다 — 끝난 잡의 finish 는 한 번은 가 본다."""
+    monkeypatch.setattr(rw, "BACKOFF_START_SECONDS", 0.5)
+    monkeypatch.setattr(rw, "BACKOFF_MAX_SECONDS", 0.5)
+    clock = WClock()
+    fake = FakeServer(clock)
+    w1 = wworker(tmp_path, fake, clock)
+    w1.prepare_sessions()
+    ended_queue(w1, 7, b"x\n")
+    die(w1)
+    fake.script["log"] = [RuntimeError("boom")] * 100000
+    w2 = restart(tmp_path, fake, clock)
+    t = threading.Thread(target=w2.send_dead_queues, daemon=True)
+    t.start()
+    try:
+        assert wait_for(lambda: any("unexpected" in x for x in w2.logs), 5), w2.logs
+        time.sleep(0.1)  # 보내는 쪽은 0.5초 물러서 있다 — 등록 쪽은 그동안 0.05초마다 본다
+        clock.advance(rw.FINISH_HOLD_SECONDS + 1)
+        t.join(10)
+        assert not t.is_alive(), w2.logs
+    finally:
+        w2.stopping.set()
+        t.join(5)
+    assert [c[3] for c in fake.calls if c[0] == "finish"] == [SUCCEEDED], w2.logs
+    assert not any("queue not delivered" in x for x in w2.logs), w2.logs
+
+
+def test_b7_3_a_finish_sent_first_says_what_it_leaves_behind(tmp_path, fast):
+    """# batch-7 #3 phase 와 로그가 함께 밀렸고 phase 가 5xx 다. 끝난 지 300초 뒤 finish 가 먼저
+    가고, 한 번도 보내 보지 않은 로그 꼬리는 가지 않는다. 그 사실을 한 줄로 남긴다 — 줄 없이
+    버리면 운영자는 `log_complete` 가 왜 거짓인지 모른다."""
+    clock = WClock()
+    fake = FakeServer(clock, tick=60)
+    w, ob, s = live_sender(tmp_path, fake, clock)
+    ob.phase = "running"
+    ob.append(b"one\ntwo\n")
+    end_job(w, ob)
+    fake.script["phase"] = [http(503)] * 100000
+    s.start()
+    try:
+        s.thread.join(5)
+        assert ob.done
+    finally:
+        s.halt.set()
+    assert "log" not in fake.routes()
+    assert [c[5]["log_bytes"] for c in fake.calls if c[0] == "finish"] == [8]
+    said = [x for x in w.logs if "not sent" in x]
+    assert said == [
+        "#7 report: the finish goes first 300s after the job ended; not sent: the phase, the last"
+        " 8 bytes of the log (log_complete is false)"
+    ], w.logs
