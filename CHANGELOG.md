@@ -32,6 +32,19 @@ of a key bumps that number and is listed here.
   stops its jobs, reports them `lost` (`worker_replaced`) and exits 0; a claim of the first
   process that is still waiting then answers 409 `session_fenced` and takes no job.
   ([#284](https://github.com/monocsp/remote_ci_monitor/pull/284))
+- **A remote job's log arrives whole, once, after any drop.** The worker writes each job's output
+  and its finish to its data folder and sends them in order with a byte offset; the server writes
+  each piece at the length it has committed, ignores what it already has and answers
+  `409 log_gap` with the offset it expects. A worker restarted on the same folder sends what its
+  last process left before it registers. Readers see only committed bytes. When the log or bundle
+  of a finished job keeps getting server errors for 300 s the finish goes first, and after 24 hours
+  without the server the finish goes without the rest of the log
+  ([report queue](docs/configuration.md#the-workers-log-and-its-report-queue)).
+- **A snapshot download cut off by a lost connection closes the job `lost`**
+  (`snapshot_unreachable`, exit 3), not `failed`; a missing snapshot is still `failed`.
+- **An artifact bundle is `ready` only when the server has it.** A finish that says `ready`
+  without the uploaded bundle (row, same hash, file) records `failed` (`upload_failed`, or
+  `hash_mismatch`).
 
 ### Added
 - **`irreversible = true` for presets whose work must not run twice at once.** The worker stops
@@ -64,6 +77,11 @@ of a key bumps that number and is listed here.
   `RCM_HOLD_NOTE` (and `event` · `hold` in a webhook body); a `[[notify]]` rule with
   `on = ["irreversible_hold"]` is called once for each new hold. The default `on` is unchanged.
   ([#284](https://github.com/monocsp/remote_ci_monitor/pull/284))
+- **`log_complete` and `late_result`.** A finished job's document, `rcm wait --json` and the recent
+  rows of `/api/status` say whether the server received every byte of the job's log (`true`,
+  `false`, or `null` when it cannot tell). A finish that arrives after the server closed the job as
+  `lost` leaves the job as it is and shows up once as `late_result`; a worker finish's
+  `finished_at` is kept between the job's start and the moment the server received it.
 
 ### Fixed
 - **`/api/status` no longer answers 500 when its queue section fails.** That section is `null`

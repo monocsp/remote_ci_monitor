@@ -272,6 +272,26 @@ def test_gap5_operating_says_a_worker_whose_job_holds_a_group_is_not_forgotten()
     assert "confirm the job's processes are gone and release the hold" in text
 
 
+def test_rl19_the_configuration_says_how_the_report_queue_retries_and_gives_up():
+    """M5t-b PR2(§4.5 · 결정 264 · 324 · 337): 300초 · 24시간 · 등록 대기 줄이 코드와 같다."""
+    from remote_ci_monitor import remote_worker as rw
+
+    body = flat(section(CONFIGURATION, "The worker's log and its report queue"))
+    assert rw.FINISH_HOLD_SECONDS == 300 and rw.DEAD_SESSION_WAIT_SECONDS == 300
+    assert rw.RETRANSMIT_SECONDS == 24 * 3600
+    assert "got HTTP 5xx for 300 s | sends the finish first" in body
+    assert "24 hours after the job ended" in body
+    assert "`X-RCM-Log-Offset`" in body and "`409 log_gap`" in body
+    assert (
+        "dead session <id> queue not delivered after 300s of server errors — registering;"
+        " job #N will close as restarted-without-job"
+    ) in body
+    assert (
+        "`late_result` (`outcome`, `exit_code`, `finished_at`, `received_at`, `log_complete`)"
+        in (body)
+    )
+
+
 def test_p63_2_the_irreversible_section_says_its_job_shows_no_retry_limit():
     """# P6-3 #2 표식 잡으로 claim 된 잡은 반복하지 않는다 — 잡 문서의
     `max_attempts` 가 null 이다."""

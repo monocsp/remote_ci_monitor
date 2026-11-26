@@ -1498,6 +1498,40 @@ the default 60 and 5. The value is written on the job when a worker claims it; a
 after a restart the grace starts again from the moment the server came up, so a restart never
 closes every remote job at once. A server with `lanes = 0` uses the same key.
 
+### The worker's log and its report queue
+
+A remote worker writes each job's output to disk before it sends it: the bytes go to
+`<data_dir>/worker-sessions/<session>/jobs/<id>/stream.log`, and `outbox.json` next to it keeps
+the last phase, the byte offset the server has confirmed, the artifact bundle and the finish. One
+sender per job sends them in order: the phase, then the log in pieces of at most 256 KiB that end
+at a line break (`X-RCM-Log-Offset` names the first byte), then the bundle, then the finish. Jobs
+do not wait for each other. A lane takes its next job only when its job's queue is done, and the
+heartbeat keeps listing the job until then.
+
+The server writes each piece at the length it has committed and answers with the new offset. A
+piece it already has is ignored, a piece ahead of it gets `409 log_gap` and the worker resends
+from `expected_offset`, so a dropped answer or a retry never doubles or skips a byte. Readers
+(`rcm logs`, the web log view, the status and job tails) see only committed bytes.
+
+| when | what the worker does |
+|---|---|
+| the job is still running | retries every failure with backoff (1 s doubling to 30 s), with no limit |
+| the job ended and the log or bundle got HTTP 5xx for 300 s | sends the finish first; the bundle becomes `failed` (`upload_failed`) and the job's `log_complete` is `false` |
+| the job ended and the server cannot be reached | keeps the order and resends from the confirmed offset when the server is back |
+| 24 hours after the job ended | sends the finish without the rest of the log; a finish that still cannot go is dropped with a log line |
+
+A worker restarted on the same data folder with the same token and server sends what its last
+process left, with that process's session, before it registers; a server that keeps answering
+with errors for 300 s makes it register anyway
+(`dead session <id> queue not delivered after 300s of server errors — registering; job #N will close as restarted-without-job`).
+Time without a connection does not count toward the 300 s. A finish that arrives after the server
+already closed the job as `lost` does not change the job: the job document and `rcm wait --json`
+show it as `late_result` (`outcome`, `exit_code`, `finished_at`, `received_at`, `log_complete`).
+`log_complete` on a job is `true` when the server received every byte the job produced, `false`
+when bytes are missing, and `null` when it does not know (an older worker, or a job closed by the
+grace). A progress line that never ends (`\r` without a newline) reaches the live tail in 64 KiB
+pieces, so it shows up late.
+
 ### Jobs that must not run twice: `irreversible`
 
 `irreversible = true` on a preset marks work that must not run twice at once, such as a store
