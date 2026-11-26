@@ -1380,12 +1380,15 @@
       expected: null, startedAt: null, source: null };
     var prog = row.progress || null;
     var est = row.estimate || {};
-    var stuck = !!est.stuck;
+    // 끊긴 잡(P6-2 G6)은 마지막으로 들은 값만 안다 — 그 경과 · 출력 시각으로 멈춤 · 조용함 · 초과를
+    // 판정하지 않고 시간 눈금도 주지 않는다(지금의 경과를 모른다). 끝낸 단계 수는 사실이라 둔다.
+    var heard = heardLive(row);
+    var stuck = heard && !!est.stuck;
     // 형편의 우선순위: `preparing > stuck > over > finalizing > quiet > normal`.
     // `quiet`(조용함)은 관측이라 가장 약하다 — 「추정을 넘겼다」·「선언한 단계를 다 끝냈다」가
     // 더 행동 가능한 사실이다. 서버가 `stuck` 과 `quiet` 을 같이 보내면 **stuck 이 이긴다**:
     // 경보를 먹는 쪽(quiet 이 이기는 것)은 fail-open 이라 금지다.
-    var quiet = !!est.quiet && !stuck;
+    var quiet = heard && !!est.quiet && !stuck;
     if (prog && prog.phase === "materializing") { out.condition = "preparing"; return out; }
     // 스텝 안의 세부 진행이 있으면 그것이 눈금이다 — 스크립트가 **아는** 분모라 선언 스텝보다 곱다.
     // `done == total` 이어도 잡은 아직 돈다(그 스텝의 단위가 다 끝난 것뿐) — 99% 상한이 여기도
@@ -1411,7 +1414,7 @@
     var expected = isNum(est.expected_seconds) && est.expected_seconds > 0 && est.source !== "default"
       ? est.expected_seconds : null;
     var elapsed = isNum(est.elapsed_seconds) ? est.elapsed_seconds : null;
-    if (expected == null || elapsed == null) {
+    if (expected == null || elapsed == null || !heard) {   // mutcheck: web-unreachable-bar-over
       if (stuck) out.condition = "stuck";
       else if (quiet) out.condition = "quiet";
       return out;

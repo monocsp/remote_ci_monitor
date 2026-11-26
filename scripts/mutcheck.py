@@ -7327,6 +7327,30 @@ MUTANTS = (
         tests=("tests/web/unreachable_m5tb.test.js",),
         runner="node",
     ),
+    Mutant(
+        # 끊긴 잡의 마지막으로 들은 출력 시각으로 「조용함」을 판정한다 — 웹 막대가 「조용함」이
+        # 된다(P6-2 G6)
+        name="unreachable-quiet-kept",
+        path="src/remote_ci_monitor/core/queue.py",
+        old="            est = replace(est, quiet=False)  # mutcheck: unreachable-quiet-kept\n",
+        new="",
+        tests=(
+            "tests/test_queue_unreachable_m5tb.py::"
+            "test_p6_2_g6_rl28_an_unreachable_job_is_never_quiet",
+        ),
+    ),
+    Mutant(
+        # 끊긴 잡의 전체 진행 막대가 마지막으로 들은 경과로 「예상 초과」를 다시 계산한다(P6-2 G6)
+        name="web-unreachable-bar-over",
+        path="src/remote_ci_monitor/web/app.js",
+        old=(
+            "    if (expected == null || elapsed == null || !heard) {"
+            "   // mutcheck: web-unreachable-bar-over"
+        ),
+        new="    if (expected == null || elapsed == null) {",
+        tests=("tests/web/unreachable_m5tb.test.js",),
+        runner="node",
+    ),
 )
 
 

@@ -443,3 +443,45 @@ describe("G8 — 목록 밖 잡의 로그 서랍도 「로그 불완전」을 �
     assert.ok(poll.indexOf("drawerLogNote(findAnyJob(id), state.drawer.doc, L())") !== -1, "pollLog 가 잡 문서를 보지 않는다");
   });
 });
+
+// ── P6-2 ─────────────────────────────────────────────────────────────────────
+
+describe("P6-2 G6 — 끊긴 잡의 전체 진행 막대는 「예상 초과」를 다시 계산하지 않는다", () => {
+  // 경과는 마지막으로 들은 값이다 — 그것으로 elapsed >= expected 를 계산하면 행은 「연락 끊김」인데
+  // 막대는 「예상 초과」다. 시간 눈금도 지금의 경과를 모르므로 없다(진행률 모름). 끝낸 단계 수는
+  // 마지막으로 들은 사실이라 그대로 둔다.
+  const over = { elapsed_seconds: 900, expected_seconds: 600, source: "preset", sample_count: 0, finish_at: null };
+  test("p6-2 g6 — 시간 눈금: 끊긴 잡은 over 가 아니고 눈금도 없다, 살아 있으면 over", () => {
+    const p = rcm.overallProgress(running(901, { estimate: Object.assign({}, over) }));
+    assert.notEqual(p.condition, "over");
+    assert.equal(p.condition, "normal");
+    assert.equal(p.basis, "none");
+    assert.equal(p.pct, null);
+    const live = rcm.overallProgress(running(901, { reason: "running", estimate: Object.assign({}, over) }));
+    assert.equal(live.condition, "over");
+  });
+  test("p6-2 g6 — 옛 서버가 overdue · quiet · stuck 을 보내도 끊긴 잡의 막대 형편은 normal", () => {
+    const est = Object.assign({}, over, { elapsed_seconds: 100, overdue: true, quiet: true });
+    assert.equal(rcm.overallProgress(running(901, { estimate: est })).condition, "normal");
+    const q = Object.assign({}, over, { elapsed_seconds: 100, quiet: true });
+    assert.equal(rcm.overallProgress(running(901, { estimate: q })).condition, "normal");
+    const s = Object.assign({}, over, { elapsed_seconds: 100, stuck: true });
+    assert.equal(rcm.overallProgress(running(901, { estimate: s })).condition, "normal");
+  });
+  test("p6-2 g6 — 단계 눈금은 마지막으로 들은 사실이라 그대로", () => {
+    const row = running(901, { estimate: Object.assign({}, over), progress: { steps_total: 4, steps_done: 1 } });
+    const p = rcm.overallProgress(row);
+    assert.equal(p.basis, "steps");
+    assert.equal(p.pct, 25);
+    assert.equal(p.condition, "normal");
+  });
+  test("p6-2 g6 — 막대 글: 「past the estimate」 · 「예상 시간 초과」가 없다", () => {
+    const row = running(901, { estimate: Object.assign({}, over) });
+    const en = rcm.progressBarHtml(row, "en", false);
+    const ko = rcm.progressBarHtml(row, "ko", false);
+    assert.ok(en.indexOf("past the estimate") === -1, en);
+    assert.ok(ko.indexOf("예상 시간 초과") === -1, ko);
+    assert.ok(en.indexOf('data-cond="over"') === -1, en);
+    assert.ok(en.indexOf("progress —") !== -1, en);
+  });
+});

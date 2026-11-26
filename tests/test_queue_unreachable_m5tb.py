@@ -14,6 +14,7 @@
 from __future__ import annotations
 
 import functools
+from dataclasses import replace
 from datetime import UTC
 from typing import Any
 
@@ -26,7 +27,14 @@ from remote_ci_monitor import cli as cli_mod
 from remote_ci_monitor import client as client_mod
 from remote_ci_monitor.cli import main
 from remote_ci_monitor.core import model
-from remote_ci_monitor.core.model import CANCELLING, RUNNING, CancelInfo, WorkerInfo
+from remote_ci_monitor.core.model import (
+    CANCELLING,
+    RUNNING,
+    CancelInfo,
+    Progress,
+    Step,
+    WorkerInfo,
+)
 from remote_ci_monitor.core.queue import compute_queue
 from remote_ci_monitor.core.render_text import render
 from test_cli_m1 import last_json
@@ -595,3 +603,41 @@ def test_g6_rl28_rcm_wait_progress_line_has_no_overdue_while_unreachable():
     }
     assert "overdue" not in cli_mod.describe(d), cli_mod.describe(d)
     assert "overdue" in cli_mod.describe({**d, "reason": "overdue"})
+
+
+# ── P6-2 ─────────────────────────────────────────────────────────────────────
+
+
+def test_p6_2_g6_rl28_an_unreachable_job_is_never_quiet():
+    """# RL28 P6-2 G6: 「조용함」도 마지막으로 들은 출력 시각으로 판정한 것이다 — 끊긴 잡에 내면
+    웹 막대의 형편이 「조용함」이 된다. 대조: 같은 잡이 살아 있는 워커에 있으면 참이다."""
+    j = job(933, key="deploy-dev", state=RUNNING, started_min=8, lane=1, worker_name="mac2")
+    j = replace(j, last_output_at=ago(minutes=5))
+    prog = {
+        933: Progress(
+            phase="executing",
+            steps=(Step(index=1, name="fetch", state="done", ok=True, seconds=20.0),),
+            steps_done=1,
+            current_name="build",
+            current_seconds=200.0,
+        )
+    }
+
+    def one(lane: WorkerInfo):
+        got = compute_queue(
+            [j],
+            workers=[lane],
+            paused=False,
+            medians={},
+            presets=PRESETS,
+            cfg=CFG,
+            now=NOW,
+            progress=prog,
+        )
+        return got[0]
+
+    live = one(remote_lane("mac2", "busy", job_id=933))
+    assert live.reason == "quiet" and live.estimate.quiet, live
+    down = one(remote_lane("mac2", "down"))
+    assert down.reason == GRACE
+    assert down.estimate.quiet is False, down.estimate
