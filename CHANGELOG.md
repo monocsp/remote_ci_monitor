@@ -14,7 +14,10 @@ of a key bumps that number and is listed here.
   that could and `rcm worker` with `server_name` stopped with `no rcm server named …`. The
   question now also goes over the loopback interface, and each server listens there too. A
   server on another computer still has to hear the network; on macOS, check the Local Network
-  permission of the process that runs `rcm serve`.
+  permission of the process that runs `rcm serve`. Several servers on one computer now all show
+  up, so a client or worker that left out `server_name` and relied on finding exactly one now
+  stops with `several rcm servers on this network: …` and asks you to pick one (`server_name` or
+  `--server`).
   ([#280](https://github.com/monocsp/remote_ci_monitor/pull/280))
 
 ## [0.11.0] - 2026-11-26
