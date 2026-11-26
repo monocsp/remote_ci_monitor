@@ -90,7 +90,10 @@ def _env(tmp_path: Path) -> tuple[dict[str, str], Path]:
         XDG_CACHE_HOME=str(tmp_path / "cache"),
         PATH=f"{stubs}:/usr/bin:/bin:/usr/sbin:/sbin",
         RCM_TOKEN="tok-" + "K4v" * 6,
-        PYTHONPATH=str(_site(tmp_path)),
+        # 덮지 않고 앞에 붙인다 — 셸의 PYTHONPATH 가 이 venv 밖의 패키지를 줄 수 있다(batch 11 L6)
+        PYTHONPATH=os.pathsep.join(
+            p for p in (str(_site(tmp_path)), os.environ.get("PYTHONPATH", "")) if p
+        ),
     )
     return env, log
 
