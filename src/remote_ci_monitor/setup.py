@@ -351,7 +351,9 @@ def _rcm_service(path: Path, *, home: Path, root: bool) -> core.RcmService | Non
         sf = doctor.read_service_file(path, user_home=None if root else str(home), system=root)
     except (OSError, doctor.ServiceFileUnreadable) as e:
         named = doctor.looks_like_rcm(doctor.ServiceFile(path=path, label=stem))
-        if named or (data is not None and _RCM_BYTES.search(data)):
+        # 읽을 권한이 없으면 이름 · 바이트로 가릴 수도 없다 — 닫는 쪽이다(batch 10 L1)
+        denied = isinstance(e, PermissionError)
+        if denied or named or (data is not None and _RCM_BYTES.search(data)):
             if isinstance(e, doctor.ServiceFileUnreadable):
                 reason = e.reason
             else:
@@ -439,7 +441,15 @@ def scan_services(
             out.append(core.RcmService(place.name, real_path(place), problem=reason))
             continue
         for path in entries:
-            if path.suffix not in (".plist", ".service") or not path.is_file():
+            if path.suffix not in (".plist", ".service"):
+                continue
+            try:
+                regular = path.is_file()
+            except OSError as e:  # stat 할 권한이 없다 — 그 파일이 무엇인지 모른다(batch 10 L1)
+                reason = f"setup cannot look at it ({e.strerror or type(e).__name__})"
+                out.append(core.RcmService(path.stem, real_path(path), problem=reason))
+                continue
+            if not regular:
                 continue
             found = _rcm_service(path, home=home, root=root)
             if found is not None:
