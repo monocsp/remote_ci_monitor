@@ -151,13 +151,22 @@ def _write_at(fh: Any, pos: int, data: bytes) -> None:
     fh.flush()
 
 
-def _open_line(fh: Any, pos: int) -> bytes:
-    """파일의 `pos` 앞에서 줄 끝 없이 열려 있는 마지막 줄(많아야 4 KiB). 마커 파싱에만 쓴다."""
-    start = max(0, pos - 4096)
+#: 앞 조각이 줄 끝 없이 남긴 열린 줄을 볼 창의 바닥(마커 한 줄에 넉넉하다)
+OPEN_LINE_BYTES = 4096
+
+
+def _open_line(fh: Any, pos: int, window: int) -> tuple[bytes, bool]:
+    """파일의 `pos` 앞에서 줄 끝 없이 열려 있는 마지막 줄의 꼬리(많아야 `window` 바이트)와, 그것이
+    줄 전체인지. 창 안에 줄 끝이 없으면 창 전체가 그 줄의 꼬리다 — 빈 머리로 두면 창보다 긴 줄
+    끝에서 두 조각에 걸친 비밀을 못 가린다(P3 2라운드). 가리기는 꼬리를, 마커 파싱은 줄 전체일
+    때만 쓴다."""
+    start = max(0, pos - window)
     fh.seek(start)
     head = fh.read(pos - start)
     cut = head.rfind(b"\n")
-    return head[cut + 1 :] if cut >= 0 else (head if start == 0 else b"")
+    if cut >= 0:
+        return head[cut + 1 :], True
+    return head, start == 0  # mutcheck: open-line-tail-dropped
 
 
 def _mask_piece(head: bytes, rest: bytes, values: Iterable[bytes]) -> bytes:
@@ -1127,7 +1136,10 @@ class RemoteWorkersMixin:
                 self.store.pin_log_incomplete(job.id)
                 self.log(f"log gap: job #{job.id} log.txt is {size} bytes, committed {file_bytes}")
                 pos = size
-            head = _open_line(fh, pos)  # 앞 조각이 줄 끝 없이 남긴 커밋된 열린 줄
+            # 앞 조각이 줄 끝 없이 남긴 커밋된 열린 줄. 창은 가장 긴 값 이상이다 — 그보다 짧은
+            # 값은 어디서 끊겨도 창 안에서 시작한다(릴리스 값은 64 KiB 까지)
+            window = max(OPEN_LINE_BYTES, max((len(v) for v in values), default=0))
+            head, whole = _open_line(fh, pos, window)  # mutcheck: open-line-window-fixed
             masked = _mask_piece(head, rest, values)
             try:
                 _write_at(fh, pos, masked)  # step 7
@@ -1139,7 +1151,7 @@ class RemoteWorkersMixin:
             # 마커는 끝난 줄에서만 찾는다. 앞 조각이 줄 끝 없이 끝났으면(러너가 64 KiB 마다 끊은
             # 줄 · 옛 시험) 파일의 그 꼬리를 앞에 붙인다 — 메모리 조각(`_log_partial`)이 아니라
             # 커밋된 파일에서 읽으므로 재시작을 넘어도 같다
-            lines = (head + masked).split(b"\n")[:-1]
+            lines = ((head if whole else b"") + masked).split(b"\n")[:-1]
             parsed = [
                 p for raw in lines if (p := parse_marker(raw.decode("utf-8", errors="replace")))
             ]

@@ -166,6 +166,58 @@ def test_rl18_e_a_secret_split_across_two_mid_line_pieces_never_reaches_the_log(
     assert row(srv, jid)["log_offset"] == len(stream)
 
 
+def two_pieces(srv: WorkerServer, jid: int, stream: bytes, cut: int) -> bytes:
+    """`stream` 을 `cut` 에서 두 조각으로 보내고 `log.txt` 를 돌려준다."""
+    status, body = post_log(srv, jid, stream[:cut], 0)
+    assert status == 200 and body["offset"] == cut, body
+    status, body = post_log(srv, jid, stream[cut:], cut)
+    assert status == 200 and body["offset"] == len(stream), body
+    text = log_file(srv, jid)
+    status, _, got = srv.req("GET", f"/jobs/{jid}/log?offset=0", token="alice", raw=True)
+    assert status == 200 and got == text
+    return text
+
+
+@pytest.mark.parametrize("before", [4000, 4096, 4097, 9000])
+def test_rl18_e_b_a_straddling_secret_after_a_line_longer_than_4_kib_is_masked(
+    srv, monkeypatch, before
+):
+    """열린 줄이 4 KiB 보다 길어 그 창 안에 줄 끝이 없어도 두 조각에 걸친 비밀을 가린다(P3 2라운드
+    LOW). 창 안에 줄 끝이 없으면 창 전체가 그 줄의 꼬리다 — 빈 머리로 두면 걸친 값이 남는다."""
+    jid = running(srv)
+    secret = b"tok-0123456789"
+    monkeypatch.setattr(srv.app, "mask_for_preset", lambda name: (secret,))
+    stream = b"start\n" + b"y" * before + b"key=" + secret + b" end\n"
+    text = two_pieces(srv, jid, stream, stream.index(b"6789"))
+    assert secret not in text, text[-40:]
+    assert text.endswith(b"****" + b" end\n"), text[-40:]
+
+
+def test_rl18_e_c_a_value_longer_than_4_kib_that_straddles_is_masked(srv, monkeypatch):
+    """릴리스 값은 64 KiB(`VALUE_MAX_BYTES`)까지다. 서버가 보는 앞 줄의 창은 가장 긴 값 이상이라
+    그보다 짧은 값은 어디서 끊겨도 가려진다(P3 2라운드 LOW)."""
+    jid = running(srv)
+    big = b"".join(b"%05d" % i for i in range(1200))  # 6000 바이트, 같은 조각이 되풀이되지 않는다
+    monkeypatch.setattr(srv.app, "mask_for_preset", lambda name: (big,))
+    stream = b"start\n" + b"y" * 300 + b"key=" + big + b" end\n"
+    text = two_pieces(srv, jid, stream, stream.index(big) + 5000)
+    assert big not in text and text.endswith(b"****" + b" end\n"), text[-40:]
+
+
+def test_rl18_e_d_several_and_overlapping_secrets_across_a_long_open_line_are_masked(
+    srv, monkeypatch
+):
+    """비밀 여럿, 서로 겹치는 값 둘이 4 KiB 보다 긴 열린 줄 끝에서 두 조각에 걸친다. 어느 값도
+    온전히 남지 않는다."""
+    jid = running(srv)
+    one, two, three = b"tok-AAAA-BBBB", b"BBBB-CCCC-dd", b"other-secret-9"
+    monkeypatch.setattr(srv.app, "mask_for_preset", lambda name: (one, two, three))
+    stream = b"y" * 5000 + b" tok-AAAA-BBBB-CCCC-dd and " + three + b"\n"
+    text = two_pieces(srv, jid, stream, stream.index(b"BB-CCCC"))
+    for value in (one, two, three):
+        assert value not in text, (value, text[-60:])
+
+
 def test_rl17_b_marker_in_a_chunk_is_committed_once(srv):
     jid = running(srv)
     data = b"::rcm::step::build\nhello\n"
