@@ -257,6 +257,14 @@ def test_p62_2_operating_says_a_restarted_server_answers_null_and_what_the_worke
     )
 
 
+def test_p62_3_operating_says_an_unsent_finish_leaves_the_folder_for_the_next_process():
+    """# P6-2 #3 멈추기 전에 끝을 알리지 못한 잡은 폴더가 남고 다음 프로세스가 확인한다."""
+    text = flat(OPERATING)
+    assert "stops before it could tell the server how a job ended" in text
+    assert "leaves that job's folder in its `data_dir`" in text
+    assert "the job closes without holding its group" in text
+
+
 def test_gap5_operating_says_a_worker_whose_job_holds_a_group_is_not_forgotten():
     """# GAP5 일주일 조용한 워커를 잊는 규칙의 예외에 열린 홀드가 든다."""
     text = flat(OPERATING)

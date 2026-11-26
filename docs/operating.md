@@ -1047,6 +1047,11 @@ When you are done with the second process, start the service again:
 `launchctl kickstart -k gui/<uid>/<label>` (launchd) or `systemctl --user restart <unit>`
 (systemd).
 
+A worker that stops before it could tell the server how a job ended (the server was unreachable,
+or the process was replaced) leaves that job's folder in its `data_dir`. The next worker process
+started there finds the folder, checks that the job's processes are gone and tells the server, so
+the job closes without holding its group.
+
 Change a worker's `server` or `server_name` only while it runs no job: stop the worker and wait for
 its jobs to end first. The worker keeps a session folder per process under its `data_dir`, owned
 by the server it was set up for. After the change it takes its old folders for another worker's,

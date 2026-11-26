@@ -6829,6 +6829,28 @@ MUTANTS = (
             "test_p62_2_the_worker_says_it_cannot_tell_when_fenced_sessions_is_null",
         ),
     ),
+    Mutant(
+        # P6-2 #3 보내지 못한 finish 의 잡 폴더를 멈추는 중에 지운다 — 다음 프로세스의 확인이 없다
+        name="unsent-finish-folder-dropped",
+        path="src/remote_ci_monitor/remote_worker.py",
+        old="            if gave_up:  # mutcheck: unsent-finish-folder-dropped\n",
+        new="            if False:\n",
+        tests=(
+            "tests/test_worker_session_m5tb.py::"
+            "test_p62_3_a_narrow_confirm_that_cannot_be_sent_is_retried_and_keeps_the_job_folder",
+        ),
+    ),
+    Mutant(
+        # P6-2 #3 409 뒤의 좁은 확인을 `keep` 없이 보낸다 — 못 보낸 것을 몰라 폴더를 지운다
+        name="narrow-confirm-without-keep",
+        path="src/remote_ci_monitor/remote_worker.py",
+        old='                self.report(call, f"#{job_id} finish", keep=keep, job_id=job_id)\n',
+        new='                self.report(call, f"#{job_id} finish", job_id=job_id)\n',
+        tests=(
+            "tests/test_worker_session_m5tb.py::"
+            "test_p62_3_a_narrow_confirm_that_cannot_be_sent_is_retried_and_keeps_the_job_folder",
+        ),
+    ),
 )
 
 

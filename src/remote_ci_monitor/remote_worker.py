@@ -2130,11 +2130,19 @@ class RemoteWorker:
 
             self.report(call, f"#{job_id} finish", keep=keep, job_id=job_id)
             if self.fenced.is_set() and sent_narrow == [False]:
-                # 이 finish 의 409 `session_fenced` 로 처음 알았다 — 결과 대신 확인을 보낸다
-                self.report(call, f"#{job_id} finish", job_id=job_id)
+                # 이 finish 의 409 `session_fenced` 로 처음 알았다 — 결과 대신 확인을 보낸다.
+                # 다른 보고처럼 `keep` 으로 보낸다(P6-2 #3) — 판정은 이 확인의 결과로 한다
+                gave_up.clear()
+                self.report(call, f"#{job_id} finish", keep=keep, job_id=job_id)
             if gave_up and not self.stopping.is_set():
                 # 서버를 갈아 끼우는 몇 초일 수 있다 — 버리지 않고 나중에 다시 보고한다
                 self._park_unreported(job_id, call)
+                return
+            if gave_up:  # mutcheck: unsent-finish-folder-dropped
+                # 멈추는 중이라 미룰 곳이 없다(펜싱도 멈춤이다). 폴더를 남긴다 — 다음 프로세스가
+                # 이 세션을 죽은 세션으로 판정해 확인을 보낸다(P6-2 #3). 지우면 확인이 사라진다
+                with self._lock:
+                    self.running.pop(job_id, None)
                 return
         with self._lock:
             self.running.pop(job_id, None)

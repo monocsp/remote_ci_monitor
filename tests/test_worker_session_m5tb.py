@@ -202,6 +202,51 @@ def test_gap2_a_fenced_sessions_natural_end_goes_as_the_narrow_confirm(
     assert w.fenced.is_set()
 
 
+def test_p62_3_a_narrow_confirm_that_cannot_be_sent_is_retried_and_keeps_the_job_folder(
+    srv, tmp_path, monkeypatch
+):
+    """# P6-2 #3 finish 의 409 로 펜싱을 처음 안 워커는 결과 대신 좁은 확인을 보낸다. 그 확인이
+    연결 실패면 다른 보고처럼 다시 보내고, 끝내 못 보내면 잡 폴더를 지우지 않는다 — 다음
+    프로세스가 그 폴더를 판정해 확인을 보낸다. 지우면 확인이 사라지고 잡은 G 뒤
+    `worker_unreachable` 로 닫히며 표식 잡의 그룹은 홀드된다."""
+    import types
+
+    monkeypatch.setattr(rw, "REPORT_RETRIES", (0.0, 0.0, 0.0))
+    srv.registered("build-02")
+    jid = running(srv, preset="ship")
+    old = srv.new_process("build-02")
+    srv.registered("build-02")  # 같은 토큰의 새 프로세스가 옛 세션을 펜싱했다
+    url = f"http://127.0.0.1:{srv.port}"
+    cfg = WorkerConfig(
+        server=url, token=srv.tokens["build-02"], data_dir=str(tmp_path / "w"), lanes=1
+    )
+    w = RemoteWorker(cfg, log=lambda m: None)
+    w.session_id = old
+    w._bind_session(w.client)
+    w.session_dir = tmp_path / "w" / rw.SESSIONS_DIR / old
+    folder = w._job_dir(jid)
+    assert folder is not None
+    w._write_claim(jid, True, 600)
+    w._write_proc(jid, None)
+    real = w.client.finish
+    sent: list[str] = []
+
+    def unreachable_after_the_first(job_id: int, outcome: str, *a: Any, **kw: Any) -> Any:
+        sent.append(outcome)
+        if len(sent) > 1:
+            raise ClientError(0, "connection refused")
+        return real(job_id, outcome, *a, **kw)
+
+    monkeypatch.setattr(w.client, "finish", unreachable_after_the_first)
+    observer = types.SimpleNamespace(irreversible=True, closed_state=None, finish_sent=False)
+    w._finish(jid, SUCCEEDED, 0, "done", observer, group_gone=True)
+    assert w.fenced.is_set()  # 첫 finish 의 409 로 알았다
+    assert sent[0] == SUCCEEDED and sent[1:] == [LOST] * len(sent[1:])
+    assert len(sent) >= 3  # 좁은 확인을 한 번이 아니라 다른 보고처럼 다시 보냈다
+    assert job_of(srv, jid).state == RUNNING
+    assert (folder / "claim.json").is_file()  # 보내지 못했다 — 다음 프로세스가 판정한다
+
+
 @pytest.mark.parametrize("gone", [True, None])
 def test_p62_1_a_remote_job_with_a_retry_frozen_before_the_mark_is_not_retried(tmp_path, gone):
     """# P6-2 #1 표식 전에 `[retry]` 로 제출된 잡은 반복 정책을 얼린 채 대기한다. reload 가
