@@ -1314,6 +1314,23 @@ def test_f2_rcm_words_inside_quoted_text_do_not_arm_the_net(command):
 @pytest.mark.parametrize(
     "command",
     [
+        # 따옴표 안에서 글자인 것: 겹 따옴표 안의 `\``, 홑 따옴표 안의 `$(…)`, 닫힌 `\"`
+        'gh pr comment 1 --body "use \\`rcm (x)\\`" && rcm wait --job 5',
+        "gh pr comment 1 --body 'use $(rcm $S)'",
+        'echo "a\\" ; rcm $S ; echo \\""',
+        # 하위 명령이 글자 그대로면 뒤의 치환은 그 인자다
+        'rcm status "$(cat /tmp/x)"',
+        "rcm wait --job $(cat /tmp/job) --timeout 60",
+    ],
+)
+def test_f2_text_the_shell_keeps_as_letters_passes(command):
+    # m5t-a-w3 F2: 그물은 따옴표를 셸처럼 자른다(`_lex`) — 셸이 글자로 두는 것은 명령이 아니다
+    assert judge(command, environ=TEST_XDG) is None, command
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
         "fd -e py src | wc -l; git archive HEAD | tar -x -C /tmp/snap; rcm status",
         "fd -e md docs > /tmp/l; unzip -x a.zip b; rcm wait --job 5 --timeout 60",
         "grep -x foo /tmp/a && fd -e md; rcm status",
@@ -1341,6 +1358,15 @@ def test_f1_a_launcher_word_that_is_not_in_a_command_place_is_not_a_launcher(com
         "xargs -I{} sh -c 'rcm {}' < /tmp/a",
         "find /tmp/a -exec sh -c 'rcm \"$1\"' _ {} \\;",
         "python3 -c 'import pty; pty.spawn([\"rcm\"])'",
+        # 글을 나중에 실행하는 꼴: 셸이 실행할 글을 치환이 만든다, 별칭, git 의 셸 별칭
+        'eval "$(printf \'rcm %s\' "$S")"',
+        'bash -c "$(printf \'rcm %s\' "$S")"',
+        "alias r='rcm $S'; r",
+        "git -c alias.x='!rcm $S' x",
+        # 따옴표를 셸처럼 자를 수 없는 글(히어독 · 닫히지 않은 따옴표)은 옛 그물로 본다
+        "python3 - <<'EOF'\nimport pty; pty.spawn(['rcm'])\nEOF",
+        "echo 'unclosed ; rcm $S",
+        "echo " + "$(" * 200 + "rcm $S" + ")" * 200,
         # 명령 자리의 런처는 리다이렉션 · 감싸기 뒤에서도 런처다
         "< /tmp/args.txt nice -n 5 xargs rcm",
         "2>&1 fd x /tmp/a -x rcm",

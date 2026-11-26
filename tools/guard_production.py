@@ -1011,10 +1011,32 @@ _LAUNCHERS = WRAPPERS | frozenset(
 #: 받은 줄(stdin · 파일 · `:::` · 찾은 파일)을 다른 명령의 인자로 붙여 실행하는 런처 — 그 인자는
 #: 명령 글에 없다(P3 5라운드 v1-1). 이름(basename)으로 본다
 _FEEDERS = frozenset({"xargs", "gxargs", "parallel", "entr", "rush", "xe"})
-#: 그 낱말이 있으면 명령을 실행하는 플래그 — find 의 `-exec` 무리와 fd 의 긴 꼴
-_FEEDER_FLAGS = frozenset({"-exec", "-execdir", "-ok", "-okdir", "--exec", "--exec-batch"})
-#: fd 의 짧은 실행 플래그(`-x` · `-X`) — 흔한 글자라 fd · fdfind 낱말이 같이 있을 때만 본다
+#: 어느 명령의 낱말이든 명령을 실행하는 긴 플래그 — fd 의 `--exec` 무리(`git rebase --exec` 도)
+_FEEDER_FLAGS = frozenset({"--exec", "--exec-batch"})
+#: find 의 실행 플래그 — 그 명령이 find 일 때만 본다(m5t-a-w3 F1: `grep -- -exec` 는 아니다)
+_FIND_FLAGS = frozenset({"-exec", "-execdir", "-ok", "-okdir"})
+_FINDS = frozenset({"find", "gfind", "bfs"})
+#: fd 의 짧은 실행 플래그(`-x` · `-X`) — 그 명령이 fd · fdfind 일 때만 본다(m5t-a-w3 F1:
+#: `tar -x` · `unzip -x` · `grep -x` 의 `-x` 는 아니다)
 _FD = frozenset({"fd", "fdfind"})
+#: 따옴표 글을 코드로 실행하는 인터프리터와 그 코드 플래그 글자(`perl -e` · `osascript -e`).
+#: 빈 글자는 첫 인자가 코드라는 뜻이다(awk). python 은 `-c` 다(`_PYTHON_CODE`)
+_CODE_FLAGS = {
+    "perl": "eE", "ruby": "e", "node": "ep", "nodejs": "ep", "bun": "e", "osascript": "e",
+    "lua": "e", "php": "r", "Rscript": "e", "awk": "", "gawk": "", "mawk": "", "nawk": "",
+    "sh": "c", "bash": "c", "zsh": "c", "dash": "c", "ksh": "c", "fish": "c",
+}  # fmt: skip
+_PYTHON_CODE = "c"
+#: 코드 플래그 뒤의 인자를 셸 명령으로 실행하는 셸. `eval` 은 인자 전부가 셸 명령이다
+_SHELLS = frozenset({"sh", "bash", "zsh", "dash", "ksh", "fish"})
+#: 따옴표 글을 나중에 명령으로 실행하게 만드는 것 — `alias r='…'`, git 의 셸 별칭(`alias.x=!…`)
+_DEFINERS = frozenset({"alias"})
+_GIT_SHELL_ALIAS = re.compile(r"alias\.[^=\s]*=!", re.IGNORECASE)
+#: 따옴표를 아는 자르기(`_lex`)가 치환(`$(…)` · 백틱 · `<(…)`) 자리에 남기는 글자 — 셸이 무엇으로
+#: 바꿀지 모른다(`$` 가 있어 변수처럼 읽힌다)
+_SUBST = "$(…)"
+#: 이보다 깊게 겹친 치환은 읽지 않고 그물을 켠다(fail closed — 훅이 터지면 setup 이 새어 나간다)
+_MAX_DEPTH = 64
 #: 명령에 가상 터미널을 주는 런처 — 그 아래 하위 명령 없는 `rcm` 은 첫 실행 질문을 띄우고
 #: 예면 setup 을 돌린다(P3 5라운드 v1-2)
 _PTY_LAUNCHERS = frozenset({"script", "unbuffer", "expect", "socat", "tmux", "screen"})
@@ -1051,9 +1073,283 @@ def _shaped_after(tokens: list[str], index: int) -> bool:
         word = _letters(token)
         if word.startswith("-"):
             continue
-        glued = tokens[position + 1 : position + 2] == ["("]  # zsh 의 `s(e)tup` 글롭
+        # zsh 의 `s(e)tup` 글롭. `_lex` 의 낱말은 붙은 `(…)` 를 이미 `_SUBST` 로 담았다 — 그 뒤의
+        # `(` 는 다음 낱말의 치환이다
+        glued = not isinstance(token, _Word) and tokens[position + 1 : position + 2] == ["("]
         return _shaped(word) or glued
     return False
+
+
+class _Word(str):
+    """`_lex` 의 낱말 — 쓰인 글자 그대로(따옴표 · 역슬래시 포함, 치환 자리는 `_SUBST`).
+    `prose` 는 따옴표 안에 빈칸이 든 낱말이다: 명령 이름 하나가 될 수 없는 글(제목 · 메시지 ·
+    본문)이거나, 그 글을 실행하는 명령(`sh -c` · `eval` · `python -c`)에게는 프로그램이다."""
+
+    prose: bool = False
+
+
+class _Unreadable(Exception):
+    """`_lex` 가 셸처럼 자를 수 없는 글 — 닫히지 않은 따옴표, 히어독(`<<EOF`, 그 본문은 명령이
+    아니다), `_MAX_DEPTH` 보다 깊게 겹친 치환. 그물은 그 글을 옛 거친 자르기로 본다
+    (`_rough_view`)."""
+
+
+def _quote_end(text: str, i: int) -> int:
+    """`'…'` 나 `$'…'`(역슬래시가 다음 글자를 감싼다)가 끝난 다음 자리. 닫히지 않으면
+    `_Unreadable`."""
+    if text[i] == "$":
+        j = i + 2
+        while j < len(text):
+            if text[j] == "\\":
+                j += 2
+            elif text[j] == "'":
+                return j + 1
+            else:
+                j += 1
+        raise _Unreadable
+    j = text.find("'", i + 1)
+    if j < 0:
+        raise _Unreadable
+    return j + 1
+
+
+def _lex(text: str) -> list[str]:
+    """명령 글을 낱말(`_Word`)과 셸 글자(`;` `&` `|` 줄바꿈, 치환 · 서브셸의 `(` · `)`)로 자른다.
+
+    `_ROUGH_TOKEN` 과 달리 따옴표를 안다 — 따옴표 안의 `(` · `|` · `;` 는 글자다(m5t-a-w3 F2:
+    제목의 `feat(cli):` 가 명령 자리를 만들었다). 맨 글과 겹 따옴표 안의 `$(…)` · 백틱, 낱말에 붙은
+    `(…)`(`<(…)` · `s(e)tup`)는 그 안을 명령으로 자르고(`(` … `)`, 바깥 낱말보다 먼저 나온다),
+    바깥 낱말에는 `_SUBST` 를 남긴다. 리다이렉션 연산자(`<` · `2>&1` · `&>` · `>|`)는 낱말의
+    머리다. 자를 수 없는 글이면 `_Unreadable`."""
+    items: list[str] = []
+    end = len(text)
+
+    def flush(word: list[str], quoted: list[bool]) -> None:
+        if word:
+            raw = _Word("".join(word))
+            raw.prose = quoted[0] and any(c in " \t\n" for c in _letters(raw))
+            items.append(raw)
+            word.clear()
+        quoted[0] = False
+
+    def double(i: int, word: list[str], depth: int) -> int:
+        word.append('"')
+        i += 1
+        while i < end:
+            c = text[i]
+            if c == '"':
+                word.append(c)
+                return i + 1
+            if c == "\\":
+                word.append(text[i : i + 2])
+                i += 2
+            elif c == "`" or text.startswith("$(", i):
+                word.append(_SUBST)
+                items.append("(")
+                i = command(i + (1 if c == "`" else 2), c if c == "`" else ")", depth + 1)
+            else:
+                word.append(c)
+                i += 1
+        raise _Unreadable
+
+    def command(i: int, closer: str, depth: int) -> int:
+        if depth > _MAX_DEPTH:
+            raise _Unreadable
+        word: list[str] = []
+        quoted = [False]
+        while i < end:
+            c = text[i]
+            head = "".join(word)
+            if closer and c == closer:
+                flush(word, quoted)
+                items.append(")")
+                return i + 1
+            if c in " \t":
+                flush(word, quoted)
+                i += 1
+            elif c == "\\":
+                word.append(text[i : i + 2])
+                i += 2
+            elif c == "'" or text.startswith("$'", i):
+                j = _quote_end(text, i)
+                word.append(text[i:j])
+                quoted[0] = True
+                i = j
+            elif c == '"':
+                quoted[0] = True
+                i = double(i, word, depth)
+            elif c == "`" or c == "(" or text.startswith("$(", i):
+                if c == "(" and not word:
+                    flush(word, quoted)  # 서브셸 · 배열
+                else:
+                    word.append(_SUBST)
+                items.append("(")
+                i = command(i + (2 if c == "$" else 1), c if c == "`" else ")", depth + 1)
+            elif c in "<>":
+                if text.startswith("<<", i) and not text.startswith("<<<", i):
+                    raise _Unreadable  # 히어독 본문은 명령이 아니다 — 줄 단위로 자르면 틀린다
+                if word and not (head.isdigit() or head[-1] in "<>&"):
+                    flush(word, quoted)
+                word.append(c)
+                i += 1
+            elif (
+                c == "&" and (head[-1:] in ("<", ">") or (not word and text[i + 1 : i + 2] == ">"))
+            ) or (c == "|" and head[-1:] == ">"):
+                word.append(c)  # `2>&1` · `&>` · `>|`
+                i += 1
+            elif c in ";&|\n)":
+                flush(word, quoted)
+                items.append(c)
+                i += 1
+            else:
+                word.append(c)
+                i += 1
+        flush(word, quoted)
+        return i
+
+    command(0, "", 0)
+    return items
+
+
+@dataclass
+class _Frame:
+    """명령 하나를 읽는 동안의 상태. `(` 가 새 틀을 쌓고 `)` 가 앞 틀로 돌아간다 — 그래서
+    `xargs -a <(…) rcm` 의 rcm 은 여전히 xargs 의 명령 안이다."""
+
+    position: bool = True  # 다음 낱말이 명령 자리다
+    wrapped: bool = False  # 감싸기 뒤 — 변수 낱말은 모두 명령 자리일 수 있다
+    runs: bool = False  # 받은 인자 · 글을 실행하는 명령(감싸기 · 런처 · 코드 플래그) 뒤
+    target: bool = False  # 앞 낱말이 리다이렉션 연산자 하나 — 이 낱말은 파일 이름이다
+    code: str | None = None  # 명령이 인터프리터면 그 코드 플래그 글자
+    interp: str = ""  # 그 인터프리터의 이름
+    shell: bool = False  # `eval` · `sh -c` 뒤 — 인자가 셸 명령이다
+    commands: list[str] = field(default_factory=list)  # 명령 자리 낱말(감싸기 · 런처 뒤 포함)
+    words: list[str] = field(default_factory=list)  # 이 명령의 낱말
+    launcher: str | None = None  # 이 명령의 런처(인자를 넘기거나 터미널을 주는 것)
+
+
+@dataclass(frozen=True)
+class _Seat:
+    """낱말 하나가 선 자리."""
+
+    letters: str  # 셸이 남길 글자(`_letters`)
+    position: bool  # 명령 자리
+    command: bool  # 명령 자리이거나 감싸기 뒤
+    wrapped: bool  # 감싸기 뒤
+    script: bool  # 실행되는 따옴표 글 — 그 안은 옛 거친 자르기(`_rough_net`)로 본다
+    inert: bool  # 실행되지 않는 따옴표 글 — 그 안의 rcm 낱말을 세지 않는다
+    shell: bool = False  # `eval` · `sh -c` 가 셸 명령으로 실행할 인자
+
+
+@dataclass(frozen=True)
+class _View:
+    items: list[str]
+    seats: list[_Seat | None]
+    runs: bool  # 글 어디엔가 받은 글을 실행하는 명령이 있다
+    cause: tuple[str, str] | None  # 그물의 (c): (런처, rcm 일 수 있는 낱말)
+
+
+def _walk(items: list[str], live_prose: bool) -> _View:
+    """`_lex` 의 낱말마다 자리를 정하고 런처 규칙(c)의 원인을 찾는다.
+
+    런처는 **명령 자리**의 런처뿐이다(m5t-a-w3 F1). 명령 자리는 앞머리 할당 · 키워드 · 리다이렉션
+    (`<f` · `< f` · `2>&1`)을 건너뛴 첫 낱말과, 감싸기 · 런처 · 코드 플래그 뒤의 낱말이다. `-x` ·
+    `-X` 는 그 명령이 fd 일 때만, `-exec` 무리는 find 일 때만 런처다. rcm 일 수 있는 낱말은 실행되지
+    않는 따옴표 글이 아니면 자리를 보지 않고 세되, `$` · 치환 낱말은 같은 명령의 런처 뒤에서만
+    센다(P6 재확인 354).
+
+    `live_prose` 가 거짓이면 명령 자리가 아닌 따옴표 글(`_Word.prose`)은 실행되지 않는 글이다.
+    참이면(글 어디엔가 `sh` · `eval` · `xargs` · `python -c` 처럼 받은 글을 실행하는 명령이 있다)
+    그 글은 프로그램일 수 있다 — 옛 거친 자르기로 그 안의 낱말을 모두 명령 자리처럼 본다."""
+    stack: list[_Frame] = []
+    frame = _Frame()
+    seats: list[_Seat | None] = []
+    runs = False
+    launcher: str | None = None
+    candidate: str | None = None
+    for item in items:
+        if not isinstance(item, _Word):
+            seats.append(None)
+            if item == "(":
+                stack.append(frame)
+                frame = _Frame()
+            elif item == ")" and stack:
+                frame = stack.pop()
+            else:
+                frame = _Frame()
+            continue
+        letters = _letters(item)
+        if frame.target or _REDIRECTION.match(item):
+            # 리다이렉션과 그 파일 이름 — 명령 자리를 옮기지 않는다
+            frame.target = not frame.target and _REDIRECTION.fullmatch(item) is not None
+            if candidate is None and _could_be_rcm(item, after=frame.launcher is not None):
+                candidate = letters or item
+            seats.append(
+                _Seat(letters, False, frame.wrapped, frame.wrapped, False, False, frame.shell)
+            )
+            continue
+        position, command = frame.position, frame.position or frame.wrapped
+        commandish = command or frame.runs
+        # 명령 자리의 따옴표 글은 명령 이름이다. 앞머리 할당의 값(`T='feat(cli): rcm …'`)은 아니다
+        prose = item.prose and (not frame.position or bool(_ASSIGNMENT.match(letters)))
+        script, inert = prose and live_prose, prose and not live_prose
+        if not inert:
+            parts = _ROUGH_TOKEN.findall(letters) if script else [item]
+            for part in parts:
+                if part in _BREAKS:
+                    continue
+                word = _letters(part)
+                if candidate is None and _could_be_rcm(part, after=frame.launcher is not None):
+                    candidate = word or part
+                frame.words.append(word)
+                if commandish or script:
+                    frame.commands.append(word)
+                if frame.launcher is None and (
+                    _launches(frame.words, frame.commands)
+                    or _gives_a_terminal(frame.words, frame.commands)
+                ):
+                    frame.launcher = word
+                    launcher = launcher or word
+        seats.append(_Seat(letters, position, command, frame.wrapped, script, inert, frame.shell))
+        if command and (_ASSIGNMENT.match(letters) or letters in _KEYWORDS):
+            continue
+        name = _name(letters)
+        if command and name in _LAUNCHERS:
+            frame.wrapped = frame.runs = True
+        if commandish and name == "eval":
+            frame.shell = True
+        if (commandish and name in _DEFINERS) or _GIT_SHELL_ALIAS.search(letters):
+            frame.runs = True  # 정의한 글을 다음 명령이 실행한다
+        if commandish and frame.code is None:
+            if name.startswith("python"):
+                frame.code = _PYTHON_CODE
+            elif name in _CODE_FLAGS:
+                frame.code = _CODE_FLAGS[name]
+                frame.runs = frame.runs or not frame.code  # awk 의 첫 인자는 프로그램이다
+            frame.interp = name
+        elif (
+            frame.code
+            and letters.startswith("-")
+            and not letters.startswith("--")
+            and any(c in frame.code for c in letters[1:])
+        ):
+            frame.runs = True  # `python -c` · `perl -e` 의 뒤는 프로그램이다
+            frame.shell = frame.shell or frame.interp in _SHELLS
+        if frame.launcher is not None:
+            frame.runs = True
+        runs = runs or frame.runs
+        frame.position = False
+    cause = (launcher, candidate) if launcher is not None and candidate is not None else None
+    return _View(items, seats, runs, cause)
+
+
+def _view(command: str) -> _View:
+    """명령 글의 자리. 먼저 따옴표 글을 모두 실행되지 않는 글로 읽어, 받은 글을 실행하는 명령이
+    있는지 본다. 있으면 따옴표 글을 프로그램으로 다시 읽는다 — `T='… rcm $S'; eval "$T"` 처럼
+    글을 나중에 실행하는 꼴은 옛 그물 그대로다."""
+    items = _lex(command.replace("\\\n", ""))
+    first = _walk(items, live_prose=False)
+    return _walk(items, live_prose=True) if first.runs else first
 
 
 def _setup_net(command: str) -> bool:
@@ -1064,22 +1360,67 @@ def _setup_net(command: str) -> bool:
     아니면 참이다. 참이면 `_setup_verdict` 가 명령 글 전체를 평범한 setup 명령 하나로 읽을 수
     있을 때만 허용한다. 평범한 `rcm setup …` 도 (a) 로 여기 걸린다.
 
-    따옴표는 하위 명령을 숨기지 못한다 — 따옴표를 벗긴 글자(`_letters`)에 setup 이 그대로
-    보이므로 (a) 가 잡는다. 그래서 (b) 는 따옴표가 아니라 셸이 글자를 바꾸는 것(`_SHAPING`)만
-    본다. 글에 rcm 낱말이 있으면 변수 낱말은 어디서든 rcm 일 수 있다(`R=rcm; nice $R …`).
+    따옴표는 하위 명령을 숨기지 못한다 — (a) 는 따옴표를 벗긴 글 전체(`_letters`)를 본다. 그래서
+    `git commit -m "fix rcm setup"` 도 막는다(받아들인 과잉 차단, 메시지가 파일로 쓰는 길을
+    알려 준다). (b) 는 따옴표가 아니라 셸이 글자를 바꾸는 것(`_SHAPING`)을 본다. 글에 rcm 낱말이
+    있으면 변수 낱말은 어디서든 rcm 일 수 있다(`R=rcm; nice $R …`).
 
-    (c) 런처 낱말(인자를 넘기는 `_launches`, 터미널을 주는 `_gives_a_terminal`)과 rcm 일 수 있는
-    낱말(`_could_be_rcm`)이 글 어디에든 함께 있어도 참이다. 자리는 보지 않는다 — 앞에 붙은
-    리다이렉션(`<f xargs rcm`)이 런처를 명령 자리에서 밀어냈다(P6 재확인 1)."""
+    (b) 는 실행되지 않는 따옴표 글 안의 rcm 낱말을 세지 않는다(m5t-a-w3 F2): 제목 · 커밋 메시지 ·
+    본문의 「rcm wait」 가 `"$T"` 뒤의 `"$H/…"` 를 rcm 의 하위 명령 자리로 만들었다. 글 어디엔가
+    받은 글을 실행하는 명령이 있으면 따옴표 글도 지금처럼 센다(`_view`).
+
+    (c) 명령 자리의 런처(인자를 넘기는 `_launches`, 터미널을 주는 `_gives_a_terminal`)와 rcm 일
+    수 있는 낱말(`_could_be_rcm`)이 함께 있어도 참이다(`_walk`). 리다이렉션이 앞에 붙어도
+    런처는 명령 자리다(`<f xargs rcm`, P6 재확인 1). 셸 글을 읽지 못하면(치환이 너무 깊다)
+    참이다."""
     text = command.replace("\\\n", "")
     letters = _letters(text)
-    names_rcm = bool(_RCM_WORD.search(letters))
-    can_call = names_rcm
-    tokens = _ROUGH_TOKEN.findall(text)
-    if _launcher_cause(command) is not None:  # 자리를 보지 않는다
+    try:
+        view = _view(text)
+    except _Unreadable:
+        return _rough_view(text)[0]
+    if view.cause is not None:
         return True
-    position = True  # 다음 낱말이 명령 자리다
-    wrapped = False  # 감싸기 뒤 — 변수 낱말은 모두 명령 자리일 수 있다
+    items, seats = view.items, view.seats
+    names_rcm = any(
+        seat is not None and not seat.inert and _RCM_WORD.search(seat.letters) for seat in seats
+    )
+    can_call = bool(_RCM_WORD.search(letters))
+    for index, seat in enumerate(seats):
+        if seat is None or seat.inert:
+            continue
+        if seat.script:
+            hit, calls = _rough_net(seat.letters, seat.wrapped, names_rcm)
+            if hit:
+                return True
+            can_call = can_call or calls
+            continue
+        word = seat.letters
+        found = _RCM_WORD.search(word)
+        if found is not None and (_shaped(word[found.end() :]) or _shaped_after(items, index)):
+            return True
+        assignment = bool(_ASSIGNMENT.match(word))
+        if seat.command and (assignment or word in _KEYWORDS):
+            continue
+        variable = "$" in word or "`" in items[index]
+        if seat.shell and variable and names_rcm:
+            # `eval "$(printf 'rcm %s' …)"` · `bash -c "$X"` — 셸이 실행할 글을 셸이 만든다
+            return True
+        if not assignment and (
+            (seat.position and _shaped(word) and word not in _TESTS)
+            or ((seat.wrapped or names_rcm) and variable)
+        ):
+            can_call = True
+            if _shaped_after(items, index):
+                return True
+    return can_call and bool(_SETUP_WORD.search(letters))
+
+
+def _rough_net(text: str, wrapped: bool, names_rcm: bool) -> tuple[bool, bool]:
+    """실행되는 따옴표 글(`sh -c '…'` 의 글)을 옛 그물의 거친 자르기(`_ROUGH_TOKEN`)로 본다 —
+    (그물이 켜지나, rcm 을 부를 수 있나). 글은 명령 자리에서 시작한다."""
+    tokens = _ROUGH_TOKEN.findall(text)
+    position, can_call = True, False
     for index, token in enumerate(tokens):
         if token in _BREAKS:
             position, wrapped = True, False
@@ -1087,7 +1428,7 @@ def _setup_net(command: str) -> bool:
         word = _letters(token)
         found = _RCM_WORD.search(word)
         if found is not None and (_shaped(word[found.end() :]) or _shaped_after(tokens, index)):
-            return True
+            return True, True
         at_command = position or wrapped
         assignment = bool(_ASSIGNMENT.match(word))
         if at_command and (assignment or word in _KEYWORDS):
@@ -1099,57 +1440,72 @@ def _setup_net(command: str) -> bool:
         ):
             can_call = True
             if _shaped_after(tokens, index):
-                return True
+                return True, True
         if at_command and _name(word) in _LAUNCHERS:
             wrapped = True
         position = False
-    return can_call and bool(_SETUP_WORD.search(letters))
+    return False, can_call
 
 
 def _launcher_cause(command: str) -> tuple[str, str] | None:
-    """(런처 낱말, rcm 일 수 있는 낱말) — 그물의 (c) 가 이 명령을 잡은 원인. 없으면 None.
+    """(런처 낱말, rcm 일 수 있는 낱말) — 그물의 (c) 가 이 명령을 잡은 원인(`_walk`). 없으면 None.
 
-    런처는 글 앞에서부터 낱말을 더해 가며 `_launches` · `_gives_a_terminal` 이 처음 참이 되는
-    낱말이다. rcm 일 수 있는 낱말(`_could_be_rcm`)은 자리를 보지 않되, `$` · 백틱 낱말만은 그
-    런처 **뒤**에 있을 때 센다(P6 재확인 354) — `echo $HOME | xargs ls` 의 `$HOME` 은 런처가
-    실행할 명령이 될 수 없다."""
-    text = command.replace("\\\n", "")
-    letters = _letters(text)
+    런처는 명령 자리의 낱말을 더해 가며 `_launches` · `_gives_a_terminal` 이 처음 참이 되는
+    낱말이다. rcm 일 수 있는 낱말(`_could_be_rcm`)은 실행되지 않는 따옴표 글이 아니면 자리를
+    보지 않되, `$` · 치환 낱말만은 같은 명령의 그 런처 **뒤**에 있을 때 센다(P6 재확인 354) —
+    `echo $HOME | xargs ls` 의 `$HOME` 은 런처가 실행할 명령이 될 수 없다."""
+    try:
+        return _view(command).cause
+    except _Unreadable:
+        return _rough_view(command.replace("\\\n", ""))[1]
+
+
+def _rough_view(text: str) -> tuple[bool, tuple[str, str] | None]:
+    """`_lex` 가 자를 수 없는 글의 그물(m5t-a-w3 F 앞의 그물 그대로) — (켜지나, 런처 원인).
+    따옴표를 보지 않고 거칠게 자르며(`_ROUGH_TOKEN`), 런처와 rcm 일 수 있는 낱말은 자리를 보지
+    않는다. `$` · 백틱 낱말만 런처 뒤에서 센다."""
     tokens = _ROUGH_TOKEN.findall(text)
     words: list[str] = []
-    launcher: tuple[int, str] | None = None
+    cause: tuple[str, str] | None = None
+    at = -1
     for index, token in enumerate(tokens):
         if token in _BREAKS:
             continue
         words.append(_letters(token))
-        if _launches(words) or _gives_a_terminal(words, letters):
-            launcher = (index, words[-1])
+        if _launches(words, words) or _gives_a_terminal(words, words):
+            at = index
             break
-    if launcher is None:
-        return None
-    at, name = launcher
-    for index, token in enumerate(tokens):
-        if _could_be_rcm(token, after=index > at):
-            return name, _letters(token) or token
-    return None
+    if at >= 0:
+        for index, token in enumerate(tokens):
+            if token not in _BREAKS and _could_be_rcm(token, after=index > at):
+                cause = (_letters(tokens[at]), _letters(token) or token)
+                break
+    letters = _letters(text)
+    names_rcm = bool(_RCM_WORD.search(letters))
+    hit, calls = _rough_net(text, False, names_rcm)
+    armed = cause is not None or hit or ((names_rcm or calls) and bool(_SETUP_WORD.search(letters)))
+    return armed, cause
 
 
-def _launches(words: list[str]) -> bool:
-    """명령 글 어디에든 받은 인자로 명령을 실행하는 런처 낱말이 있나(xargs · parallel · entr ·
-    rush · xe, find 의 `-exec` 무리, fd 의 `-x` · `-X` · `--exec`). 자리는 보지 않는다 — 앞에
-    붙은 리다이렉션(`<f xargs …`)이 런처를 명령 자리에서 밀어내도 낱말은 남는다(P6 재확인 1)."""
-    names = {_name(word) for word in words}
+def _launches(words: list[str], commands: list[str]) -> bool:
+    """명령 하나(`words`)가 받은 인자로 명령을 실행하는 런처인가: 명령 자리(`commands`)의
+    xargs · parallel · entr · rush · xe, 어느 명령의 `--exec`, 명령이 find 일 때의 `-exec` 무리,
+    명령이 fd 일 때의 `-x` · `-X`(m5t-a-w3 F1 — `tar -x` 의 `-x` 는 아니다)."""
+    names = {_name(word) for word in commands}
     if names & _FEEDERS or _FEEDER_FLAGS.intersection(words):
+        return True
+    if names & _FINDS and _FIND_FLAGS.intersection(words):
         return True
     return bool(names & _FD) and bool({"-x", "-X"}.intersection(words))
 
 
-def _gives_a_terminal(words: list[str], letters: str) -> bool:
-    """명령 글 어디에든 가상 터미널을 주는 런처 낱말이 있나(script · unbuffer · expect · socat ·
-    tmux · screen, `ssh -t`, python 의 pty · pexpect). 자리는 보지 않는다(P6 재확인 1)."""
-    names = {_name(word) for word in words}
+def _gives_a_terminal(words: list[str], commands: list[str]) -> bool:
+    """명령 하나가 가상 터미널을 주는 런처인가: 명령 자리의 script · unbuffer · expect · socat ·
+    tmux · screen, 명령이 ssh 일 때의 `-t` · `RequestTTY`, 명령이 python 일 때의 pty · pexpect."""
+    names = {_name(word) for word in commands}
     if names & _PTY_LAUNCHERS:
         return True
+    letters = " ".join(words)
     if "ssh" in names and (
         any(_SSH_TTY.fullmatch(word) for word in words) or "requesttty" in letters.lower()
     ):
