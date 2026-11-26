@@ -48,7 +48,9 @@ of a key bumps that number and is listed here.
   `fenced_sessions`, the number of live processes of the same worker that this registration
   replaced, and the new process logs `replaced N other process(es) of worker NAME — a service
   worker with this token has stopped and will not start again by itself`: start that service again
-  with `launchctl kickstart -k` or `systemctl --user restart`.
+  with `launchctl kickstart -k` or `systemctl --user restart`. A server that restarted less than
+  `worker_timeout_seconds` ago answers `fenced_sessions: null` when it cannot tell, and the worker
+  says so.
   ([#284](https://github.com/monocsp/remote_ci_monitor/pull/284))
 - **An `irreversible` preset cannot also have `[presets.retry]`.** A retry runs the command
   again, so the server refuses to load that combination

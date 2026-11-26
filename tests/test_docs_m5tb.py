@@ -245,6 +245,18 @@ def test_gap8_operating_says_a_replaced_service_stays_down_and_how_to_restart_it
     assert "stop the worker and wait for its jobs to end first" in text
 
 
+def test_p62_2_operating_says_a_restarted_server_answers_null_and_what_the_worker_says():
+    """# P6-2 #2 재시작한 서버는 `worker_timeout_seconds` 동안 펜싱한 세션이 살아 있었는지 모른다 —
+    `fenced_sessions: null` 과 워커의 「모른다」 줄(워커 코드의 문구 앞부분)."""
+    text = flat(OPERATING)
+    assert "For `worker_timeout_seconds` after the server restarts it cannot tell" in text
+    assert "`fenced_sessions: null`" in text
+    assert (
+        "`the server restarted recently and cannot tell whether this replaced another process of"
+        " worker build-02`" in text
+    )
+
+
 def test_gap5_operating_says_a_worker_whose_job_holds_a_group_is_not_forgotten():
     """# GAP5 일주일 조용한 워커를 잊는 규칙의 예외에 열린 홀드가 든다."""
     text = flat(OPERATING)

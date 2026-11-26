@@ -425,6 +425,54 @@ def test_gap8_the_worker_logs_one_line_when_it_replaced_a_live_process(tmp_path,
     assert line == expected
 
 
+def _server_restarted(srv: WorkerServer) -> None:
+    """서버 재시작 흉내 — 세션을 들은 시각은 메모리에만 있다(결정 266). 바닥은 지금이다."""
+    with srv.app._heard_lock:
+        srv.app._heard.clear()
+    srv.app.started_mono = srv.clock.mono()
+
+
+def test_p62_2_fenced_sessions_is_null_while_a_restarted_server_cannot_know(srv):
+    """# P6-2 #2 재시작한 서버는 그 전에 들은 세션을 모른다. 기동 뒤 `worker_timeout_seconds` 가
+    지나기 전에 펜싱한 세션이 아직 안 들렸으면 살아 있었는지 모른다 — 0 이 아니라 null 이다.
+    그 시간이 지나면 안 들린 세션은 조용했던 것이라 0 이다."""
+    srv.registered("build-02")
+    _server_restarted(srv)
+    srv.new_process("build-02")
+    assert srv.registered("build-02")["fenced_sessions"] is None  # 모름
+    assert srv.registered("build-02")["fenced_sessions"] == 0  # 같은 세션의 재등록은 안다
+    _server_restarted(srv)
+    srv.clock.advance(TIMEOUT + 1)
+    srv.new_process("build-02")
+    assert srv.registered("build-02")["fenced_sessions"] == 0  # 기동 뒤 내내 조용했다
+    srv.new_process("build-02")
+    assert srv.registered("build-02")["fenced_sessions"] == 1  # 기동 뒤에 들었다
+
+
+def test_p62_2_the_worker_says_it_cannot_tell_when_fenced_sessions_is_null(tmp_path):
+    """# P6-2 #2 `fenced_sessions` 가 null 이면 서버가 모른다 — 워커는 「대신했다」고 단정하지
+    않고 모른다고 한 줄 쓴다. 키가 없는 옛 서버에는 아무것도 쓰지 않는다."""
+
+    class _Unknown(_Who):
+        def register(self, **kw: Any) -> dict[str, Any]:
+            return {**super().register(**kw), "fenced_sessions": None}
+
+    logs: list[str] = []
+    w = _worker(tmp_path, _Unknown())
+    w.log = logs.append
+    w.register()
+    assert [m for m in logs if "worker build-02" in m] == [
+        "the server restarted recently and cannot tell whether this replaced another process of"
+        " worker build-02 — if a service worker with this token was running, it has stopped and"
+        " will not start again by itself"
+    ]
+    old: list[str] = []
+    w = _worker(tmp_path / "old", _Who())
+    w.log = old.append
+    w.register()
+    assert [m for m in old if "worker build-02" in m and "replace" in m] == []
+
+
 @pytest.mark.parametrize("key", ["worker_session_id", "previous_sessions", "unverified_sessions"])
 def test_gap7_a_session_id_with_a_trailing_newline_is_400(srv, key):
     """# GAP7 세션 id 는 32자 소문자 hex **전부**다. `$` 는 끝 줄바꿈 앞에서도 맞으므로

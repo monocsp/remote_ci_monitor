@@ -669,25 +669,33 @@ class RemoteWorkersMixin:
             self.wake.set()
         return self._register_answer(row, fenced=replaced)
 
-    def _live_replaced(self, fenced: list[str], listed: set[str]) -> int:
+    def _live_replaced(self, fenced: list[str], listed: set[str]) -> int | None:
         """이 등록이 펜싱한 다른 세션 가운데 살아 있던 것으로 보이는 수(P6 GAP8, 명세 §9). 워커가
         죽었다고 넘긴 세션은 빼고, 서버가 `worker_timeout_seconds` 안에 들은 세션만 센다. 펜싱된
-        프로세스는 종료 0 이라 서비스면 다시 뜨지 않는다 — 새 프로세스가 그것을 로그로 말한다."""
+        프로세스는 종료 0 이라 서비스면 다시 뜨지 않는다 — 새 프로세스가 그것을 로그로 말한다.
+
+        들은 시각은 메모리에만 있다(결정 266). 기동 뒤 `worker_timeout_seconds` 가 지나기 전에는
+        안 들린 세션이 조용했는지 서버가 꺼져 있어 못 들었는지 모른다 — 그런 세션이 하나라도
+        있으면 None(모름)이다(P6-2 #2)."""
         now = self.mono_fn()  # type: ignore[attr-defined]
         timeout = self.config.server.worker_timeout_seconds
         with self._heard_lock:
-            return sum(
-                1
+            others = [
+                sid
                 for sid in fenced
                 if sid not in listed  # mutcheck: replaced-counts-listed
-                and sid in self._heard
-                and now - self._heard[sid] <= timeout
-            )
+            ]
+            heard = {sid: self._heard[sid] for sid in others if sid in self._heard}
+        recent = now - self.started_mono <= timeout  # type: ignore[attr-defined]
+        if recent and len(heard) < len(others):  # mutcheck: replaced-unknown-as-zero
+            return None
+        return sum(1 for at in heard.values() if now - at <= timeout)
 
-    def _register_answer(self, row: WorkerRow, *, fenced: int = 0) -> dict[str, Any]:
+    def _register_answer(self, row: WorkerRow, *, fenced: int | None = 0) -> dict[str, Any]:
         s = self.config.server
         return {
-            # 이 등록이 대신한 살아 있던 프로세스 수(P6 GAP8) — 같은 세션의 재등록은 0
+            # 이 등록이 대신한 살아 있던 프로세스 수(P6 GAP8) — 같은 세션의 재등록은 0. 재시작한
+            # 서버가 아직 모르면 null(P6-2 #2)
             "fenced_sessions": fenced,
             "generation": self.generation,  # type: ignore[attr-defined]
             "name": row.name,

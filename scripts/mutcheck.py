@@ -6804,6 +6804,31 @@ MUTANTS = (
             "test_p62_1_a_local_job_with_a_retry_frozen_before_the_mark_is_not_retried",
         ),
     ),
+    Mutant(
+        # P6-2 #2 재시작한 서버가 아직 안 들린 세션을 「조용했다」(0)로 단정한다 — 모름이 아니다
+        name="replaced-unknown-as-zero",
+        path="src/remote_ci_monitor/remote_workers.py",
+        old=(
+            "        if recent and len(heard) < len(others):"
+            "  # mutcheck: replaced-unknown-as-zero\n"
+        ),
+        new="        if False:\n",
+        tests=(
+            "tests/test_worker_session_m5tb.py::"
+            "test_p62_2_fenced_sessions_is_null_while_a_restarted_server_cannot_know",
+        ),
+    ),
+    Mutant(
+        # P6-2 #2 서버가 모른다(null)고 답해도 워커가 아무 말도 하지 않는다
+        name="replaced-unknown-silent",
+        path="src/remote_ci_monitor/remote_worker.py",
+        old="                self.log(  # mutcheck: replaced-unknown-silent\n",
+        new="                (lambda m: None)(  # 변이\n",
+        tests=(
+            "tests/test_worker_session_m5tb.py::"
+            "test_p62_2_the_worker_says_it_cannot_tell_when_fenced_sessions_is_null",
+        ),
+    ),
 )
 
 

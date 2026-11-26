@@ -1037,6 +1037,12 @@ token by hand. The second process says so when it registers:
 [rcm worker] replaced 1 other process of worker build-02 — a service worker with this token has stopped and will not start again by itself
 ```
 
+The server keeps the time it last heard each process in memory only. For `worker_timeout_seconds`
+after the server restarts it cannot tell whether a process it has not heard from yet was still
+running, so the register answer carries `fenced_sessions: null` and the second process says
+`the server restarted recently and cannot tell whether this replaced another process of worker
+build-02` instead. Check the service yourself in that case.
+
 When you are done with the second process, start the service again:
 `launchctl kickstart -k gui/<uid>/<label>` (launchd) or `systemctl --user restart <unit>`
 (systemd).

@@ -1188,6 +1188,13 @@ class RemoteWorker:
             self.timeout_seconds = int(out.get("worker_timeout_seconds") or 60)
             self.name = str(out.get("name") or self.name)
             replaced = out.get("fenced_sessions")
+            if "fenced_sessions" in out and replaced is None:
+                # 재시작한 서버가 아직 모른다(P6-2 #2) — 대신했다고 단정하지 않고 모른다고 쓴다
+                self.log(  # mutcheck: replaced-unknown-silent
+                    "the server restarted recently and cannot tell whether this replaced another"
+                    f" process of worker {self.name} — if a service worker with this token was"
+                    " running, it has stopped and will not start again by itself"
+                )
             if isinstance(replaced, int) and not isinstance(replaced, bool) and replaced > 0:
                 # 펜싱된 프로세스는 종료 0 이라 서비스면 다시 뜨지 않는다(명세 §9, P6 GAP8)
                 noun = "process" if replaced == 1 else "processes"
