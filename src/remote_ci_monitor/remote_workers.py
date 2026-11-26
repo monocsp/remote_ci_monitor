@@ -679,11 +679,20 @@ class RemoteWorkersMixin:
         }
 
     def _hold_created(self, job_id: int) -> None:
-        """홀드를 만든 커밋 뒤 · 잠금 밖에서 — 서버 로그 한 줄과 버스 사건(§4.12)."""
-        self.log(f"job #{job_id}: irreversible group held until rcm release-hold {job_id}")
-        on_hold = getattr(self, "_on_hold_created", None)
-        if on_hold is not None:
-            on_hold(job_id)
+        """홀드를 만든 커밋 뒤 · 잠금 밖에서 — 서버 로그 한 줄과 버스 사건(§4.12).
+
+        알림 오류는 삼키고 로그에 남긴다 — 뒤에 올 다른 홀드의 알림 · 발행 · 깨우기를 막지 않게
+        (로컬 레인의 `Worker._hold_created` 와 같다, P3 3라운드 LOW). 홀드 자체는 이미 커밋됐다."""
+        try:
+            self.log(f"job #{job_id}: irreversible group held until rcm release-hold {job_id}")
+            on_hold = getattr(self, "_on_hold_created", None)
+            if on_hold is not None:
+                on_hold(job_id)
+        except Exception as e:  # noqa: BLE001  # mutcheck: hold-announce-error-escapes
+            try:
+                self.log(f"job #{job_id}: hold announcement failed: {type(e).__name__}")
+            except Exception:  # noqa: BLE001 — 로그도 못 쓰면 더 할 것이 없다
+                pass
 
     def _registered(self, token: TokenInfo) -> WorkerRow:
         row = self.store.get_worker(token.name)
@@ -1326,8 +1335,12 @@ class RemoteWorkersMixin:
                 with self._remote_lock:
                     self._worker_samples[token.name] = parsed
         cancel = [j.id for j in active if j.state == CANCELLING]
-        for job_id in self._close_unconfirmed_cancels(active, now):
-            self._hold_created(job_id)
+        cancel_held: list[int] = []
+        try:
+            self._close_unconfirmed_cancels(active, now, cancel_held)
+        finally:
+            for job_id in cancel_held:  # 중간에 터져도 커밋된 홀드는 알린다
+                self._hold_created(job_id)
         self._mark_dirty()
         return {
             "cancel": cancel,
@@ -1385,39 +1398,49 @@ class RemoteWorkersMixin:
         건다. 판정과 닫기는 그 세션의 잠금 안이다 — 같은 세션의 다른 heartbeat 와 줄을 선다."""
         closed: list[int] = []
         held: list[int] = []
-        with self._session_lock(session):
-            with self._heard_lock:
-                accepted = self._hb_seq.get(session, 0)
-                fresh = seq > accepted  # mutcheck: hb-stale-seq-judged
-                if fresh:
-                    self._hb_seq[session] = seq
-            active = self.store.jobs_of_session(session)
-            if fresh and known is not None:
-                listed = set(known)
-                forgotten = [
-                    j
-                    for j in active
-                    if j.id not in listed
-                    and j.claim_seq is not None
-                    and j.claim_seq <= settled  # mutcheck: t5-ignores-claims-settled
-                ]
-                text, code, args = outcome.summary("worker_restarted_without_job", name=token.name)
-                for job in forgotten:
-                    if self.store.finish(
-                        job.id,
-                        LOST,
-                        now=now,
-                        summary=text,
-                        summary_code=code,
-                        summary_args=args,
-                        only_from=BUSY_STATES,
-                        # mutcheck: t5-confirms-irreversible
-                        hold_cause="worker_restarted_without_job",
-                    ):
-                        closed.append(job.id)
-                        if self.store.has_open_hold(job.id):
-                            held.append(job.id)
-        # 알림 · 발행은 잠금을 놓은 뒤에(§4.2)
+        try:
+            with self._session_lock(session):
+                with self._heard_lock:
+                    accepted = self._hb_seq.get(session, 0)
+                    fresh = seq > accepted  # mutcheck: hb-stale-seq-judged
+                    if fresh:
+                        self._hb_seq[session] = seq
+                active = self.store.jobs_of_session(session)
+                if fresh and known is not None:
+                    listed = set(known)
+                    forgotten = [
+                        j
+                        for j in active
+                        if j.id not in listed
+                        and j.claim_seq is not None
+                        and j.claim_seq <= settled  # mutcheck: t5-ignores-claims-settled
+                    ]
+                    text, code, args = outcome.summary(
+                        "worker_restarted_without_job", name=token.name
+                    )
+                    for job in forgotten:
+                        if self.store.finish(
+                            job.id,
+                            LOST,
+                            now=now,
+                            summary=text,
+                            summary_code=code,
+                            summary_args=args,
+                            only_from=BUSY_STATES,
+                            # mutcheck: t5-confirms-irreversible
+                            hold_cause="worker_restarted_without_job",
+                        ):
+                            closed.append(job.id)
+                            if self.store.has_open_hold(job.id):
+                                held.append(job.id)
+        finally:
+            # 알림 · 발행은 잠금을 놓은 뒤에(§4.2). 중간에 터져도 이미 커밋한 닫힘은 알린다
+            self._announce_closed(closed, held)
+        return [j for j in active if j.id not in set(closed)]
+
+    def _announce_closed(self, closed: list[int], held: list[int]) -> None:
+        """커밋한 닫힘의 발행 · 홀드 알림 · 깨우기(잠금 밖, §4.2). 닫기 한 무리가 중간에 예외로
+        끊겨도 `finally` 에서 부른다 — 커밋된 홀드의 알림이 빠지지 않게(P3 3라운드 LOW)."""
         for job_id in closed:
             self._publish_job(None, job_id)
         for job_id in held:
@@ -1425,7 +1448,6 @@ class RemoteWorkersMixin:
         if closed:
             self._drop_log_partial(closed)
             self.wake.set()
-        return [j for j in active if j.id not in set(closed)]
 
     def _cancel_deadline(self, job: Job) -> datetime | None:
         """취소 미확인 닫기의 기준 `kill_at`. None 이면 아직 닫지 않는다.
@@ -1479,15 +1501,15 @@ class RemoteWorkersMixin:
                 if records:
                     records[:] = [r for r in records if r[0] > floor]
 
-    def _close_unconfirmed_cancels(self, jobs: list[Job], now: datetime) -> list[int]:
+    def _close_unconfirmed_cancels(self, jobs: list[Job], now: datetime, held: list[int]) -> None:
         """살아 있는 워커가 취소를 확인하지 않으면 `kill_at + 2 × heartbeat` 뒤 서버가 닫는다.
-        `kill_at` 은 `_cancel_deadline` 이 조용했던 시간만큼 민다. 홀드가 걸린 잡 id 를 돌려준다 —
-        호출자가 세션 잠금을 놓은 뒤 `_hold_created` 를 부른다(§4.2 · §4.12)."""
+        `kill_at` 은 `_cancel_deadline` 이 조용했던 시간만큼 민다. 홀드가 걸린 잡 id 를 커밋마다
+        `held` 에 더한다 — 호출자가 세션 잠금을 놓은 뒤(중간에 터져도 `finally` 에서)
+        `_hold_created` 를 부른다(§4.2 · §4.12 · P3 3라운드 LOW)."""
         # 순환 import 를 피한다(위 finish 의 `outcome_for` 와 같다)
         from remote_ci_monitor.worker import cancel_outcome
 
         self._prune_resumed(jobs, now)
-        held: list[int] = []
         slack = timedelta(seconds=2 * self.config.server.worker_heartbeat_seconds)
         for job in jobs:
             if job.state != CANCELLING:
@@ -1514,7 +1536,6 @@ class RemoteWorkersMixin:
                     self._publish_job(None, job.id)
                     if self.store.has_open_hold(job.id):  # mutcheck: cancel-unconfirmed-hold-silent
                         held.append(job.id)
-        return held
 
     # ── down · lost 판정 (janitor 루프) ─────────────────────────────────────
 
@@ -1529,80 +1550,83 @@ class RemoteWorkersMixin:
         lost: list[int] = []
         held: list[int] = []
         cancel_held: list[int] = []
-        mono = self.mono_fn()  # type: ignore[attr-defined]
-        timeout = self.config.server.worker_timeout_seconds
-        for row in self._workers():
-            if not self.worker_alive(row, now):
-                with self._remote_lock:
-                    self._worker_samples.pop(row.name, None)
-                continue
-            # 취소 미확인 닫기는 그 이름의 **현재 · 들리는** 세션의 잡에만(결정 266 · RL33). 펜싱된
-            # 세션의 취소 중 잡을 살아 있는 새 세션 때문에 닫으면 그룹 자리가 풀린다
-            current = self.store.current_session(row.name)
-            if current is None:  # mutcheck: cancel-unconfirmed-any-session
-                continue
-            with self._heard_lock:
-                unheard = current not in self._heard
-            if unheard:  # mutcheck: restart-unheard-cancel-closed
-                continue  # 기동 뒤 아직 안 들렸다 — 들리는 세션이 아니다
-            if mono - self.heard_at(current) > timeout:
-                continue
-            with self._session_lock(current):
-                jobs = self.store.jobs_of_session(current)
-                cancel_held += self._close_unconfirmed_cancels(jobs, now)
-        for job_id in cancel_held:  # 잠금을 놓은 뒤에(§4.2)
-            self._hold_created(job_id)
-        default_grace = disconnect_grace(self.config.server)
-        budget = GRACE_CLOSES_PER_TICK
-        for job in self.store.busy_remote_jobs():
-            key = job.worker_session_id or f"legacy:{job.worker_name}"
-            grace = job.disconnect_grace_seconds or default_grace
-            if mono - self.heard_at(key) <= grace:  # mutcheck: grace-wall-clock
-                continue
-            if budget <= 0:
-                break
-            with self._session_lock(key):
-                gap = self.mono_fn() - self.heard_at(key)  # type: ignore[attr-defined]
-                if gap <= grace:
-                    continue  # 판정 뒤에 들었다 — 닫지 않는다
-                code = "worker_unreachable"
-                if job.worker_session_id is not None and job.irreversible:
-                    srow = self.store.get_session(job.worker_session_id)
-                    if srow is not None and srow.orphan_unverified:
-                        # 다음 프로세스가 고아를 확인하지 못했다고 알렸다 — 「그 머신에서 아직 돌 수
-                        # 있다」를 말한다(결정 327). 그룹은 홀드다(결정 330)
-                        code = "orphan_unverified"  # mutcheck: orphan-unverified-code-dropped
-                text, code, args = outcome.summary(code, name=job.worker_name, seconds=int(gap))
-                try:
-                    closed = self.store.finish(
-                        job.id,
-                        LOST,
-                        now=now,
-                        summary=text,
-                        summary_code=code,
-                        summary_args=args,
-                        only_from=BUSY_STATES,
-                        hold_cause=code,
-                    )
-                except sqlite3.OperationalError as e:
-                    if not _is_busy_error(e):
-                        raise
-                    break  # 바쁘다 — 다음 틱에 다시 한다. 늦게 닫는 것은 안전한 쪽이다
-            budget -= 1
-            if closed:
-                lost.append(job.id)
-                if job.irreversible is not False and self.store.has_open_hold(job.id):
-                    held.append(job.id)
-        # 알림 · 발행 · 로그는 잠금을 놓은 뒤에(§4.2)
-        if lost:
-            self.log(f"disconnect grace over: lost={lost}")
-            self._drop_log_partial(lost)
-            for job_id in lost:
-                self._publish_job(None, job_id)
-            for job_id in held:
+        try:
+            mono = self.mono_fn()  # type: ignore[attr-defined]
+            timeout = self.config.server.worker_timeout_seconds
+            for row in self._workers():
+                if not self.worker_alive(row, now):
+                    with self._remote_lock:
+                        self._worker_samples.pop(row.name, None)
+                    continue
+                # 취소 미확인 닫기는 그 이름의 **현재 · 들리는** 세션의 잡에만(결정 266 · RL33).
+                # 펜싱된 세션의 취소 중 잡을 살아 있는 새 세션 때문에 닫으면 그룹 자리가 풀린다
+                current = self.store.current_session(row.name)
+                if current is None:  # mutcheck: cancel-unconfirmed-any-session
+                    continue
+                with self._heard_lock:
+                    unheard = current not in self._heard
+                if unheard:  # mutcheck: restart-unheard-cancel-closed
+                    continue  # 기동 뒤 아직 안 들렸다 — 들리는 세션이 아니다
+                if mono - self.heard_at(current) > timeout:
+                    continue
+                with self._session_lock(current):
+                    jobs = self.store.jobs_of_session(current)
+                    self._close_unconfirmed_cancels(jobs, now, cancel_held)
+            default_grace = disconnect_grace(self.config.server)
+            budget = GRACE_CLOSES_PER_TICK
+            for job in self.store.busy_remote_jobs():
+                key = job.worker_session_id or f"legacy:{job.worker_name}"
+                grace = job.disconnect_grace_seconds or default_grace
+                if mono - self.heard_at(key) <= grace:  # mutcheck: grace-wall-clock
+                    continue
+                if budget <= 0:
+                    break
+                with self._session_lock(key):
+                    gap = self.mono_fn() - self.heard_at(key)  # type: ignore[attr-defined]
+                    if gap <= grace:
+                        continue  # 판정 뒤에 들었다 — 닫지 않는다
+                    code = "worker_unreachable"
+                    if job.worker_session_id is not None and job.irreversible:
+                        srow = self.store.get_session(job.worker_session_id)
+                        if srow is not None and srow.orphan_unverified:
+                            # 다음 프로세스가 고아를 확인하지 못했다고 알렸다 — 「그 머신에서 아직
+                            # 돌 수 있다」를 말한다(결정 327). 그룹은 홀드다(결정 330)
+                            code = "orphan_unverified"  # mutcheck: orphan-unverified-code-dropped
+                    text, code, args = outcome.summary(code, name=job.worker_name, seconds=int(gap))
+                    try:
+                        closed = self.store.finish(
+                            job.id,
+                            LOST,
+                            now=now,
+                            summary=text,
+                            summary_code=code,
+                            summary_args=args,
+                            only_from=BUSY_STATES,
+                            hold_cause=code,
+                        )
+                    except sqlite3.OperationalError as e:
+                        if not _is_busy_error(e):
+                            raise
+                        break  # 바쁘다 — 다음 틱에 다시 한다. 늦게 닫는 것은 안전한 쪽이다
+                budget -= 1
+                if closed:
+                    lost.append(job.id)
+                    if job.irreversible is not False and self.store.has_open_hold(job.id):
+                        held.append(job.id)
+        finally:
+            # 알림 · 발행 · 로그는 잠금을 놓은 뒤에(§4.2). 틱이 중간에 예외로 끊겨도 이미 커밋한
+            # 닫힘은 알린다 — 모아 두었다 끝에서만 알리면 그 홀드의 알림이 빠진다(P3 3라운드 LOW)
+            for job_id in cancel_held:
                 self._hold_created(job_id)
-            self._publish_server()
-            self.wake.set()
+            if lost:
+                self.log(f"disconnect grace over: lost={lost}")
+                self._drop_log_partial(lost)
+                for job_id in lost:
+                    self._publish_job(None, job_id)
+                for job_id in held:
+                    self._hold_created(job_id)
+                self._publish_server()
+                self.wake.set()
         self._forget_closed_sessions()
         return lost
 

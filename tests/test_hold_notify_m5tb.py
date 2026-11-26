@@ -379,6 +379,94 @@ def test_rl54_a_legacy_worker_forgetting_its_irreversible_job_announces_the_hold
     assert hold_events(sub) == [jid]
 
 
+# ── 닫기 한 무리가 중간에 끊겨도 커밋된 홀드는 알린다(P3 3라운드 LOW B1) ────────────
+
+
+@pytest.fixture
+def two(tmp_path):
+    """표식 프리셋 둘(그룹이 따로라 한 세션이 둘을 같이 돌린다)을 한 세션이 집은 서버."""
+    from test_worker_api import WorkerServer, sh
+
+    s = WorkerServer(
+        tmp_path,
+        presets=[
+            sh("ship", "echo ship", irreversible=True),
+            sh("ship2", "echo 2", irreversible=True),
+        ],
+    )
+    s.registered("build-02", lanes=2)
+    a = s.queued_job(preset="ship")
+    b = s.queued_job(preset="ship2")
+    assert s.claimed("build-02", 1) == a and s.claimed("build-02", 2) == b
+    yield s, a, b
+    s.close()
+
+
+def _second_finish_breaks(monkeypatch, store: Store) -> None:
+    """두 번째 `store.finish` 가 커밋하지 못하고 터진다(디스크 오류처럼 — DB 바쁨이 아니다)."""
+    real = store.finish
+    calls: list[int] = []
+
+    def finish(job_id: int, *a: Any, **kw: Any) -> bool:
+        calls.append(job_id)
+        if len(calls) == 2:
+            raise RuntimeError("disk I/O error")
+        return real(job_id, *a, **kw)
+
+    monkeypatch.setattr(store, "finish", finish)
+
+
+def _closed_one(srv: Any, a: int, b: int) -> int:
+    states = {j: srv.store.get_job(j).state for j in (a, b)}
+    first = [j for j, st in states.items() if st == LOST]
+    assert len(first) == 1, states
+    return first[0]
+
+
+def test_rl54_a_janitor_tick_that_breaks_after_a_commit_still_announces_that_hold(two, monkeypatch):
+    """janitor 한 틱이 유예로 닫는 둘 가운데 첫째를 커밋하고 둘째에서 터진다. 알림을 틱 끝에 모아
+    두면 첫째 홀드의 알림이 빠진다 — 커밋된 홀드는 예외가 나가도 알린다."""
+    srv, a, b = two
+    srv.clock.advance(601)  # 유예 G(600) 를 넘겼다
+    _second_finish_breaks(monkeypatch, srv.store)
+    sub = srv.app.bus.subscribe()
+    with pytest.raises(RuntimeError):
+        srv.app.mark_lost_workers(srv.clock.now)
+    first = _closed_one(srv, a, b)
+    assert srv.store.has_open_hold(first)
+    assert hold_events(sub) == [first]
+
+
+def test_rl54_a_heartbeat_that_breaks_after_a_commit_still_announces_that_hold(two, monkeypatch):
+    """T5 로 잊힌 잡 둘을 닫는 heartbeat 가 첫째를 커밋하고 둘째에서 터진다 — 첫째 홀드는 알린다."""
+    srv, a, b = two
+    _second_finish_breaks(monkeypatch, srv.store)
+    sub = srv.app.bus.subscribe()
+    status, _ = srv.heartbeat("build-02", jobs=[], seq=5, claims_settled=10)
+    assert status == 500
+    first = _closed_one(srv, a, b)
+    assert srv.store.has_open_hold(first)
+    assert hold_events(sub) == [first]
+
+
+def test_rl54_a_failing_hold_announcement_does_not_stop_the_rest_of_the_tick(two, monkeypatch):
+    """홀드 알림 하나가 터져도 같은 틱의 다른 알림 · 발행은 계속된다 — 로컬 레인의
+    `Worker._hold_created` 와 같이 알림 오류를 삼키고 로그에 남긴다."""
+    srv, a, b = two
+    srv.clock.advance(601)
+    seen: list[int] = []
+
+    def flaky(job_id: int) -> None:
+        seen.append(job_id)
+        if len(seen) == 1:
+            raise RuntimeError("bus broke")
+
+    monkeypatch.setattr(srv.app, "_on_hold_created", flaky)
+    lost = srv.app.mark_lost_workers(srv.clock.now)
+    assert sorted(lost) == sorted([a, b])
+    assert sorted(seen) == sorted([a, b])
+
+
 HOLD_MAKERS = {"finish", "recover_on_start", "open_session"}
 
 

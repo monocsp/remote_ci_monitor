@@ -5271,10 +5271,10 @@ MUTANTS = (
         name="t5-confirms-irreversible",
         path="src/remote_ci_monitor/remote_workers.py",
         old=(
-            "                        # mutcheck: t5-confirms-irreversible\n"
-            '                        hold_cause="worker_restarted_without_job",\n'
+            "                            # mutcheck: t5-confirms-irreversible\n"
+            '                            hold_cause="worker_restarted_without_job",\n'
         ),
-        new="                        hold_cause=None,\n",
+        new="                            hold_cause=None,\n",
         tests=(
             "tests/test_worker_session_m5tb.py::"
             "test_rl9_a_lost_claim_answer_closes_after_the_claim_settled_and_holds_if_irreversible",
@@ -5284,9 +5284,9 @@ MUTANTS = (
         # 취소 미확인 닫기가 현재 · 들리는 세션 조건 없이 그 이름의 모든 잡에 걸린다(RL33)
         name="cancel-unconfirmed-any-session",
         path="src/remote_ci_monitor/remote_workers.py",
-        old="                jobs = self.store.jobs_of_session(current)\n",
+        old="                    jobs = self.store.jobs_of_session(current)\n",
         new=(
-            "                jobs = [j for j in self.store.busy_remote_jobs("
+            "                    jobs = [j for j in self.store.busy_remote_jobs("
             ") if j.worker_name == row.name]\n"
         ),
         tests=(
@@ -5299,22 +5299,22 @@ MUTANTS = (
         name="grace-wall-clock",
         path="src/remote_ci_monitor/remote_workers.py",
         old=(
-            "            if mono - self.heard_at(key) <= grace:  # mutcheck: grace-wall-clock\n"
-            "                continue\n"
-            "            if budget <= 0:\n"
-            "                break\n"
-            "            with self._session_lock(key):\n"
-            "                gap = self.mono_fn() - self.heard_at(key)  #"
+            "                if mono - self.heard_at(key) <= grace:  # mutcheck: grace-wall-clock\n"
+            "                    continue\n"
+            "                if budget <= 0:\n"
+            "                    break\n"
+            "                with self._session_lock(key):\n"
+            "                    gap = self.mono_fn() - self.heard_at(key)  #"
             " type: ignore[attr-defined]\n"
         ),
         new=(
-            "            seen = self.store.get_worker(job.worker_name).last_seen_at\n"
-            "            if (now - seen).total_seconds() <= grace:\n"
-            "                continue\n"
-            "            if budget <= 0:\n"
-            "                break\n"
-            "            with self._session_lock(key):\n"
-            "                gap = (now - seen).total_seconds()\n"
+            "                seen = self.store.get_worker(job.worker_name).last_seen_at\n"
+            "                if (now - seen).total_seconds() <= grace:\n"
+            "                    continue\n"
+            "                if budget <= 0:\n"
+            "                    break\n"
+            "                with self._session_lock(key):\n"
+            "                    gap = (now - seen).total_seconds()\n"
         ),
         tests=(
             "tests/test_worker_selfstop_m5tb.py::"
@@ -5762,10 +5762,10 @@ MUTANTS = (
         name="grace-close-no-recheck",
         path="src/remote_ci_monitor/remote_workers.py",
         old=(
-            "                if gap <= grace:\n"
-            "                    continue  # 판정 뒤에 들었다 — 닫지 않는다\n"
+            "                    if gap <= grace:\n"
+            "                        continue  # 판정 뒤에 들었다 — 닫지 않는다\n"
         ),
-        new="                if False:\n                    continue\n",
+        new="                    if False:\n                        continue\n",
         tests=(
             "tests/test_worker_selfstop_m5tb.py::"
             "test_rl56_a_heard_that_rises_between_the_judgement_and_the_lock_keeps_the_job_open",
@@ -5776,13 +5776,13 @@ MUTANTS = (
         name="grace-close-outside-the-session-lock",
         path="src/remote_ci_monitor/remote_workers.py",
         old=(
-            "            with self._session_lock(key):\n"
-            "                gap = self.mono_fn() - self.heard_at(key)  #"
+            "                with self._session_lock(key):\n"
+            "                    gap = self.mono_fn() - self.heard_at(key)  #"
             " type: ignore[attr-defined]\n"
         ),
         new=(
-            "            with threading.Lock():\n"
-            "                gap = self.mono_fn() - self.heard_at(key)  #"
+            "                with threading.Lock():\n"
+            "                    gap = self.mono_fn() - self.heard_at(key)  #"
             " type: ignore[attr-defined]\n"
         ),
         tests=(
@@ -5857,12 +5857,12 @@ MUTANTS = (
         name="grace-heard-of-the-current-session",
         path="src/remote_ci_monitor/remote_workers.py",
         old=(
-            "        for job in self.store.busy_remote_jobs():\n"
-            '            key = job.worker_session_id or f"legacy:{job.worker_name}"\n'
+            "            for job in self.store.busy_remote_jobs():\n"
+            '                key = job.worker_session_id or f"legacy:{job.worker_name}"\n'
         ),
         new=(
-            "        for job in self.store.busy_remote_jobs():\n"
-            "            key = self.store.current_session(job.worker_name)"
+            "            for job in self.store.busy_remote_jobs():\n"
+            "                key = self.store.current_session(job.worker_name)"
             ' or f"legacy:{job.worker_name}"\n'
         ),
         tests=(
@@ -6570,6 +6570,55 @@ MUTANTS = (
         tests=(
             "tests/test_worker_selfstop_m5tb.py::"
             "test_rl8_a_many_short_silences_after_the_cancel_do_not_drop_where_its_window_began",
+        ),
+    ),
+    Mutant(
+        # janitor 한 틱이 끝까지 가야만 알린다 — 중간에 터지면 이미 커밋한 홀드의 알림이 빠진다
+        name="janitor-announce-only-on-success",
+        path="src/remote_ci_monitor/remote_workers.py",
+        old=(
+            "        finally:\n"
+            "            # 알림 · 발행 · 로그는 잠금을 놓은 뒤에(§4.2). 틱이 중간에 예외로 끊겨도"
+        ),
+        new=(
+            "        except Exception:\n"
+            "            raise\n"
+            "        else:\n"
+            "            # 알림 · 발행 · 로그는 잠금을 놓은 뒤에(§4.2). 틱이 중간에 예외로 끊겨도"
+        ),
+        tests=(
+            "tests/test_hold_notify_m5tb.py::"
+            "test_rl54_a_janitor_tick_that_breaks_after_a_commit_still_announces_that_hold",
+        ),
+    ),
+    Mutant(
+        # T5 닫기 한 무리가 끝까지 가야만 알린다 — 중간에 터지면 커밋한 홀드의 알림이 빠진다
+        name="t5-announce-only-on-success",
+        path="src/remote_ci_monitor/remote_workers.py",
+        old=("        finally:\n            # 알림 · 발행은 잠금을 놓은 뒤에(§4.2). 중간에 터져도"),
+        new=(
+            "        except Exception:\n"
+            "            raise\n"
+            "        else:\n"
+            "            # 알림 · 발행은 잠금을 놓은 뒤에(§4.2). 중간에 터져도"
+        ),
+        tests=(
+            "tests/test_hold_notify_m5tb.py::"
+            "test_rl54_a_heartbeat_that_breaks_after_a_commit_still_announces_that_hold",
+        ),
+    ),
+    Mutant(
+        # 홀드 알림 하나의 오류가 그 틱의 나머지 알림 · 발행 · 깨우기를 막는다
+        name="hold-announce-error-escapes",
+        path="src/remote_ci_monitor/remote_workers.py",
+        old=(
+            "        except Exception as e:  # noqa: BLE001  # mutcheck: "
+            "hold-announce-error-escapes\n"
+        ),
+        new="        except ZeroDivisionError as e:\n",
+        tests=(
+            "tests/test_hold_notify_m5tb.py::"
+            "test_rl54_a_failing_hold_announcement_does_not_stop_the_rest_of_the_tick",
         ),
     ),
 )
