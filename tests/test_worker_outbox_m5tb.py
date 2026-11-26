@@ -580,7 +580,9 @@ def test_rl39_b_dead_queue_not_registered_drops_it_and_never_registers_the_dead_
     ended_queue(w1, 7, b"x\n")
     ended_queue(w1, 8, b"y\n")
     die(w1)
-    fake.script["log"] = [http(409, "not_registered")]
+    # 서버가 D 를 모르면 D 의 모든 요청이 409 다 — 하나만 409 로 두면 두 큐의 보내는 스레드가
+    # 겨뤄 다른 잡의 finish 가 먼저 나가는 일이 있었다(batch-2 에서 6번 중 1번 빨강)
+    fake.script["log"] = [http(409, "not_registered")] * 10
     w2 = restart(tmp_path, fake, clock)
     w2.send_dead_queues()
     w2.register()
