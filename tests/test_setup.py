@@ -2538,3 +2538,36 @@ def test_b11_l3_no_account_home_refuses(cfg, tmp_path, monkeypatch):
     assert go(fake, *coordinator_args(tmp_path / "data")) == 1, fake.text
     assert "cannot find this account's home — refusing" in fake.err.getvalue(), fake.text
     _nothing_written(cfg, tmp_path / "data")
+
+
+@pytest.mark.parametrize(
+    "spelled", ["${D}", "$D", "--data-dir=${D}"], ids=["braced", "own-word", "inside-a-word"]
+)
+def test_b11_l4_an_execstart_with_variables_setup_cannot_expand_closes(
+    cfg, home, tmp_path, spelled
+):
+    # batch 11 L4(v1-3): systemd 는 ExecStart 의 `$VAR` · `${VAR}` 를 서비스의 환경으로 펼친다
+    # (systemd.service 「Command lines」). setup 은 펼치지 않으므로 글자 그대로 읽으면 진짜
+    # data_dir 을 놓친다 — 그런 유닛은 닫는 쪽이다(거절 + 파일 이름)
+    data = tmp_path / "prod-data"
+    data.mkdir()
+    flag = spelled if spelled.startswith("--") else f"--data-dir {spelled}"
+    hub = _hand_unit(
+        home,
+        tmp_path,
+        f"Environment=D={data}\nExecStart={{rcm}} serve --config {{config}} {flag}",
+        name="rcm-server",
+    )
+    fake = Fake(platform="linux")
+    assert go(fake, *coordinator_args(data / "inner")) == 1, fake.text
+    err = fake.err.getvalue()
+    assert str(hub["unit"]) in err and "refusing" in err, err
+    _nothing_written(cfg, data / "inner")
+    # `$$` 는 글자 `$` 다 — 펼칠 변수가 없으면 그대로 읽는다
+    hub["unit"].write_text(
+        f"[Service]\nExecStart={hub['venv'] / 'bin' / 'rcm'} serve --config {hub['config']} "
+        f"--data-dir {data}/$$x\n",
+        encoding="utf-8",
+    )
+    fake = Fake(platform="linux")
+    assert go(fake, *coordinator_args(tmp_path / "data")) == 0, fake.text
