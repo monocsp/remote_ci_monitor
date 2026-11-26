@@ -2503,7 +2503,7 @@ PR #284 본문의 「Differs from the spec」 과 같은 목록이다. 항목은
 | 16 | /api/health irreversible_holds is null when the read fails (never []); /api/status reads holds inside the queue section. |
 | 17 | RL6 / RL10 / RL50 e2e scope narrowed at P2-3 (sha256 is PR2; exact orderings in unit / HTTP tests) — RL6 (a) wait JSON keys, RL10 fake supervisor and RL50 relay e2e were later filled by P2-5/P2-6 (items 20, 24 and test_rl10_a_fake_supervisor_does_not_bring_back_a_fenced_process). |
 | 18 | Extra mutants beyond §7.4 (closed-jobs-ignored and the seven m5tb-* P2-2 cases). |
-| 19 | Docs outside owns: README / README.ko.md did not list rcm release-hold yet; CHANGELOG lines carry no PR link (number unknown) — README row added at P2-4 (item 20). |
+| 19 | Docs outside owns: README / README.ko.md did not list rcm release-hold yet — README row added at P2-4 (item 20); the CHANGELOG lines, first written without a PR link (number unknown), now carry the #284 link. |
 | 20 | README release-hold row written `rcm release-hold N [--reason TEXT] [--json]` (N like every other row) instead of `<job>`. |
 | 21 | RL50 e2e: the relay holds the idle heartbeat and refuses later ones; red under t5-ignores-claims-settled; hb-stale-seq-judged cannot be made red by a real worker (R20) and stays killed by tests/test_hb_order_m5tb.py. |
 | 22 | RL14 (b): the kill -9 test runs a new preset longl (sleep 400) instead of slowl (sleep 30), which ended before G. |
