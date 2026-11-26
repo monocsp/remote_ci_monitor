@@ -668,6 +668,23 @@ def _stopped(runner: FakeRunner) -> bool:
     return runner.observer.self_stop.is_set()
 
 
+def test_rl34_f_the_worker_hands_its_monotonic_clock_to_the_runner(tmp_path, monkeypatch):
+    """러너의 점검 박자 · SIGTERM→SIGKILL 은 단조 시계다. 워커에 주입한 단조 시계가 러너에 닿지
+    않으면 시험과 감시 스레드가 보는 시계와 러너의 시계가 갈린다(P3 1라운드 LOW)."""
+    w, fake, clocks, _ = make_worker(tmp_path)
+    runner = FakeRunner()
+    seen: dict[str, Any] = {}
+
+    def recording(spec, observer, **kw):
+        seen.update(kw)
+        runner.release.set()
+        return runner(spec, observer, **kw)
+
+    monkeypatch.setattr(rw, "run_job", recording)
+    w.run_claimed(1, claimed(irreversible=True))
+    assert seen.get("mono_fn") == clocks.mono_fn
+
+
 def test_rl34_the_watchdog_stops_an_irreversible_job_exactly_at_g_minus_m(tmp_path, monkeypatch):
     w, fake, clocks, _ = make_worker(tmp_path)
     w.mark_ok(clocks.now().timestamp(), clocks.mono)  # claim 을 보낸 시각

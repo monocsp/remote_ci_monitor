@@ -1822,6 +1822,7 @@ class RemoteWorker:
                 now_fn=self.now_fn,
                 environ=self.environ,
                 materialize=lambda s: self._materialize(s, job),
+                mono_fn=self.mono_fn,  # mutcheck: runner-own-monotonic-clock
             )
         except RequiredToolMissing as e:
             observer.final_flush()

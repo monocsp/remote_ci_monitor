@@ -6326,6 +6326,18 @@ MUTANTS = (
             "test_rl12_two_registers_of_one_new_session_racing_both_succeed",
         ),
     ),
+    # ── M5t-b P3 1라운드 LOW — 워커의 단조 시계가 러너에 안 닿는다 ──
+    Mutant(
+        # 원격 워커가 run_job 에 제 단조 시계를 넘기지 않는다 — 러너는 제 시계를 쓴다
+        name="runner-own-monotonic-clock",
+        path="src/remote_ci_monitor/remote_worker.py",
+        old="                mono_fn=self.mono_fn,  # mutcheck: runner-own-monotonic-clock\n",
+        new="",
+        tests=(
+            "tests/test_worker_selfstop_m5tb.py::"
+            "test_rl34_f_the_worker_hands_its_monotonic_clock_to_the_runner",
+        ),
+    ),
 )
 
 
