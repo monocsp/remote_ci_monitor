@@ -300,9 +300,14 @@ class JobOutbox:
         try:
             with (self.folder / STREAM_FILE).open("rb") as fh:
                 fh.seek(start)
-                return fh.read(end - start)
+                data = fh.read(end - start)
         except OSError:
             return None
+        # 파일이 `written` 보다 짧다(잘렸다) — 앞부분이나 빈 바이트를 조각으로 보내면 `acked` 가
+        # 그대로인 채 쉬지 않고 돈다. 못 읽음과 같다(P3 2라운드)
+        if len(data) < end - start:  # mutcheck: short-spool-read-sent
+            return None
+        return data
 
     def pending(self) -> int:
         with self._lock:
@@ -349,7 +354,11 @@ class _JobSender:
         # 마지막 시도가 서버의 오류 응답이었거나 스풀을 못 읽었다 — 죽은 세션 D 의 등록 대기
         # 300초가 세는 시간(결정 337). 큐마다 두고 성공 · 연결 실패에 내린다(P3 1라운드)
         self.answered = False
+        # 마지막 로그 시도가 스풀을 못 읽었다 — 끝난 잡이면 5xx 와 같은 300초 뒤 finish 가 먼저
+        # 간다(결정 324, P3 2라운드). 스풀을 다시 읽으면 내린다
+        self.spool_unreadable = False
         self._read_failed_said = False
+        self._unreadable_first_said = False
         self.failures = 0
         # 펜싱 — 이 프로세스의 큐는 프로세스의 펜싱(W5)을, D 의 큐는 그 큐가 받은 409 를 본다
         self.fenced = proc.fenced if dead is None else threading.Event()
@@ -425,6 +434,17 @@ class _JobSender:
                     " finish without them"
                 )
             return True
+        # 못 읽는 스풀은 서버가 고칠 수 없다 — 5xx 와 같이 300초 뒤 finish 를 먼저 보내 잡을 진짜
+        # 결과로 닫는다. 남은 로그는 가지 않고 `log_complete` 는 거짓이다(P3 2라운드 MED)
+        unreadable = self.spool_unreadable  # mutcheck: unreadable-spool-holds-finish
+        if unreadable and age >= FINISH_HOLD_SECONDS:
+            if not self._unreadable_first_said:
+                self._unreadable_first_said = True
+                self.proc.log(
+                    f"#{self.job_id} report: spooled log still unreadable {FINISH_HOLD_SECONDS}s"
+                    " after the job ended — sending the finish first, the log stays incomplete"
+                )
+            return True
         # 5xx 는 서버에 닿았다는 뜻이다. 연결 실패면 finish 도 갈 수 없으니 순서를 지킨다
         return age >= FINISH_HOLD_SECONDS and self.last_5xx  # mutcheck: finish-waits-forever
 
@@ -459,6 +479,10 @@ class _JobSender:
         러너는 64 KiB 마다 줄 끝을 붙이므로 4 MiB 넘는 한 줄은 러너에서 오지 않는다. 스풀을 못
         읽으면 None."""
         ob = self.ob
+        # 스트림이 더 자라지 않는지는 읽기 **전에** 본다. 읽은 뒤에 보면 그 사이 줄 끝이 이어
+        # 쓰이고 잡이 끝난 경우 줄 끝 없는 조각을 보내 다음 조각이 줄 가운데서 시작한다(P3
+        # 2라운드). finish 는 레인이 출력을 다 쓴 뒤에 적는다
+        final = ob.finish is not None or self.dead is not None
         data = ob.read(ob.acked, LOG_BATCH_BYTES)
         if data is None:
             return None
@@ -470,7 +494,7 @@ class _JobSender:
             cut = data.find(b"\n")
         if cut >= 0:
             return data[: cut + 1]
-        if len(data) >= LOG_PIECE_MAX_BYTES or ob.finish is not None or self.dead is not None:
+        if len(data) >= LOG_PIECE_MAX_BYTES or final:  # mutcheck: chunk-end-seen-after-read
             return data
         return b""
 
@@ -503,7 +527,10 @@ class _JobSender:
                 self.delay = min(BACKOFF_MAX_SECONDS, max(BACKOFF_START_SECONDS, self.delay * 2))
                 self.halt.wait(self.delay)
         except Exception as e:  # noqa: BLE001 — 보내는 스레드가 죽으면 레인이 묶인다
-            self.proc.log(f"#{self.job_id} report: {type(e).__name__}")
+            self.proc.log(
+                f"#{self.job_id} report: {type(e).__name__} — keeping the report on disk for the"
+                " next worker process"
+            )
             self.gave_up = True
         finally:
             self.ob.close()
@@ -535,6 +562,7 @@ class _JobSender:
                 chunk = b"" if step == "query" else self._chunk()
                 if chunk is None:  # mutcheck: unreadable-spool-sent-empty
                     return self._spool_unreadable()
+                self.spool_unreadable = False
                 out = self.client.log(self.job_id, chunk, offset=ob.acked)
                 got = out.get("offset") if isinstance(out, dict) else None
                 if isinstance(got, int) and not isinstance(got, bool):
@@ -568,13 +596,15 @@ class _JobSender:
         return True
 
     def _spool_unreadable(self) -> bool:
-        """`stream.log` 를 못 읽었다. 빈 조각을 보내 성공으로 세지 않는다 — 그러면 `acked` 는
-        그대로인 채 쉬지 않고 돈다. 백오프로 다시 해 보고 로그는 한 줄이다. 끝난 잡이면 재전송
-        창(24시간)이 지난 뒤 finish 만 간다(§4.5). D 의 큐면 등록 대기 300초가 이 시간도 센다.
-        서버 탓이 아니어도 등록을 끝없이 막지 않게."""
+        """`stream.log` 를 못 읽었다(없다 · 잘렸다). 빈 조각을 보내 성공으로 세지 않는다 —
+        그러면 `acked` 는 그대로인 채 쉬지 않고 돈다. 백오프로 다시 해 보고 로그는 한 줄이다.
+        끝난 잡이면 5xx 와 같이 끝난 지 300초 뒤 finish 가 먼저 간다(`_finish_first`, 결정 324)
+        — 24시간 묶이면 서버에서 잡이 `running` 이고 레인도 잡혀 있다(P3 2라운드 MED). D 의
+        큐면 등록 대기 300초가 이 시간도 센다. 서버 탓이 아니어도 등록을 끝없이 막지 않게."""
         if not self._read_failed_said:
             self._read_failed_said = True
             self.proc.log(f"#{self.job_id} report: cannot read the spooled log — retrying")
+        self.spool_unreadable = True
         self.answered = True
         return False
 
@@ -1186,6 +1216,10 @@ class RemoteWorker:
         # 잡마다 보내는 스레드(M5t-b §4.5, 결정 337). 레인은 제 잡의 큐가 끝날 때까지 다음 claim 을
         # 하지 않고, heartbeat 의 `jobs` 목록에는 큐가 안 끝난 잡이 남는다(F10)
         self._senders: dict[int, _JobSender] = {}
+        # 레인 → 기다림을 그만둔 뒤에도 안 끝난 그 레인 잡의 큐(드레인 한도 · done 없이 끝난 보내는
+        # 스레드). 그 잡이 `running` 에 있는 동안 서버에서도 그 레인을 잡고 있다 — 레인은 claim
+        # 하지 않는다(`_lane_held`, P3 2라운드)
+        self._lane_queues: dict[int, _JobSender] = {}
         self._rereg_lock = threading.Lock()
         self._dead_dropped: set[str] = set()
         self._tail_said = False
@@ -2000,6 +2034,17 @@ class RemoteWorker:
             self._idle_lanes.discard(lane)
             return False
 
+    def _lane_held(self, lane: int) -> bool:
+        """레인이 기다림을 그만둔 앞 잡이 아직 `running`(heartbeat 목록)에 있으면 참."""
+        with self._lock:
+            sender = self._lane_queues.get(lane)
+            if sender is None:
+                return False
+            if self.running.get(sender.job_id) == lane:
+                return True
+            self._lane_queues.pop(lane, None)
+            return False
+
     def _drained(self) -> bool:
         """드레인 중이고 살아 있는 레인이 모두 잡 없이 기다리면 드레인을 마친다(§3.3 의 4). 보고하지
         못한 잡은 heartbeat 가 도는 동안 다시 보고한다(§14 B질문11)."""
@@ -2152,6 +2197,11 @@ class RemoteWorker:
         while not self.stopping.is_set():
             if self._lane_waits(lane):
                 # 드레인 중 — claim 하지 않고 기다린다. 받은 잡은 이미 끝내고 보고했다(§3.3 의 2)
+                self.stopping.wait(DRAIN_WAIT_SECONDS)
+                continue
+            if self._lane_held(lane):  # mutcheck: lane-claims-over-its-open-queue
+                # 이 레인의 앞 잡이 아직 heartbeat 목록에 있다(큐가 안 끝났다) — 서버도 그 잡으로
+                # 이 레인을 잡고 있어 claim 은 409 다. 큐가 끝나면 claim 한다
                 self.stopping.wait(DRAIN_WAIT_SECONDS)
                 continue
             if self.paused:
@@ -2640,7 +2690,14 @@ class RemoteWorker:
             ob.ended_at = self._epoch()
         ob.save()
         sender.wake.set()
-        self._await_queue(job_id, sender)
+        if not self._await_queue(job_id, sender):
+            # 레인이 기다림을 그만뒀다(드레인 한도 · done 없이 끝난 보내는 스레드). 서버에서는 그
+            # 잡이 아직 이 레인을 잡고 있다 — 드레인이 취소돼 레인이 다시 돌면 claim 마다 409
+            # `LaneBusy` 를 받는다. 그 잡이 목록에서 빠질 때까지 레인은 claim 하지 않는다
+            with self._lock:
+                lane = self.running.get(job_id)
+                if lane is not None:
+                    self._lane_queues[lane] = sender
         # 레인은 풀려도 큐는 보내는 스레드가 끝날 때까지 heartbeat 목록에 남는다 — 드레인 한도가
         # 지난 큐는 exec 까지 계속 보낸다. 먼저 빼면 exec 전의 heartbeat 하나로 서버가 그 잡을
         # 「잊힌 잡」(T5)으로 닫는다(§4.5 · F10, rcm-ci 4341)
@@ -2648,8 +2705,17 @@ class RemoteWorker:
         sender.when_ended(ended)  # mutcheck: queued-job-left-the-heartbeat
 
     def _queue_ended(self, job_id: int, sender: _JobSender) -> None:
-        """잡의 보내는 스레드가 끝났다 — heartbeat 목록에서 빼고, 다 보냈으면 폴더를 지운다."""
+        """잡의 보내는 스레드가 끝났다 — heartbeat 목록에서 빼고, 다 보냈으면 폴더를 지운다.
+
+        `done` 없이 끝났는데(예상 못 한 예외 · `protocol_required`) 워커가 멈추지 않으면 잡을
+        목록에 남긴다. 빼면 finish 가 디스크에만 있는데 서버가 그 잡을 「잊힌 잡」(T5)으로 닫는다
+        (P3 2라운드). 서버에서 잡은 다음 프로세스가 디스크의 큐를 보낼 때까지 `running` 이다.
+        멈춤 · 펜싱 · 드레인 exec 이면 뺀다 — 프로세스가 끝나고 다음 프로세스가 보낸다
+        (§4.4 의 7)."""
         with self._lock:
+            unsent = not sender.ob.done
+            if unsent and not self.stopping.is_set():  # mutcheck: halted-queue-left-the-heartbeat
+                return
             self.running.pop(job_id, None)
             if self._senders.get(job_id) is sender:
                 self._senders.pop(job_id, None)

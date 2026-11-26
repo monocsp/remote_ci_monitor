@@ -1125,3 +1125,241 @@ def test_rl23_a_missing_snapshot_is_still_failed(tmp_path, fast):
     w.run_claimed(1, job)
     fin = next(c for c in fake.calls if c[0] == "finish")
     assert fin[3] == "failed" and fin[5]["summary_code"] == "snapshot_download_failed", fin
+
+
+# ── P3 2라운드 ─────────────────────────────────────────────────────────────────
+
+
+def wait_for(pred: Any, seconds: float = 10.0) -> bool:
+    deadline = time.monotonic() + seconds
+    while time.monotonic() < deadline:
+        if pred():
+            return True
+        time.sleep(0.01)
+    return bool(pred())
+
+
+def test_rl40_b_finished_job_whose_spool_cannot_be_read_sends_the_finish_after_300s(
+    srv, tmp_path, fast
+):
+    """끝난 잡의 `stream.log` 를 못 읽으면 5xx 와 같은 300초 규칙으로 finish 가 먼저 간다(결정
+    324 · §4.5). 못 읽는 스풀이 finish 를 24시간 묶으면 서버는 잡을 `running` 으로 두고 레인도
+    잡혀 있다(P3 2라운드 MED). 잡은 진짜 결과로 닫히고, 받지 못한 바이트가 있으니 `log_complete`
+    는 false 다. 로그 줄은 finish 를 먼저 보낸다고 말한다."""
+    from remote_ci_monitor.client import WorkerClient
+
+    jid = running(srv)
+    assert post_log(srv, jid, b"one\n", 0)[0] == 200
+    clock = WClock()
+    client = WorkerClient(f"http://127.0.0.1:{srv.port}", srv.tokens[W])
+    w = wworker(tmp_path, client, clock)  # type: ignore[arg-type]
+    w.session_id = srv.session(W)
+    w._bind_session(w.client)
+    w.session_dir = tmp_path / "wd" / rw.SESSIONS_DIR / w.session_id
+    ob = ended_queue(w, jid, b"one\ntwo\n", acked=4)
+    spool = w._job_dir(jid) / rw.STREAM_FILE
+    spool.rename(spool.with_name("hidden"))  # 읽을 수 없다(OSError)
+    s = rw._JobSender(w, jid, ob).start()
+    try:
+        assert wait_for(lambda: any("cannot read" in x for x in w.logs)), w.logs
+        time.sleep(0.1)
+        assert srv.store.get_job(jid).state == RUNNING  # 300초 전 — 아직 로그가 앞이다
+        clock.advance(rw.FINISH_HOLD_SECONDS + 1)
+        s.wake.set()
+        s.thread.join(10)
+        assert ob.done, "the finish waits behind an unreadable spool"
+    finally:
+        s.halt.set()
+    assert srv.store.get_job(jid).state == SUCCEEDED
+    doc = job_doc(srv, jid)
+    assert doc["state"] == SUCCEEDED and doc["log_complete"] is False
+    assert any("sending the finish first" in x for x in w.logs), w.logs
+
+
+@pytest.mark.parametrize("keep", [0, 6])
+def test_rl20_b_b_spool_shorter_than_written_is_unreadable_not_an_empty_piece(tmp_path, fast, keep):
+    """스풀 파일이 `written` 보다 짧다(잘렸다). 짧은 읽기 · EOF 너머의 `b""` 도 못 읽음이다 — 빈
+    조각이나 앞부분만 보내 2xx 로 성공하면 `acked` 가 그대로인 채 쉬지 않고 돈다(P3 2라운드
+    LOW)."""
+    clock = WClock()
+    fake = FakeServer(clock)
+    w = wworker(tmp_path, fake, clock)
+    w.prepare_sessions()
+    ob = ended_queue(w, 7, b"one\ntwo\n")
+    spool = w._job_dir(7) / rw.STREAM_FILE
+    with spool.open("r+b") as fh:
+        fh.truncate(keep)
+    s = rw._JobSender(w, 7, ob).start()
+    try:
+        assert wait_for(lambda: any("cannot read" in x for x in w.logs), 2), w.logs
+        time.sleep(0.2)
+        logs = [c for c in fake.calls if c[0] == "log"]
+        assert logs == [], f"a short read was sent as a piece: {len(logs)} log calls"
+        assert sum(1 for x in w.logs if "cannot read" in x) == 1, w.logs
+        assert ob.acked == 0 and not ob.done
+    finally:
+        s.halt.set()
+
+
+def test_rl17_c_d_a_job_that_ends_while_its_piece_is_read_is_not_cut_mid_line(tmp_path, fast):
+    """조각을 읽은 **뒤에** 잡이 끝났는지를 보면, 그 사이 줄 끝이 이어 쓰이고 finish 가 적힌 잡의
+    줄 끝 없는 조각을 보낸다 — 다음 조각이 줄 가운데서 시작한다(P3 2라운드 LOW). 끝났는지는 읽기
+    전에 본다."""
+    clock = WClock()
+    fake = FakeServer(clock)
+    w, ob, s = live_sender(tmp_path, fake, clock)
+    ob.append(b"abc")
+    real = ob.read
+    raced: list[bool] = []
+
+    def read_then_the_job_ends(start: int, limit: int) -> bytes | None:
+        data = real(start, limit)
+        if not raced:
+            raced.append(True)
+            ob.append(b"def\n")  # 읽은 뒤 · finish 를 보기 전에 줄 끝이 오고 잡이 끝난다
+            end_job(w, ob)
+        return data
+
+    ob.read = read_then_the_job_ends  # type: ignore[method-assign]
+    assert s._chunk() == b"", "a piece of a running job was sent without its line end"
+    assert s._chunk() == b"abcdef\n"
+
+
+def test_rl17_c_e_a_line_longer_than_the_piece_limit_is_cut_at_the_limit(
+    tmp_path, fast, monkeypatch
+):
+    """줄 끝이 `LOG_PIECE_MAX_BYTES`(서버 본문 상한) 안에 없으면 그 상한에서 자른다 — 도는 잡이라도
+    그 줄을 기다리지 않고, 상한보다 긴 조각을 만들지 않는다(서버가 413 으로 거절한다)."""
+    monkeypatch.setattr(rw, "LOG_BATCH_BYTES", 16)
+    monkeypatch.setattr(rw, "LOG_PIECE_MAX_BYTES", 32)
+    clock = WClock()
+    fake = FakeServer(clock)
+    w, ob, s = live_sender(tmp_path, fake, clock)
+    ob.append(b"x" * 50 + b"\n")
+    s.start()
+    try:
+        assert wait_for(lambda: ob.acked == 51, 5), [c[4] for c in fake.calls if c[0] == "log"]
+        pieces = [c[4] for c in fake.calls if c[0] == "log"]
+        assert pieces == [b"x" * 32, b"x" * 18 + b"\n"], pieces
+        assert ob.finish is None  # 잡은 아직 돈다
+    finally:
+        s.halt.set()
+
+
+class LaneFake(FakeServer):
+    """claim 도 받는다. 서버에서 잡 #7 이 그 레인을 잡고 있는 동안(finish 가 아직 안 갔다) 같은
+    세션의 claim 은 서버처럼 409 `lane 1 already has job #7` 이다(remote_workers.py 의 자기 세션
+    `LaneBusy`)."""
+
+    def claim(self, lane: int, wait: int, claim_seq: int | None = None) -> Any:
+        with self.lock:
+            self.calls.append(("claim", self.session_id, lane))
+            closed = self.closed
+        if not closed:
+            raise ClientError(409, f"lane {lane} already has job #7", {"error": "busy"})
+        return None
+
+    def finish(self, job_id, outcome, rc, summary=None, **extra) -> dict[str, Any]:
+        out = super().finish(job_id, outcome, rc, summary, **extra)
+        self.closed = True
+        return out
+
+    closed = False
+
+
+def test_rl12_b_c_a_lane_freed_by_the_drain_limit_waits_for_its_queue_after_a_cancel(
+    tmp_path, fast, monkeypatch
+):
+    """드레인 한도(60초) 뒤 레인은 풀리지만 그 잡의 큐는 아직 보낸다. 드레인이 취소되면 같은 레인이
+    다시 claim 하는데 서버에서는 옛 잡이 그 레인을 잡고 있어 409 `LaneBusy` 가 2~4초마다 온다(P3
+    2라운드 LOW). 그 레인은 큐가 끝날 때까지 claim 하지 않고, 끝나면 claim 한다."""
+    monkeypatch.setattr(rw, "DRAIN_REPORT_SECONDS", 0.3)
+    monkeypatch.setattr(rw, "RETRY_WAIT_SECONDS", 0.01)
+    monkeypatch.setattr(rw, "CLAIM_MIN_INTERVAL", 0.01)
+    monkeypatch.setattr(rw, "DRAIN_WAIT_SECONDS", 0.01)
+    clock = WClock()
+    fake = LaneFake(clock)
+    w = wworker(tmp_path, fake, clock)
+    w.prepare_sessions()
+    fake.script["finish"] = [http(503)] * 100000
+    ob = rw.JobOutbox(w._job_dir(7))
+    s = rw._JobSender(w, 7, ob).start()
+    w._senders[7] = s
+    with w._lock:
+        w.running[7] = 1
+    w.draining.set()
+    w._finish(7, SUCCEEDED, 0, None, None, group_gone=True)  # 한도 뒤에 돌아온다
+    assert 7 in w.running and s.alive()
+    w.draining.clear()  # 서버가 지금 버전으로 돌아왔다 — 드레인 취소
+    lane = threading.Thread(target=w._lane_loop, args=(1,), daemon=True)
+    lane.start()
+    try:
+        time.sleep(0.3)
+        claims = [c for c in fake.calls if c[0] == "claim"]
+        assert claims == [], f"the lane claimed over its open queue: {w.logs[-3:]}"
+        fake.script["finish"].clear()  # 큐가 끝난다
+        assert wait_for(lambda: any(c[0] == "claim" for c in fake.calls), 5)
+        assert 7 not in w.running
+        assert not any("already has job" in x for x in w.logs), w.logs
+    finally:
+        w.stopping.set()
+        s.halt.set()
+        lane.join(5)
+
+
+@pytest.mark.parametrize(
+    "refusal", [RuntimeError("boom"), http(409, "protocol_required")], ids=["error", "protocol"]
+)
+def test_rl14_a_c_a_queue_that_ends_unsent_while_the_worker_runs_stays_in_the_heartbeat(
+    tmp_path, fast, refusal
+):
+    """보내는 스레드가 `done` 없이 끝났다(예상 못 한 예외 · `protocol_required`) — 워커는 멈추지
+    않고 계속 돈다. 그 잡을 heartbeat 목록에서 빼면 finish 가 디스크에만 있는데 서버가 그 잡을
+    「잊힌 잡」(T5, `worker_restarted_without_job`)으로 닫는다(P3 2라운드 LOW). 잡은 목록에 남고
+    폴더도 남는다 — 다음 프로세스가 디스크에서 보낸다. 멈춤 · 드레인 exec 은 p63_1 이 본다."""
+    clock = WClock()
+    fake = FakeServer(clock)
+    w = wworker(tmp_path, fake, clock)
+    w.prepare_sessions()
+    fake.script["finish"] = [refusal]
+    ob = rw.JobOutbox(w._job_dir(7))
+    s = rw._JobSender(w, 7, ob).start()
+    w._senders[7] = s
+    with w._lock:
+        w.running[7] = 1
+    w._finish(7, SUCCEEDED, 0, None, None, group_gone=True)
+    s.thread.join(10)
+    assert not s.alive() and not ob.done
+    sent: list[list[int]] = []
+
+    def heartbeat_call(jobs: list[int], seq: int, settled: int) -> dict[str, Any]:
+        sent.append(list(jobs))
+        return {}
+
+    w._heartbeat_call = heartbeat_call  # type: ignore[method-assign]
+    w.heartbeat_once()
+    assert sent == [[7]], "the heartbeat dropped a job whose finish is only on disk"
+    on_disk = rw.JobOutbox.load(w._job_dir(7))
+    assert on_disk is not None and on_disk.finish is not None and not on_disk.done
+
+
+def test_rl17_c_f_a_running_job_sends_every_whole_line_up_to_the_last_line_end(
+    tmp_path, fast, monkeypatch
+):
+    """도는 잡의 조각은 `acked` 부터 마지막 줄 끝까지다(F34). 줄 끝 없는 꼬리만 남기고, 앞의 줄
+    여럿을 한 조각으로 보낸다 — 마지막 줄 끝을 못 보면 짧은 줄은 잡이 끝날 때까지 안 가거나
+    줄마다 한 조각이 된다."""
+    monkeypatch.setattr(rw, "LOG_BATCH_BYTES", 16)
+    clock = WClock()
+    fake = FakeServer(clock)
+    w, ob, s = live_sender(tmp_path, fake, clock)
+    ob.append(b"aaa\nbbb\nccc\nddd")
+    s.start()
+    try:
+        assert wait_for(lambda: ob.acked == 12, 5), [c[4] for c in fake.calls if c[0] == "log"]
+        time.sleep(0.1)
+        pieces = [c[4] for c in fake.calls if c[0] == "log"]
+        assert pieces == [b"aaa\nbbb\nccc\n"], pieces
+        assert ob.finish is None
+    finally:
+        s.halt.set()
