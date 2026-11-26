@@ -217,6 +217,15 @@ of a key bumps that number and is listed here.
   did. The `server: found …` line and the "several rcm servers" messages of every command clean
   the name and address found on the network to one line.
   ([#268](https://github.com/monocsp/remote_ci_monitor/pull/268))
+- **`tools/guard_production.py` no longer refuses ordinary commands as ones that could reach
+  `rcm setup`.** A quoted title, commit message or comment body that names rcm (`--title "$T"`
+  after `T='feat(cli): rcm wait …'`, `--body "… rcm (job 3712) …"`) no longer arms the setup net,
+  unless the same command also runs text (`sh -c`, `bash -c`, `eval`, `xargs`, `python -c`,
+  `alias`, a git shell alias). A launcher counts only where a command stands: `-x` only when the
+  command is `fd`, `-exec` only when it is `find`, so `tar -x`, `unzip -x`, `grep -x` and
+  `grep -n expect` are not launchers any more; redirections and wrappers in front
+  (`<f xargs rcm`, `nice xargs rcm`) still are. A command with a heredoc or an unclosed quote is
+  judged as before. Text naming both rcm and `setup` is still refused.
 
 ## [0.10.0] - 2026-11-23
 
