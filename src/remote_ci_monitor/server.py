@@ -711,6 +711,7 @@ class App(RemoteWorkersMixin, CapabilitiesMixin, ShelfAppMixin):
             log=self.log,
             base_url=self.base_url(),
             stop=self.stop,
+            local_machine=self.local_machine,  # M5t-a — 훅의 RCM_MACHINE
         )
         self.notifier.start()
         hooks = [n.name for n in self.config.notify]
@@ -3781,6 +3782,7 @@ class App(RemoteWorkersMixin, CapabilitiesMixin, ShelfAppMixin):
             presets=tuple(self.config.presets),
             pools=tuple(pools),
             base_url=self.base_url(host),
+            local_machine=self.local_machine(),  # M5t-a — 로컬 레인 잡의 `ran_on`
         )
         tails: dict[int, list[str]] = {}
         if queue and token is not None:
@@ -3849,13 +3851,19 @@ class App(RemoteWorkersMixin, CapabilitiesMixin, ShelfAppMixin):
         log_tail = None
         if tail > 0 and row.job.state in BUSY_STATES and self.can_read_log(row.job, token):
             log_tail = tail_lines(self.log_path(job_id), min(tail, MAX_TAIL))
-        return self._with_artifacts(
-            queue_row_json(row, base_url=self.base_url(host), log_tail=log_tail), row.job, host
+        doc = queue_row_json(
+            row, base_url=self.base_url(host), log_tail=log_tail, local=self.local_machine()
         )
+        return self._with_artifacts(doc, row.job, host)
 
     def _terminal_view(self, job: Job, host: str | None) -> dict[str, Any]:
         """종료 잡의 문서 — 최근 행 모양 + 산출물 + 스텝 타임라인(M5j) + 이름별 이력(M5h)."""
-        doc = recent_json(job, base_url=self.base_url(host), action=self._last_action(job.id))
+        doc = recent_json(
+            job,
+            base_url=self.base_url(host),
+            action=self._last_action(job.id),
+            local=self.local_machine(),
+        )
         step_names = self._with_step_timeline(self._with_artifacts(doc, job, host), job)
         return self._with_failures(doc, job, step_names=step_names)
 

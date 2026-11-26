@@ -6,6 +6,13 @@
 못 찾으면 그 자체로 실패다(코드가 바뀌어 감시가 풀린 것).
 
 변이 목록(개수는 `MUTANTS` 가 정본이다 — 문서의 숫자는 머지마다 썩는다):
+  M5t-a PR5 — `m5t-ran-on-*` 둘(시작 전 잡 · 다른 머신의 로컬 잡에 이름을 지음) ·
+     `m5t-terminal-view-without-local` · `m5t-notify-machine-from-worker` ·
+     `m5t-wait-end-line-without-machine` · `m5t-wait-artifact-unknown-silent` ·
+     `m5t-wait-notify-*` 둘(플래그 없이 알림 · 도구가 없으면 죽음)
+     (`docs/m5t-workplan.md` §4.6 · TN1~TN11) + P6-1 의 다섯: 받기 실패를 「succeeded」로 알림 ·
+     알림 중 Ctrl-C 가 새어 나감 · 도구의 0 아닌 종료를 넘김 · notify-send 에 `--` 없음 ·
+     시작 못 한 잡에 산출물 경고(`cli.py` · `core/render_text.py`, PR #273 검토)
   M5t-a PR1 — `m5t-local-only-remote-kept`: 후보 함수가 `local_only` 프리셋의 원격 머신을 안 뺌
      (`capabilities.py`, `docs/m5t-workplan.md` §4.3 · TO15 — 진입점 17 경우가 모두 빨개진다)
      + `m5t-cli-local-only-refusal-is-unknown`: `rcm run` 이 원격 금지 409 를 3 으로 끝냄(`cli.py`)
@@ -2840,6 +2847,165 @@ MUTANTS = (
         new='        if __import__("shutil").which("git", path=path) is None:\n',
         tests=(
             "tests/test_tool_shim.py::test_r2_server_startup_counts_a_blocked_git_shim_as_missing",
+        ),
+    ),
+    # ── M5t-a PR5 — 요청자에게 알리기 (docs/m5t-workplan.md §4.6, 결정 248 e · f, TN1~TN11) ──
+    Mutant(
+        # 시작하지 못한 잡에도 `ran_on` 을 계산한다 — 대기 · 시작 전 취소 잡이 이 머신에서 돈 것처럼
+        # 보이고 훅의 RCM_MACHINE 이 찬다(TN11)
+        name="m5t-ran-on-unstarted-named",
+        path="src/remote_ci_monitor/core/status.py",
+        old="    if job.started_at is None:\n        return None\n    if job.worker_name:\n",
+        new="    if job.worker_name:\n",
+        tests=(
+            "tests/test_requester_notify_m5t.py::"
+            "test_tn11_ran_on_is_null_for_a_job_that_never_started",
+            "tests/test_requester_notify_m5t.py::"
+            "test_tn2_tn9_every_job_document_builder_carries_ran_on",
+        ),
+    ),
+    Mutant(
+        # 다른 물리 머신에서 돈 로컬 레인 잡을 이 머신 이름으로 부른다 — 모르는 이름을 지어낸다(TN9)
+        name="m5t-ran-on-foreign-host-named",
+        path="src/remote_ci_monitor/core/status.py",
+        old=(
+            "    if job.host_key is not None and job.host_key != local.host_key:\n"
+            "        return None\n"
+        ),
+        new="",
+        tests=(
+            "tests/test_requester_notify_m5t.py::"
+            "test_tn9_ran_on_is_null_when_the_name_is_unknown_and_never_comes_from_host_key",
+        ),
+    ),
+    Mutant(
+        # 끝난 잡의 문서(`GET /jobs/<id>`)가 이 서버 머신을 모른다 — 로컬 레인 잡의 `ran_on` 이
+        # null 이 된다(TN2)
+        name="m5t-terminal-view-without-local",
+        path="src/remote_ci_monitor/server.py",
+        old=(
+            "            action=self._last_action(job.id),\n"
+            "            local=self.local_machine(),\n"
+        ),
+        new="            action=self._last_action(job.id),\n",
+        tests=(
+            "tests/test_requester_notify_m5t.py::"
+            "test_tn2_a_local_lane_job_names_this_machine_and_keeps_worker_null",
+        ),
+    ),
+    Mutant(
+        # 훅의 RCM_MACHINE 을 `worker` 칸에서 읽는다 — 로컬 레인 잡(worker null)의 훅이 빈 값을
+        # 받는다(TN5)
+        name="m5t-notify-machine-from-worker",
+        path="src/remote_ci_monitor/core/notify.py",
+        old='        "RCM_MACHINE": sanitize_text(job_row.get("ran_on")),',
+        new='        "RCM_MACHINE": sanitize_text(job_row.get("worker")),',
+        tests=(
+            "tests/test_requester_notify_m5t.py::"
+            "test_tn5_notify_env_carries_rcm_machine_and_keeps_rcm_requester",
+            "tests/test_requester_notify_m5t.py::"
+            "test_tn5_the_server_hook_gets_this_machine_for_a_local_lane_job",
+        ),
+    ),
+    Mutant(
+        # `rcm wait` 끝줄이 머신을 빼먹는다(TN1 · TN2)
+        name="m5t-wait-end-line-without-machine",
+        path="src/remote_ci_monitor/core/render_text.py",
+        old='    if name:\n        head += f" on {name}"\n',
+        new='    if False:\n        head += f" on {name}"\n',
+        tests=(
+            "tests/test_requester_notify_m5t.py::"
+            "test_tn1_the_end_line_names_the_machine_and_the_time",
+            "tests/test_requester_notify_m5t.py::"
+            "test_tn2_a_local_lane_job_names_its_machine_on_the_end_line",
+        ),
+    ),
+    Mutant(
+        # 산출물 상태 `unknown`(보고하지 않은 옛 워커 · M5e 이전 잡)을 경고하지 않는다(TN10)
+        name="m5t-wait-artifact-unknown-silent",
+        path="src/remote_ci_monitor/core/render_text.py",
+        old="ARTIFACT_WARN_STATES = (_art.FAILED, _art.DROPPED, _art.UNAVAILABLE, _art.UNKNOWN)",
+        new="ARTIFACT_WARN_STATES = (_art.FAILED, _art.DROPPED, _art.UNAVAILABLE)",
+        tests=(
+            "tests/test_requester_notify_m5t.py::"
+            "test_tn10_four_artifact_states_warn_and_two_say_still_collecting",
+        ),
+    ),
+    Mutant(
+        # `--notify` 없이도 OS 알림을 부른다 — 기본 꺼짐(⛔ Q3)이 깨진다(TN7)
+        name="m5t-wait-notify-always",
+        path="src/remote_ci_monitor/cli.py",
+        old="    if notify:\n        try:\n            warning = os_notify(",
+        new="    if True:\n        try:\n            warning = os_notify(",
+        tests=(
+            "tests/test_requester_notify_m5t.py::"
+            "test_tn7_wait_without_notify_never_calls_the_os_notifier",
+        ),
+    ),
+    Mutant(
+        # 알림 도구가 없으면 예외로 죽는다 — 경고 한 줄 + 정상 종료가 아니다(TN6)
+        name="m5t-wait-notify-missing-tool-raises",
+        path="src/remote_ci_monitor/cli.py",
+        old='        return f"warning: --notify: {tool} not found — no notification sent"\n',
+        new="        raise FileNotFoundError(tool)\n",
+        tests=(
+            "tests/test_requester_notify_m5t.py::"
+            "test_tn6_wait_notify_without_the_tool_warns_once_and_exits_normally",
+        ),
+    ),
+    # ── M5t-a PR5 P6-1 — 알림의 끝 · 문구 · 실패 갈래(PR #273 검토 LOW 1~5) ──
+    Mutant(
+        # 받기 실패로 종료 코드가 5 가 됐는데 알림은 잡의 「succeeded」 끝 줄을 그대로 보낸다(LOW 1)
+        name="m5t-wait-notify-delivery-says-succeeded",
+        path="src/remote_ci_monitor/cli.py",
+        old="    if code == EXIT_DELIVERY:\n        said = ",
+        new="    if False:\n        said = ",
+        tests=(
+            "tests/test_requester_notify_m5t.py::"
+            "test_tn7_a_delivery_failure_is_what_the_notification_says",
+        ),
+    ),
+    Mutant(
+        # 알림 도구를 기다리다 온 Ctrl-C 가 rcm wait 밖으로 나가 종료 코드를 잃는다(LOW 2)
+        name="m5t-wait-notify-ctrl-c-escapes",
+        path="src/remote_ci_monitor/cli.py",
+        old='        except KeyboardInterrupt:\n            warning = "warning: --notify: ',
+        new='        except OSError:\n            warning = "warning: --notify: ',
+        tests=(
+            "tests/test_requester_notify_m5t.py::"
+            "test_tn7_ctrl_c_during_the_notification_keeps_the_exit_code_and_the_json",
+        ),
+    ),
+    Mutant(
+        # 0 이 아닌 알림 도구 종료를 조용히 넘긴다 — 알림이 안 갔는데 아무 말도 없다(LOW 3)
+        name="m5t-os-notify-nonzero-silent",
+        path="src/remote_ci_monitor/cli.py",
+        old='    if proc.returncode != 0:\n        return f"warning: --notify: {tool} exited',
+        new='    if proc.returncode < 0:\n        return f"warning: --notify: {tool} exited',
+        tests=(
+            "tests/test_requester_notify_m5t.py::"
+            "test_tn6_os_notify_failures_warn_once_and_never_raise",
+        ),
+    ),
+    Mutant(
+        # notify-send 인자 앞의 `--` 가 빠진다 — `-` 로 시작하는 본문이 옵션으로 읽힌다(LOW 4)
+        name="m5t-notify-send-without-end-of-options",
+        path="src/remote_ci_monitor/cli.py",
+        old='        return "notify-send", ["--", title, message]\n',
+        new='        return "notify-send", [title, message]\n',
+        tests=(
+            "tests/test_requester_notify_m5t.py::test_tn7_notify_send_reads_a_dash_message_as_text",
+        ),
+    ),
+    Mutant(
+        # 시작하지 못한 잡에도 산출물 경고를 낸다 — 돌지 않았으니 올릴 것이 없다(LOW 5)
+        name="m5t-wait-unstarted-artifacts-told",
+        path="src/remote_ci_monitor/core/render_text.py",
+        old="    if _never_started(job):\n        return None\n",
+        new="    if False:\n        return None\n",
+        tests=(
+            "tests/test_requester_notify_m5t.py::"
+            "test_tn11_a_job_that_never_started_says_nothing_about_artifacts",
         ),
     ),
     # ── M5t-a PR4 — rcm setup (docs/m5t-workplan.md §4.1, TR31 · TR33) ──

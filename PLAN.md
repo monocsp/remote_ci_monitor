@@ -640,7 +640,7 @@ docs/reviews/
 | 3 | 명령 범위 | **등록된 프리셋만**. 임의 명령 없음, 셸 보간 없음 |
 | 4 | 쓰기 인증 | **클라이언트별 bearer 토큰**(서버엔 sha256 만). 읽기는 `none` 기본(Tailscale/LAN 전제), 로그는 항상 토큰 |
 | 5 | 서버 노출 | Tailscale/LAN 안. TLS 는 서버가 안 한다. `basic` 은 TLS 프록시 뒤 전용 옵션 |
-| 6 | 결과 전달 | 폴링/SSE 명령(`rcm wait` 종료 코드)만. webhook · 커밋 status · PR 코멘트는 범위 밖 |
+| 6 | 결과 전달 | 요청자는 폴링/SSE 명령(`rcm wait` 종료 코드)으로 결과를 받는다. 서버가 잡 끝에 부르는 것은 관리자가 건 `[[notify]]` 훅뿐이다(M5a, 명령 실행 또는 url 로 JSON POST). 커밋 상태는 rcm 서버가 올리지 않는다. 잡의 스크립트가 올린다(M5r 의 `rcm-ci` 잡이 올리는 `rcm/ci`). PR 코멘트는 쓰지 않는다. 요청한 머신의 OS 알림은 클라이언트가 띄운다(`rcm wait --notify`, 기본 꺼짐, M5t-a 결정 248 f). 2026-11-26 M5t-a PR5 가 사실대로 고쳤다. 옛 문장은 「폴링/SSE 명령만. webhook · 커밋 status · PR 코멘트는 범위 밖」이었다 |
 | 7 | 자원 | CPU·RAM·GPU 를 서버 프로세스가 직접 샘플링(macOS `ioreg`, Linux `nvidia-smi`). 폴링 기본 5초, 하한 2초 |
 | 8 | 언어·런타임 | Python 3.11+, 런타임 의존성 0, TOML 설정, 내부 UTC |
 | 9 | 표본 | 성공 잡만 기본(`sample_policy`), `sample_count` 노출, 스키마 `pools[]` 축 |

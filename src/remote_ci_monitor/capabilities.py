@@ -41,6 +41,7 @@ from remote_ci_monitor.core.model import (
     REASON_NO_CAPABLE_MACHINE,
     RUNNING,
     Job,
+    LocalMachine,
     Placement,
     PlacementNote,
     Preset,
@@ -744,6 +745,15 @@ class CapabilitiesMixin:
 
     def local_display_name(self) -> str:
         return socket.gethostname().split(".")[0] or "host"
+
+    def local_machine(self) -> LocalMachine:
+        """이 서버 머신 — 로컬 레인 잡의 `ran_on` · `RCM_MACHINE`(M5t-a 결정 248 f).
+
+        이름은 머신 목록과 같은 자리(`gethostname` 의 첫 조각)에서 온다. 비었으면 None 이다 —
+        머신 목록의 `"host"` 처럼 지어낸 이름을 잡이 돈 곳으로 적지 않는다."""
+        return LocalMachine(
+            name=socket.gethostname().split(".")[0] or None, host_key=self.local_host_key()
+        )
 
     def machine_views(self, now: datetime) -> list[_MachineView]:
         rows = {r.worker: r for r in self.store.list_machines()}

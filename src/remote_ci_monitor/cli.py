@@ -24,6 +24,7 @@ import signal
 import socket
 import sqlite3
 import stat
+import subprocess
 import sys
 import tarfile
 import tempfile
@@ -85,6 +86,7 @@ from remote_ci_monitor.core.render_text import (
     DASH,
     MAX_IDENT,
     RUNS_NO_JOBS,
+    artifact_notice,
     blocked_notes_text,
     failure_lines,
     fingerprint_summary,
@@ -102,6 +104,7 @@ from remote_ci_monitor.core.render_text import (
     source_ident,
     storage_row,
     verdict_text,
+    wait_end_line,
 )
 from remote_ci_monitor.core.render_text import _bytes as _fmt_bytes
 from remote_ci_monitor.core.render_text import _coarse as _fmt_age
@@ -1273,6 +1276,8 @@ def _wait(
     cancel_token: str | None = None,
     shelf_url: str | None = None,
     return_on_action: bool = False,
+    end_summary: bool = False,
+    notify: bool = False,
 ) -> int:
     """잡을 따라가다 종료 코드를 낸다. Ctrl-C 는 detach — 요청자는 아무것도 보내지 않고, 합류자는
     자기 `leave_submission` capability(`cancel_token`)로 합류만 뺀다(PLAN 계약 · M5j G5).
@@ -1282,7 +1287,12 @@ def _wait(
     끝났을 때(detach · 연결 끊김) 쓴다.
 
     잡이 「사람이 할 일」 표식을 찍으면 stderr 에 한 줄을 남긴다(M5s). `return_on_action` 이면 새
-    표식에서 4 로 돌아온다 — 잡은 계속 돈다(결정 234)."""
+    표식에서 4 로 돌아온다 — 잡은 계속 돈다(결정 234).
+
+    `end_summary`(`rcm wait`)면 끝난 잡의 머신 · 걸린 시간 · 산출물 상태를 한 줄로 찍고(M5t-a
+    결정 248 e · f), 산출물이 잘못됐거나 아직 수집 중이면 그렇게 말한다. 종료 코드는 바꾸지
+    않는다. `rcm run` 의 기다림은 이 줄을 찍지 않는다 — 그 출력은 골든 시험이 잠근 그대로다.
+    `notify` 면 JSON 줄을 낸 뒤 요청 머신의 OS 알림을 띄운다(`rcm wait --notify`, 기본 꺼짐)."""
     line = _StatusLine()
     last: dict[str, Any] | None = None
     watch = _ActionWatch(job_id, return_on_action=return_on_action)
@@ -1347,6 +1357,9 @@ def _wait(
     note = superseded_line(job or {}, job_id)
     if note:
         _err(note)
+    end = wait_end_line(job, job_id=job_id) if end_summary and isinstance(job, dict) else None
+    if end:
+        _info(end)
     # 0 이 아닌 끝에는 로그로 가는 길과 이름별 최근 이력을 붙인다(M5h §2.5). 3(모른다)에도
     # 붙인다 — 모를수록 로그가 필요하다.
     # 확정 404 만 로그 줄을 뺀다 — 없는 잡의 로그 길은 아무것도 안 가리킨다(M5i I3).
@@ -1362,6 +1375,16 @@ def _wait(
             job or {}, job_id=job_id, url=(job or {}).get("url"), cause=cause
         ):
             _err(text)
+    # 산출물의 상태(M5t-a 결정 248 e). `--fetch-artifacts` 면 받기가 같은 상태를
+    # `artifacts:` 줄로 말한다
+    notice = (
+        artifact_notice(job, job_id=job_id)
+        if end_summary and fetch is None and isinstance(job, dict)
+        else None
+    )
+    if notice:
+        kind, text = notice
+        (_err if kind == "warning" else _info)(text)
     out = dict(job or {"job_id": job_id, "state": None})
     out.setdefault("job_id", out.get("id", job_id))  # --no-wait 출력과 같은 키로도 읽히게
     if attempts is not None:
@@ -1392,7 +1415,77 @@ def _wait(
     if shelf_note:
         _info(shelf_note)
     _print_json(out)
+    # 알림은 결과(JSON · 종료 코드)가 나간 **뒤**다. 도구가 멈춰도 결과가 늦지 않고, 도구를
+    # 기다리다 Ctrl-C 가 오면 알림만 건너뛰고 잡의 종료 코드로 끝난다
+    if notify:
+        try:
+            warning = os_notify("rcm", _notify_text(job, job_id, code, end))
+        except KeyboardInterrupt:
+            warning = "warning: --notify: interrupted — no notification sent"
+        if warning:
+            _err(warning)
     return code
+
+
+#: `rcm wait --notify` 가 알림 도구를 기다리는 상한(초). 도구가 멈춰도 결과를 붙잡지 않는다
+NOTIFY_TIMEOUT_SECONDS = 10.0
+
+
+def _notify_text(job: Any, job_id: int, code: int, end: str | None) -> str:
+    """OS 알림의 본문 — 끝줄이 있으면 그 줄, 표식에서 돌아왔으면 표식, 아니면 종료 코드.
+
+    `code` 는 이 기다림의 **최종** 종료 코드다. 받기(`--fetch-artifacts`)가 실패해 5 가 됐으면
+    그 결과를 앞에 적는다 — 잡의 「succeeded」 끝줄을 그대로 알리지 않는다."""
+    if code == EXIT_DELIVERY:
+        said = f"#{job_id} artifact delivery failed · exit {code}"
+        return f"{said} · job {end.split(' ', 1)[1]}" if end and " " in end else said
+    if end:
+        return end
+    if code == EXIT_ACTION and isinstance(job, dict):
+        said = action_line(job_id, job.get("action"))
+        if said:
+            return said
+    return f"#{job_id} wait ended · exit {code}"
+
+
+def _notifier_argv(title: str, message: str) -> tuple[str, list[str]] | None:
+    """이 OS 의 알림 도구와 인자. 셸을 거치지 않는다 — 본문은 osascript 의 `argv` 로 넘긴다."""
+    if sys.platform == "darwin":
+        script = "display notification (item 2 of argv) with title (item 1 of argv)"
+        return "osascript", ["-e", "on run argv", "-e", script, "-e", "end run", title, message]
+    if sys.platform.startswith("linux"):
+        # `--` 뒤는 옵션이 아니다 — `-` 로 시작하는 본문(잡 이름 · 표식 note)이 옵션으로 읽히지 않게
+        return "notify-send", ["--", title, message]
+    return None
+
+
+def os_notify(title: str, message: str) -> str | None:
+    """요청 머신의 OS 알림(M5t-a 결정 248 f, ⛔ Q3 기본 꺼짐). 실패하면 경고 한 줄을 돌려준다.
+
+    알림은 덤이다 — 도구가 없거나 실패해도 예외를 내지 않고 종료 코드도 바꾸지 않는다."""
+    plan = _notifier_argv(title, message)
+    if plan is None:
+        return f"warning: --notify: no notifier on this platform ({sys.platform}) — none sent"
+    tool, args = plan
+    exe = shutil.which(tool)
+    if exe is None:
+        return f"warning: --notify: {tool} not found — no notification sent"
+    try:
+        proc = subprocess.run(
+            [exe, *args],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=NOTIFY_TIMEOUT_SECONDS,
+            check=False,
+        )
+    except subprocess.TimeoutExpired:
+        return f"warning: --notify: {tool} did not finish in {NOTIFY_TIMEOUT_SECONDS:g}s"
+    except OSError as e:
+        return f"warning: --notify: {tool} could not start ({type(e).__name__})"
+    if proc.returncode != 0:
+        return f"warning: --notify: {tool} exited {proc.returncode}"
+    return None
 
 
 def _shelf_later_line(doc: Any, fallback: str | None) -> str | None:
@@ -1487,6 +1580,8 @@ def cmd_wait(args: argparse.Namespace) -> int:
         joined=False,
         use_sse=not args.poll,
         return_on_action=bool(getattr(args, "return_on_action", False)),
+        end_summary=True,
+        notify=bool(getattr(args, "notify", False)),
     )
 
 
@@ -5515,6 +5610,12 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="return with exit 4 when the job asks a person to act (::rcm::action::); "
         "the job keeps running",
+    )
+    wait.add_argument(
+        "--notify",
+        action="store_true",
+        help="show a desktop notification on this computer when the wait ends "
+        "(macOS osascript, Linux notify-send); off by default",
     )
     client_opts(wait)
     wait.set_defaults(func=cmd_wait)

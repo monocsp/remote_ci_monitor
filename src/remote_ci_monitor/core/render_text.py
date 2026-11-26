@@ -12,6 +12,7 @@ from datetime import datetime, tzinfo
 from typing import Any
 from zoneinfo import ZoneInfo
 
+from remote_ci_monitor.core import artifacts as _art
 from remote_ci_monitor.core.model import (
     CANCELLED,
     CANCELLING,
@@ -24,6 +25,7 @@ from remote_ci_monitor.core.model import (
     RETRIED,
     RUNNING,
     SUCCEEDED,
+    TERMINAL_STATES,
     TIMED_OUT,
     UPLOADING,
 )
@@ -868,6 +870,86 @@ def failure_lines(
         window = max((_int(i.get("window")) for i in items), default=0)
         out.append(f"note: {unnamed} of those {window} runs failed without naming anything")
     return out
+
+
+#: 기다림이 끝날 때 경고 줄로 말하는 산출물 상태(M5t-a 결정 248 e). 종료 코드는 그대로다 —
+#: 「테스트가 깨졌다」와 「산출물을 못 받았다」는 다른 사실이다(M5e §3)
+ARTIFACT_WARN_STATES = (_art.FAILED, _art.DROPPED, _art.UNAVAILABLE, _art.UNKNOWN)
+#: 잡은 끝났는데 산출물은 아직 모으거나 올리는 중 — 「나중에 보라」고 안내한다(경고가 아니다)
+ARTIFACT_STILL_COLLECTING = (_art.COLLECTING, _art.UPLOADING)
+
+
+def _artifact_state(job: Mapping[str, Any]) -> str | None:
+    """잡 문서의 `artifacts.state`. 키가 없거나(옛 서버) 어휘 밖이면 None — 말하지 않는다."""
+    doc = job.get("artifacts")
+    state = doc.get("state") if isinstance(doc, dict) else None
+    return state if isinstance(state, str) and state in _art.ARTIFACT_STATES else None
+
+
+def _never_started(job: Mapping[str, Any]) -> bool:
+    """`started_at` 이 null 로 온 잡 — 돌지 않았으니 올릴 산출물도 없다.
+
+    키가 아예 없는 문서(가짜 서버 · 다른 모양)는 시작했는지 모른다고 보고 False 다 — 돈 잡의
+    산출물 경고를 지우지 않는다."""
+    return "started_at" in job and job.get("started_at") is None
+
+
+def wait_end_line(job: Mapping[str, Any], *, job_id: int) -> str | None:
+    """`#381 succeeded on build-02 · 6m 31s · artifacts ready` — 기다림 끝의 한 줄(M5t-a 248 e · f).
+
+    끝난 잡에만 낸다. 머신은 서버가 계산한 `ran_on` 이다 — 모르면(시작하지 못한 잡 · 옛 서버)
+    `on …` 을 빼고, `worker` 나 `host_key` 로 이름을 짓지 않는다. 실패면 선언된 실패 스텝을
+    붙인다(추측한 스텝은 없다, M5h). 산출물은 `disabled`(프리셋이 산출물을 선언하지 않았다)일 때
+    말하지 않는다 — 산출물이 없는 잡마다 같은 꼬리를 붙이지 않는다.
+    """
+    state = job.get("state")
+    if state not in TERMINAL_STATES:
+        return None
+    head = f"#{job_id} {state}"
+    machine = job.get("ran_on")
+    name = clean_line(machine) if isinstance(machine, str) else ""
+    if name:
+        head += f" on {name}"
+    parts = [head]
+    seconds = job.get("job_seconds")
+    if isinstance(seconds, (int, float)) and not isinstance(seconds, bool):
+        parts.append(fmt_duration(seconds))
+    step = job.get("failed_step")
+    step_name = clean_line(step) if isinstance(step, str) else ""
+    # 취소된 옛 행에는 `failed_step` 이 남아 있을 수 있다(M5h 이전, 운영 잡 #176)
+    if step_name and state not in (SUCCEEDED, CANCELLED):
+        parts.append(f"step {step_name}")
+    # 시작하지 못한 잡은 산출물을 말하지 않는다(M5t-a 결정 248 e — 돌지 않았다)
+    artifacts = None if _never_started(job) else _artifact_state(job)
+    if artifacts is not None and artifacts != _art.DISABLED:
+        parts.append(f"artifacts {artifacts}")
+    return " · ".join(parts)
+
+
+def artifact_notice(job: Mapping[str, Any], *, job_id: int) -> tuple[str, str] | None:
+    """기다림 끝의 산출물 안내(M5t-a 결정 248 e) — `("warning", 줄)` · `("info", 줄)` · None.
+
+    `failed` · `dropped` · `unavailable` · `unknown` 은 경고이고 `collecting` · `uploading` 은
+    「아직 수집 중」 안내다. 끝나지 않은 잡(`--timeout`)은 말하지 않는다 — 산출물은 잡이 끝난 뒤의
+    일이다. 시작하지 못한 잡(`started_at` null)도 말하지 않는다 — 올릴 것이 없었다.
+    """
+    if job.get("state") not in TERMINAL_STATES:
+        return None
+    if _never_started(job):
+        return None
+    state = _artifact_state(job)
+    if state in ARTIFACT_WARN_STATES:
+        doc = job.get("artifacts")
+        raw = doc.get("reason_code") if isinstance(doc, dict) else None
+        reason = clean_line(raw) if isinstance(raw, str) else ""
+        tail = f" ({reason})" if reason else ""
+        return "warning", f"warning: #{job_id} artifacts {state}{tail}"
+    if state in ARTIFACT_STILL_COLLECTING:
+        return "info", (
+            f"#{job_id} artifacts still collecting ({state}) — "
+            f"see them later with rcm artifacts {job_id}"
+        )
+    return None
 
 
 def _int(value: Any) -> int:
