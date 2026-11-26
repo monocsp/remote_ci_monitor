@@ -1357,6 +1357,31 @@ def test_gap1_seventy_failed_starts_leave_no_folder_and_the_next_register_succee
     assert srv.store.get_session(w.session_id) is not None
 
 
+def test_p62_4_a_dead_session_the_server_never_knew_is_ignored_and_its_folder_removed(
+    srv, tmp_path
+):
+    """# P6-2 #4 `previous_sessions` 에 서버가 모르는 세션 id 가 들어갈 수 있다(등록 응답을 못
+    받고 죽은 프로세스, 다른 서버를 보던 폴더). 서버는 그 id 를 무시하고 등록은 성공한다 —
+    세션 행을 만들지 않고 남의 이름으로 막지도 않는다. 워커는 보고한 폴더를 지운다."""
+    url = f"http://127.0.0.1:{srv.port}"
+    cfg = WorkerConfig(
+        server=url, token=srv.tokens["build-02"], data_dir=str(tmp_path / "w"), lanes=1
+    )
+    w = RemoteWorker(cfg, log=lambda m: None)
+    w.config.data_path.mkdir(parents=True, exist_ok=True)
+    owner = rw.owner_of(w.config, "build-02")
+    unknown = _dead_folder(w, owner, {3: None})  # 띄운 적 없는 잡 하나 — 확인된 죽은 세션
+    assert srv.store.get_session(unknown.name) is None
+    w.prepare_sessions()
+    assert w.previous_sessions == [unknown.name]
+    out = w.register()
+    assert out["name"] == "build-02"
+    assert srv.store.get_session(unknown.name) is None  # 서버는 그 id 를 표에 넣지 않았다
+    assert srv.store.get_session(w.session_id) is not None
+    assert not unknown.exists()  # 보고했으니 폴더를 지웠다
+    assert out["fenced_sessions"] == 0  # 모르는 id 는 대신한 프로세스로도 세지 않는다
+
+
 def _aged(d: Path, at: float) -> Path:
     os.utime(d / "lock", (at, at))  # `ok_at.json` 이 없으면 D 의 나이는 `lock` 의 mtime 이다
     return d
