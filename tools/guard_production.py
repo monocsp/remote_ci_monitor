@@ -967,10 +967,12 @@ def _subcommand_index(argv: list[str]) -> int | None:
 
 #: rcm 실행 파일(이름이 `rcm` · `remote-ci-monitor`)이나 이 패키지(`remote_ci_monitor`, `-m` ·
 #: `-mremote_ci_monitor` · `-Imremote_ci_monitor` · `-c` 로 부를 때). `rcm.toml` · `rcm-server` ·
-#: 워크트리 이름(`remote_ci_monitor-x`)은 아니다
+#: 워크트리 이름(`remote_ci_monitor-x`)은 아니다. 경로 조각(앞뒤에 `/`,
+#: `src/remote_ci_monitor/x.py`)도 아니다 — 그 폴더를 읽는 `find` · `git ls-files` 가
+#: 막혔다(P6 재확인 354 · v2-1)
 _RCM_WORD = re.compile(
     r"(?<![\w.-])(?:rcm|remote-ci-monitor)(?![\w./-])"
-    r"|(?:(?<![\w-])|(?<![\w])-[A-Za-z]*m)remote_ci_monitor(?![\w-])",
+    r"|(?:(?<![\w/-])|(?<![\w])-[A-Za-z]*m)remote_ci_monitor(?![\w/-])",
     re.IGNORECASE,
 )
 #: 낱말 setup: 하위 명령 `setup` 과 모듈 `remote_ci_monitor.setup`. `setup.py` · `test_setup` ·
@@ -1064,9 +1066,7 @@ def _setup_net(command: str) -> bool:
     names_rcm = bool(_RCM_WORD.search(letters))
     can_call = names_rcm
     tokens = _ROUGH_TOKEN.findall(text)
-    words = [_letters(token) for token in tokens if token not in _BREAKS]
-    launcher = _launches(words) or _gives_a_terminal(words, letters)
-    if launcher and any(_could_be_rcm(token) for token in tokens):  # 자리를 보지 않는다
+    if _launcher_cause(command) is not None:  # 자리를 보지 않는다
         return True
     position = True  # 다음 낱말이 명령 자리다
     wrapped = False  # 감싸기 뒤 — 변수 낱말은 모두 명령 자리일 수 있다
@@ -1096,6 +1096,34 @@ def _setup_net(command: str) -> bool:
     return can_call and bool(_SETUP_WORD.search(letters))
 
 
+def _launcher_cause(command: str) -> tuple[str, str] | None:
+    """(런처 낱말, rcm 일 수 있는 낱말) — 그물의 (c) 가 이 명령을 잡은 원인. 없으면 None.
+
+    런처는 글 앞에서부터 낱말을 더해 가며 `_launches` · `_gives_a_terminal` 이 처음 참이 되는
+    낱말이다. rcm 일 수 있는 낱말(`_could_be_rcm`)은 자리를 보지 않되, `$` · 백틱 낱말만은 그
+    런처 **뒤**에 있을 때 센다(P6 재확인 354) — `echo $HOME | xargs ls` 의 `$HOME` 은 런처가
+    실행할 명령이 될 수 없다."""
+    text = command.replace("\\\n", "")
+    letters = _letters(text)
+    tokens = _ROUGH_TOKEN.findall(text)
+    words: list[str] = []
+    launcher: tuple[int, str] | None = None
+    for index, token in enumerate(tokens):
+        if token in _BREAKS:
+            continue
+        words.append(_letters(token))
+        if _launches(words) or _gives_a_terminal(words, letters):
+            launcher = (index, words[-1])
+            break
+    if launcher is None:
+        return None
+    at, name = launcher
+    for index, token in enumerate(tokens):
+        if _could_be_rcm(token, after=index > at):
+            return name, _letters(token) or token
+    return None
+
+
 def _launches(words: list[str]) -> bool:
     """명령 글 어디에든 받은 인자로 명령을 실행하는 런처 낱말이 있나(xargs · parallel · entr ·
     rush · xe, find 의 `-exec` 무리, fd 의 `-x` · `-X` · `--exec`). 자리는 보지 않는다 — 앞에
@@ -1119,12 +1147,15 @@ def _gives_a_terminal(words: list[str], letters: str) -> bool:
     return any(name.startswith("python") for name in names) and bool(_PYTHON_PTY.search(letters))
 
 
-def _could_be_rcm(token: str) -> bool:
+def _could_be_rcm(token: str, *, after: bool = True) -> bool:
     """이 낱말이 rcm 일 수 있나 — rcm 낱말이거나, 셸이 펼치는 변수 · 명령 치환(`$` · 백틱),
     펼쳐 rcm 이 될 수 있는 글롭(`r?m` · `*`)이나 중괄호 펼치기(`{r,x}cm`). 앞의 리다이렉션
-    연산자는 떼고 본다 — `2>/dev/null` · `<f` 는 rcm 이 아니다. `*.py` · find 의 `{}` 도 아니다."""
+    연산자는 떼고 본다 — `2>/dev/null` · `<f` 는 rcm 이 아니다. `*.py` · find 의 `{}` 도 아니다.
+
+    `$` · 백틱 낱말은 런처 뒤(`after`)에 있고, 펼친 끝 조각(마지막 `/` 뒤)이 글자 그대로의 다른
+    이름이 아닐 때만 센다(P6 재확인 354 · v2-2): `"$PWD/x"` 는 펼쳐도 `…/x` 다."""
     if "$" in token or "`" in token:
-        return True
+        return after and _open_tail(token)
     word = _letters(token)
     if _RCM_WORD.search(word):
         return True
@@ -1135,6 +1166,15 @@ def _could_be_rcm(token: str) -> bool:
     ):
         return True
     return "{" in word and ("," in word or ".." in word)
+
+
+def _open_tail(token: str) -> bool:
+    """펼치기가 든 낱말의 끝 조각(마지막 `/` 뒤)이 rcm 일 수 있나 — 그 조각에 `$` · 백틱이
+    있거나 글자 그대로 rcm 이면 참이다."""
+    tail = _letters(token).rstrip("/").rsplit("/", 1)[-1]
+    if not tail or "$" in tail or "`" in tail:
+        return True
+    return _could_be_rcm(tail)
 
 
 #: 허용 모양에 있으면 안 되는 글자: 셸 메타 문자(`;` `&` `|` `$` 백틱 `(` `)` `{` `}` `<` `>`),
@@ -1230,7 +1270,16 @@ def _home_joined(home: Path, value: str) -> str:
     return (str(home).rstrip("/") + value[1:]) or "/"
 
 
-def _not_plain() -> Verdict:
+def _not_plain(cause: tuple[str, str] | None = None) -> Verdict:
+    """그물의 거절. 런처 규칙이 잡았으면 원인(런처 낱말 + rcm 일 수 있는 낱말)과 나누는 법을
+    말한다(P6 재확인 354)."""
+    why = ""
+    if cause is not None:
+        why = (
+            f" It was stopped because the launcher `{cause[0]}` and the word `{cause[1]}` are in "
+            "the same command — a launcher can run that word as a command the hook cannot see. "
+            "If they belong to different steps, split them into two Bash calls."
+        )
     return Verdict(
         "deny",
         "This command can reach `rcm setup`, but not as a plain `rcm setup …` call the hook can "
@@ -1238,7 +1287,7 @@ def _not_plain() -> Verdict:
         f"or data directory. In short, {PLAIN_RULE} (`NAME=value` in front is fine; no `cd`, "
         "`env`, `sudo` or a second command). If the words are only text — a "
         "commit message, an echo — put the text in a file (`git commit -F <file>`, "
-        f'`gh pr create --title "$(cat <file>)"`). See {DOCS}.',
+        f'`gh pr create --title "$(cat <file>)"`).{why} See {DOCS}.',
     )
 
 
@@ -1337,7 +1386,7 @@ def _setup_verdict(
     모양일 때만 지나간다."""
     plain = _plain_setup(command)
     if plain is None:
-        return _not_plain()
+        return _not_plain(_launcher_cause(command))
     if _wants_help(list(plain.args)):
         return None
     try:

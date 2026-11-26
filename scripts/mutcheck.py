@@ -3369,7 +3369,7 @@ MUTANTS = (
         name="guard-launcher-any-shaped-word-counts",
         path="tools/guard_production.py",
         old='    if "$" in token or "`" in token:\n',
-        new="    if any(c in _SHAPING for c in token):\n",
+        new="    if any(c in _SHAPING for c in token):\n        return True\n    if False:\n",
         tests=(
             "tests/test_guard_production_setup.py::test_b8_1_a_launcher_without_an_rcm_word_passes",
         ),
@@ -3426,6 +3426,50 @@ MUTANTS = (
         new="            if False:\n",
         tests=(
             "tests/test_guard_production_setup.py::test_b8_7_nice_timeout_and_env_split_do_not_hide_rcm",
+        ),
+    ),
+    Mutant(
+        # `remote_ci_monitor` 경로 조각(`src/remote_ci_monitor/…`)을 rcm 낱말로 센다 — 그 폴더를
+        # 읽는 `find … -exec ruff` · `git ls-files … | xargs` 가 막힌다(P6 재확인 354 · v2-1)
+        name="guard-rcm-word-path-fragment-counts",
+        path="tools/guard_production.py",
+        old='    r"|(?:(?<![\\w/-])|(?<![\\w])-[A-Za-z]*m)remote_ci_monitor(?![\\w/-])",\n',
+        new='    r"|(?:(?<![\\w-])|(?<![\\w])-[A-Za-z]*m)remote_ci_monitor(?![\\w-])",\n',
+        tests=(
+            "tests/test_guard_production_setup.py::"
+            "test_b9_354_a_path_fragment_or_an_argument_variable_beside_a_launcher_passes",
+        ),
+    ),
+    Mutant(
+        # 펼친 끝 조각을 보지 않는다 — `xargs ruff check "$PWD/x"` 가 막힌다(P6 재확인 354 · v2-2)
+        name="guard-launcher-variable-tail-ignored",
+        path="tools/guard_production.py",
+        old="        return after and _open_tail(token)\n",
+        new="        return after\n",
+        tests=(
+            "tests/test_guard_production_setup.py::"
+            "test_b9_354_a_path_fragment_or_an_argument_variable_beside_a_launcher_passes",
+        ),
+    ),
+    Mutant(
+        # 런처 앞의 변수도 센다 — `echo $HOME | xargs ls` 가 막힌다(P6 재확인 354)
+        name="guard-launcher-variable-before-counts",
+        path="tools/guard_production.py",
+        old="        return after and _open_tail(token)\n",
+        new="        return _open_tail(token)\n",
+        tests=(
+            "tests/test_guard_production_setup.py::"
+            "test_b9_354_a_path_fragment_or_an_argument_variable_beside_a_launcher_passes",
+        ),
+    ),
+    Mutant(
+        # 런처 규칙의 거절이 원인과 나누는 법을 말하지 않는다(P6 재확인 354)
+        name="guard-launcher-deny-cause-dropped",
+        path="tools/guard_production.py",
+        old="        return _not_plain(_launcher_cause(command))\n",
+        new="        return _not_plain()\n",
+        tests=(
+            "tests/test_guard_production_setup.py::test_b9_354_the_launcher_deny_names_its_cause_and_says_split",
         ),
     ),
     Mutant(

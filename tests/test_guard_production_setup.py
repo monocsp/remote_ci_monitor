@@ -1186,3 +1186,63 @@ def test_b8_7_nice_timeout_and_env_split_do_not_hide_rcm(command):
 )
 def test_b8_7_nice_timeout_and_env_split_around_other_commands_pass(command):
     assert judge(command) is None, command
+
+
+# ── P6 재확인(batch 9) 354: 훅의 과잉 차단 줄이기 ──
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "find src/remote_ci_monitor -name '*.py' -exec ruff check {} +",
+        "find src/remote_ci_monitor/ -name '*.py' -exec ./.venv/bin/ruff check {} +",
+        "git ls-files src/remote_ci_monitor | xargs ./.venv/bin/ruff check",
+        "git ls-files -z src/remote_ci_monitor | xargs -0 -r ./.venv/bin/ruff check",
+        'git ls-files -z tests | xargs -0 -r ./.venv/bin/ruff check "$PWD/x"',
+        "echo $HOME | xargs ls",
+        "grep -n expect src/remote_ci_monitor/x.py",
+        "grep -rl foo src/remote_ci_monitor/ | xargs sed -n 1p",
+    ],
+)
+def test_b9_354_a_path_fragment_or_an_argument_variable_beside_a_launcher_passes(command):
+    # v2-1 · v2-2: `remote_ci_monitor` 가 경로 조각(앞뒤에 `/`)이면 rcm 낱말이 아니고, `$` · 백틱
+    # 낱말은 런처 뒤에 있고 펼친 끝 조각이 글자 그대로의 다른 이름이 아닐 때만 rcm 일 수 있다
+    assert judge(command, environ=TEST_XDG) is None, command
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "<f xargs $R",
+        "xargs -0 -r $R < /tmp/a",
+        "xargs -0 -r ./.venv/bin/$N < /tmp/a",
+        'xargs -0 -r "$D/rcm" < /tmp/a',
+        "find /tmp/a -exec `which r` {} +",
+        "script -q /dev/null $R",
+        "xargs python3 -m remote_ci_monitor.cli < /tmp/a",
+        "xargs python3 -mremote_ci_monitor < /tmp/a",
+        "xargs python3 -m remote_ci_monitor < /tmp/a",
+    ],
+)
+def test_b9_354_a_variable_after_a_launcher_or_the_module_word_is_still_denied(command):
+    # 줄이는 것은 경로 조각과 런처 앞 · 다른 이름으로 끝나는 변수뿐이다 — 런처가 실행할 자리의
+    # 변수 · 정확한 모듈 낱말은 그대로 막는다
+    verdict = judge(command, environ=TEST_XDG)
+    assert verdict is not None and verdict.decision == "deny", command
+
+
+@pytest.mark.parametrize(
+    ("command", "launcher", "word"),
+    [
+        ("git ls-files | xargs grep -n rcm", "xargs", "rcm"),
+        ("<f xargs $R", "xargs", "$R"),
+        ("script -q /dev/null rcm status", "script", "rcm"),
+    ],
+)
+def test_b9_354_the_launcher_deny_names_its_cause_and_says_split(command, launcher, word):
+    # 거절이 원인(어떤 런처 + 어떤 낱말)과 「두 Bash 호출로 나눠라」를 말한다
+    verdict = judge(command, environ=TEST_XDG)
+    assert verdict is not None and verdict.decision == "deny", command
+    assert f"`{launcher}`" in verdict.reason and f"`{word}`" in verdict.reason, verdict.reason
+    assert "two Bash calls" in verdict.reason, verdict.reason
+    assert PLAIN_MESSAGE in verdict.reason, verdict.reason
