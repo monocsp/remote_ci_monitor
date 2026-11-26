@@ -140,6 +140,18 @@ describe("RL45 — 그룹 홀드의 사람용 화면", () => {
     assert.equal(r2.kind, "list");
     assert.equal(r2.partial, true);
   });
+  test("읽을 수 없는 홀드 항목이 하나라도 있으면 목록 전체가 「모름」(P3 r1, rcm check · doctor 와 같은 규칙)", () => {
+    const bad = [{ job_id: "812", group: "irreversible:ship" }, { job_id: 813, group: "" }, { job_id: 814 }, null, "x"];
+    bad.forEach((b) => {
+      const r = rcm.notMoving(status([], { irreversible_holds: [HOLD_A, b] }), null, "en");
+      assert.equal(r.kind, "unknown", JSON.stringify(b) + " " + JSON.stringify(r));
+      assert.equal(r.why, "holds");
+      const r2 = rcm.notMoving(status([running(901)], { irreversible_holds: [HOLD_A, b] }), null, "en");
+      assert.equal(r2.kind, "list");
+      assert.equal(r2.partial, true, JSON.stringify(b));
+      assert.equal(r2.why, "holds");
+    });
+  });
   test("키가 없는 옛 서버 · 빈 목록은 홀드 줄이 없다", () => {
     assert.equal(rcm.notMoving(status([]), null, "en").kind, "ok");
     assert.equal(rcm.notMoving(status([], { irreversible_holds: [] }), null, "en").kind, "ok");

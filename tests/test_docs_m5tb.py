@@ -345,6 +345,12 @@ def test_rl45_operating_says_where_a_hold_shows_and_quotes_the_lines():
     assert doctor.split(": ", 1)[1].replace("812", "N") in body
     assert "`group held` chip" in body and "exit 4" in body
     assert "`unknown — group holds unavailable`" in body
+    # P3 r1: 못 읽는 항목 하나면 세 곳 모두 목록 전체가 모름 — `rcm check` 의 실제 문구를 인용한다
+    from remote_ci_monitor.cli import _hold_rows
+
+    unknown = _hold_rows({"irreversible_holds": [{"job_id": "x"}]})
+    assert len(unknown) == 1 and f"`{unknown[0][2]}`" in body, unknown
+    assert "`irreversible_holds: null`" in body
 
 
 def test_rl28_both_usage_guides_show_the_grace_and_the_two_wait_lines():

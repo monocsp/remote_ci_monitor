@@ -1237,7 +1237,11 @@ People see a hold in words, without the code:
 A job of the server's own local lane has no worker: the web and `rcm check` say «the server's
 local lane» and «check the server». When the server could not read its holds
 (`irreversible_holds: null`), the web says `unknown — group holds unavailable` instead of «nothing
-to look at», and `rcm check` prints one warning row saying so.
+to look at», and `rcm check` prints one warning row saying so. An entry rcm cannot read (no job
+number or no group) makes the whole list unknown in all three places, rather than a shorter list
+that looks complete: the web says the same `unknown — group holds unavailable`, `rcm check` prints
+`could not read every group hold the server sent — unknown`, and `rcm doctor --json` has
+`irreversible_holds: null`.
 
 Look at the machine first. On the worker named in the hold, `ps -g <pgid>` lists what is left of
 the job's process group (the job's last log line and `rcm logs N` tell you how far it got). When

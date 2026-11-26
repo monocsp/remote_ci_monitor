@@ -246,6 +246,38 @@ def test_rl45_rcm_check_says_it_could_not_read_the_holds(fake, capsys, monkeypat
     ], lines
 
 
+UNREADABLE_HOLDS = (
+    {"job_id": "812", "group": "irreversible:ship"},  # 번호가 문자열
+    {"job_id": 813, "group": ""},  # 그룹이 비었다
+    {"job_id": True, "group": "devices"},  # bool 은 번호가 아니다
+    "not a hold",
+)
+
+
+@pytest.mark.parametrize("bad", UNREADABLE_HOLDS, ids=["str-id", "no-group", "bool-id", "str"])
+def test_rl45_rcm_check_says_unknown_when_one_hold_cannot_be_read(fake, capsys, monkeypatch, bad):
+    """# RL45 읽을 수 없는 항목을 조용히 빼면 짧은 목록이 「그게 전부」로 읽힌다. `rcm doctor` 의
+    `parse_holds` 와 웹의 `holdsOf` 와 같은 규칙: 하나라도 못 읽으면 목록 전체가 모름이다(P3 r1)."""
+    code0, _ = check_lines(fake, capsys, monkeypatch, {"irreversible_holds": []})
+    code, lines = check_lines(fake, capsys, monkeypatch, {"irreversible_holds": [HOLD_A, bad]})
+    assert code == code0
+    assert lines == [
+        "warn  irreversible hold could not read every group hold the server sent — unknown"
+    ], lines
+
+
+def test_rl45_doctor_json_is_null_when_one_hold_cannot_be_read(worker, srv, capsys):
+    """# RL45 doctor 의 `parse_holds` 는 못 읽는 항목 하나에 목록 전체를 모름(null)으로 둔다 —
+    `rcm check` · 웹과 같은 규칙."""
+    srv.route(
+        "GET",
+        "/api/health",
+        {"ok": True, "version": __version__, "irreversible_holds": [HOLD_A, {"job_id": "x"}]},
+    )
+    _code, doc = worker(capsys)
+    assert doc["irreversible_holds"] is None, doc["irreversible_holds"]
+
+
 def test_rl45_rcm_check_has_no_hold_row_on_an_old_server(fake, capsys, monkeypatch):
     _code, lines = check_lines(fake, capsys, monkeypatch, {})
     assert lines == []

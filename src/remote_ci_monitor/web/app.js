@@ -544,12 +544,17 @@
     if (!bb || typeof bb !== "object" || !isNum(bb.job_id) || typeof bb.group !== "string" || !bb.group) return null;
     return { group: bb.group, id: bb.job_id };
   }
-  /** 상태 문서의 열린 그룹 홀드(M5t-b §4.8). 키가 없으면(옛 서버) `[]`, null 이면(서버가 못 읽음) null. */
+  /** 상태 문서의 열린 그룹 홀드(M5t-b §4.8). 키가 없으면(옛 서버) `[]`, null 이면(서버가 못 읽음) null.
+      읽을 수 없는 항목이 하나라도 있어도 null 이다: 빼고 보이면 짧은 목록이 「그게 전부」로 읽힌다.
+      `rcm check` 의 `_hold_rows` · `rcm doctor` 의 `parse_holds` 와 같은 규칙이다. */
   function holdsOf(status) {
     if (!status || !("irreversible_holds" in status)) return [];
     var h = status.irreversible_holds;
-    if (!Array.isArray(h)) return null;
-    return h.filter(function (x) { return x && isNum(x.job_id) && typeof x.group === "string" && x.group; });
+    if (!Array.isArray(h)) return null;   // mutcheck: holds-null-read-as-none
+    var ok = h.filter(function (x) {
+      return x && typeof x === "object" && isNum(x.job_id) && Math.floor(x.job_id) === x.job_id && typeof x.group === "string" && x.group.trim() !== "";
+    });
+    return ok.length === h.length ? ok : null;   // mutcheck: holds-unreadable-entry-dropped
   }
   /** 홀드 하나의 사람 문장 — 원인 코드는 드러내지 않는다. */
   function holdText(hold, lang) {

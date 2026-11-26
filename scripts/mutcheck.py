@@ -6970,6 +6970,29 @@ MUTANTS = (
             "test_rl28_a_job_waiting_behind_an_unreachable_job_in_its_group_has_no_eta",
         ),
     ),
+    Mutant(
+        # `rcm check` 가 읽을 수 없는 홀드 항목을 조용히 빼고 짧은 목록을 보인다(RL45, P3 r1)
+        name="hold-check-unreadable-dropped",
+        path="src/remote_ci_monitor/cli.py",
+        old="    if any(t is None for t in texts):  # mutcheck: hold-check-unreadable-dropped\n",
+        new="    if False:\n",
+        tests=(
+            "tests/test_hold_display_m5tb.py::"
+            "test_rl45_rcm_check_says_unknown_when_one_hold_cannot_be_read",
+        ),
+    ),
+    Mutant(
+        # 웹이 읽을 수 없는 홀드 항목을 조용히 빼고 짧은 목록을 보인다(RL45, P3 r1)
+        name="holds-unreadable-entry-dropped",
+        path="src/remote_ci_monitor/web/app.js",
+        old=(
+            "    return ok.length === h.length ? ok : null;"
+            "   // mutcheck: holds-unreadable-entry-dropped"
+        ),
+        new="    return ok;",
+        tests=("tests/web/unreachable_m5tb.test.js",),
+        runner="node",
+    ),
 )
 
 

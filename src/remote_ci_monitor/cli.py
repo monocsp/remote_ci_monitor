@@ -722,7 +722,12 @@ def _hold_rows(h: dict[str, Any]) -> list[tuple[str, bool | None, str]]:
     holds = h.get("irreversible_holds")
     if not isinstance(holds, list):
         return [(HOLD_ROW, None, "the server could not read its group holds — unknown")]
-    return [(HOLD_ROW, None, text) for text in map(hold_check_text, holds) if text]
+    texts = [hold_check_text(x) for x in holds]
+    # 읽을 수 없는 항목을 빼고 나머지만 보이면 짧은 목록이 「그게 전부」로 읽힌다. `rcm doctor` 의
+    # `parse_holds` · 웹의 `holdsOf` 와 같은 규칙: 하나라도 못 읽으면 목록 전체가 모름이다
+    if any(t is None for t in texts):  # mutcheck: hold-check-unreadable-dropped
+        return [(HOLD_ROW, None, "could not read every group hold the server sent — unknown")]
+    return [(HOLD_ROW, None, t) for t in texts if t]
 
 
 def _warn_if_client_too_old(client: Client, h: dict[str, Any] | None = None) -> None:
