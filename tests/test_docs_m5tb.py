@@ -170,3 +170,28 @@ def test_readme_command_tables_list_release_hold_in_both_languages():
         rows = [line for line in table.splitlines() if line.startswith(f"| {RELEASE_HOLD_CELL} |")]
         assert len(rows) == 1, name
         assert word in rows[0] and f"]({RELEASE_HOLD_LINK})" in rows[0], name
+
+
+# ── P6 엣지 감사의 문서 ───────────────────────────────────────────────────────
+
+
+def test_gap4_the_irreversible_section_says_retry_is_refused_with_the_loader_message():
+    """# GAP4 표식 프리셋의 `[presets.retry]` 는 설정 로드가 거절한다 — 문서가 그 사실과 오류
+    문구를 말한다."""
+    import pytest
+
+    body = flat(section(CONFIGURATION, "Jobs that must not run twice: `irreversible`"))
+    assert "An irreversible preset cannot have" in body
+    assert "a retry runs the command again" in body
+    quoted = "irreversible presets cannot have [retry]"
+    assert f"`{quoted}`" in body
+    preset = {
+        "name": "ship",
+        "argv": ["true"],
+        "source_modes": ["git_ref"],
+        "irreversible": True,
+        "retry": {"on_exit": 75},
+    }
+    with pytest.raises(config_mod.ConfigError) as e:
+        config_mod.parse_preset(preset)
+    assert quoted in str(e.value)

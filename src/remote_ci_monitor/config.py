@@ -964,6 +964,12 @@ def parse_preset(raw: Any) -> Preset:
     irreversible = raw.get("irreversible", False)
     if not isinstance(irreversible, bool):
         raise ConfigError(f"{where}: irreversible must be true or false")
+    if irreversible and retry is not None:  # mutcheck: irreversible-retry-accepted
+        # 재시도는 명령을 다시 돌린다 — 재시도 종료 코드면 그룹이 사라진 채 retried 로 닫히고 또
+        # 돈다(P6 GAP4, 메인 세션 결정). 새 키라 기존 설정에는 이 조합이 없다
+        raise ConfigError(
+            f"{where}: irreversible presets cannot have [retry] — a retry runs the command again"
+        )
     synthetic = False
     if irreversible and not group:  # mutcheck: synthetic-group-missing
         # 홀드할 그룹이 없으면 안전이 설정의 빈칸에 기댄다 — rcm 이 고정 그룹을 채운다(결정 330 ·

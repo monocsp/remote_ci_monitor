@@ -44,6 +44,10 @@ of a key bumps that number and is listed here.
   list open holds in `irreversible_holds` (when the server could not read them,
   `irreversible_holds` is `null`, not an empty list), and `GET /jobs/N` carries `hold`.
   ([#284](https://github.com/monocsp/remote_ci_monitor/pull/284))
+- **An `irreversible` preset cannot also have `[presets.retry]`.** A retry runs the command
+  again, so the server refuses to load that combination
+  (`irreversible presets cannot have [retry]`).
+  ([#284](https://github.com/monocsp/remote_ci_monitor/pull/284))
 - **`rcm release-hold N [--reason TEXT] [--json]`** releases a group hold after an admin checked
   the machine (exit 0 released, 1 no open hold, 2 refused, 3 unreachable or a server error).
   ([#284](https://github.com/monocsp/remote_ci_monitor/pull/284))

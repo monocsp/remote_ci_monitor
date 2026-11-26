@@ -6723,6 +6723,17 @@ MUTANTS = (
             "test_gap3_a_job_running_before_the_mark_blocks_the_synthetic_group",
         ),
     ),
+    Mutant(
+        # GAP4 표식 프리셋의 [retry] 를 받는다 — 재시도가 명령을 두 번 돌린다
+        name="irreversible-retry-accepted",
+        path="src/remote_ci_monitor/config.py",
+        old="    if irreversible and retry is not None:  # mutcheck: irreversible-retry-accepted\n",
+        new="    if False:\n",
+        tests=(
+            "tests/test_irreversible_hold_m5tb.py::"
+            "test_gap4_an_irreversible_preset_cannot_have_retry",
+        ),
+    ),
 )
 
 

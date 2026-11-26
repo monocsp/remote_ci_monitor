@@ -271,6 +271,21 @@ def test_gap3_a_job_running_before_the_mark_blocks_the_synthetic_group(store, cl
     assert store.get_job(new.id).state == QUEUED
 
 
+def test_gap4_an_irreversible_preset_cannot_have_retry():
+    """# GAP4 재시도는 명령을 다시 돌린다 — 표식 프리셋에 `[retry]` 가 있으면 재시도 종료 코드에서
+    그룹이 사라진 채 retried 로 닫히고 다시 돈다(명령 두 번). 설정 로드가 거절한다(메인 세션
+    결정). 표식이 없으면 `[retry]` 는 오늘처럼 받는다."""
+    base = {
+        "name": "ship",
+        "argv": ["sh", "-c", "true"],
+        "source_modes": ["git_ref"],
+        "retry": {"on_exit": 75, "max_attempts": 2},
+    }
+    with pytest.raises(ConfigError, match="irreversible presets cannot have"):
+        parse_preset({**base, "irreversible": True})
+    assert parse_preset(base).retry is not None
+
+
 def test_rl48_config_fills_a_synthetic_global_group_for_an_irreversible_preset():
     p = parse_preset({"name": "ship", "argv": ["sh", "-c", "true"], "irreversible": True})
     assert p.irreversible is True

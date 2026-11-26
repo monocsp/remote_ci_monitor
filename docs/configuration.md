@@ -1520,6 +1520,10 @@ A preset with `irreversible = true` and no `concurrency_group` gets the group
 `preset X: irreversible without concurrency_group — using group irreversible:X (global)` when it
 starts, and `rcm presets` shows that group.
 
+An irreversible preset cannot have [`[presets.retry]`](#trying-again-later-presetsretry): a retry
+runs the command again, so the server refuses to load such a preset (`irreversible presets cannot
+have [retry]`).
+
 The command must not leave daemons or other processes outside its session behind (`setsid`, a
 double-fork daemon): rcm cannot see them, so for those processes this protection is fail-open.
 They keep running after the job ends, and a later job of the same group can start beside them.
