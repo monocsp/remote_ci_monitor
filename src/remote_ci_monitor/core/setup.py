@@ -21,7 +21,7 @@ import plistlib
 import re
 import shlex
 import unicodedata
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -958,11 +958,16 @@ def production_refusal(
                 f"{svc.file} looks like an rcm service, but {svc.problem} — setup cannot tell "
                 "what that service uses, so it is refusing (nothing was written)"
             )
-    mine = {label, unit_name(label)} if label is not None else set()
+
+    def names(of: Iterable[str]) -> set[str]:
+        """라벨을 견줄 글자 — 경로처럼 대소문자를 가리지 않는 디스크면 접는다(batch 11 L5)."""
+        return {unicodedata.normalize("NFC", n).casefold() if fold_case else n for n in of}
+
+    mine = names((label, unit_name(label))) if label is not None else set()
 
     def ours(svc: RcmService) -> bool:
         """setup 이 쓴 서비스인가 — 라벨이 같고, 그 라벨의 설치 자리에 있고, 바이트가 같다."""
-        named = bool(mine.intersection(svc.names))
+        named = bool(mine.intersection(names(svc.names)))
         placed = installed is not None and same_or_inside(svc.file, installed, fold_case=fold_case)
         return named and placed and svc.data is not None and svc.data in written
 
@@ -983,7 +988,7 @@ def production_refusal(
                             f"was written){hint}"
                         )
     for svc in services:
-        if mine.intersection(svc.names) and not own(svc):
+        if mine.intersection(names(svc.names)) and not own(svc):
             return (
                 f"--label {label}: this is {svc.name}'s label — refusing (nothing was written); "
                 f"{svc.file} is installed and is not a file this setup wrote. Pass another "
