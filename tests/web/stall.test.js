@@ -190,7 +190,7 @@ describe("옛 문서도 그대로 읽는다 (C-70)", () => {
 describe("조용한 잡은 「확인이 필요한 작업」에 안 뜬다 (C-47)", () => {
   test("ACTIONABLE 은 오늘과 글자까지 같다 — quiet 는 없다 (M5n §7.3 이 새 이유 둘을 더했다)", () => {
     assert.deepEqual(rcm.ACTIONABLE,
-      ["needs_action", "worker_down", "no_capable_machine", "check_failed", "stuck", "upload_stalled",
+      ["needs_action", "worker_down", "worker_unreachable_grace", "no_capable_machine", "check_failed", "stuck", "upload_stalled",
        "not_scheduled", "blocked_by_group", "overdue", "paused"]);
   });
 

@@ -140,6 +140,7 @@ def test_needs_action_is_a_wire_value_and_leads_the_actionable_reasons():
     # 나머지 차례는 그대로다
     assert model.ACTIONABLE_REASONS[1:] == (
         "worker_down",
+        "worker_unreachable_grace",  # M5t-b §4.8 — 유예 중인 잡(F58)
         "no_capable_machine",
         "check_failed",
         "stuck",

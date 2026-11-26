@@ -1,0 +1,388 @@
+"""M5t-b PR3 — 끊김 유예 중인 잡이 사람에게 어떻게 보이나(docs/m5tb-workplan.md §4.8 · 결정 276).
+
+원격 워커와 연락이 끊겨 레인은 `down` 인데 잡은 유예(G) 동안 `running` 으로 남는다(PR1). 그 잡의
+사유는 새 값 `worker_unreachable_grace` 이고, `estimate.finish_at` 은 null(`—`)이며, 「확인이
+필요한 작업」에서는 `worker_down` 바로 뒤에 선다. 사람에게는 원문 코드가 아니라 「워커와 연락이
+끊김 — 유예 안에 돌아오면 이어 감」 꼴의 문장으로 보인다(`rcm top` · `rcm wait` stderr · 웹).
+
+`log_complete = false` 와 `late_result` 의 사람용 줄(RL20 · §4.6)도 여기서 잠근다. 두 키는 PR2 가
+만든다 — 키가 없는 문서(옛 서버 · PR2 전)에는 아무 줄도 더하지 않는다.
+
+시나리오: RL28 · RL20(PR3 몫 — `rcm logs` 줄) · RL29(PR3 몫 — 사람용 마지막 줄).
+"""
+
+from __future__ import annotations
+
+import functools
+from datetime import UTC
+from typing import Any
+
+import pytest
+
+from fake_rcm_http import FakeRcm, RawReply
+from jobfactory import CFG, NOW, PRESETS, ago, job
+from remote_ci_monitor import __version__
+from remote_ci_monitor import cli as cli_mod
+from remote_ci_monitor import client as client_mod
+from remote_ci_monitor.cli import main
+from remote_ci_monitor.core import model
+from remote_ci_monitor.core.model import CANCELLING, RUNNING, CancelInfo, WorkerInfo
+from remote_ci_monitor.core.queue import compute_queue
+from remote_ci_monitor.core.render_text import render
+from test_cli_m1 import last_json
+
+GRACE = "worker_unreachable_grace"
+
+
+def remote_lane(name: str, state: str, n: int = 1, job_id: int | None = None) -> WorkerInfo:
+    return WorkerInfo(
+        lane=n, state=state, job_id=job_id, worker=name, since=ago(minutes=3), host_key="h-" + name
+    )
+
+
+def busy(job_id: int, *, worker: str | None = "mac2", state: str = RUNNING, **kw: Any):
+    return job(job_id, state=state, started_min=4, lane=1, worker_name=worker, **kw)
+
+
+def rows(jobs, workers):
+    return {
+        r.job.id: r
+        for r in compute_queue(
+            jobs, workers=workers, paused=False, medians={}, presets=PRESETS, cfg=CFG, now=NOW
+        )
+    }
+
+
+# ── 사유 (compute_queue) ─────────────────────────────────────────────────────
+
+
+def test_rl28_a_running_job_on_a_down_worker_is_worker_unreachable_grace_without_an_eta():
+    r = rows([busy(901)], [remote_lane("mac2", "down")])[901]
+    assert r.job.state == RUNNING  # 잡은 유예 동안 그대로 돈다(PR1)
+    assert r.reason == GRACE
+    assert r.estimate.finish_at is None  # 끝날 시각을 지어내지 않는다
+
+
+def test_rl28_the_same_job_on_a_live_worker_is_running_with_an_eta():
+    r = rows([busy(902)], [remote_lane("mac2", "busy", job_id=902)])[902]
+    assert r.reason == "running"
+    assert r.estimate.finish_at is not None
+
+
+def test_rl28_unreachable_comes_before_cancelling_stuck_and_needs_action():
+    """§4.8: `_busy_reason` 의 맨 앞이다. 취소 중이어도 그렇다 — 취소가 닿지 못한다는 사실이
+    더 행동에 쓸모 있다."""
+    jobs = [
+        busy(903, state=CANCELLING, cancel=CancelInfo(ago(minutes=1), "alice", None)),
+        busy(904, last_output_at=ago(minutes=200)),  # 아주 오래 조용하다 — 살아 있으면 stuck
+    ]
+    got = rows(jobs, [remote_lane("mac2", "down", 1), remote_lane("mac2", "down", 2)])
+    assert got[903].reason == GRACE
+    assert got[904].reason == GRACE
+    assert got[903].estimate.finish_at is None and got[904].estimate.finish_at is None
+
+
+def test_rl28_a_local_lane_job_is_never_unreachable():
+    """로컬 레인 잡은 `worker_name` 이 없다 — 원격 워커 하나가 down 이어도 그 잡과 무관하다."""
+    got = rows([busy(905, worker=None)], [remote_lane("mac2", "down")])
+    assert got[905].reason == "running"
+
+
+def test_rl28_another_workers_down_lane_does_not_touch_this_job():
+    got = rows([busy(906, worker="build-02")], [remote_lane("mac2", "down")])
+    assert got[906].reason == "running"
+
+
+def test_rl28_the_reason_is_a_wire_value_right_after_worker_down():
+    assert model.REASON_WORKER_UNREACHABLE_GRACE == GRACE
+    order = model.ACTIONABLE_REASONS
+    assert order.index(GRACE) == order.index("worker_down") + 1
+
+
+# ── rcm top ──────────────────────────────────────────────────────────────────
+
+
+def top_row(**over: Any) -> dict[str, Any]:
+    r: dict[str, Any] = {
+        "id": 907,
+        "pool": "default",
+        "state": "running",
+        "key": "ship",
+        "requester": {"name": "alice", "label": "alice@mbp"},
+        "joiners": [],
+        "source": {"mode": "git_ref", "repo": "org/app", "ref": "main", "sha": "25e1494ab0f1"},
+        "estimate": {
+            "elapsed_seconds": 240.0,
+            "remaining_seconds": 60.0,
+            "source": "preset",
+            "sample_count": 0,
+            "finish_at": None,
+        },
+        "reason": GRACE,
+        "lane": 1,
+        "ran_on": "mac2",
+        "placement": "pool",
+        "placement_detail": [],
+        "position": None,
+    }
+    r.update(over)
+    return r
+
+
+def top_text(*queue: dict[str, Any]) -> str:
+    doc = {
+        "schema_version": 1,
+        "generated_at": "2026-11-27T09:00:00Z",
+        "display_timezone": "UTC",
+        "server": {"lanes": 1, "workers": []},
+        "pools": [
+            {"name": "default", "queue": list(queue), "recent": [], "medians": {}, "hosts": []}
+        ],
+    }
+    return render(doc, tz=UTC)
+
+
+def row_block(text: str, job_id: int) -> list[str]:
+    lines = text.splitlines()
+    for i, ln in enumerate(lines):
+        if f"#{job_id} " in ln:
+            out = [ln]
+            for nxt in lines[i + 1 :]:
+                if not nxt.startswith("        "):
+                    break
+                out.append(nxt)
+            return out
+    raise AssertionError(f"no row for #{job_id}:\n{text}")
+
+
+def test_rl28_rcm_top_says_lost_contact_in_words_and_never_the_code():
+    head, reason, *_ = row_block(top_text(top_row()), 907)
+    assert reason.strip() == (
+        "lost contact with mac2 — the job goes on if the worker is back within the grace period"
+    )
+    assert GRACE not in top_text(top_row())
+    assert "eta —" in head
+
+
+def test_rl28_rcm_top_without_a_machine_name_says_the_worker():
+    _head, reason, *_ = row_block(top_text(top_row(ran_on=None)), 907)
+    assert reason.strip().startswith("lost contact with the worker — ")
+
+
+# ── rcm wait ─────────────────────────────────────────────────────────────────
+
+JOB = 907
+
+
+class Script:
+    """잡 문서를 차례대로 내주는 가짜 서버(마지막 것은 계속)."""
+
+    def __init__(self, fake: FakeRcm):
+        self.fake = fake
+        self.docs: list[dict[str, Any]] = []
+        fake.route("GET", "/api/health", {"ok": True, "version": __version__})
+        fake.route("GET", f"/jobs/{JOB}", lambda _b: self.next_doc())
+        log = RawReply(b"step 1\n", {"X-RCM-Next-Offset": "7", "X-RCM-More": "0"})
+        fake.route("GET", f"/jobs/{JOB}/log", log)
+
+    def next_doc(self) -> dict[str, Any]:
+        return self.docs.pop(0) if len(self.docs) > 1 else self.docs[0]
+
+
+def doc(state: str = "running", reason: str | None = "running", **extra: Any) -> dict[str, Any]:
+    d: dict[str, Any] = {
+        "id": JOB,
+        "state": state,
+        "preset": "ship",
+        "exit_code": None if state == "running" else (0 if state == "succeeded" else 1),
+        "url": f"http://build.example:8787/#/jobs/{JOB}",
+        "keep": False,
+        "shelf": None,
+        "reason": reason if state == "running" else None,
+        "ran_on": "mac2",
+        "action": None,
+    }
+    d.update(extra)
+    return d
+
+
+@pytest.fixture
+def fake(monkeypatch, tmp_path):
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    for var in ("XDG_CONFIG_HOME", "RCM_LABEL", "RCM_CONFIG"):
+        monkeypatch.delenv(var, raising=False)
+    srv = FakeRcm()
+    monkeypatch.setenv("RCM_SERVER", srv.url)
+    monkeypatch.setenv("RCM_TOKEN", "alice-token")
+    fast = functools.partial(client_mod.wait_for_job, poll_seconds=0.01)
+    monkeypatch.setattr(cli_mod, "wait_for_job", fast)
+    yield Script(srv)
+    srv.close()
+
+
+def run(capsys, argv: list[str]) -> tuple[int, str, str]:
+    try:
+        code = main(argv)
+    except SystemExit as e:
+        code = e.code if isinstance(e.code, int) else 2
+    cap = capsys.readouterr()
+    return code, cap.out, cap.err
+
+
+LOST_LINE = (
+    f"#{JOB} lost contact with worker mac2 — the job goes on if the worker is back within "
+    "the grace period"
+)
+BACK_LINE = f"#{JOB} worker mac2 is back — the job goes on"
+
+
+def test_rl28_rcm_wait_says_once_that_the_worker_is_unreachable_and_keeps_waiting(fake, capsys):
+    fake.docs = [doc(), doc(reason=GRACE), doc(reason=GRACE), doc(reason=GRACE), doc("succeeded")]
+    code, out, err = run(capsys, ["wait", "--job", str(JOB), "--poll"])
+    assert code == 0, err  # 유예 동안 끝내지 않는다 — 결과가 오면 그 결과다
+    assert [ln for ln in err.splitlines() if "lost contact" in ln] == [LOST_LINE], err
+    assert GRACE not in err
+    assert last_json(out)["wait_exit_code"] == 0
+
+
+def test_rl28_rcm_wait_says_when_the_worker_is_back(fake, capsys):
+    fake.docs = [doc(reason=GRACE), doc(reason=GRACE), doc(), doc(), doc("succeeded")]
+    code, _out, err = run(capsys, ["wait", "--job", str(JOB), "--poll"])
+    assert code == 0, err
+    assert [ln for ln in err.splitlines() if "lost contact" in ln or "is back" in ln] == [
+        LOST_LINE,
+        BACK_LINE,
+    ], err
+
+
+def test_rl28_rcm_wait_with_a_timeout_during_the_grace_ends_3(fake, capsys):
+    fake.docs = [doc(reason=GRACE)]
+    code, _out, err = run(capsys, ["wait", "--job", str(JOB), "--poll", "--timeout", "1"])
+    assert code == 3, err
+    assert LOST_LINE in err
+
+
+# ── log_complete · late_result 의 사람용 줄 (RL20 · §4.6, 키는 PR2) ──────────────
+
+INCOMPLETE = (
+    f"#{JOB} log incomplete — the worker could not keep all of it; rcm logs {JOB} shows "
+    "what arrived"
+)
+
+
+def test_rl20_rcm_wait_says_the_log_is_incomplete_when_the_job_says_false(fake, capsys):
+    fake.docs = [doc(), doc("failed", log_complete=False)]
+    code, _out, err = run(capsys, ["wait", "--job", str(JOB), "--poll"])
+    assert code == 1, err
+    assert INCOMPLETE in err.splitlines(), err
+
+
+@pytest.mark.parametrize("value", [True, None, ...])
+def test_rl20_rcm_wait_says_nothing_when_the_log_is_whole_unknown_or_the_key_is_missing(
+    fake, capsys, value
+):
+    extra = {} if value is ... else {"log_complete": value}
+    fake.docs = [doc(), doc("succeeded", **extra)]
+    code, _out, err = run(capsys, ["wait", "--job", str(JOB), "--poll"])
+    assert code == 0, err
+    assert "log incomplete" not in err
+
+
+LATE = {
+    "outcome": "succeeded",
+    "exit_code": 0,
+    "finished_at": "2026-11-27T09:10:00Z",
+    "received_at": "2026-11-27T09:12:00Z",
+    "log_complete": True,
+}
+
+
+def test_rl29_rcm_wait_shows_a_late_result_as_one_line_that_does_not_count(fake, capsys):
+    lost = doc(
+        "lost",
+        exit_code=None,
+        summary_code="worker_unreachable",
+        summary_args={"name": "mac2", "seconds": 660},
+        late_result=LATE,
+    )
+    fake.docs = [doc(), lost]
+    code, out, err = run(capsys, ["wait", "--job", str(JOB), "--poll"])
+    assert code == 3, err  # 늦은 결과는 잡의 결과가 아니다 — 종료 코드는 lost 의 3
+    want = f"#{JOB} late result: succeeded (exit 0) — not counted as this job's result"
+    assert [ln for ln in err.splitlines() if "late result" in ln] == [want], err
+    assert last_json(out)["late_result"] == LATE
+
+
+@pytest.mark.parametrize("value", [None, ..., "garbage", {"outcome": "\x1b[2Jsucceeded"}])
+def test_rl29_rcm_wait_has_no_late_line_without_a_readable_late_result(fake, capsys, value):
+    extra = {} if value is ... else {"late_result": value}
+    fake.docs = [doc(), doc("lost", exit_code=None, summary_code="worker_unreachable", **extra)]
+    code, _out, err = run(capsys, ["wait", "--job", str(JOB), "--poll"])
+    assert code == 3, err
+    assert "late result" not in err
+
+
+def test_rl20_rcm_logs_ends_with_a_line_on_stderr_when_the_log_is_incomplete(fake, capsys):
+    fake.docs = [doc("failed", log_complete=False)]
+    code, _out, err = run(capsys, ["logs", str(JOB)])
+    assert code == 0, err
+    assert err.splitlines()[-1:] == [INCOMPLETE], err
+
+
+@pytest.mark.parametrize("value", [True, None, ...])
+def test_rl20_rcm_logs_adds_nothing_otherwise(fake, capsys, value):
+    extra = {} if value is ... else {"log_complete": value}
+    fake.docs = [doc("succeeded", **extra)]
+    code, _out, err = run(capsys, ["logs", str(JOB)])
+    assert code == 0, err
+    assert "log incomplete" not in err
+
+
+def test_rl20_rcm_logs_still_prints_the_log_when_the_job_document_cannot_be_read(fake, capsys):
+    fake.fake.route("GET", f"/jobs/{JOB}", {"error": "boom"}, status=500)
+    code, _out, err = run(capsys, ["logs", str(JOB)])
+    assert code == 0, err
+    assert "log incomplete" not in err
+
+
+# ── 연락 두절의 다섯 끝 (RL29 · 사람용 마지막 줄) ─────────────────────────────
+
+FIVE = [
+    ("worker_unreachable", {"name": "mac2", "seconds": 660}, "worker mac2 unreachable for 660s"),
+    (
+        "worker_self_stopped",
+        {"seconds": 575},
+        "worker stopped the job itself after 575s without the server",
+    ),
+    ("worker_replaced", {"name": "mac2"}, "worker mac2 was replaced by a new process"),
+    ("worker_restarted_without_job", {"name": "mac2"}, "worker mac2 restarted without the job"),
+    (
+        "orphan_unverified",
+        {"name": "mac2", "seconds": 660},
+        "the job may still be running on that machine, check it",
+    ),
+]
+
+
+@pytest.mark.parametrize(("code", "args", "want"), FIVE, ids=[f[0] for f in FIVE])
+def test_rl29_each_lost_ending_waits_3_with_its_own_sentence_and_the_log_path(
+    fake, capsys, code, args, want
+):
+    lost = doc(
+        "lost",
+        exit_code=None,
+        summary=None,
+        summary_code=code,
+        summary_args=args,
+        failed_step=None,
+        last_step=None,
+    )
+    fake.docs = [doc(), lost]
+    rc, out, err = run(capsys, ["wait", "--job", str(JOB), "--poll"])
+    assert rc == 3, err
+    assert want in err, err
+    assert f"rcm logs {JOB}" in err, err
+    assert code not in err  # 원문 코드는 보이지 않는다
+    assert last_json(out)["summary_code"] == code
