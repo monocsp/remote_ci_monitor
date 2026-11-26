@@ -38,7 +38,8 @@ of a key bumps that number and is listed here.
   `409 log_gap` with the offset it expects. A worker restarted on the same folder sends what its
   last process left before it registers. Readers see only committed bytes. When the log or bundle
   of a finished job keeps getting server errors for 300 s the finish goes first, and after 24 hours
-  without the server the finish goes without the rest of the log
+  without the server the finish goes without the rest of the log; a finish that still cannot go
+  then is dropped with one log line
   ([report queue](docs/configuration.md#the-workers-log-and-its-report-queue)).
 - **A snapshot download cut off by a lost connection closes the job `lost`**
   (`snapshot_unreachable`, exit 3), not `failed`; a missing snapshot is still `failed`.
