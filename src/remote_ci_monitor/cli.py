@@ -1292,7 +1292,7 @@ def _wait(
     `end_summary`(`rcm wait`)면 끝난 잡의 머신 · 걸린 시간 · 산출물 상태를 한 줄로 찍고(M5t-a
     결정 248 e · f), 산출물이 잘못됐거나 아직 수집 중이면 그렇게 말한다. 종료 코드는 바꾸지
     않는다. `rcm run` 의 기다림은 이 줄을 찍지 않는다 — 그 출력은 골든 시험이 잠근 그대로다.
-    `notify` 면 끝에 요청 머신의 OS 알림을 띄운다(`rcm wait --notify`, 기본 꺼짐)."""
+    `notify` 면 JSON 줄을 낸 뒤 요청 머신의 OS 알림을 띄운다(`rcm wait --notify`, 기본 꺼짐)."""
     line = _StatusLine()
     last: dict[str, Any] | None = None
     watch = _ActionWatch(job_id, return_on_action=return_on_action)
@@ -1414,11 +1414,16 @@ def _wait(
     )
     if shelf_note:
         _info(shelf_note)
+    _print_json(out)
+    # 알림은 결과(JSON · 종료 코드)가 나간 **뒤**다. 도구가 멈춰도 결과가 늦지 않고, 도구를
+    # 기다리다 Ctrl-C 가 오면 알림만 건너뛰고 잡의 종료 코드로 끝난다
     if notify:
-        warning = os_notify("rcm", _notify_text(job, job_id, code, end))
+        try:
+            warning = os_notify("rcm", _notify_text(job, job_id, code, end))
+        except KeyboardInterrupt:
+            warning = "warning: --notify: interrupted — no notification sent"
         if warning:
             _err(warning)
-    _print_json(out)
     return code
 
 

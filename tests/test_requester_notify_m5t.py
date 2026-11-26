@@ -488,3 +488,54 @@ def test_tn6_tn7_notify_is_a_wait_flag_and_not_a_run_flag(capsys):
     with pytest.raises(SystemExit):
         parser.parse_args(["run", "gate", "--notify"])
     capsys.readouterr()
+
+
+# ── P6-1: 알림의 끝 · 문구 · 실패 갈래(PR #273 검토) ─────────────────────────
+
+
+def wait_notify_once(monkeypatch, capsys, *, code: int, doc: dict[str, Any], events=None):
+    """`rcm wait --job 381 --notify` 의 명령 함수. `events` 를 주면 JSON 줄이 나간 때를 적는다."""
+    monkeypatch.setattr(cli, "_client", lambda *a, **kw: object())
+    monkeypatch.setattr(cli, "wait_for_job", lambda client, job_id, **kw: (code, doc, None))
+    if events is not None:
+        real = cli._print_json
+
+        def recorded(obj: Any) -> None:
+            events.append("json")
+            real(obj)
+
+        monkeypatch.setattr(cli, "_print_json", recorded)
+    args = argparse.Namespace(
+        job=JOB_ID, timeout=None, poll=True, return_on_action=False, notify=True
+    )
+    escaped = None
+    try:
+        rc = cli.cmd_wait(args)
+    except KeyboardInterrupt as e:  # 시험 세션을 끊지 않게 잡아서 단언으로 말한다
+        escaped, rc = e, None
+    cap = capsys.readouterr()
+    return rc, cap.out, cap.err, escaped
+
+
+def test_tn7_ctrl_c_during_the_notification_keeps_the_exit_code_and_the_json(
+    monkeypatch, tmp_path, capsys
+):
+    """알림은 결과가 나간 뒤다. 도구를 기다리다 Ctrl-C 가 와도 잡의 종료 코드와 JSON 은 그대로다."""
+    bin_dir, marker = stub_path(tmp_path, ("notify-send",))
+    monkeypatch.setenv("PATH", str(bin_dir))
+    monkeypatch.setattr(sys, "platform", "linux")
+    events: list[str] = []
+
+    def interrupted(*a: Any, **kw: Any) -> Any:
+        events.append("notify")
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(cli.subprocess, "run", interrupted)
+    doc = wait_doc(state="failed", exit_code=1, failed_step="test", summary="exit 1")
+    rc, out, err, escaped = wait_notify_once(monkeypatch, capsys, code=1, doc=doc, events=events)
+    assert escaped is None, f"Ctrl-C during the notification escaped rcm wait: {err!r}"
+    assert rc == 1
+    assert events == ["json", "notify"], events  # JSON 이 먼저 나가고 알림은 그 뒤다
+    assert last_json(out)["wait_exit_code"] == 1
+    warned = [ln for ln in err.splitlines() if "--notify" in ln]
+    assert warned == ["rcm: warning: --notify: interrupted — no notification sent"], err

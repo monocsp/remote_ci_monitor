@@ -2933,8 +2933,8 @@ MUTANTS = (
         # `--notify` 없이도 OS 알림을 부른다 — 기본 꺼짐(⛔ Q3)이 깨진다(TN7)
         name="m5t-wait-notify-always",
         path="src/remote_ci_monitor/cli.py",
-        old="    if notify:\n        warning = os_notify(",
-        new="    if True:\n        warning = os_notify(",
+        old="    if notify:\n        try:\n            warning = os_notify(",
+        new="    if True:\n        try:\n            warning = os_notify(",
         tests=(
             "tests/test_requester_notify_m5t.py::"
             "test_tn7_wait_without_notify_never_calls_the_os_notifier",
