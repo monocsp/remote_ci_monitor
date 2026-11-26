@@ -1443,6 +1443,58 @@ def test_rl43_any_observer_error_after_popen_stops_the_job_and_reports_it(
     assert body["summary"] == "worker error: RuntimeError" and body["group_gone"] is True
 
 
+@pytest.mark.parametrize("gone", [True, False])
+def test_rl43_a_worker_error_after_the_runner_returned_reports_that_result(
+    tmp_path, monkeypatch, gone
+):
+    """러너가 결과를 낸 뒤에 워커가 예외를 냈다 — 바깥 안전망은 늘 `failed` 를 보내지 않고 그
+    결과와 그 `group_gone` 을 보낸다(P3 2라운드 LOW). 버리면 확인된 그룹도 홀드되고, 끝난 잡이
+    실패로 남는다."""
+    from remote_ci_monitor.runner import RunResult
+
+    def fake_run(spec, observer, **kw):
+        observer.spawning()
+        at = kw["now_fn"]()
+        return RunResult(rc=0, started=at, finished=at, group_gone=gone)
+
+    def broken(*_a: Any, **_kw: Any) -> None:
+        raise RuntimeError("collect broke")
+
+    monkeypatch.setattr(rw, "run_job", fake_run)
+    fake = _Runs()
+    w = _worker(tmp_path, fake)
+    w.prepare_sessions()
+    monkeypatch.setattr(w, "_collect_artifacts", broken)
+    _run_claimed(w, _claim_of(7, ["true"], irreversible=True))
+    ((_, jid, body),) = fake.finished
+    assert (jid, body["outcome"], body.get("group_gone")) == (7, SUCCEEDED, gone)
+    assert "finished_at" in body and w.running == {}
+
+
+def test_rl43_a_worker_error_before_anything_was_launched_says_the_group_is_gone(
+    tmp_path, monkeypatch
+):
+    """띄우기 전(자재화)의 예외 — 바깥 안전망의 finish 가 `group_gone: true` 를 명시한다. 빼면
+    서버는 띄운 적 없는 표식 잡의 그룹을 홀드한다."""
+    fake = _Runs()
+    w = _worker(tmp_path, fake)
+    w.prepare_sessions()
+
+    def broken(spec: Any, job: Any) -> None:
+        raise RuntimeError("materialize broke")
+
+    w._materialize = broken  # type: ignore[method-assign]
+    t = threading.Thread(
+        target=w.run_claimed, args=(1, _claim_of(7, ["true"], irreversible=True)), daemon=True
+    )
+    t.start()
+    t.join(20)
+    assert not t.is_alive()
+    ((_, jid, body),) = fake.finished
+    assert (jid, body["outcome"], body.get("group_gone")) == (7, "failed", True)
+    assert body["summary"] == "worker error: RuntimeError" and w.running == {}
+
+
 # ── admin 이 푸는 길(RL45 PR1 몫 · §4.12 · 결정 330) ────────────────────────────
 
 

@@ -393,6 +393,40 @@ def test_rl43_an_observer_failing_right_after_popen_does_not_abandon_the_process
     assert result.rc == 0 and b"hi" in obs.out and result.group_gone is True
 
 
+def test_rl43_a_swallowed_spawned_error_leaves_a_line_in_the_job_log(tmp_path):
+    """`spawned` 의 예외는 잡을 멈추지 않지만 보이지 않게 삼키지도 않는다 — 잡 로그에 한 줄
+    (P3 2라운드 LOW). OSError 가 아닌 예외도 그 줄로만 보인다."""
+    obs = Obs()
+
+    def broken(pid: int) -> None:
+        raise RuntimeError("observer broke")
+
+    obs.spawned = broken  # type: ignore[method-assign]
+    s = spec(tmp_path, ["sh", "-c", "echo hi"], irreversible=True)
+    assert run_job(s, obs).rc == 0
+    assert "[rcm] observer: spawned: RuntimeError" in s.log_path.read_text(encoding="utf-8")
+
+
+@pytest.mark.parametrize("irreversible", [False, True])
+def test_rl43_a_popen_error_that_is_not_an_oserror_launches_nothing_and_says_so(
+    tmp_path, irreversible
+):
+    """argv 의 NUL 은 Popen 에서 `ValueError` 다(OSError 아님). 프로세스는 뜨지 않았으니
+    `launch_failed` 이고 `group_gone` 이 참이다(P3 2라운드 LOW). OSError(없는 명령)도 같다 —
+    러너가 띄우지 못한 그룹은 없다."""
+    err: Exception | None = None
+    try:
+        run_job(spec(tmp_path, ["echo", "a\x00b"], irreversible=irreversible), Obs())
+    except Exception as exc:  # noqa: BLE001 — 고치기 전에는 ValueError 가 그대로 샌다
+        err = exc
+    assert isinstance(err, RunnerError), repr(err)
+    assert err.code == "launch_failed" and err.args_public == {"error": "ValueError"}
+    assert getattr(err, "group_gone", None) is True
+    with pytest.raises(RunnerError) as missing:
+        run_job(spec(tmp_path, ["/nonexistent/rcm-no-such-tool"]), Obs())
+    assert getattr(missing.value, "group_gone", None) is True
+
+
 def test_rl34_f_sigkill_follows_the_monotonic_clock_when_the_wall_clock_goes_back(tmp_path):
     """(f) SIGTERM 뒤 워커 벽시계가 1시간 뒤로 가도 SIGKILL 은 단조 시계로 grace + 2초 안(F67)."""
     obs = Obs()

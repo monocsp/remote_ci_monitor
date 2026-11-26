@@ -473,7 +473,19 @@ def run_job(
                 start_new_session=True,
             )
         except OSError as e:
-            raise _launch_error(e, spec.argv[0]) from e
+            failure = _launch_error(e, spec.argv[0])
+            failure.group_gone = True  # type: ignore[attr-defined]  # 띄우지 못했다
+            raise failure from e
+        except Exception as e:  # noqa: BLE001  # mutcheck: popen-error-not-launch-failed
+            # OSError 가 아닌 Popen 실패 — argv 의 NUL 은 ValueError 다. 프로세스는 뜨지 않았다.
+            # 그대로 새면 호출자는 그룹을 모른다(표식 잡이면 홀드) — 띄우지 못함으로 닫는다
+            failure = RunnerError(
+                "launch_failed",
+                error=type(e).__name__,
+                log=f"cannot start {spec.argv[0]!r}: {safe_error(e)}",
+            )
+            failure.group_gone = True  # type: ignore[attr-defined]
+            raise failure from e
         # 여기서부터 프로세스가 돈다 — 관찰자의 어떤 예외도 그 프로세스를 감시 없이 남기면 안 된다
         # (P3 1라운드 HIGH). 기록 실패는 잡을 멈추지 않는다: `spawning` 의 「띄우는 중」 기록이
         # 남아 있어 다음 프로세스는 그 그룹을 모름(UNKNOWN)으로 읽는다
@@ -481,8 +493,9 @@ def run_job(
         if callable(spawned):
             try:
                 spawned(proc.pid)
-            except Exception:  # noqa: BLE001  # mutcheck: runner-spawned-error-escapes
-                pass
+            except Exception as e:  # noqa: BLE001  # mutcheck: runner-spawned-error-escapes
+                # 잡은 멈추지 않는다. 다만 삼킨 예외가 보이게 잡 로그에 한 줄(OSError 가 아닌 것도)
+                _note(log, f"[rcm] observer: spawned: {type(e).__name__}")
         try:
             result, head = _pump(spec, proc, log, observer, started, now_fn, mono_fn)
         except Exception as e:
@@ -496,6 +509,15 @@ def run_job(
             failure.group_gone = result.group_gone  # type: ignore[attr-defined]
             raise failure
     return result
+
+
+def _note(log: Any, line: str) -> None:
+    """러너가 잡 로그에 남기는 한 줄. 쓰지 못해도 잡을 막지 않는다."""
+    try:
+        log.write(line.encode("utf-8", errors="replace") + b"\n")
+        log.flush()
+    except (OSError, ValueError):
+        pass
 
 
 def _pump(

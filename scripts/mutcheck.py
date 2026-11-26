@@ -6107,15 +6107,10 @@ MUTANTS = (
         name="runner-spawned-error-escapes",
         path="src/remote_ci_monitor/runner.py",
         old=(
-            "            except Exception:  # noqa: BLE001  # mutcheck: "
+            "            except Exception as e:  # noqa: BLE001  # mutcheck: "
             "runner-spawned-error-escapes\n"
-            "                pass\n"
         ),
-        new=(
-            "            except Exception:  # noqa: BLE001  # mutcheck: "
-            "runner-spawned-error-escapes\n"
-            "                raise\n"
-        ),
+        new=("            except Exception as e:  # noqa: BLE001\n                raise\n"),
         tests=(
             "tests/test_job_supervisor_m5tb.py::"
             "test_rl43_an_observer_failing_right_after_popen_does_not_abandon_the_process",
@@ -6374,6 +6369,54 @@ MUTANTS = (
         tests=(
             "tests/test_hold_notify_m5tb.py::"
             "test_rl54_a_local_lane_irreversible_job_holds_unless_its_group_is_gone",
+        ),
+    ),
+    # ── M5t-b P3 2라운드 LOW — 바깥 안전망 · Popen 의 OSError 아닌 실패 · spawned 로그 ──
+    Mutant(
+        # argv 의 NUL(ValueError)이 러너 밖으로 그대로 샌다 — 그룹을 모르는 채로 닫힌다
+        name="popen-error-not-launch-failed",
+        path="src/remote_ci_monitor/runner.py",
+        old=(
+            "        except Exception as e:  # noqa: BLE001  # mutcheck: "
+            "popen-error-not-launch-failed\n"
+        ),
+        new="        except ZeroDivisionError as e:\n",
+        tests=(
+            "tests/test_job_supervisor_m5tb.py::"
+            "test_rl43_a_popen_error_that_is_not_an_oserror_launches_nothing_and_says_so",
+        ),
+    ),
+    Mutant(
+        # 바깥 안전망이 러너가 이미 낸 결과를 버리고 늘 failed 를 보낸다
+        name="safety-net-drops-the-result",
+        path="src/remote_ci_monitor/remote_worker.py",
+        old="            if result is not None:  # mutcheck: safety-net-drops-the-result\n",
+        new="            if False:\n",
+        tests=(
+            "tests/test_worker_session_m5tb.py::"
+            "test_rl43_a_worker_error_after_the_runner_returned_reports_that_result",
+        ),
+    ),
+    Mutant(
+        # 띄우기 전의 예외에도 바깥 안전망이 group_gone 을 싣지 않는다 — 서버가 홀드한다
+        name="safety-net-unlaunched-group-unknown",
+        path="src/remote_ci_monitor/remote_worker.py",
+        old="                group_gone=gone,  # mutcheck: safety-net-unlaunched-group-unknown\n",
+        new='                group_gone=getattr(e, "group_gone", None),\n',
+        tests=(
+            "tests/test_worker_session_m5tb.py::"
+            "test_rl43_a_worker_error_before_anything_was_launched_says_the_group_is_gone",
+        ),
+    ),
+    Mutant(
+        # 러너가 `spawned` 의 예외를 아무 흔적 없이 삼킨다
+        name="spawned-error-not-logged",
+        path="src/remote_ci_monitor/runner.py",
+        old='                _note(log, f"[rcm] observer: spawned: {type(e).__name__}")\n',
+        new="                pass\n",
+        tests=(
+            "tests/test_job_supervisor_m5tb.py::"
+            "test_rl43_a_swallowed_spawned_error_leaves_a_line_in_the_job_log",
         ),
     ),
 )

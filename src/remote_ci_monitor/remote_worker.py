@@ -189,6 +189,9 @@ class _RemoteObserver:
         self.closed_stop = threading.Event()
         self.closed_state: str | None = None  # 서버가 알린 끝 상태(W4)
         self.finish_sent = False  # `_finish` 를 거쳤다(보냈거나 못 보낸 보고로 남겼다)
+        # 바깥 안전망(`run_claimed`)이 읽는다: 러너가 Popen 직전까지 갔나, 결과를 냈나
+        self.launching = False
+        self.result: Any = None
 
     def phase(self, phase: str) -> None:
         self.proc.report(
@@ -284,6 +287,7 @@ class _RemoteObserver:
         이 기록이 없으면 다음 프로세스는 「띄운 적 없음」(CONFIRMED)으로 읽는다. 그래서 표식 잡은
         기록하지 못하면 띄우지 않는다 — 도는 그룹을 사라졌다고 판정받는 것보다 안 띄우는 것이
         안전하다. 일반 잡은 홀드가 없으니 로그 한 줄 뒤 띄운다(P3 1라운드 HIGH)."""
+        self.launching = True
         try:
             self.proc._write_proc(self.job_id, None)
         except OSError as e:
@@ -1799,17 +1803,49 @@ class RemoteWorker:
                 observer.final_flush()
             except Exception:  # noqa: BLE001
                 pass
-            # 러너가 띄운 그룹을 끝내고 확인했으면 그 값이 실린다. 모르면 싣지 않는다 — 서버는
-            # 표식 잡이면 홀드로 읽는다
+            result = observer.result
+            if result is not None:  # mutcheck: safety-net-drops-the-result
+                # 러너는 이미 결과를 냈다 — 그 결과와 그 `group_gone` 을 보낸다(P3 2라운드 LOW).
+                # 버리면 끝난 잡이 실패로 남고 확인된 그룹도 홀드된다. 산출물은 없다
+                outcome, summary, code, args = self._result_outcome(spec, observer, result)
+                self._finish(
+                    job.id,
+                    outcome,
+                    result.rc,
+                    summary,
+                    observer,
+                    finished=result,
+                    summary_code=code,
+                    summary_args=args,
+                    group_gone=getattr(result, "group_gone", None),
+                )
+                self._cleanup(spec, failed=outcome != SUCCEEDED)
+                return
+            # 띄우기 전이면 그룹은 없다. 띄운 뒤면 러너가 그룹을 끝내고 확인한 값이 실린다. 모르면
+            # 싣지 않는다 — 서버는 표식 잡이면 홀드로 읽는다
+            gone = getattr(e, "group_gone", None) if observer.launching else True
             self._finish(
                 job.id,
                 FAILED,
                 None,
                 f"worker error: {type(e).__name__}",
                 observer,
-                group_gone=getattr(e, "group_gone", None),
+                group_gone=gone,  # mutcheck: safety-net-unlaunched-group-unknown
             )
             self._cleanup(spec, failed=True)
+
+    def _result_outcome(
+        self, spec: RunSpec, observer: Any, result: Any
+    ) -> tuple[str, str | None, str | None, dict[str, Any] | None]:
+        """러너의 결과 → (outcome, summary, summary_code, summary_args)."""
+        if result.lost:
+            summary, code, args = self._stop_summary(observer)
+            return LOST, summary, code, args
+        if result.cancelled:
+            return CANCELLED, None, None, None
+        if result.timed_out:
+            return TIMED_OUT, format_limit(spec.timeout_seconds), None, None
+        return (SUCCEEDED if result.rc == 0 else FAILED), None, None, None
 
     def _run_claimed(
         self, lane: int, claimed: dict[str, Any], spec: RunSpec, job: Job, observer: Any
@@ -1837,6 +1873,7 @@ class RemoteWorker:
                 materialize=lambda s: self._materialize(s, job),
                 mono_fn=self.mono_fn,  # mutcheck: runner-own-monotonic-clock
             )
+            observer.result = result
         except RequiredToolMissing as e:
             observer.final_flush()
             skipped = CollectResult(state=art.SKIPPED, reason_code="not_run")
@@ -1928,19 +1965,7 @@ class RemoteWorker:
             return
         observer.final_flush()
         rc = result.rc
-        code: str | None = None
-        args: dict[str, Any] | None = None
-        if result.lost:
-            outcome = LOST
-            summary, code, args = self._stop_summary(observer)
-        elif result.cancelled:
-            outcome = CANCELLED
-        elif result.timed_out:
-            outcome, summary = TIMED_OUT, format_limit(spec.timeout_seconds)
-        elif rc == 0:
-            outcome = SUCCEEDED
-        else:
-            outcome = FAILED
+        outcome, summary, code, args = self._result_outcome(spec, observer, result)
         # 워크스페이스를 지우기 전에 모으고, `self.running` 에서 빠지기 전에 올린다(§5)
         bundle = self._collect_artifacts(job.id, claimed, spec, result)
         self._finish(
