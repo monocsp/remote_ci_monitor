@@ -361,7 +361,8 @@ def _rcm_service(path: Path, *, home: Path, root: bool) -> core.RcmService | Non
         config = _service_path(str(raw_config), home=service_home, workdir=workdir)
         if config is None:
             return problem(f"setup cannot resolve its config path {raw_config}")
-    data_dir = None
+    data_dir: Path | None = None
+    others: tuple[Path, ...] = ()
     if command in _DATA_DIRS:
         if config is None:
             return problem("it names no --config, so setup cannot tell which config it reads")
@@ -374,11 +375,20 @@ def _rcm_service(path: Path, *, home: Path, root: bool) -> core.RcmService | Non
             return problem(f"setup cannot read its config {config} ({why})")
         table = doc.get(section)
         declared = table.get("data_dir") if isinstance(table, dict) else None
-        raw_data = sf.env.get(env_name) or (declared if isinstance(declared, str) else default)
-        data_dir = _service_path(raw_data, home=service_home, workdir=workdir)
-        if data_dir is None:
-            return problem(f"setup cannot resolve its data_dir {raw_data}")
-    return core.RcmService(name, file, names, config, data_dir, venv, checkout, data)
+        # 설정의 data_dir(없으면 기본값), env, 유닛의 `--data-dir` — 우선순위를 흉내 내지 않고
+        # 모두 지킨다(batch 10 M1). 이긴 쪽만 고르면 진 쪽의 진짜 DB 를 놓친다
+        raws = [declared if isinstance(declared, str) else default]
+        raws += [raw for raw in (sf.env.get(env_name), sf.launch.get("data_dir")) if raw]
+        dirs: list[Path] = []
+        for raw_data in raws:
+            resolved = _service_path(str(raw_data), home=service_home, workdir=workdir)
+            if resolved is None:
+                return problem(f"setup cannot resolve its data_dir {raw_data}")
+            dirs.append(resolved)
+        data_dir, others = dirs[0], tuple(dirs[1:])
+    return core.RcmService(
+        name, file, names, config, data_dir, venv, checkout, data, data_dirs=others
+    )
 
 
 def scan_services(

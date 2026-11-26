@@ -887,6 +887,9 @@ class RcmService:
     data: bytes | None = None
     #: rcm 처럼 보이는데 읽지 못했거나 설정 · data_dir 을 풀지 못한 이유 — 있으면 닫는 쪽이다
     problem: str | None = None
+    #: 그 서비스가 쓸 수 있는 다른 data_dir — 유닛의 `--data-dir` 플래그와 env 값. 어느 것이
+    #: 이기는지 흉내 내지 않고 모두 지킨다(batch 10 M1)
+    data_dirs: tuple[Path, ...] = ()
 
 
 #: 운영 서비스에서 견주는 자리와 거절 문장의 이름
@@ -894,6 +897,7 @@ PRODUCTION_PIECES = (
     ("file", "service file"),
     ("config", "config"),
     ("data_dir", "data_dir"),
+    ("data_dirs", "data_dir"),
     ("venv", "venv"),
     ("checkout", "checkout"),
 )
@@ -944,12 +948,13 @@ def production_refusal(
     for flag, target in targets.items():
         for svc in services:
             for attr, what in PRODUCTION_PIECES:
-                root = getattr(svc, attr)
-                if root is not None and same_or_inside(target, root, fold_case=fold_case):
-                    return (
-                        f"{flag} {target}: this is {svc.name}'s {what} — refusing (nothing was "
-                        "written)"
-                    )
+                value = getattr(svc, attr)
+                for root in value if isinstance(value, tuple) else (value,):
+                    if root is not None and same_or_inside(target, root, fold_case=fold_case):
+                        return (
+                            f"{flag} {target}: this is {svc.name}'s {what} — refusing (nothing "
+                            "was written)"
+                        )
     for svc in services:
         if mine.intersection(svc.names) and not own(svc):
             return (

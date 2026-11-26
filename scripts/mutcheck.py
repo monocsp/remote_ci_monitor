@@ -3917,6 +3917,25 @@ MUTANTS = (
         tests=("tests/test_setup.py::test_b10_h2_an_install_place_is_found_through_links_and_xdg",),
     ),
     Mutant(
+        # 유닛의 `--data-dir` 플래그와 env 값을 data_dir 로 보지 않는다(batch 10 M1)
+        name="setup-scan-flag-and-env-data-dirs-missed",
+        path="src/remote_ci_monitor/setup.py",
+        old=(
+            "        raws += [raw for raw in (sf.env.get(env_name), "
+            'sf.launch.get("data_dir")) if raw]\n'
+        ),
+        new="        raws += []\n",
+        tests=("tests/test_setup.py::test_b10_m1_every_data_dir_a_unit_can_use_is_protected",),
+    ),
+    Mutant(
+        # 다른 data_dir 들을 모아도 견주지 않는다(batch 10 M1)
+        name="setup-production-other-data-dirs-unchecked",
+        path="src/remote_ci_monitor/core/setup.py",
+        old='    ("data_dirs", "data_dir"),\n',
+        new="",
+        tests=("tests/test_setup.py::test_b10_m1_every_data_dir_a_unit_can_use_is_protected",),
+    ),
+    Mutant(
         # 읽지 못한 rcm 같은 파일을 rcm 이 아닌 것으로 본다(결정 352, 닫는 쪽)
         name="setup-scan-unreadable-rcm-skipped",
         path="src/remote_ci_monitor/setup.py",
