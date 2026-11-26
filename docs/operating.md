@@ -176,8 +176,9 @@ on Linux: `systemctl --user disable --now <unit>`, `rm -f ~/.config/systemd/user
 way; a `data_dir` and its database stay until you delete them. setup prints this as one
 `to remove: …` line with its own paths, just before its last line. In that line the service is
 unloaded and its installed file deleted only when `cmp -s` finds the installed file is the one
-setup wrote (`cmp -s <staged> <installed> && launchctl bootout … && rm -f <installed>`); a file
-someone else installed under that name is left alone. When a service with the label was already
+setup wrote (`cmp -s <staged> <installed> && { launchctl bootout …; rm -f <installed>; }`), and
+deleted even when the unload fails (a service already stopped); a file someone else installed
+under that name is left alone. When a service with the label was already
 loaded before setup ran, the line adds that it may not be one setup wrote.
 
 **What it refuses or warns about.**

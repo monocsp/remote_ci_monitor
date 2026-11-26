@@ -1667,3 +1667,33 @@ def test_b8_6_a_typed_bracketed_address_is_asked_again(cfg, tmp_path):
     assert go(fake, "--data-dir", str(tmp_path / "data"), "--label", "test.rcm.server") == 0
     assert "without the brackets" in fake.err.getvalue()
     assert read_toml(cfg / "server.toml")["server"]["bind"] == "127.0.0.1"
+
+
+# ── P6 재확인(batch 9) v1-5 · v2-4 ──
+
+
+@pytest.mark.parametrize("platform", ["darwin", "linux"])
+def test_b9_the_remove_line_removes_setups_file_even_when_the_unload_fails(
+    cfg, home, tmp_path, platform
+):
+    # v1-5 · v2-4: 서비스 관리자가 내리기에 실패해도(이미 내려간 서비스 · 닿지 않는 버스) cmp 가
+    # 같으면 설치 자리의 파일은 지운다 — `cmp && { 내리기; rm; }` 꼴이다
+    fake = Fake(platform=platform)
+    assert go(fake, *coordinator_args(tmp_path / "data")) == 0
+    remove = _lines(fake)[-2]
+    staged, installed = _installed_and_staged(cfg, home, platform)
+    installed.parent.mkdir(parents=True, exist_ok=True)
+    installed.write_bytes(staged.read_bytes())
+    bin_dir, log = tmp_path / "stub-bin", tmp_path / "manager.log"
+    for manager in ("launchctl", "systemctl"):
+        _manager_stub(bin_dir, manager, f'echo "$*" >> {log}\necho "unload failed" >&2\nexit 5\n')
+    for tool in ("cmp", "rm", "id"):
+        found = shutil.which(tool)
+        assert found is not None, tool
+        (bin_dir / tool).symlink_to(found)
+    env = {"PATH": str(bin_dir), "HOME": str(home)}
+    subprocess.run(["/bin/sh", "-c", remove.removeprefix("to remove: ")], env=env, check=False)
+    assert not installed.exists(), remove
+    assert not staged.exists() and not (cfg / "server.toml").exists()
+    called = log.read_text()
+    assert "bootout" in called or "disable" in called, called

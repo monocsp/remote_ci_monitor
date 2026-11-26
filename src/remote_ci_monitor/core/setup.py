@@ -528,7 +528,8 @@ def remove_line(
     `disable --now`), 설치한 서비스 파일과 setup 이 쓴 파일을 지운다. data_dir 은 지우지 않는다.
 
     설치 자리의 파일은 setup 이 쓴 파일(`staged`)과 같을 때만(`cmp -s`) 내리고 지운다 — 다르면
-    그 서비스는 다른 누가 쓴 것이라 그대로 둔다(P6 재확인 3 · v2-3). 같은 라벨이 setup 전에 이미
+    그 서비스는 다른 누가 쓴 것이라 그대로 둔다(P6 재확인 3 · v2-3). 같으면 내리기의 성패와
+    상관없이 지운다(`cmp && { 내리기; rm; }`). 같은 라벨이 setup 전에 이미
     올라가 있었으면(`preloaded`) 그 서비스는 setup 이 쓴 것이 아닐 수 있다고 덧붙인다."""
     q = shlex.quote
     rm = "rm -f " + " ".join(q(str(p)) for p in files)
@@ -536,13 +537,15 @@ def remove_line(
     if manager in (LAUNCHD, SYSTEMD) and installed is not None and staged is not None:
         same = f"cmp -s {q(str(staged))} {q(str(installed))}"
         gone = f"rm -f {q(str(installed))}"
+        # 내리기가 실패해도(이미 내려간 서비스 · 닿지 않는 버스) cmp 가 같으면 지운다 — `&&` 로
+        # 이으면 내리기의 실패가 `rm -f` 를 건너뛰었다(P6 재확인 v1-5 · v2-4)
         if manager == LAUNCHD and label:
-            service = f"{same} && launchctl bootout gui/$(id -u)/{q(label)} && {gone}; "
+            service = f"{same} && {{ launchctl bootout gui/$(id -u)/{q(label)}; {gone}; }}; "
         elif manager == SYSTEMD:
             unit = q(installed.name)
             service = (
-                f"{same} && systemctl --user disable --now {unit} && {gone} && "
-                "systemctl --user daemon-reload; "
+                f"{same} && {{ systemctl --user disable --now {unit}; {gone}; "
+                "systemctl --user daemon-reload; }; "
             )
     line = f"to remove: {service}{rm}"
     if service and preloaded:

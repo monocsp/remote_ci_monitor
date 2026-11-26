@@ -3716,10 +3716,10 @@ MUTANTS = (
         name="setup-remove-line-without-cmp",
         path="src/remote_ci_monitor/core/setup.py",
         old=(
-            '            service = f"{same} && launchctl bootout gui/$(id -u)/{q(label)} && '
-            '{gone}; "\n'
+            '            service = f"{same} && {{ launchctl bootout gui/$(id -u)/{q(label)}; '
+            '{gone}; }}; "\n'
         ),
-        new='            service = f"launchctl bootout gui/$(id -u)/{q(label)} && {gone}; "\n',
+        new='            service = f"{{ launchctl bootout gui/$(id -u)/{q(label)}; {gone}; }}; "\n',
         tests=(
             "tests/test_setup.py::"
             "test_b8_3_the_remove_line_takes_the_installed_file_only_when_setup_wrote_it",
@@ -3733,6 +3733,24 @@ MUTANTS = (
         old="    if service and preloaded:\n",
         new="    if False:\n",
         tests=("tests/test_setup.py::test_b8_3_a_label_already_loaded_may_not_be_setups",),
+    ),
+    Mutant(
+        # 제거 줄이 내리기의 성공에 지우기를 건다 — 이미 내려간 서비스면 설치 자리의 파일이
+        # 남는다(P6 재확인 v1-5 · v2-4)
+        name="setup-remove-line-unload-gates-the-rm",
+        path="src/remote_ci_monitor/core/setup.py",
+        old=(
+            '            service = f"{same} && {{ launchctl bootout gui/$(id -u)/{q(label)}; '
+            '{gone}; }}; "\n'
+        ),
+        new=(
+            '            service = f"{same} && launchctl bootout gui/$(id -u)/{q(label)} && '
+            '{gone}; "\n'
+        ),
+        tests=(
+            "tests/test_setup.py::"
+            "test_b9_the_remove_line_removes_setups_file_even_when_the_unload_fails",
+        ),
     ),
     Mutant(
         # 마지막 doctor 줄이 맨 이름 rcm 이다 — PATH 의 다른 빌드가 그 머신을 잰다(P5 B-E7)
