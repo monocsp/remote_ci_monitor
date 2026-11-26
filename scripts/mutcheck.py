@@ -4704,6 +4704,18 @@ MUTANTS = (
             "test_ob2_doctor_prefers_the_installed_copy_of_this_configs_service_file",
         ),
     ),
+    Mutant(
+        # `rcm init worker --service-file` 의 `next:` 줄이 셸 치환 `gui/$(id -u)` 로 돌아간다
+        # (온보딩 시험 OB3 의 남은 한 곳)
+        name="ob3-init-worker-gui-domain-command-substitution",
+        path="src/remote_ci_monitor/cli.py",
+        old='            f"launchctl bootstrap {gui_domain()} {target}"\n',
+        new='            f"launchctl bootstrap gui/$(id -u) {target}"\n',
+        tests=(
+            "tests/test_onboarding_findings.py::"
+            "test_ob3_init_worker_service_file_hint_prints_the_numeric_uid",
+        ),
+    ),
 )
 
 
