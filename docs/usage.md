@@ -157,18 +157,22 @@ Every row must say `ok`. A `warn` row is a heads-up, not a failure: `rcm check` 
 4. **`rcm wait --job N`** attaches to a job you already have, follows it over the event stream and
    ends when the job does. Ctrl-C detaches again without stopping anything.
 5. The exit code is the job's, exactly as if you had waited from the start.
-6. Its last line says where the job ran and how long it took:
-   `#381 succeeded on build-02 · 6m 31s · artifacts ready`. A failed job adds the step that
-   failed (`· step test`); the artifact state is left out when the preset declares no artifacts.
+6. Its end line says where the job ran and how long it took:
+   `#381 succeeded on build-02 · 6m 31s · artifacts ready`. Warning, log and shelf lines may
+   follow it. A failed job adds the step that failed (`· step test`); the artifact state is left
+   out when the preset declares no artifacts, and a job that never started says nothing about
+   artifacts.
    Artifacts that `failed`, were `dropped`, are `unavailable` or `unknown` add a warning line,
    and artifacts still `collecting` or `uploading` add
    `#381 artifacts still collecting (uploading) — see them later with rcm artifacts 381`. Neither
    changes the exit code. The JSON carries the same machine as `ran_on` (`worker` stays `null`
-   for the build machine's own lanes, as before).
+   for the build machine's own lanes, as before). For those lanes `ran_on` is the server's host
+   name as it is now, not as it was when the job ran.
 7. **`rcm wait --job N --notify`** also shows a desktop notification on the computer that waits
-   when the wait ends — `osascript` on macOS, `notify-send` on Linux. Without the tool it prints
-   one warning line and exits as it would have. It is off unless you pass it, and `rcm run` does
-   not take it: run with `--no-wait`, then wait with `--notify`.
+   when the wait ends, after the JSON line — `osascript` on macOS, `notify-send` on Linux.
+   Without the tool, or on Ctrl-C while it runs, it prints one warning line and exits as it
+   would have. It is off unless you pass it, and `rcm run` does not take it: run with
+   `--no-wait`, then wait with `--notify`.
 
 **Later instead of now.** `rcm run deploy --ref main --at 15:00` (or `--in 90m`) hands the server
 a time. The job waits as `scheduled` and enters the queue at that time: `rcm jobs` lists it as
