@@ -230,6 +230,14 @@ of a key bumps that number and is listed here.
   did. The `server: found …` line and the "several rcm servers" messages of every command clean
   the name and address found on the network to one line.
   ([#268](https://github.com/monocsp/remote_ci_monitor/pull/268))
+- **`tools/guard_production.py`: the `rcm setup` net now refuses when it crashes instead of
+  allowing.** An error inside the net used to leave only a warning and let the Bash command run;
+  now the hook refuses that command, as it already did for an error while judging `rcm setup`
+  itself. The net of #272 is otherwise unchanged, and so is its over-blocking: a command that
+  names rcm in quoted text (a PR title, a commit message, a comment body) next to `$`, `(` or a
+  launcher word such as the `-x` of `tar -x` is still refused. Pass such text through a file
+  (`gh pr create --body-file`, `git commit -F <file>`) and keep the rcm word out of the command.
+  ([#274](https://github.com/monocsp/remote_ci_monitor/pull/274))
 
 ## [0.10.0] - 2026-11-23
 

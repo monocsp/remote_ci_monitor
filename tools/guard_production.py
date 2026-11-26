@@ -1673,13 +1673,20 @@ def find_production() -> Production:
 
 
 def _about_setup(payload: Any) -> bool:
-    """훅 입력이 `rcm setup` 에 닿을 수 있는 Bash 명령인가(`_setup_net`). 무엇이 터져도 답한다."""
+    """훅 입력이 `rcm setup` 에 닿을 수 있는 Bash 명령인가(`_setup_net`). 무엇이 터져도 답한다 —
+    모양이 이상한 입력은 setup 이 아니고, 그물이 터진 Bash 명령은 setup 에 닿는 쪽이다(fail
+    closed, PR #274 P3 LOW)."""
     try:
         tool_input = payload.get("tool_input") or {}
         command = tool_input.get("command")
-        return payload.get("tool_name") == "Bash" and _setup_net(str(command or ""))
+        if payload.get("tool_name") != "Bash":
+            return False
     except Exception:  # noqa: BLE001 — 모양이 이상한 입력은 setup 이 아니다
         return False
+    try:
+        return _setup_net(str(command or ""))
+    except Exception:  # noqa: BLE001 — 그물이 터지면 setup 이 어디에 쓸지 모른다
+        return True
 
 
 def main() -> int:
