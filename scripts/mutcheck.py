@@ -6,6 +6,8 @@
 못 찾으면 그 자체로 실패다(코드가 바뀌어 감시가 풀린 것).
 
 변이 목록(개수는 `MUTANTS` 가 정본이다 — 문서의 숫자는 머지마다 썩는다):
+  M5t-a PR6 — `m5t-core-names-a-catalog-tool`: 코어가 툴체인 카탈로그의 도구 이름을 상수로 가짐
+     (`hostsample.py`, `docs/m5t-workplan.md` §4.5 · TD23)
   M5t-a PR5 — `m5t-ran-on-*` 둘(시작 전 잡 · 다른 머신의 로컬 잡에 이름을 지음) ·
      `m5t-terminal-view-without-local` · `m5t-notify-machine-from-worker` ·
      `m5t-wait-end-line-without-machine` · `m5t-wait-artifact-unknown-silent` ·
@@ -4613,6 +4615,14 @@ MUTANTS = (
             "tests/test_lanes_zero.py::"
             "test_tl3_a_capacity_error_is_logged_once_not_on_every_health_call",
         ),
+    ),
+    Mutant(
+        # 코어가 카탈로그의 도구 이름(node)을 상수로 갖는다 — 이식성 규칙(명세 §4.5, TD23)
+        name="m5t-core-names-a-catalog-tool",
+        path="src/remote_ci_monitor/hostsample.py",
+        old='PACKAGE_MANAGERS = ("brew", "apt-get", "dnf", "pacman")\n',
+        new='PACKAGE_MANAGERS = ("brew", "apt-get", "dnf", "pacman", "node")\n',
+        tests=("tests/test_toolchain_catalog.py::test_td23_core_code_names_no_catalog_tool",),
     ),
 )
 
