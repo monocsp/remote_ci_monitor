@@ -358,15 +358,16 @@ def test_rl28_both_usage_guides_show_the_grace_and_the_two_wait_lines():
         raw = section(text, heading)
         body = flat(raw)
         assert re.findall(r"^(\d+)\. ", raw, re.M) == ["1", "2", "3"], heading
-        assert unreachable_text("mac2") in body, heading
+        # 이름과 잡 번호는 web-worker-down.png 장면(tools/screenshots/capture.py 의 down)과 같다
+        assert unreachable_text("mac2-worker") in body, heading
         assert "`—`" in body, heading
         assert "(configuration.md#a-lost-connection-disconnect_grace_seconds)" in body, heading
         assert "(operating.md#when-a-worker-cannot-be-reached)" in body, heading
-        assert f"#812 {unreachable_text('worker mac2')}\n" in raw, heading
-        assert "#812 worker mac2 is back — the job goes on\n" in raw, heading
+        assert f"#11 {unreachable_text('worker mac2-worker')}\n" in raw, heading
+        assert "#11 worker mac2-worker is back — the job goes on\n" in raw, heading
         assert "`lost`" in body, heading
     assert "not resumed automatically" not in usage
     assert "자동으로 재개되지도 않는다" not in usage_ko
-    assert "워커 mac2와 연락이 끊김 · 유예 시간 안에 돌아오면 이어서 진행" in flat(
+    assert "`… 연락이 끊김 · 유예 시간 안에 돌아오면 이어서 진행`" in flat(
         section(usage_ko, "워커가 멈추면")
     )
