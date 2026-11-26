@@ -730,9 +730,10 @@ command naming rcm (or with a variable where the command goes) that holds the wo
 anywhere, or where the word after rcm is something the shell builds (`${S}tup`, `` `…` ``,
 `s{e,}tup`) — is refused with "run `rcm setup` as one plain command: no ; & | $ ` ( ) < > or
 backslash, absolute or ~ paths only". So are `cd /x && rcm setup …`, `env rcm setup …`, a
-command line setup would reject, and a failure of the hook itself. So is any command that holds
-both a word that could be rcm (`rcm`, a path ending in `/rcm`, the module word
-`remote_ci_monitor[.cli]`, a glob such as `r?m`, or — after the launcher — a `$` variable or
+command line setup would reject, and a failure of the hook itself. If the net itself fails (an
+internal error), the hook treats the command as one that can reach `rcm setup` and refuses it.
+The hook also refuses any command that holds both a word that could be rcm (`rcm`, a path ending
+in `/rcm`, the module word `remote_ci_monitor[.cli]`, a glob such as `r?m`, or — after the launcher — a `$` variable or
 `` `…` `` whose last path part is not a plain other name) and, anywhere in it, a launcher that
 feeds arguments (`xargs`, `parallel`, `find … -exec`, `fd -x`, `entr`, `rush`, `xe`), whose
 arguments come from input the hook cannot read, or one that gives a terminal (`script`,
@@ -744,9 +745,12 @@ is refused too; search text with a tool that is not a launcher. A path through t
 (`src/remote_ci_monitor/…`) is not an rcm word, and a variable before the launcher or one that
 ends in a plain name (`xargs ruff check "$PWD/x"`) is not either, so `find src/remote_ci_monitor
 -name '*.py' -exec ruff check {} +` and `git ls-files src/remote_ci_monitor | xargs ruff check`
-pass. Text that
-only mentions it, such as `git commit -m "… rcm setup …"`, is refused too: put the text in a file
-(`git commit -F <file>`, `gh pr create --title "$(cat <file>)"`).
+pass. Text that only mentions it, such as `git commit -m "… rcm setup …"`, is refused as well.
+The net refuses some ordinary commands too — a command that names rcm in quoted text next to `$`
+or `(`, or a launcher word such as `fd -x` or `expect` anywhere in the line. This is accepted:
+pass text through a file (`git commit -F <file>`, `gh pr create --body-file <file>`,
+`gh pr comment --body-file <file>`; a title can come from `--title "$(cat <file>)"`) and split
+long chains into separate commands.
 
 The hook is the first line, not the last. It judges shell text, and every closed list it keeps
 (launchers, shell metacharacters, where a word stands) has an outside: a variable where the
