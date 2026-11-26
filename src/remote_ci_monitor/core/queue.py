@@ -44,6 +44,7 @@ from remote_ci_monitor.core.model import (
     REASON_UPLOADING,
     REASON_WAITING_FOR_LANE,
     REASON_WORKER_DOWN,
+    REASON_WORKER_UNREACHABLE_GRACE,
     SCOPE_GLOBAL,
     SCOPE_HOST,
     SOURCE_MEASURED_OTHER,
@@ -336,15 +337,24 @@ def _busy_estimate(
     )
 
 
-def _busy_reason(job: Job, est: Estimate, progress: Progress | None = None) -> str:
+def _busy_reason(
+    job: Job, est: Estimate, progress: Progress | None = None, *, unreachable: bool = False
+) -> str:
     """표시 사유 하나.
-    `cancelling → materializing → needs_action → stuck → overdue → quiet → running`.
+    `worker_unreachable_grace → cancelling → materializing → needs_action → stuck → overdue →
+    quiet → running`.
+
+    `unreachable` 은 그 잡을 집은 원격 워커가 `down` 이라는 뜻이다 — 잡은 끊김 유예 동안
+    `running` 으로 남는다(M5t-b §4.8). 이것이 맨 앞이다: 취소 중이어도 그 취소가 워커에 닿지
+    못한다는 사실이 더 행동에 쓸모 있다.
 
     초과 실행이면서 조용한 잡은 `overdue` 로 낸다 — 더 행동 가능한 사실이 이긴다. 뒤집으면
     초과 실행이 회색 「조용함」 뒤에 숨는다. 같은 까닭으로 「사람이 할 일」 표식(M5s)이 멈춤보다
     앞이다 — 사람을 기다리는 잡은 조용하고, 그 침묵의 이유를 잡이 직접 말했다. 취소 중인 잡은
     표식이 있어도 `cancelling` 이다(이제 할 일이 없다).
     """
+    if unreachable:  # mutcheck: unreachable-reason-dropped
+        return REASON_WORKER_UNREACHABLE_GRACE
     if job.state == CANCELLING:
         return REASON_CANCELLING
     if job.phase == PHASE_MATERIALIZING:
@@ -495,6 +505,9 @@ def compute_queue(
 
     lane_info: dict[_LaneKey, WorkerInfo] = {(w.worker, w.lane): w for w in workers}
     live = [w for w in workers if w.state != WORKER_DOWN]
+    # 연락이 끊긴 원격 워커(M5t-b §4.8) — 그 워커가 집은 잡은 유예 동안 돌지만 끝날 시각을 모른다.
+    # 로컬 레인(`worker` 없음)은 원격 워커의 끊김과 무관하다
+    down_workers = {w.worker for w in workers if w.state == WORKER_DOWN and w.worker}
     # 레인은 **번호가 아니라 (워커, 번호)** 로 센다. 기본 풀에는 로컬 레인 1..N 과 원격 워커의
     # 레인 1..M 이 함께 들어오므로, 번호로 키를 잡으면 로컬 레인 2 와 `build-02/2` 가 뭉개진다.
     live_lanes: list[_LaneKey] = [(w.worker, w.lane) for w in live]
@@ -539,6 +552,9 @@ def compute_queue(
         )
         if busy_per_pool.get(job.pool, 0) > 1:
             est = replace(est, shared=True)
+        unreachable = job.worker_name is not None and job.worker_name in down_workers
+        if unreachable:
+            est = replace(est, finish_at=None)  # 워커가 돌아올지 모른다 — 시각을 지어내지 않는다
         free_at = now + timedelta(seconds=est.remaining_seconds or 0)
         if holder_lane is not None and holder_lane in lane_free:
             lane_free[holder_lane] = max(lane_free[holder_lane], free_at)
@@ -553,7 +569,7 @@ def compute_queue(
             QueueRow(
                 job=job,
                 position=None,
-                reason=_busy_reason(job, est, prog),
+                reason=_busy_reason(job, est, prog, unreachable=unreachable),
                 lane=job.lane,
                 ahead_job_id=None,
                 blocked_by=None,

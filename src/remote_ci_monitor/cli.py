@@ -90,7 +90,9 @@ from remote_ci_monitor.core.model import (
     EXIT_CODE_BY_STATE,
     EXIT_UNKNOWN,
     PLACEMENT_CAPABLE,
+    REASON_WORKER_UNREACHABLE_GRACE,
     RETRIED,
+    RUNNING,
     TERMINAL_STATES,
     Preset,
 )
@@ -107,6 +109,11 @@ from remote_ci_monitor.core.render_text import (
     fingerprint_summary,
     fmt_clock,
     fmt_duration,
+    held_group,
+    hold_check_text,
+    late_result_line,
+    log_incomplete_line,
+    lost_line,
     placement_reason_text,
     placement_suffix,
     presets_summary,
@@ -118,6 +125,7 @@ from remote_ci_monitor.core.render_text import (
     shelf_row,
     source_ident,
     storage_row,
+    unreachable_text,
     verdict_text,
     wait_end_line,
 )
@@ -699,6 +707,24 @@ def _supersede_row(h: dict[str, Any]) -> tuple[str, bool | None, str] | None:
     )
 
 
+#: `rcm check` 의 그룹 홀드 행 이름(M5t-b §4.8)
+HOLD_ROW = "irreversible hold"
+
+
+def _hold_rows(h: dict[str, Any]) -> list[tuple[str, bool | None, str]]:
+    """`rcm check` 의 그룹 홀드 경고 줄 — 홀드마다 하나(M5t-b §4.8 · 결정 330).
+
+    경고(ok = None)이지 FAIL 이 아니다. `rcm check` 는 이 머신의 환경 검사이고, 홀드와 무관한
+    프리셋의 연결 점검을 막으면 안 된다. 키가 없으면 옛 서버라 행이 없고, null 이면 서버가 홀드를
+    못 읽었다 — 「없음」이라 하지 않고 모른다고 말한다."""
+    if "irreversible_holds" not in h:
+        return []
+    holds = h.get("irreversible_holds")
+    if not isinstance(holds, list):
+        return [(HOLD_ROW, None, "the server could not read its group holds — unknown")]
+    return [(HOLD_ROW, None, text) for text in map(hold_check_text, holds) if text]
+
+
 def _warn_if_client_too_old(client: Client, h: dict[str, Any] | None = None) -> None:
     """`rcm run` 의 stderr 한 줄 — 막지 않는다. health 를 못 읽으면 조용히 지나간다.
 
@@ -1247,17 +1273,27 @@ class _FetchSpec:
     dry_run: bool = False
 
 
-def action_line(job_id: Any, action: Any) -> str | None:
+def action_line(job_id: Any, action: Any, blocked_by: Any = None) -> str | None:
     """`#N needs action · <code> · <note>` — 「사람이 할 일」 표식 한 줄(M5s). 표식이 없으면 None.
 
     code 는 서버가 어휘로 거른 값이지만 여기서도 어휘 밖이면 말하지 않는다 — 터미널에 그대로
     흐르는 문자열이다. note 는 서버가 이미 지웠지만(`progress.parse_action_value`) 옛 서버나 가짜
-    서버의 문서일 수 있어 같은 `clean_line` 을 한 번 더 지난다."""
+    서버의 문서일 수 있어 같은 `clean_line` 을 한 번 더 지난다.
+
+    그룹 홀드(M5t-b §4.8)는 서버가 정한 코드다 — `blocked_by` 로 그룹과 홀드 잡을 알면 원문 코드
+    대신 사람 말로 쓴다. 모르면(옛 · 가짜 서버) 오늘의 줄 그대로다."""
     if not isinstance(action, dict):
         return None
     code = action.get("code")
     if not isinstance(code, str) or not ACTION_CODE_RE.fullmatch(code):
         return None
+    held = held_group(action, blocked_by)
+    if held is not None:
+        group, holder = held
+        return (
+            f"#{job_id} needs action · group {group} is held by job #{holder} — check that "
+            f"machine for a leftover process, then ask an admin to run rcm release-hold {holder}"
+        )
     note = clean_line(action.get("note")) if isinstance(action.get("note"), str) else ""
     tail = f" · {note}" if note else ""
     return f"#{job_id} needs action · {code}{tail}"
@@ -1301,7 +1337,7 @@ class _ActionWatch:
         if ident is None or ident == self.printed:
             return None
         self.printed = ident
-        return action_line(job.get("id", self.job_id), job.get("action"))
+        return action_line(job.get("id", self.job_id), job.get("action"), job.get("blocked_by"))
 
     def stop_when(self, job: dict[str, Any]) -> int | None:
         if not self.return_on_action or self._stopped(job):
@@ -1309,6 +1345,35 @@ class _ActionWatch:
         if action_line(self.job_id, job.get("action")) is None:
             return None
         return EXIT_ACTION
+
+
+class _GraceWatch:
+    """기다리는 잡의 원격 워커와 연락이 끊겼다가 돌아오는 것(M5t-b §4.8 · RL28).
+
+    사유가 `worker_unreachable_grace` 가 되는 순간 stderr 한 줄, 다시 도는 사유로 돌아오면 한 줄.
+    잡은 유예 동안 `running` 이고 `rcm wait` 은 끝내지 않는다 — 결과가 오면 그 결과, 유예가 끝나면
+    서버가 `lost`(3)로 닫는다. 원문 코드는 드러내지 않는다."""
+
+    def __init__(self, job_id: int) -> None:
+        self.job_id = job_id
+        self.away = False
+
+    def observe(self, job: dict[str, Any]) -> str | None:
+        if job.get("state") not in (RUNNING, CANCELLING):
+            return None
+        machine = job.get("ran_on")
+        name = clean_line(machine) if isinstance(machine, str) else ""
+        jid = job.get("id", self.job_id)
+        if job.get("reason") == REASON_WORKER_UNREACHABLE_GRACE:
+            if self.away:
+                return None
+            self.away = True
+            return f"#{jid} " + unreachable_text(f"worker {name}" if name else None)
+        if not self.away:
+            return None
+        self.away = False
+        who = f"worker {name}" if name else "the worker"
+        return f"#{jid} {who} is back — the job goes on"
 
 
 def _wait(
@@ -1342,15 +1407,16 @@ def _wait(
     line = _StatusLine()
     last: dict[str, Any] | None = None
     watch = _ActionWatch(job_id, return_on_action=return_on_action)
+    grace = _GraceWatch(job_id)
 
     def on_update(job: dict[str, Any]) -> None:
         nonlocal last
         last = job
-        said = watch.observe(job)
-        if said:
-            line.done()  # 진행 줄을 덮어쓰지 않게 — 표식은 남아야 하는 줄이다
-            _info(said)
-            line.last = ""
+        for said in (watch.observe(job), grace.observe(job)):
+            if said:
+                line.done()  # 진행 줄을 덮어쓰지 않게 — 표식은 남아야 하는 줄이다
+                _info(said)
+                line.last = ""
         line.update(describe(job))
 
     def on_retry(job: dict[str, Any]) -> None:
@@ -1406,6 +1472,16 @@ def _wait(
     end = wait_end_line(job, job_id=job_id) if end_summary and isinstance(job, dict) else None
     if end:
         _info(end)
+    if end_summary and isinstance(job, dict):
+        # M5t-b: 유실의 원인 문장(RL29), 늦게 온 결과(세지 않는다, §4.6), 불완전한 로그(RL20).
+        # 키가 없는 문서(옛 서버 · PR2 전)에는 아무 줄도 없다
+        for said in (
+            lost_line(job, job_id=job_id),
+            late_result_line(job, job_id=job_id),
+            log_incomplete_line(job, job_id=job_id),
+        ):
+            if said:
+                _info(said)
     # 0 이 아닌 끝에는 로그로 가는 길과 이름별 최근 이력을 붙인다(M5h §2.5). 3(모른다)에도
     # 붙인다 — 모를수록 로그가 필요하다.
     # 확정 404 만 로그 줄을 뺀다 — 없는 잡의 로그 길은 아무것도 안 가리킨다(M5i I3).
@@ -1488,7 +1564,7 @@ def _notify_text(job: Any, job_id: int, code: int, end: str | None) -> str:
     if end:
         return end
     if code == EXIT_ACTION and isinstance(job, dict):
-        said = action_line(job_id, job.get("action"))
+        said = action_line(job_id, job.get("action"), job.get("blocked_by"))
         if said:
             return said
     return f"#{job_id} wait ended · exit {code}"
@@ -3169,6 +3245,15 @@ def cmd_logs(args: argparse.Namespace) -> int:
         return _client_fail(client, "logs failed", e)
     except KeyboardInterrupt:
         return 130
+    # 로그가 불완전하면 끝에 한 줄(M5t-b §4.6 · RL20). 잡 문서를 못 읽으면 말하지 않는다 — 로그는
+    # 이미 나갔고 종료 코드는 로그를 받은 것에 대한 것이다
+    try:
+        doc = client.job(args.job)
+    except ClientError:
+        doc = None
+    said = log_incomplete_line(doc, job_id=args.job) if isinstance(doc, dict) else None
+    if said:
+        _info(said)
     return 0
 
 
@@ -4516,6 +4601,7 @@ def cmd_check(args: argparse.Namespace) -> int:
             supersede_row = _supersede_row(h)
             if supersede_row is not None:
                 rows.append(supersede_row)
+            rows.extend(_hold_rows(health_body))
             adv = h.get("advertise") or {}
             if adv.get("error"):
                 # 광고가 켜져 있는데 실제로는 못 나간다 — 발견은 부가 기능이라 FAIL 은 아니다

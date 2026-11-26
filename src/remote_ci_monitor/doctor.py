@@ -1218,6 +1218,9 @@ class Health:
     preset_env: dict[str, PresetEnv] | None
     #: 갈 수 있는 머신이 있는 프리셋(M5t-a 결정 243). None 이면 서버가 말하지 않았다(옛 서버)
     capacity: Capacity | None = None
+    #: 열린 그룹 홀드(M5t-b §4.8). None 이면 모른다 — 서버가 키를 싣지 않았거나(옛 서버) 못
+    #: 읽었거나(null) 알아볼 수 없는 항목이 있었다
+    holds: tuple[dict[str, Any], ...] | None = None
 
 
 @dataclass(frozen=True)
@@ -1241,6 +1244,8 @@ class PresetEnv:
 @dataclass(frozen=True)
 class Whoami:
     kind: str
+    #: 토큰 이름 — 워커 토큰이면 곧 워커 이름이다(M5t-b T19). 모르면 None
+    name: str | None = None
 
 
 @dataclass(frozen=True)
@@ -1325,11 +1330,49 @@ def parse_health(answer: dict[str, Any]) -> Health:
         if not 0 <= reachable <= total or len(names) != total - reachable:
             raise AnswerUnreadable("capacity does not add up")
         capacity = Capacity(total, reachable, tuple(dc.clean_text(n, 64) for n in names))
-    return Health(answer["ok"], answer["version"], answer.get("error"), preset_env, capacity)
+    return Health(
+        answer["ok"],
+        answer["version"],
+        answer.get("error"),
+        preset_env,
+        capacity,
+        parse_holds(answer.get("irreversible_holds")),
+    )
+
+
+#: `irreversible_holds` 항목의 칸(M5t-b §4.8, `core/status.hold_item_json`)
+HOLD_KEYS = ("job_id", "preset", "group", "scope", "worker", "cause", "since")
+
+
+def parse_holds(raw: Any) -> tuple[dict[str, Any], ...] | None:
+    """`/api/health` 의 `irreversible_holds` — 씻은 항목들. 모르면 None.
+
+    홀드는 판정에 들지 않는다(종료 코드 규칙은 그대로, §4.8). 그래서 모양이 틀려도 답 전체를
+    알아볼 수 없다고 하지 않고 홀드만 모름(None)으로 둔다. 알아볼 수 없는 항목 하나를 빼고
+    나머지만 보이면 「여기에는 홀드가 없다」로 읽힐 수 있다 — 빼지 않는다."""
+    if not isinstance(raw, list):
+        return None
+    out = []
+    for item in raw:
+        if not isinstance(item, dict):
+            return None
+        job_id = item.get("job_id")
+        if not isinstance(job_id, int) or isinstance(job_id, bool):
+            return None
+        if not isinstance(item.get("group"), str) or not item["group"].strip():
+            return None
+        hold: dict[str, Any] = {"job_id": job_id}
+        for key in HOLD_KEYS[1:]:
+            value = item.get(key)
+            hold[key] = dc.clean_text(value, 120) if isinstance(value, str) else None
+        out.append(hold)
+    return tuple(out)
 
 
 def parse_whoami(answer: dict[str, Any]) -> Whoami:
-    return Whoami(answer["kind"])
+    name = answer.get("name")
+    shown = dc.clean_text(name, 64) if isinstance(name, str) else ""
+    return Whoami(answer["kind"], shown or None)
 
 
 def parse_spec(answer: dict[str, Any]) -> Spec:
@@ -1473,6 +1516,9 @@ class _Run:
         self.unsure_git = False
         #: 시스템 서비스의 `User=` 를 이 머신이 모른다 — 그 이유 줄(모르면 None)
         self.service_user_unknown: str | None = None
+        #: 이 머신에서 돈 잡의 열린 그룹 홀드(M5t-b §4.8). 역할이 worker · coordinator-worker 일
+        #: 때만 채운다 — 모르면(서버에 못 닿음 · 옛 서버 · 다른 역할) None
+        self.holds: list[dict[str, Any]] | None = None
 
     # ── 공통 ──
 
@@ -1684,6 +1730,9 @@ class _Run:
             "undecided": undecided,
             "warnings": warnings,
             "exit": code,
+            # 이 머신의 그룹 홀드(M5t-b §4.8). 종료 코드에는 들지 않는다 — 「이 머신이 무엇을 할
+            # 수 있나」의 질문이 아니다. 키만 더했다(doctor_version 1)
+            "irreversible_holds": self.holds,
         }
         return doc
 
@@ -2147,6 +2196,9 @@ class _Run:
                 "token (rcm token add NAME --worker)"
             )
             return
+        # 워커 토큰의 이름이 곧 워커 이름이다 — 이름을 모르면 어느 홀드가 여기 것인지도 모른다
+        if health.holds is not None and me.name:
+            self.holds = [h for h in health.holds if h["worker"] == me.name]
         ok, spec = self.reach(client.spec_answer, "/worker/spec", WORKER_TOKEN_HINT)
         if not ok:
             return
@@ -2417,6 +2469,9 @@ class _Run:
         if self.role == dc.ROLE_COORDINATOR_WORKER:
             local = next((m for m in machines.machines if m.kind == "local"), None)
             self.local_lane(cfg, health, local)
+            # 서버의 로컬 레인 잡은 홀드의 `worker` 가 null 이다(M5t-b §4.8)
+            if health.holds is not None:
+                self.holds = [h for h in health.holds if h["worker"] is None]
 
     def report_capacity(self, cfg: Any, health: Health, machines: Machines) -> None:
         """분배 전용 코디네이터의 판정은 「올 프리셋이 0개」가 아니라 `capacity` 다(TD38). 어느

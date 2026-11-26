@@ -504,6 +504,19 @@ def _preset_state(p: Mapping[str, Any]) -> str:
     return STATE_TEXT.get(p["state"], "—") if p["state"] is not None else "—"
 
 
+def hold_line(hold: Mapping[str, Any]) -> str:
+    """이 머신에서 돈 잡의 그룹 홀드 한 줄(M5t-b §4.8). 원인 코드는 드러내지 않는다 — 사람이
+    할 일은 원인과 무관하게 같다. 푸는 일은 admin 의 몫이다."""
+    job_id = hold.get("job_id")
+    preset = clean_text(hold.get("preset")) or "—"
+    group = clean_text(hold.get("group")) or "—"
+    return (
+        f"job #{job_id} ({preset}) · group {group}: a job that ran here was closed without a "
+        "stop confirmation — check for a leftover process, then ask an admin to run "
+        f"rcm release-hold {job_id}"
+    )
+
+
 def _shown(value: Any) -> str:
     """사람용 칸 — 모름(None)은 `—` 이다."""
     return "—" if value is None else str(value)
@@ -596,6 +609,8 @@ def render(doc: Mapping[str, Any]) -> list[str]:
             f"{s['missing']} missing · {s['unknown']} unknown"
             + (f" · {maybe} may come (unknown)" if maybe else "")
         )
+    for h in doc.get("irreversible_holds") or []:
+        lines.append(f"needs action  {hold_line(h)}")
     for w in doc.get("warnings") or []:
         lines.append(f"warn  {w}")
     for p in doc.get("problems") or []:

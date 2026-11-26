@@ -17,7 +17,8 @@
   // `check_pending` 은 없다 — 점검이 끝나면 저절로 풀린다.
   // M5s — `needs_action` 이 맨 앞이다: 잡이 스스로 「사람이 이것을 해 달라」고 말했다. 모델의
   // `ACTIONABLE_REASONS` 와 같은 목록이다(tests/test_web_schedule_m5s.py 가 잠근다).
-  var ACTIONABLE = ["needs_action", "worker_down", "no_capable_machine", "check_failed", "stuck", "upload_stalled", "not_scheduled", "blocked_by_group", "overdue", "paused"];
+  // M5t-b §4.8 — `worker_unreachable_grace`(끊김 유예 중인 잡)는 `worker_down` 바로 뒤다.
+  var ACTIONABLE = ["needs_action", "worker_down", "worker_unreachable_grace", "no_capable_machine", "check_failed", "stuck", "upload_stalled", "not_scheduled", "blocked_by_group", "overdue", "paused"];
   // `환경 바뀜` 칩이 사는 창(§8.3) — 지문이 이 안에서 바뀐 머신만
   var ENV_CHANGED_WINDOW_MS = 24 * 3600 * 1000;
   var TERMINAL = { succeeded: 1, failed: 1, timed_out: 1, cancelled: 1, lost: 1, expired: 1, retried: 1, exhausted: 1 };
@@ -369,6 +370,13 @@
         // 서버가 note 의 제어문자를 지웠고, 화면은 그리는 자리에서 escape 한다
         var act = row.action && typeof row.action === "object" ? row.action : {};
         parts.push(T(lang, "reason.needs_action"));
+        // 그룹 홀드(M5t-b §4.8)는 서버가 정한 코드다 — 원문 코드 대신 사람 말로, 홀드 잡으로 가는 링크
+        var held = heldBy(row);
+        if (held) {
+          parts.push(T(lang, "reason.held_group", { group: held.group, id: held.id }));
+          links.push({ jobId: held.id });
+          out.text = parts.join(" · "); out.actionable = true; out.cls = "action"; break;
+        }
         if (typeof act.code === "string" && act.code) parts.push(act.code);
         if (typeof act.note === "string" && act.note) parts.push(act.note);
         out.text = parts.join(" · "); out.actionable = true; out.cls = "action"; break;
@@ -376,6 +384,10 @@
       case "paused": out.text = T(lang, "reason.paused"); out.actionable = true; break;
       case "not_scheduled": out.text = T(lang, "reason.not_scheduled"); out.actionable = true; break;
       case "worker_down": out.text = T(lang, "reason.no_worker"); out.actionable = true; break;
+      case "worker_unreachable_grace":
+        // 끊김 유예(M5t-b §4.8 · 결정 276) — 잡은 돈다. 워커가 유예 안에 돌아오면 이어 간다
+        out.text = T(lang, "reason.unreachable_grace", { worker: typeof row.ran_on === "string" && row.ran_on ? row.ran_on : null });
+        out.actionable = true; out.cls = "stalled"; break;
       default: out.text = T(lang, "reason.unknown");
     }
     return out;
@@ -523,12 +535,53 @@
     return { running: running, waiting: waiting, pools: pools.length };
   }
 
+  /** 홀드에 막힌 대기 행이면 {group, id}(M5t-b §4.8). `action.code` 가 `irreversible_hold` 이고
+      `blocked_by` 에 홀드 잡 번호와 그룹이 있을 때만 — 모르면 지어내지 않는다(오늘의 줄로). */
+  function heldBy(row) {
+    var act = row && row.action;
+    var bb = row && row.blocked_by;
+    if (!act || typeof act !== "object" || act.code !== "irreversible_hold") return null;
+    if (!bb || typeof bb !== "object" || !isNum(bb.job_id) || typeof bb.group !== "string" || !bb.group) return null;
+    return { group: bb.group, id: bb.job_id };
+  }
+  /** 상태 문서의 열린 그룹 홀드(M5t-b §4.8). 키가 없으면(옛 서버) `[]`, null 이면(서버가 못 읽음) null. */
+  function holdsOf(status) {
+    if (!status || !("irreversible_holds" in status)) return [];
+    var h = status.irreversible_holds;
+    if (!Array.isArray(h)) return null;
+    return h.filter(function (x) { return x && isNum(x.job_id) && typeof x.group === "string" && x.group; });
+  }
+  /** 홀드 하나의 사람 문장 — 원인 코드는 드러내지 않는다. */
+  function holdText(hold, lang) {
+    return T(lang, "hold.needs_look", {
+      group: hold.group, id: hold.job_id, preset: hold.preset || DASH,
+      worker: typeof hold.worker === "string" && hold.worker ? hold.worker : null
+    });
+  }
+  /** 홀드 잡의 행에 다는 칩 하나(M5t-b §4.8). 그 잡에 열린 홀드가 없으면 null. */
+  function holdChip(status, jobId, lang) {
+    var holds = holdsOf(status) || [];
+    for (var i = 0; i < holds.length; i++) {
+      if (holds[i].job_id === jobId) return { text: T(lang, "hold.chip"), title: holdText(holds[i], lang) };
+    }
+    return null;
+  }
+  /** 로그 서랍의 머리 줄에 붙는 한 마디(M5t-b §4.6) — `log_complete` 가 **거짓**일 때만. */
+  function logCompleteNote(job, lang) {
+    return job && job.log_complete === false ? T(lang, "drawer.log_incomplete") : null;
+  }
+
   // ── 요약 (항목 23 · 24 · 25) ──
   function notMoving(status, me, lang) {
     var q = queueOf(status);
     if (!Array.isArray(q)) return { kind: "unknown", lines: [] };
     var lines = [];
     var unknown = false;
+    // 열린 그룹 홀드마다 한 줄(M5t-b §4.8) — 그 그룹에 대기 잡이 없어도. 사람만 푼다: `needs_action` 자리
+    var holds = holdsOf(status);
+    (holds || []).forEach(function (h) {
+      lines.push({ jobId: h.job_id, reason: "irreversible_hold", text: holdText(h, lang), rank: 0 });
+    });
     q.forEach(function (row) {
       if (!("reason" in row)) { unknown = true; return; }
       if (row.reason === "running" || row.reason === "waiting_for_lane" || row.reason === "uploading" || row.reason === "materializing" || row.reason === "cancelling") return;
@@ -549,8 +602,12 @@
     // 표식이 있었을 수 있다. 줄이 없으면 「모른다」, 있으면 그 줄만 그리고 「나머지 없음」은 빼게 한다
     var schedUnknown = sc.kind === "error";
     if (schedUnknown && !lines.length) return { kind: "unknown", lines: [], why: "scheduled" };
+    // 홀드를 못 읽었으면(null) 같은 규칙이다 — 거기 사람이 풀어야 할 그룹이 있었을 수 있다
+    if (holds === null && !lines.length) return { kind: "unknown", lines: [], why: "holds" };
     lines.sort(function (a, b) { return a.rank - b.rank || (a.jobId || 0) - (b.jobId || 0); });
-    if (lines.length) return schedUnknown ? { kind: "list", lines: lines, partial: true } : { kind: "list", lines: lines };
+    if (lines.length && schedUnknown) return { kind: "list", lines: lines, partial: true };
+    if (lines.length && holds === null) return { kind: "list", lines: lines, partial: true, why: "holds" };
+    if (lines.length) return { kind: "list", lines: lines };
     return { kind: "ok", lines: [] };
   }
 
@@ -3543,6 +3600,7 @@
     ordinal: ordinal, truncate: truncate, stateWord: stateWord, stateGlyph: stateGlyph, personLabel: personLabel,
     reasonText: reasonText, confidenceBadge: confidenceBadge, etaText: etaText,
     elapsedText: elapsedText, notMoving: notMoving, yourJobs: yourJobs, isMine: isMine,
+    holdChip: holdChip, logCompleteNote: logCompleteNote,
     scheduledOf: scheduledOf, scheduledRowModel: scheduledRowModel, notifyFailuresBadge: notifyFailuresBadge, cancelLocked: cancelLocked, hostPressure: hostPressure,
     jobStorageLine: jobStorageLine, hostRunsNoJobs: hostRunsNoJobs, hostFacts: hostFacts,
     queueHeader: queueHeader, sortQueue: sortQueue, workerPills: workerPills, workersCrowded: workersCrowded, workerName: workerName, hostCards: hostCards, headerNote: headerNote, progressHead: progressHead, progressHeadHtml: progressHeadHtml, queueGroups: queueGroups, runningStep: runningStep,
@@ -3982,13 +4040,13 @@
     // 24
     var nm = notMoving(st, state.me, L());
     var s;
-    if (nm.kind === "unknown") s = '<span class="muted">' + esc(tr(nm.why === "scheduled" ? "summary.scheduled_unknown" : "summary.queue_unknown")) + "</span>";
+    if (nm.kind === "unknown") s = '<span class="muted">' + esc(tr(nm.why === "scheduled" ? "summary.scheduled_unknown" : nm.why === "holds" ? "summary.holds_unknown" : "summary.queue_unknown")) + "</span>";
     else if (nm.kind === "ok") s = lost
       ? '<span class="muted">' + esc(tr("summary.last_known") + tr("summary.nothing_stuck")) + "</span>"
       : '<span class="ok">' + esc(tr("summary.nothing_stuck")) + "</span>";
     else s = nm.lines.slice(0, 3).map(function (l) { return '<span class="sl" data-cut="sl" title="#' + l.jobId + " " + esc(l.text) + '">' + jl(l.jobId, "#" + l.jobId) + ' <span class="warn">' + esc(l.text) + "</span></span>"; }).join("")
       // 예약을 못 읽었으면 「그 밖에 없다」고 말하지 않는다 — 모르는 것이 남아 있다
-      + '<span class="sl muted">' + esc(tr(nm.partial ? "summary.scheduled_unknown" : "summary.nothing_else_stuck")) + "</span>";
+      + '<span class="sl muted">' + esc(tr(nm.partial ? (nm.why === "holds" ? "summary.holds_unknown" : "summary.scheduled_unknown") : "summary.nothing_else_stuck")) + "</span>";
     $("[data-stuck]").innerHTML = (lost && nm.kind === "list" ? '<span class="muted">' + esc(tr("summary.last_known")) + "</span><br>" : "") + s;
     // 25
     var host = p && Array.isArray(p.hosts) ? p.hosts[0] : null;
@@ -4764,6 +4822,12 @@
     return html + "</div>";
   }
 
+  /** 홀드 잡의 칩(M5t-b §4.8) — 전문은 title 로. 홀드가 없으면 빈 글. */
+  function holdChipHtml(id) {
+    var c = holdChip(state.status, id, L());
+    return c ? ' <span class="chip hold" data-hold-chip="' + id + '" data-cut="chip" title="' + esc(c.title) + '">' + esc(c.text) + "</span>" : "";
+  }
+
   // ── 렌더: 최근 (항목 14 · 15 · 32) ──
   function renderRecent() {
     var p = pool0(state.status);
@@ -4788,7 +4852,7 @@
       html += '<div class="rrow' + (l.cls ? " " + esc(l.cls) : "") + (failedish ? " clickable" : "") + (state.hl === job.id ? " hl" : "") + '" data-job="' + job.id + '"' + (failedish ? ' data-rtoggle="' + job.id + '" role="button" tabindex="0" aria-expanded="' + (open ? "true" : "false") + '"' : "") + ">" +
         '<span class="id">#' + job.id + "</span>" +
         '<span class="pill ' + esc(l.cls) + '"><span class="g" aria-hidden="true">' + esc(l.glyph) + "</span> " + esc(l.pill) + "</span>" +
-        '<span class="k">' + keyWithLinkHtml(job.key || DASH, job.link, "kn") + (job._pool ? ' <span class="chip" data-cut="chip" title="' + esc(tr("pool.name", { name: job._pool })) + '">' + esc(tr("pool.name", { name: job._pool })) + "</span>" : "") + "</span>" +
+        '<span class="k">' + keyWithLinkHtml(job.key || DASH, job.link, "kn") + (job._pool ? ' <span class="chip" data-cut="chip" title="' + esc(tr("pool.name", { name: job._pool })) + '">' + esc(tr("pool.name", { name: job._pool })) + "</span>" : "") + holdChipHtml(job.id) + "</span>" +
         '<span class="s rq" data-cut="rq" title="' + esc((job.requester || {}).label || DASH) + '">' + esc(truncate((job.requester || {}).label || DASH, 40)) + "</span>" +
         '<span class="d">' + esc(l.duration) + "</span>" +
         '<span class="t">' + esc(l.when) + "</span>" +
@@ -5241,7 +5305,9 @@
         state.drawer.lines += 1;
       }
       state.drawer.offset = res.next;
-      $("[data-drawer-sub]").textContent = res.more ? tr("drawer.live", { bytes: fmtBytes(res.next) }) : tr("drawer.finished", { bytes: fmtBytes(res.next) });
+      // 워커가 로그 일부를 남기지 못했으면(M5t-b §4.6) 머리 줄에 한 마디 — 잡 행의 `log_complete`
+      var gap = logCompleteNote(findAnyJob(id), L());
+      $("[data-drawer-sub]").textContent = (res.more ? tr("drawer.live", { bytes: fmtBytes(res.next) }) : tr("drawer.finished", { bytes: fmtBytes(res.next) })) + (gap ? " · " + gap : "");
       if (res.more) state.drawer.timer = setTimeout(pollLog, 2000);
     }).catch(function () { $("[data-drawer-sub]").textContent = tr("drawer.load_failed"); state.drawer.timer = setTimeout(pollLog, 5000); });
   }

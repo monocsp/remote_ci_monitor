@@ -14,6 +14,7 @@ from zoneinfo import ZoneInfo
 
 from remote_ci_monitor.core import artifacts as _art
 from remote_ci_monitor.core.model import (
+    ACTION_IRREVERSIBLE_HOLD,
     CANCELLED,
     CANCELLING,
     EXHAUSTED,
@@ -30,6 +31,7 @@ from remote_ci_monitor.core.model import (
     UPLOADING,
 )
 from remote_ci_monitor.core.outcome import label_text
+from remote_ci_monitor.core.outcome import render as outcome_text
 from remote_ci_monitor.core.progress import clean_line
 from remote_ci_monitor.core.queue import confidence
 from remote_ci_monitor.core.status import parse_iso
@@ -688,10 +690,21 @@ def _plain_reason_text(row: dict[str, Any], workers: list[dict[str, Any]] | None
         return (
             f"over by {fmt_duration(over)} · expected {fmt_duration(est.get('expected_seconds'))}"
         )
+    if reason == "worker_unreachable_grace":
+        # 끊김 유예(M5t-b §4.8) — 원문 코드는 드러내지 않는다
+        return unreachable_text(row.get("ran_on"))
     if reason == "needs_action":
         # 잡이 찍은 「사람이 할 일」(M5s). note 는 서버가 제어문자를 지운 한 줄이지만 옛 서버나
         # 가짜 서버의 문서일 수 있어 `rcm wait` 의 `action_line` 처럼 한 번 더 씻는다
         act = row.get("action") if isinstance(row.get("action"), dict) else {}
+        held = held_group(act, row.get("blocked_by"))
+        if held is not None:
+            # 그룹 홀드(M5t-b §4.8) — 서버가 정한 코드라 사람 말로 바꿔 그린다
+            group, holder = held
+            return (
+                f"needs action · group {group} is held by #{holder} — rcm release-hold {holder} "
+                "after checking the machine"
+            )
         code = act.get("code")
         note = clean_line(act["note"]) if isinstance(act.get("note"), str) else None
         head = f"needs action · {code}" if code else "needs action"
@@ -722,6 +735,112 @@ def _plain_reason_text(row: dict[str, Any], workers: list[dict[str, Any]] | None
         lane = row.get("lane")
         return f"running · lane {lane}" if lane else "running"
     return reason or "unknown"
+
+
+def unreachable_text(machine: Any) -> str:
+    """끊김 유예 중인 잡의 한 줄(M5t-b §4.8 · 결정 276).
+
+    머신 이름(`ran_on`)을 모르면 「the worker」다."""
+    name = clean_line(machine) if isinstance(machine, str) else ""
+    who = name or "the worker"
+    return f"lost contact with {who} — {_GRACE_TAIL}"
+
+
+#: 끊김 유예의 뒤 절 — `rcm top` 의 이유 줄과 `rcm wait` 의 줄이 같은 말을 쓴다
+_GRACE_TAIL = "the job goes on if the worker is back within the grace period"
+
+
+def held_group(action: Any, blocked_by: Any) -> tuple[str, int] | None:
+    """홀드에 막힌 대기 잡이면 (그룹, 홀드 잡 번호). 아니면 None(M5t-b §4.8).
+
+    `action.code` 가 `irreversible_hold` 이고 `blocked_by` 에 정수 잡 번호와 그룹이 있을 때만이다.
+    옛 서버나 가짜 서버의 문서라 그룹을 모르면 지어내지 않는다 — 부르는 쪽이 오늘의 줄로 물러선다.
+    """
+    if not isinstance(action, dict) or action.get("code") != ACTION_IRREVERSIBLE_HOLD:
+        return None
+    if not isinstance(blocked_by, dict):
+        return None
+    holder = blocked_by.get("job_id")
+    group = blocked_by.get("group")
+    if not isinstance(holder, int) or isinstance(holder, bool) or not isinstance(group, str):
+        return None
+    group = clean_line(group)
+    return (group, holder) if group else None
+
+
+def hold_fields(hold: Any) -> tuple[int, str, str, str | None] | None:
+    """`irreversible_holds` 항목 하나 → (잡 번호, 그룹, 프리셋, 워커). 읽을 수 없으면 None.
+
+    서버 문서는 우리가 만든 게 아니다 — 터미널로 흐르는 글자는 씻는다. 워커가 null 이면 로컬
+    레인 잡이다(M5t-b §4.8)."""
+    if not isinstance(hold, dict):
+        return None
+    job_id = hold.get("job_id")
+    if not isinstance(job_id, int) or isinstance(job_id, bool):
+        return None
+    group = clean_line(hold["group"]) if isinstance(hold.get("group"), str) else ""
+    if not group:
+        return None
+    preset = clean_line(hold["preset"]) if isinstance(hold.get("preset"), str) else ""
+    worker = clean_line(hold["worker"]) if isinstance(hold.get("worker"), str) else ""
+    return job_id, group, preset or DASH, worker or None
+
+
+def hold_check_text(hold: Any) -> str | None:
+    """`rcm check` 의 홀드 경고 줄 하나(M5t-b §4.8). 원문 코드(원인)는 드러내지 않는다."""
+    f = hold_fields(hold)
+    if f is None:
+        return None
+    job_id, group, preset, worker = f
+    where = worker or "the server's local lane"
+    look = worker or "the server"
+    return (
+        f"group {group} · job #{job_id} ({preset}) on {where} closed without a stop "
+        f"confirmation — check {look}, then rcm release-hold {job_id}"
+    )
+
+
+def log_incomplete_line(job: Mapping[str, Any], *, job_id: int) -> str | None:
+    """`log_complete` 가 **거짓**일 때만 한 줄(M5t-b §4.6 · RL20).
+
+    참 · null · 키 없음(옛 서버 · PR2 전)은 말하지 않는다."""
+    if job.get("log_complete") is not False:
+        return None
+    return (
+        f"#{job_id} log incomplete — the worker could not keep all of it; rcm logs {job_id} "
+        "shows what arrived"
+    )
+
+
+#: 늦은 결과의 `outcome` 으로 받는 값 — 어휘 밖이면 줄을 내지 않는다(터미널에 흐르는 문자열이다)
+_LATE_OUTCOMES = frozenset(("succeeded", "failed", "timed_out", "cancelled", "lost"))
+
+
+def late_result_line(job: Mapping[str, Any], *, job_id: int) -> str | None:
+    """`late_result` 한 줄(M5t-b §4.6 · 결정 256 · 274). 잡의 결과로 세지 않는다고 말한다."""
+    late = job.get("late_result")
+    if not isinstance(late, dict):
+        return None
+    outcome = late.get("outcome")
+    if outcome not in _LATE_OUTCOMES:
+        return None
+    code = late.get("exit_code")
+    tail = f" (exit {code})" if isinstance(code, int) and not isinstance(code, bool) else ""
+    return f"#{job_id} late result: {outcome}{tail} — not counted as this job's result"
+
+
+def lost_line(job: Mapping[str, Any], *, job_id: int) -> str | None:
+    """`lost` 로 끝난 잡의 원인 문장 한 줄(M5t-b RL29). 코드를 영어 문장으로 그리고, 모르는 코드면
+    서버가 저장한 `summary` 로 물러선다. 둘 다 없으면 말하지 않는다."""
+    if job.get("state") != LOST:
+        return None
+    code = job.get("summary_code")
+    args = job.get("summary_args") if isinstance(job.get("summary_args"), dict) else None
+    text = outcome_text(code, args) if isinstance(code, str) else None
+    if text is None and isinstance(job.get("summary"), str):
+        text = job["summary"]
+    text = clean_line(text) if text else ""
+    return f"#{job_id} lost: {text}" if text else None
 
 
 def _mb(b: int | None) -> str:

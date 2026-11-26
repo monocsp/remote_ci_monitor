@@ -257,6 +257,8 @@
     "summary.add_token": "Add a token to highlight your jobs",
     "summary.queue_unknown": "unknown — queue unavailable",
     "summary.scheduled_unknown": "unknown — scheduled jobs unavailable",
+    // M5t-b §4.8 — 서버가 그룹 홀드를 못 읽었다(null). 「없음」이 아니다
+    "summary.holds_unknown": "unknown — group holds unavailable",
     "summary.no_jobs": "No jobs of yours in the queue",
     "summary.and_more": function (a) { return "and " + a.n + " more"; },
     "summary.last_known": "last known: ",
@@ -368,6 +370,8 @@
     "drawer.live": function (a) { return "live · " + a.bytes; },
     "drawer.finished": function (a) { return "finished · " + a.bytes; },
     "drawer.load_failed": "couldn’t load — retrying",
+    // M5t-b §4.6 — 워커가 로그의 일부를 남기지 못했다(`log_complete` 거짓)
+    "drawer.log_incomplete": "log incomplete — the worker could not keep all of it",
     "cancel.confirm_title": function (a) { return "Cancel #" + a.id + " " + a.key + " (" + a.who + ")?"; },
     "cancel.joiner_body": function (a) {
       return "You joined this job. You will leave the join list; the job keeps running for " + a.who + ".";
@@ -466,6 +470,25 @@
     "reason.not_scheduled": "idle lane did not pick it up",
     "reason.needs_action": "needs action",
     "reason.no_worker": "no worker",
+    // M5t-b §4.8 · 결정 276 — 끊김 유예 중인 잡. 원문 코드는 드러내지 않는다
+    "reason.unreachable_grace": function (a) {
+      return "lost contact with " + (a.worker || "the worker") +
+        " — the job goes on if the worker is back within the grace period";
+    },
+    // 그룹 홀드에 막힌 대기 잡(M5t-b §4.8) — `needs action` 뒤에 붙는다
+    "reason.held_group": function (a) {
+      return "group " + a.group + " is held by #" + a.id + " — rcm release-hold " + a.id +
+        " after checking the machine";
+    },
+    // 「확인이 필요한 작업」의 홀드 항목(M5t-b §4.8). `worker` 가 없으면 서버의 로컬 레인 잡이다
+    "hold.needs_look": function (a) {
+      var where = a.worker || "the server's local lane";
+      var look = a.worker || "the server";
+      return "Group " + a.group + " is held: job #" + a.id + " (" + a.preset + ") on " + where +
+        " closed without a stop confirmation. Check " + look +
+        " for a leftover process, then run rcm release-hold " + a.id + ".";
+    },
+    "hold.chip": "group held",
     // M5n — 머신 배치. 머신 · 프리셋 · 도구 · 점검 이름은 서버가 보낸 그대로 끼운다.
     "reason.no_capable_machine": "no capable machine",
     "reason.check_failed": "check failed",
@@ -1492,6 +1515,7 @@
     "summary.add_token": "토큰을 넣으면 내 작업이 표시됩니다",
     "summary.queue_unknown": "알 수 없음 — 큐를 읽지 못했습니다",
     "summary.scheduled_unknown": "알 수 없음 — 예약을 읽지 못했습니다",
+    "summary.holds_unknown": "알 수 없음 — 그룹 홀드를 읽지 못했습니다",
     "summary.no_jobs": "큐에 내 작업이 없습니다",
     "summary.and_more": function (a) { return a.n + "개 더"; },
     "summary.last_known": "마지막으로 알던 값: ",
@@ -1600,6 +1624,7 @@
     "drawer.live": function (a) { return "실시간 · " + a.bytes; },
     "drawer.finished": function (a) { return "종료 · " + a.bytes; },
     "drawer.load_failed": "불러오지 못했습니다 — 다시 시도합니다",
+    "drawer.log_incomplete": "로그가 불완전함 — 워커가 일부를 남기지 못함",
     "cancel.confirm_title": function (a) {
       return withJosa("#" + a.id + " " + a.key + " (" + a.who + ")", "을/를") + " 취소할까요?";
     },
@@ -1698,6 +1723,21 @@
     "reason.not_scheduled": "빈 레인이 집지 않음",
     "reason.needs_action": "사람이 할 일",
     "reason.no_worker": "워커 없음",
+    "reason.unreachable_grace": function (a) {
+      return (a.worker ? "워커 " + withJosa(a.worker, "와/과") : "워커와") +
+        " 연락이 끊김 · 유예 시간 안에 돌아오면 이어서 진행";
+    },
+    "reason.held_group": function (a) {
+      return "그룹 " + withJosa(a.group, "이/가") + " #" + a.id + " 때문에 막혀 있음 — 머신을 확인한 뒤 rcm release-hold " + a.id;
+    },
+    "hold.needs_look": function (a) {
+      var where = a.worker || "서버의 로컬 레인";
+      var look = a.worker || "서버";
+      return "그룹 " + withJosa(a.group, "이/가") + " 막혀 있음: 작업 #" + a.id + "(" + a.preset + ")" + josa(String(a.id), "이/가") + " " +
+        where + "에서 멈춤 확인 없이 닫힘. " + look + "에 남은 프로세스가 있는지 확인한 뒤 rcm release-hold " +
+        withJosa(String(a.id), "을/를") + " 실행하세요.";
+    },
+    "hold.chip": "그룹 막힘",
     // M5n — 머신 배치. 머신 · 프리셋 · 도구 · 점검 이름은 서버가 보낸 그대로 끼운다.
     "reason.no_capable_machine": "실행 가능한 머신 없음",
     "reason.check_failed": "머신 점검 실패",

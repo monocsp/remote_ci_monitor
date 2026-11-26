@@ -145,7 +145,8 @@ def test_rl45_rcm_wait_says_in_words_that_the_group_is_held(fake, capsys):
     fake.docs = [queued(), queued(), queued(held=False), finished()]
     code, _out, err = cli_run(capsys, ["wait", "--job", str(JOB), "--poll"])
     assert code == 0, err
-    assert [ln for ln in err.splitlines() if "needs action" in ln] == [HELD_LINE], err
+    # 진행 줄(`#821 queued · 1st in line · needs action`)은 오늘 그대로다 — 남는 줄만 센다
+    assert [ln for ln in err.splitlines() if "needs action ·" in ln] == [HELD_LINE], err
     no_raw_code(err)
 
 

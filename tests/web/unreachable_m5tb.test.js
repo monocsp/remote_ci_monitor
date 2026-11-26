@@ -105,10 +105,10 @@ describe("RL45 — 그룹 홀드의 사람용 화면", () => {
     const r = rcm.notMoving(status([], { irreversible_holds: [HOLD_A, HOLD_B] }), null, "ko");
     assert.equal(r.lines.length, 2, JSON.stringify(r));
     assert.equal(r.lines[0].text,
-      "그룹 irreversible:ship이 잡혀 있음: 작업 #812(ship)가 build-02에서 멈춤 확인 없이 닫힘. "
+      "그룹 irreversible:ship가 막혀 있음: 작업 #812(ship)가 build-02에서 멈춤 확인 없이 닫힘. "
       + "build-02에 남은 프로세스가 있는지 확인한 뒤 rcm release-hold 812를 실행하세요.");
     assert.equal(r.lines[1].text,
-      "그룹 devices가 잡혀 있음: 작업 #815(deploy)가 서버의 로컬 레인에서 멈춤 확인 없이 닫힘. "
+      "그룹 devices가 막혀 있음: 작업 #815(deploy)가 서버의 로컬 레인에서 멈춤 확인 없이 닫힘. "
       + "서버에 남은 프로세스가 있는지 확인한 뒤 rcm release-hold 815를 실행하세요.");
     r.lines.forEach((l) => noCode(l.text));
   });
@@ -125,7 +125,7 @@ describe("RL45 — 그룹 홀드의 사람용 화면", () => {
     assert.equal(en.actionable, true);
     noCode(en.text);
     const ko = rcm.reasonText(row, NOW, status([row]), "ko");
-    assert.equal(ko.text, "사람이 할 일 · 그룹 irreversible:ship이 #812 때문에 잡혀 있음 — 머신을 확인한 뒤 rcm release-hold 812");
+    assert.equal(ko.text, "사람이 할 일 · 그룹 irreversible:ship가 #812 때문에 막혀 있음 — 머신을 확인한 뒤 rcm release-hold 812");
     noCode(ko.text);
   });
   test("잡이 직접 찍은 표식(다른 code)은 오늘 그대로다", () => {
@@ -153,7 +153,7 @@ describe("RL45 — 그룹 홀드의 사람용 화면", () => {
       "Group irreversible:ship is held: job #812 (ship) on build-02 closed without a stop confirmation. "
       + "Check build-02 for a leftover process, then run rcm release-hold 812.");
     assert.equal(rcm.holdChip(st, 813, "en"), null);
-    assert.equal(rcm.holdChip(st, 812, "ko").text, "그룹 잡힘");
+    assert.equal(rcm.holdChip(st, 812, "ko").text, "그룹 막힘");
     assert.equal(rcm.holdChip(status([]), 812, "en"), null);
     assert.equal(rcm.holdChip(status([], { irreversible_holds: null }), 812, "en"), null);
   });
