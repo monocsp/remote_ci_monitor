@@ -6246,6 +6246,29 @@ MUTANTS = (
             "tests/test_worker_session_m5tb.py::test_rl45_rcm_release_hold_exit_codes",
         ),
     ),
+    # ── M5t-b P3 1라운드 LOW — 서버 재시작 뒤 취소 미확인 창 ──
+    Mutant(
+        # 기동 뒤 처음 들린 세션의 창을 새로 재지 않는다 — 돌아온 첫 heartbeat 가 곧바로 닫는다
+        name="restart-not-quiet",
+        path="src/remote_ci_monitor/remote_workers.py",
+        old="                elif key not in self._heard:  # mutcheck: restart-not-quiet\n",
+        new="                elif False:\n",
+        tests=(
+            "tests/test_worker_selfstop_m5tb.py::"
+            "test_rl7_a_cancel_window_that_ran_out_while_the_server_was_down_starts_again",
+        ),
+    ),
+    Mutant(
+        # 기동 뒤 아직 안 들린 세션의 취소 중 잡을 janitor 의 첫 틱이 닫는다
+        name="restart-unheard-cancel-closed",
+        path="src/remote_ci_monitor/remote_workers.py",
+        old="            if unheard:  # mutcheck: restart-unheard-cancel-closed\n",
+        new="            if False:\n",
+        tests=(
+            "tests/test_worker_selfstop_m5tb.py::"
+            "test_rl7_a_cancel_window_that_ran_out_while_the_server_was_down_starts_again",
+        ),
+    ),
 )
 
 

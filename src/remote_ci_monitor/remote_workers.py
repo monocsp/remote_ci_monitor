@@ -367,6 +367,10 @@ class RemoteWorkersMixin:
             with self._heard_lock:
                 if now - last > quiet:  # mutcheck: t4-quiet-time-counted
                     self._resumed[key] = self.now_fn()
+                elif key not in self._heard:  # mutcheck: restart-not-quiet
+                    # 기동 뒤 처음 듣는다 — 서버가 꺼져 있던 동안도 그 세션이 조용했던 시간이다.
+                    # 취소 미확인 창을 여기서 새로 잰다(바닥이 기동 시각이라 위 판정이 못 본다)
+                    self._resumed[key] = self.now_fn()
                 self._heard[key] = max(self._heard.get(key, now), now)
 
     def heard_at(self, key: str) -> float:
@@ -1471,6 +1475,10 @@ class RemoteWorkersMixin:
             current = self.store.current_session(row.name)
             if current is None:  # mutcheck: cancel-unconfirmed-any-session
                 continue
+            with self._heard_lock:
+                unheard = current not in self._heard
+            if unheard:  # mutcheck: restart-unheard-cancel-closed
+                continue  # 기동 뒤 아직 안 들렸다 — 들리는 세션이 아니다
             if mono - self.heard_at(current) > timeout:
                 continue
             with self._session_lock(current):

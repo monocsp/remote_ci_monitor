@@ -1337,6 +1337,51 @@ def test_rl8_a_irreversible_cancel_unconfirmed_in_the_new_window_closes_and_hold
     assert [(h["job_id"], h["cause"]) for h in holds(srv)] == [(a, "cancel_unconfirmed")]
 
 
+def test_rl7_a_cancel_window_that_ran_out_while_the_server_was_down_starts_again(srv):
+    """서버가 꺼진 동안 취소 중 잡의 `kill_at + 2H` 가 지났다. 다시 뜬 서버의 첫 틱과, 워커가
+    `worker_timeout` 안에 돌아와 보낸 첫 heartbeat 가 그 잡을 `cancel_unconfirmed` 로 닫으면 안
+    된다 — 꺼져 있던 시간은 세션이 조용했던 시간이다(P3 1라운드 LOW). 창은 다시 들린 때부터
+    새로 재고, 그 창 안에 확인이 없으면 그때 닫는다(fail-open 아님)."""
+    from remote_ci_monitor.server import App
+
+    srv.registered("build-02")
+    a = srv.queued_job(preset="ship")
+    assert srv.claimed("build-02", 1) == a
+    assert srv.heartbeat("build-02", jobs=[a])[0] == 200
+    assert srv.cancel(a)[1]["state"] == "cancelling"
+    j = srv.store.get_job(a)
+    window = (j.cancel.kill_at - j.cancel.requested_at).total_seconds() + 2 * 5
+    srv.clock.advance(window + 5)  # 서버가 꺼져 있던 동안 옛 창이 지났다(worker_timeout 60 안)
+    app2 = App(srv.cfg, srv.store, now_fn=srv.clock, mono_fn=srv.clock.mono)  # 다시 뜬 서버
+    app2.start()
+    try:
+        token = srv.store.verify_token(srv.tokens["build-02"])
+        seq = iter(range(100, 200))
+
+        def beat() -> dict[str, Any]:
+            n = next(seq)
+            body = {
+                "worker_session_id": srv.session("build-02"),
+                "seq": n,
+                "claims_settled": 1,
+                "jobs": [a],
+            }
+            return app2.worker_heartbeat(token, body)
+
+        app2.mark_lost_workers(srv.clock.now)  # 기동 직후 첫 틱 — 아직 안 들린 세션
+        assert srv.store.get_job(a).state == CANCELLING
+        assert beat()["cancel"] == [a]  # 돌아온 첫 heartbeat 는 취소를 전한다
+        assert srv.store.get_job(a).state == CANCELLING
+        app2.mark_lost_workers(srv.clock.now)
+        assert srv.store.get_job(a).state == CANCELLING
+        srv.clock.advance(window + 1)
+        beat()
+        j = srv.store.get_job(a)
+        assert j.state == CANCELLED and j.summary_code == "cancel_unconfirmed"
+    finally:
+        app2.shutdown()
+
+
 def _race_at_the_boundary(s: WorkerServer, jid: int) -> dict[str, Any]:
     """janitor 의 틱과 돌아온 heartbeat + finish 를 한 장벽에서 함께 출발시킨다."""
     go = threading.Barrier(2)
