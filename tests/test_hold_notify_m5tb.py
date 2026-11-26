@@ -739,6 +739,7 @@ def test_rl54_a_local_claim_that_commits_and_then_cannot_read_the_job_closes_it_
     홀드한다 — 명령은 돈 적이 없는데. claim 은 그 id 를 예외에 실어 넘기고, 레인은 그 잡을 홀드
     없이 닫는다(띄운 적 없다)."""
     import sqlite3
+    import threading
     import time
 
     from remote_ci_monitor.core.model import FAILED
@@ -751,17 +752,22 @@ def test_rl54_a_local_claim_that_commits_and_then_cannot_read_the_job_closes_it_
     try:
         store = srv.store
         real_claim, real_get = store.claim, store.get_job
-        state = {"in_claim": False, "raised": False}
+        # 읽기 실패는 claim 하는 그 스레드의 `get_job` 에만 넣는다. 레인이 claim 하는 동안 다른
+        # 스레드(보관 · 청소 · 알림)도 `get_job` 을 부른다 — 그쪽이 실패를 가져가면 claim 은 잡을
+        # 읽고 명령을 띄운다(CI 잡 4324 의 `assert [1] == []`, 그 스레드는 rcm-retention 이었다)
+        state: dict[str, Any] = {"claimer": None, "raised": False}
 
         def claim(*a: Any, **kw: Any):
-            state["in_claim"] = True
+            state["claimer"] = threading.get_ident()
             try:
+                if not state["raised"]:
+                    time.sleep(0.3)  # 다른 스레드가 `get_job` 을 부를 틈을 일부러 연다
                 return real_claim(*a, **kw)
             finally:
-                state["in_claim"] = False
+                state["claimer"] = None
 
         def get_job(job_id: int):
-            if state["in_claim"] and not state["raised"]:
+            if state["claimer"] == threading.get_ident() and not state["raised"]:
                 state["raised"] = True
                 raise sqlite3.OperationalError("disk I/O error")
             return real_get(job_id)
