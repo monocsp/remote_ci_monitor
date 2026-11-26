@@ -199,12 +199,16 @@ def service_loaded(manager: str, label: str) -> bool | None:
 # ── 운영 알아보기(결정 352) ──────────────────────────────────────────────────
 
 #: setup 이 rcm 서비스를 찾는 시스템 자리 — launchd 의 모든 사용자 자리와 데몬 자리, systemd 의
-#: 시스템 유닛과 모든 사용자의 사용자 유닛. 시험이 바꿔 끼운다
+#: 시스템 유닛과 모든 사용자의 사용자 유닛(`/etc/xdg` · `/usr/local/lib` 의 자리도 systemd 가
+#: 읽는다, batch 12 L3). 시험이 바꿔 끼운다
 SYSTEM_SERVICE_PLACES: tuple[Path, ...] = (
     Path("/Library/LaunchAgents"),
     Path("/Library/LaunchDaemons"),
     Path("/etc/systemd/system"),
     Path("/etc/systemd/user"),
+    Path("/etc/xdg/systemd/user"),
+    Path("/usr/local/lib/systemd/system"),
+    Path("/usr/local/lib/systemd/user"),
 )
 #: root 가 읽고 `User=` · `UserName` 으로 띄우는 자리 — 그 유닛의 `%h` · `~` 는 이 사용자의 홈이
 #: 아니다
@@ -263,16 +267,20 @@ def service_places(
     homes: Sequence[Path], environ: Mapping[str, str]
 ) -> list[tuple[Path, bool, Path]]:
     """(자리, root 자리인가, 그 자리의 홈). 홈마다 사용자 자리(`~/Library/LaunchAgents`,
-    `~/.config/systemd/user` — 실제 홈 아래의 기본 XDG 자리), `$XDG_CONFIG_HOME/systemd/user`,
-    시스템 자리(`SYSTEM_SERVICE_PLACES`)다. 심볼릭 링크를 푼 자리가 같으면 한 번만 본다."""
+    `~/.config/systemd/user`, `~/.local/share/systemd/user` — 실제 홈 아래의 기본 XDG 자리),
+    `$XDG_CONFIG_HOME/systemd/user`, `$XDG_DATA_HOME/systemd/user`, 시스템 자리
+    (`SYSTEM_SERVICE_PLACES`)다. 심볼릭 링크를 푼 자리가 같으면 한 번만 본다."""
     first = homes[0]
     found: list[tuple[Path, bool, Path]] = []
     for home in homes:
         found.append((home / "Library" / "LaunchAgents", False, home))
         found.append((home / ".config" / "systemd" / "user", False, home))
-    xdg = environ.get("XDG_CONFIG_HOME")
-    if xdg and os.path.isabs(xdg):
-        found.append((Path(xdg) / "systemd" / "user", False, first))
+        # systemd 는 데이터 자리의 사용자 유닛도 읽는다(batch 12 L3)
+        found.append((home / ".local" / "share" / "systemd" / "user", False, home))
+    for name in ("XDG_CONFIG_HOME", "XDG_DATA_HOME"):
+        xdg = environ.get(name)
+        if xdg and os.path.isabs(xdg):
+            found.append((Path(xdg) / "systemd" / "user", False, first))
     found += [(place, place.name in _ROOT_PLACES, first) for place in SYSTEM_SERVICE_PLACES]
     out: list[tuple[Path, bool, Path]] = []
     seen: set[Path] = set()
