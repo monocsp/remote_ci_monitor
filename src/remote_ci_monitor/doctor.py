@@ -586,6 +586,31 @@ def _read_plist(p: Path) -> ServiceFile:
     )
 
 
+def unit_lines(text: str) -> list[tuple[int, str]]:
+    """systemd 유닛의 논리 줄 — (첫 줄 번호, 앞뒤 빈칸을 뗀 줄). systemd 처럼 읽는다
+    (systemd.syntax(7)): 주석 줄(`#` · `;`)은 줄 잇기보다 먼저 버리고, 홀수 개의 역슬래시로 끝나는
+    줄은 마지막 역슬래시를 빈칸으로 바꿔 다음 줄과 잇는다. 잇는 중에 나온 주석 줄도 건너뛴다.
+    잇지 않으면 `ExecStart=rcm serve \\` 의 argv 가 비어 rcm 을 띄우는 유닛을 놓친다(batch 11
+    HIGH)."""
+    out: list[tuple[int, str]] = []
+    held: str | None = None
+    start = 0
+    for number, raw in enumerate(text.splitlines(), 1):
+        if raw.lstrip()[:1] in ("#", ";"):
+            continue
+        if held is None:
+            start = number
+        line = raw if held is None else held + raw
+        if (len(raw) - len(raw.rstrip("\\"))) % 2:
+            held = line[:-1] + " "
+            continue
+        held = None
+        out.append((start, line.strip()))
+    if held is not None:  # 마지막 줄이 역슬래시로 끝났다 — systemd 도 모은 만큼 읽는다
+        out.append((start, held.strip()))
+    return out
+
+
 def read_service_file(
     path: str | os.PathLike[str], *, user_home: str | None = None, system: bool = False
 ) -> ServiceFile:
@@ -628,9 +653,10 @@ def read_service_file(
     workdir: str | None = None
     workdir_unknown = False
     user: str | None = None
-    for number, raw in enumerate(text.splitlines(), 1):
-        line = raw.strip()
+    for number, line in unit_lines(text):
         key, _, value = line.partition("=")
+        # `=` 앞뒤의 빈칸은 버린다(systemd.syntax(7)) — `ExecStart = rcm …` 도 ExecStart= 다
+        key, value = key.strip(), value.strip()
         try:
             if key in SYSTEMD_UNFOLLOWED:
                 unfollowed.append(f"line {number} ({key}=): rcm does not follow {key}=")

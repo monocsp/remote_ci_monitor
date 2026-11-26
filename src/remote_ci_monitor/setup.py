@@ -368,6 +368,11 @@ def _rcm_service(path: Path, *, home: Path, root: bool) -> core.RcmService | Non
 
     launch = _launch(sf)
     if launch is None:
+        exec_unread = [u for u in sf.unreadable_lines if "ExecStart" in u]
+        if exec_unread and data is not None and _RCM_BYTES.search(data):
+            # 띄우는 명령 줄을 끝내 읽지 못했는데 바이트에 rcm 이 있다 — 이름이 rcm 같지 않아도
+            # 닫는 쪽이다(doctor 의 `_matching` 과 같은 규칙, batch 11 HIGH)
+            return problem(f"setup cannot read its {exec_unread[0]}")
         if not doctor.looks_like_rcm(sf):
             return None
         return problem("setup cannot tell which rcm command it starts")

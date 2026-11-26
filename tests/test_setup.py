@@ -2344,10 +2344,10 @@ def _hand_unit(home: Path, tmp_path: Path, exec_lines: str, name: str = "ci-hub"
 def test_b11_h_a_continued_execstart_unit_is_read_as_systemd_reads_it(
     cfg, home, tmp_path, exec_lines
 ):
-    # batch 11 HIGH(v1-1): 줄 끝 역슬래시로 이어진 ExecStart= 는 shlex 가 읽지 못해 argv=[] 가 됐고,
-    # 이름이 rcm 같지 않은 유닛(`ci-hub.service`)은 스캔이 건너뛰었다 — systemd 는 줄을 이어 rcm 을
-    # 띄운다. 유닛 파서는 systemd 처럼 줄을 잇고(이어지는 중의 주석 줄은 건너뛴다), `=` 앞뒤의 빈칸도
-    # 버린다(systemd.syntax(7))
+    # batch 11 HIGH(v1-1): 줄 끝 역슬래시로 이어진 ExecStart= 는 shlex 가 읽지 못해 argv=[] 가
+    # 됐고, 이름이 rcm 같지 않은 유닛(`ci-hub.service`)은 스캔이 건너뛰었다 — systemd 는 줄을 이어
+    # rcm 을 띄운다. 유닛 파서는 systemd 처럼 줄을 잇고(이어지는 중의 주석 줄은 건너뛴다), `=`
+    # 앞뒤의 빈칸도 버린다(systemd.syntax(7))
     hub = _hand_unit(home, tmp_path, exec_lines)
     before = hub["config"].read_bytes()
     fake = Fake(platform="linux")
