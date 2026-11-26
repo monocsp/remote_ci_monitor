@@ -429,13 +429,15 @@ def _rcm_service(path: Path, *, home: Path, root: bool) -> core.RcmService | Non
         if isinstance(e, PermissionError):
             # 읽을 권한이 없으면 바이트로 가릴 수 없다 — 이름으로 가린다(batch 10 L1 · 11 MED)
             return _unread(path, f"setup cannot read it ({e.strerror or type(e).__name__})")
+        if isinstance(e, OSError) or isinstance(e.__cause__, OSError):
+            # 다른 이유(EIO …)로도 읽지 못했으면 바이트가 없다 — 조용히 건너뛰지 않고 권한
+            # 거부처럼 이름으로 가린다(batch 12 L2)
+            why = e.strerror if isinstance(e, OSError) else e.reason
+            return _unread(path, f"setup cannot read it ({why or type(e).__name__})")
         named = doctor.looks_like_rcm(doctor.ServiceFile(path=path, label=stem))
         if named or (data is not None and _RCM_BYTES.search(data)):
-            if isinstance(e, doctor.ServiceFileUnreadable):
-                reason = e.reason
-            else:
-                reason = e.strerror or type(e).__name__
-            return core.RcmService(stem, file, (stem,), problem=f"setup cannot read it ({reason})")
+            reason = f"setup cannot read it ({e.reason})"
+            return core.RcmService(stem, file, (stem,), problem=reason)
         return None
     name = sf.label if path.suffix == ".plist" and sf.label else stem
     names = tuple(dict.fromkeys(n for n in (sf.label, stem) if n))
