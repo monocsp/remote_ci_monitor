@@ -273,6 +273,16 @@ def test_rl20_finish_with_every_byte_received_is_log_complete_and_legacy_is_unkn
     assert job_doc(srv, other)["log_complete"] is None
 
 
+def test_rl20_a_a_local_lane_job_is_log_complete(srv):
+    """로컬 레인 잡은 서버가 직접 쓰므로 `log_complete` 가 참이다(§4.6)."""
+    jid = srv.queued_job()
+    claimed = srv.store.claim(1, srv.clock())
+    assert claimed is not None and claimed.id == jid
+    assert srv.store.finish(jid, SUCCEEDED, now=srv.clock())
+    assert srv.store.log_complete_for([jid]) == {jid: True}
+    assert job_doc(srv, jid)["log_complete"] is True
+
+
 # ── 산출물 처분과 `ready` 조건(결정 275 · F63 · RL22) ────────────────────────
 
 
@@ -595,12 +605,11 @@ def test_rl17_c_b_the_piece_limit_is_the_servers_body_limit():
     assert rw.LOG_PIECE_MAX_BYTES == MAX_WORKER_LOG_BODY
 
 
-def test_rl46_c_a_dead_queue_that_finished_does_not_leave_its_answers_counted(
-    tmp_path, fast, monkeypatch
-):
-    """죽은 세션 D 의 큐 둘. #7 은 503 한 번 뒤 보냈고, #8 은 그 뒤 연결 실패만 받는다. 등록
-    대기 300초는 서버가 응답한(HTTP 오류) 시간만 센다(결정 337). #7 의 옛 503 이 #8 의 연결 실패
-    시간까지 세게 하면 안 된다(P3 1라운드 LOW — 워커 하나의 깃발이 큐 사이에서 낡았다)."""
+def test_rl46_c_a_dead_queue_answers_do_not_go_stale(tmp_path, fast, monkeypatch):
+    """죽은 세션 D 의 큐 둘. 등록 대기 300초는 서버가 오류로 응답한 시간만 센다(결정 337).
+    워커 하나의 깃발은 큐 사이에서 낡았다(P3 1라운드 LOW). 503 뒤 409 로 끝난 #7 의 옛 응답과,
+    로그에서 503 을 받았다가 보낸 #8 의 옛 응답이 #8 의 finish 가 받는 연결 실패 시간까지 세게
+    했다. 깃발은 큐마다 두고 성공에 내리며, 끝난 큐는 보지 않는다."""
     monkeypatch.setattr(rw, "BACKOFF_START_SECONDS", 0.01)
     monkeypatch.setattr(rw, "BACKOFF_MAX_SECONDS", 0.01)
     clock = WClock()
@@ -610,35 +619,39 @@ def test_rl46_c_a_dead_queue_that_finished_does_not_leave_its_answers_counted(
     ended_queue(w1, 7, b"seven\n")
     ended_queue(w1, 8, b"eight\n")
     die(w1)
-    seven_sent = threading.Event()
-    state = {"refused_7": False, "slow_8": 3}
+    seven_over = threading.Event()
+    state = {"finish_7": 0, "log_8": 0, "slow_8": 3}
     real_log, real_finish = fake.log, fake.finish
 
     def log(job_id: int, data: bytes, offset: int | None = None) -> dict[str, Any]:
+        if job_id == 8 and state["log_8"] == 0:
+            state["log_8"] += 1
+            raise http(503)
+        return real_log(job_id, data, offset)
+
+    def finish(job_id, outcome, rc, summary=None, **extra) -> dict[str, Any]:
+        if job_id == 7:
+            state["finish_7"] += 1
+            if state["finish_7"] == 1:
+                raise http(503)
+            seven_over.set()
+            raise http(409, "job_closed", state=LOST)  # #7 은 503 을 받은 채 끝난다
         if job_id == 8 and state["slow_8"] > 0:
-            assert seven_sent.wait(10)
+            assert seven_over.wait(10)
+            time.sleep(0.1)  # #7 의 스레드가 끝난다
             state["slow_8"] -= 1
             clock.advance(400)  # 연결 실패 하나가 400초 걸린다
             time.sleep(0.2)
             raise conn_fail()
-        return real_log(job_id, data, offset)
-
-    def finish(job_id, outcome, rc, summary=None, **extra) -> dict[str, Any]:
-        if job_id == 7 and not state["refused_7"]:
-            state["refused_7"] = True
-            raise http(503)
-        out = real_finish(job_id, outcome, rc, summary, **extra)
-        if job_id == 7:
-            seven_sent.set()
-        return out
+        return real_finish(job_id, outcome, rc, summary, **extra)
 
     fake.log = log  # type: ignore[method-assign]
     fake.finish = finish  # type: ignore[method-assign]
     w2 = restart(tmp_path, fake, clock)
     w2.send_dead_queues()
     assert not any("queue not delivered" in s for s in w2.logs), w2.logs
-    done = sorted(c[2] for c in fake.calls if c[0] == "finish" and c[3] == SUCCEEDED)
-    assert done == [7, 7, 8] or done == [7, 8], fake.calls
+    assert [c[2] for c in fake.calls if c[0] == "finish"] == [8], fake.calls
+    assert bytes(fake.received[8]) == b"eight\n"
 
 
 def test_rl14_a_a_finish_left_on_disk_is_sent_with_the_old_session_before_registering(

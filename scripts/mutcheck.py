@@ -7105,7 +7105,7 @@ MUTANTS = (
         # 죽은 세션 큐의 등록 대기 300초에 연결 실패 시간도 센다(RL46 b · 결정 337)
         name="dead-session-counts-connection-failures",
         path="src/remote_ci_monitor/remote_worker.py",
-        old="            if self._dead_answered:\n",
+        old="            if answering:\n",
         new="            if True:\n",
         tests=(
             "tests/test_worker_outbox_m5tb.py::"
@@ -7192,6 +7192,248 @@ MUTANTS = (
         tests=(
             "tests/test_worker_outbox_m5tb.py::"
             "test_rl46_a_dead_queue_with_server_errors_registers_after_300s_answered",
+        ),
+    ),
+    # ── M5t-b PR2 · P3 1라운드 (batch-3) ──
+    Mutant(
+        # 프로토콜 2 claim 이 커밋된 길이를 0 으로 두지 않는다 — 첫 조각이 커밋 전에 읽는 쪽에
+        # 보이고 기동 정리도 건너뛴다(RL55 · 결정 339-f)
+        name="first-piece-uncapped",
+        path="src/remote_ci_monitor/store.py",
+        old=(
+            '                    sets += ", log_offset=0, log_file_bytes=0"'
+            "  # mutcheck: first-piece-uncapped\n"
+        ),
+        new="                    pass\n",
+        tests=(
+            "tests/test_log_read_cap_m5tb.py::test_rl55_b_the_first_piece_is_hidden_until_its_commit",
+            "tests/test_log_read_cap_m5tb.py::"
+            "test_rl55_b_a_failed_first_commit_never_shows_its_bytes",
+            "tests/test_log_read_cap_m5tb.py::"
+            "test_rl55_b_b_start_up_trims_a_first_piece_written_before_its_commit",
+        ),
+    ),
+    Mutant(
+        # 드레인 한도가 지난 큐의 잡을 보내기 전에 heartbeat 목록에서 뺀다 — exec 전의 heartbeat
+        # 하나로 서버가 T5 로 닫는다(RL12 b · rcm-ci 4341)
+        name="queued-job-left-the-heartbeat",
+        path="src/remote_ci_monitor/remote_worker.py",
+        old="        sender.when_ended(ended)  # mutcheck: queued-job-left-the-heartbeat\n",
+        new="        ended()\n",
+        tests=(
+            "tests/test_worker_outbox_m5tb.py::"
+            "test_rl12_b_b_a_queue_past_the_drain_limit_stays_in_the_heartbeat_until_it_is_sent",
+        ),
+    ),
+    Mutant(
+        # 닫힌 잡의 잡별 로그 잠금을 버리지 않는다 — lost 로 닫힌 잡마다 남는다
+        name="closed-job-log-lock-kept",
+        path="src/remote_ci_monitor/remote_workers.py",
+        old="                self._job_log_locks.pop(job_id, None)\n",
+        new="                pass\n",
+        tests=(
+            "tests/test_worker_api.py::test_job_log_memory_is_dropped_when_the_job_is_closed_as_lost",
+        ),
+    ),
+    Mutant(
+        # 닫힌 레거시 잡의 잘린 줄(`_log_partial`)을 버리지 않는다
+        name="closed-job-partial-line-kept",
+        path="src/remote_ci_monitor/remote_workers.py",
+        old="                self._log_partial.pop(job_id, None)\n",
+        new="                pass\n",
+        tests=(
+            "tests/test_worker_api.py::test_job_log_memory_is_dropped_when_the_job_is_closed_as_lost",
+        ),
+    ),
+    Mutant(
+        # outbox 저장이 스냅숏 · 쓰기 · 이름 바꾸기를 줄 세우지 않는다 — 옛 스냅숏이 finish 를
+        # 덮는다
+        name="outbox-save-out-of-order",
+        path="src/remote_ci_monitor/remote_worker.py",
+        old="        with self._save_lock:  # mutcheck: outbox-save-out-of-order\n",
+        new="        if True:\n",
+        tests=(
+            "tests/test_worker_outbox_m5tb.py::"
+            "test_rl14_a_b_an_older_outbox_snapshot_never_lands_after_a_newer_one",
+        ),
+    ),
+    Mutant(
+        # 못 읽은 스풀을 빈 조각처럼 보낸다 — 2xx 로 성공해 쉬지 않고 돈다
+        name="unreadable-spool-sent-empty",
+        path="src/remote_ci_monitor/remote_worker.py",
+        old="                if chunk is None:  # mutcheck: unreadable-spool-sent-empty\n",
+        new="                if False:\n",
+        tests=(
+            "tests/test_worker_outbox_m5tb.py::"
+            "test_rl20_b_a_spool_that_cannot_be_read_backs_off_and_says_so_once",
+        ),
+    ),
+    Mutant(
+        # 256 KiB 안에 줄 끝이 없으면 그 줄 끝까지 보지 않는다 — 긴 줄이 조각 사이에서 끊긴다(F34)
+        name="long-line-cut-mid-line",
+        path="src/remote_ci_monitor/remote_worker.py",
+        old=(
+            "        if cut < 0 and len(data) >= LOG_BATCH_BYTES:"
+            "  # mutcheck: long-line-cut-mid-line\n"
+        ),
+        new="        if False:\n",
+        tests=(
+            "tests/test_worker_outbox_m5tb.py::"
+            "test_rl17_c_a_a_line_longer_than_a_piece_goes_whole_while_the_job_runs",
+        ),
+    ),
+    Mutant(
+        # 두 조각에 걸친 값을 가리지 않는다 — 조각마다만 가린다(RL18 · F14)
+        name="straddling-secret-unmasked",
+        path="src/remote_ci_monitor/remote_workers.py",
+        old="    return MASK + masked if cut else masked  # mutcheck: straddling-secret-unmasked\n",
+        new="    return mask_bytes(rest, vals)\n",
+        tests=(
+            "tests/test_worker_log_offset_m5tb.py::"
+            "test_rl18_e_a_secret_split_across_two_mid_line_pieces_never_reaches_the_log",
+        ),
+    ),
+    Mutant(
+        # D 큐의 응답 깃발을 성공에 내리지 않는다 — 옛 503 이 연결 실패 시간까지 센다(RL46)
+        name="dead-answer-kept-after-success",
+        path="src/remote_ci_monitor/remote_worker.py",
+        old=(
+            "        self.last_5xx = False\n"
+            "        self.answered = False\n"
+            "        self.failures = 0\n"
+            "        return True\n"
+        ),
+        new="        self.last_5xx = False\n        self.failures = 0\n        return True\n",
+        tests=(
+            "tests/test_worker_outbox_m5tb.py::test_rl46_c_a_dead_queue_answers_do_not_go_stale",
+        ),
+    ),
+    Mutant(
+        # 끝난 D 큐의 응답 깃발까지 본다 — 503 을 받은 채 끝난 큐가 남은 시간을 센다(RL46)
+        name="dead-answer-of-ended-queue-counted",
+        path="src/remote_ci_monitor/remote_worker.py",
+        old="            answering = any(s.alive() and s.answered for s in senders)\n",
+        new="            answering = any(s.answered for s in senders)\n",
+        tests=(
+            "tests/test_worker_outbox_m5tb.py::test_rl46_c_a_dead_queue_answers_do_not_go_stale",
+        ),
+    ),
+    Mutant(
+        # 쓰기 실패(ENOSPC) 뒤 되자르지 않는다 — 부분 쓰기가 커밋된 길이 뒤에 남는다(T15 · RL36 c)
+        name="write-failure-not-truncated",
+        path="src/remote_ci_monitor/remote_workers.py",
+        old=(
+            "                _truncate_quietly(fh, pos)\n"
+            "                raise _api_error(\n"
+            '                    503, f"cannot write the log'
+        ),
+        new='                raise _api_error(\n                    503, f"cannot write the log',
+        tests=(
+            "tests/test_worker_log_offset_m5tb.py::"
+            "test_rl36_c_write_error_is_503_log_write_failed_and_truncates",
+        ),
+    ),
+    Mutant(
+        # DB 바쁨으로 커밋이 실패해도 되자르지 않는다(RL36 a)
+        name="busy-commit-not-truncated",
+        path="src/remote_ci_monitor/remote_workers.py",
+        old=(
+            "                _truncate_quietly(fh, pos)\n"
+            "                if not _is_busy_error(e):\n"
+        ),
+        new="                if not _is_busy_error(e):\n",
+        tests=(
+            "tests/test_worker_log_offset_m5tb.py::"
+            "test_rl36_a_database_busy_truncates_and_the_resend_fills_once",
+        ),
+    ),
+    Mutant(
+        # 커밋이 다른 오류로 터져도 되자르지 않는다(§4.5 step 8)
+        name="failed-commit-not-truncated",
+        path="src/remote_ci_monitor/remote_workers.py",
+        old="            except BaseException:\n                _truncate_quietly(fh, pos)\n",
+        new="            except BaseException:\n",
+        tests=(
+            "tests/test_worker_log_offset_m5tb.py::"
+            "test_rl36_f_an_unexpected_commit_error_truncates_too",
+        ),
+    ),
+    Mutant(
+        # 커밋이 0행(닫힘 · 펜싱)이어도 되자르지 않는다(RL36 d · e)
+        name="refused-commit-not-truncated",
+        path="src/remote_ci_monitor/remote_workers.py",
+        old="            if not ok:\n                _truncate_quietly(fh, pos)\n",
+        new="            if not ok:\n",
+        tests=(
+            "tests/test_worker_log_offset_m5tb.py::"
+            "test_rl36_d_job_closed_between_write_and_commit_is_409_and_leaves_no_bytes",
+            "tests/test_worker_log_offset_m5tb.py::"
+            "test_rl36_e_fence_between_write_and_commit_is_409_session_fenced",
+        ),
+    ),
+    Mutant(
+        # 기동 정리가 커밋 안 된 꼬리를 자르지 않는다(RL16 c)
+        name="start-trim-skipped",
+        path="src/remote_ci_monitor/remote_workers.py",
+        old="            elif size > committed and busy:\n",
+        new="            elif False:\n",
+        tests=(
+            "tests/test_worker_log_offset_m5tb.py::"
+            "test_rl16_c_start_trims_an_uncommitted_tail_and_the_resend_fills_it",
+            "tests/test_log_read_cap_m5tb.py::"
+            "test_rl55_b_b_start_up_trims_a_first_piece_written_before_its_commit",
+        ),
+    ),
+    Mutant(
+        # 기동 정리가 끝난 잡의 더 긴 파일도 자른다 — 끝난 잡의 파일에는 커밋 뒤 쓰기가 없다(RL37 c)
+        name="start-trim-finished-jobs",
+        path="src/remote_ci_monitor/remote_workers.py",
+        old="            elif size > committed and busy:\n",
+        new="            elif size > committed:\n",
+        tests=(
+            "tests/test_worker_log_offset_m5tb.py::"
+            "test_rl37_c_start_checks_finished_remote_jobs_and_leaves_missing_files",
+        ),
+    ),
+    Mutant(
+        # 오프셋 헤더 형식 검사를 지운다 — `+3` 을 받고 `abc` 는 500 이다(RL16 · §4.5 step 1)
+        name="offset-header-not-checked",
+        path="src/remote_ci_monitor/remote_workers.py",
+        old="    if not _OFFSET_RE.fullmatch(raw):\n",
+        new="    if False:\n",
+        tests=(
+            "tests/test_worker_log_offset_m5tb.py::"
+            "test_rl16_offset_header_not_a_non_negative_integer_is_400",
+        ),
+    ),
+    Mutant(
+        # 짧은 파일에서 고정한 log_complete = 0 을 finish 가 되돌린다(T16 · RL37 a)
+        name="pinned-log-incomplete-overturned",
+        path="src/remote_ci_monitor/store.py",
+        old='    if row["log_complete"] == 0:\n',
+        new="    if False:\n",
+        tests=(
+            "tests/test_worker_log_offset_m5tb.py::"
+            "test_rl37_a_short_file_continues_at_its_end_and_pins_log_incomplete",
+        ),
+    ),
+    Mutant(
+        # 로컬 레인 잡의 log_complete 가 참이 아니다(§4.6)
+        name="local-log-not-complete",
+        path="src/remote_ci_monitor/store.py",
+        old='    if row["worker_name"] is None:\n        return 1  # 로컬 레인',
+        new="    if False:\n        return 1  # 로컬 레인",
+        tests=("tests/test_worker_outbox_m5tb.py::test_rl20_a_a_local_lane_job_is_log_complete",),
+    ),
+    Mutant(
+        # 받은 바이트가 낸 바이트보다 적어도 log_complete 가 참이다(RL20)
+        name="short-log-called-complete",
+        path="src/remote_ci_monitor/store.py",
+        old='    return 1 if int(row["log_offset"] or 0) >= log_bytes else 0\n',
+        new="    return 1\n",
+        tests=(
+            "tests/test_worker_outbox_m5tb.py::"
+            "test_rl20_finish_with_fewer_bytes_received_than_produced_is_log_incomplete",
         ),
     ),
 )
