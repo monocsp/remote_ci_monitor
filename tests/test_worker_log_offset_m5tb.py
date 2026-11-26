@@ -72,7 +72,9 @@ def test_rl16_session_without_offset_header_is_400_and_writes_nothing(srv):
     status, body = post_log(srv, jid, b"line\n", None)
     assert status == 400, body
     assert set(body) == {"error"}  # `code` 없음(F58)
-    assert log_file(srv, jid) == b"" and row(srv, jid)["log_offset"] is None
+    # claim 이 커밋된 길이 0 으로 시작한다(결정 339-f) — 400 은 그 값을 바꾸지 않는다
+    assert log_file(srv, jid) == b"" and row(srv, jid)["log_offset"] == 0
+    assert row(srv, jid)["log_file_bytes"] == 0
 
 
 @pytest.mark.parametrize("bad", ["-1", "abc", "1.5", "", "+3", "0x1"])

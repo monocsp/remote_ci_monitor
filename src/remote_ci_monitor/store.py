@@ -3544,6 +3544,10 @@ class Store:
             if worker_name is not None:
                 sets += ", worker_session_id=?, claim_seq=?, disconnect_grace_seconds=?"
                 params += [session_id, claim_seq, grace_seconds]
+                if session_id is not None:
+                    # 프로토콜 2 원격 잡은 커밋된 길이 0 에서 시작한다(M5t-b 결정 339-f) — NULL 이면
+                    # 첫 조각이 커밋 전에 읽는 쪽에 보이고 기동 정리도 그 조각을 건너뛴다
+                    sets += ", log_offset=0, log_file_bytes=0"  # mutcheck: first-piece-uncapped
             cur = conn.execute(
                 f"UPDATE jobs SET {sets} WHERE id=? AND state=?", (*params, job_id, QUEUED)
             )
