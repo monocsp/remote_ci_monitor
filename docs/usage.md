@@ -257,6 +257,16 @@ discovery at all: it stops with `no server configured` and, unlike `rcm worker`,
 its version with the server's, so nothing points at the real cause. When in doubt, write the
 address (`http://<build-machine>.local:8787`) — it costs nothing and always works.
 
+**Several servers on the network.** When discovery finds more than one rcm server, a client does
+not pick one. It stops with `several rcm servers on this network: … — pick one with --server or
+client.toml`, which lists each server's name and address. Write one down: `--server
+http://192.0.2.10:8787` for one command, or `server = "http://192.0.2.10:8787"` in `client.toml`.
+A worker picks by name instead, with `server_name = "<name>"` in `worker.toml`. `rcm setup --role
+client` does not search the network at all: it needs `--server`, and to use discovery later you
+remove the `server` line from `client.toml` or set `server = "auto"` there. The name a server
+answers with is its short host name, or `advertise_name` in its `server.toml`; `rcm setup` has no
+flag for it.
+
 **The token is not discovered, and never will be.** `rcm token add` runs on the build machine and
 writes straight to the server's database; no API hands one out. Somebody has to carry it over. So
 on a fresh machine this is the normal, correct state:
@@ -305,6 +315,59 @@ Now prove the whole path before you trust it with real work:
    with no live worker is the reason jobs would sit still forever.
 
 Every row must say `ok`. A `warn` row is a heads-up, not a failure: `rcm check` still exits 0.
+
+### Windows (WSL)
+
+rcm does not run on Windows itself. A session on a Windows computer runs rcm inside WSL, as a
+client of a build machine on the network. Started on Windows itself, rcm stops at once with one
+line and exit 2:
+
+```
+rcm: native Windows is not supported — install and run rcm inside WSL (see docs/usage.md «Windows (WSL)»)
+```
+
+1. **Ubuntu in WSL2, on Windows 11.** rcm needs Python 3.11.4 or newer inside WSL. Ubuntu 24.04
+   ships Python 3.12 and works. Ubuntu 22.04 ships Python 3.10 and does not.
+2. **pipx from apt.** Ubuntu 24.04 follows PEP 668, so `python3 -m pip install --user pipx` is
+   refused with `externally-managed-environment`. Install pipx with apt, then open a new shell:
+
+   ```sh
+   sudo apt install pipx && pipx ensurepath
+   pipx install git+https://github.com/monocsp/remote_ci_monitor
+   ```
+
+3. **Give the build machine's address.** Use its IP address rather than its `.local` name: the
+   name is answered over mDNS, which WSL does not see by default. The token comes from
+   `rcm token add` on the build machine, as in [step 2](#2-the-build-machine):
+
+   ```sh
+   rcm setup --role client --server http://192.0.2.10:8787 --yes
+   export RCM_TOKEN=<the token>
+   rcm check
+   ```
+
+4. **Discovery and the network mode.** WSL2's default network is NAT, and it does not pass
+   multicast. So `server = "auto"` and `rcm discover` find nothing there, and rcm says so:
+
+   ```
+   rcm: no rcm server found on this network (is the server's advertise on? same Wi-Fi?) — give its address with --server http://<address>:8787 — under WSL2 the default NAT network does not pass multicast, so use --server or WSL's mirrored networking
+   ```
+
+   Mirrored networking (Windows 11 22H2 or newer: `networkingMode=mirrored` under `[wsl2]` in
+   `%UserProfile%\.wslconfig`, then `wsl --shutdown`) gives WSL the Windows network interfaces
+   and may let discovery work. This has not been confirmed with rcm; `--server` always works. See
+   Microsoft's [WSL networking](https://learn.microsoft.com/en-us/windows/wsl/networking) page.
+5. **Tailscale.** Install Tailscale on Windows, not inside WSL. WSL reaches the tailnet through
+   Windows. Give the build machine's Tailscale address to `--server`.
+6. **Keep the repository in WSL's file system.** Clone it under `~/` inside WSL, not under
+   `/mnt/c`. There, the execute bit of a script is not kept reliably and file access is slow.
+   A checkout made by Git for Windows with `core.autocrlf` turned on has CRLF line ends, and a
+   shell script with CRLF fails on the build machine. Clone with the git inside WSL, or add
+   `*.sh text eol=lf` to the repository's `.gitattributes`.
+7. **`--notify` may show nothing.** On Linux `--notify` runs `notify-send`. WSL usually has none
+   installed, and then `rcm wait --notify` prints one warning line instead. The JSON and the exit
+   code do not change. Whether an installed `notify-send` shows anything depends on WSLg (not
+   verified).
 
 ## 4. Your first job
 

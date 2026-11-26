@@ -9,6 +9,21 @@ Ctrl-C 는 detach — 잡은 계속 돌고 `rcm wait --job ID` / `rcm cancel ID`
 
 from __future__ import annotations
 
+import sys
+
+# 네이티브 Windows 는 범위 밖이다(PLAN.md 「범위 밖」, README 「Windows is out of scope」). 아래
+# import 가 `submissions` 의 `fcntl` 에서 traceback 으로 죽기 전에 WSL 로 가라는 한 줄과 사용
+# 오류(2)로 멈춘다(WW1, 2026-11-26 격리 검사). 콘솔 스크립트는 이 모듈을 import 하며 시작한다.
+# 문장은 `if` 안에 둔다: 대입문이 import 앞에 있으면 E402 다. 같은 글이 아래 `NATIVE_WINDOWS_HINT`
+# 이고, tests/test_windows_wsl_hints.py 가 둘이 같은지 본다.
+if sys.platform == "win32":
+    sys.stderr.write(
+        "rcm: native Windows is not supported — install and run rcm inside WSL "
+        "(see docs/usage.md «Windows (WSL)»)\n"
+    )
+    sys.stderr.flush()
+    raise SystemExit(2)
+
 import argparse
 import dataclasses
 import hashlib
@@ -113,6 +128,12 @@ from remote_ci_monitor.mdns import discover
 from remote_ci_monitor.release_secrets import secrets_dir
 
 USAGE_EXIT = 2
+#: 네이티브 Windows 에서 맨 위의 `if` 가 찍는 줄과 같은 글 — 문서 잠금
+#: (tests/test_docs_windows_wsl.py)이 읽는다
+NATIVE_WINDOWS_HINT = (
+    "rcm: native Windows is not supported — install and run rcm inside WSL "
+    "(see docs/usage.md «Windows (WSL)»)"
+)
 #: 「사람이 할 일」 표식에서 돌아왔다 — 잡은 계속 돈다(M5s 결정 234). `rcm wait
 #: --return-on-action` 을 줄 때만 나온다. 실패도 「모른다」도 아니다.
 EXIT_ACTION = 4
@@ -408,6 +429,31 @@ def _client_config(args: argparse.Namespace):
 DISCOVER_NONE_HINT = (
     "no rcm server found on this network (is the server's advertise on? same Wi-Fi?)"
 )
+#: 못 찾았을 때 손으로 주는 길(WW2, 2026-11-26 격리 검사) — 「같은 Wi-Fi?」 만으로는 고칠 수 없다
+DISCOVER_ADDRESS_HINT = "give its address with --server http://<address>:8787"
+#: WSL 안이면 더하는 말(WW3) — WSL2 의 기본 NAT 망은 멀티캐스트(mDNS)를 Windows 밖으로 넘기지 않는다
+WSL_MULTICAST_HINT = (
+    "under WSL2 the default NAT network does not pass multicast, so use --server "
+    "or WSL's mirrored networking"
+)
+#: WSL 커널은 `/proc/version` 에 `microsoft` 를 적는다(대소문자는 판마다 다르다)
+PROC_VERSION = Path("/proc/version")
+
+
+def _in_wsl() -> bool:
+    try:
+        text = PROC_VERSION.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return False
+    return "microsoft" in text.lower()
+
+
+def _none_found_hint() -> str:
+    """서버를 하나도 못 찾았을 때의 안내 — `rcm discover` · 클라이언트 명령 · 워커가 같이 쓴다."""
+    parts = [DISCOVER_NONE_HINT, DISCOVER_ADDRESS_HINT]
+    if _in_wsl():
+        parts.append(WSL_MULTICAST_HINT)
+    return " — ".join(parts)
 
 
 #: 한 프로세스 안의 발견 결과(M5q §14 A질문12). 따라가기가 먼저 찾았으면 명령이 1.5초 발견을
@@ -454,7 +500,7 @@ def _resolve_server(cfg: Any, *, timeout: float = 1.5) -> Any:
             _info(_found_line(found[0]))
         return cfg
     if not found:
-        raise ConfigError(f"{NO_SERVER_HINT} — {DISCOVER_NONE_HINT}")
+        raise ConfigError(f"{NO_SERVER_HINT} — {_none_found_hint()}")
     names = ", ".join(_found_where(f) for f in found)
     raise ConfigError(
         f"several rcm servers on this network: {names} — pick one with --server or client.toml"
@@ -4546,7 +4592,7 @@ def cmd_discover(args: argparse.Namespace) -> int:
         )
         return 0 if found else 1
     if not found:
-        _err(DISCOVER_NONE_HINT)
+        _err(_none_found_hint())
         return 1
     print(f"{'name':<20} {'address':<30} {'version':<9} lanes")
     for f in found:
@@ -4610,7 +4656,7 @@ def _pick_worker_server(cfg: Any, *, timeout: float = 1.5) -> str:
         _info(_found_line(f))
         return f.address
     if not found:
-        raise ConfigError(f"worker needs a server — {DISCOVER_NONE_HINT}")
+        raise ConfigError(f"worker needs a server — {_none_found_hint()}")
     names = ", ".join(_found_where(f) for f in found)
     if want:
         raise ConfigError(
