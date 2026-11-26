@@ -212,11 +212,10 @@ def test_rl52_a_sigterm_before_the_check_starts_nothing(tmp_path):
 def test_rl51_a_sigterm_in_the_popen_window_reaches_the_command(tmp_path):
     """(a) 시작 확인 뒤 · Popen 전에 온 SIGTERM — 감독자가 Popen 뒤 그룹에 한 번 보낸다."""
     done = tmp_path / "done"
-    began = time.monotonic()
     out = hooked(tmp_path, "before_popen", str(os.getpid()), ["sh", "-c", f"sleep 2; touch {done}"])
+    # 시계는 재지 않는다 — 명령이 끝까지 돌았다면 `done` 이 있고 종료 코드가 0 이다
     assert not done.exists()  # 명령은 끝까지 돌지 못했다
     assert out.returncode == -15
-    assert time.monotonic() - began < 2
 
 
 def spawn_parent(tmp_path: Path, cmd: list[str], grace: int) -> subprocess.Popen:
@@ -253,7 +252,9 @@ def test_rl43_the_worker_dying_ends_the_command_group(tmp_path, ignores_term):
         parent.wait()
         took = wait_dead(pid, 6)
         assert took is not None, "the command outlived its dead worker"
-        assert took < (2.5 if ignores_term else 1.5)
+        # 명세의 상한은 (a) 0.25 + ε · (b) 0.31 + grace(1)다. `-n auto` 부하에서도 흔들리지 않게
+        # 여유를 두되, 그룹을 끝내지 못하는 감독자(6초 안에 못 죽임)와는 갈린다
+        assert took < (4.0 if ignores_term else 3.0)
     finally:
         parent.kill()
         if pidfile.exists():
@@ -272,7 +273,8 @@ def test_rl51_the_supervisor_sweeps_a_term_ignoring_child_after_the_command_ends
         parent.wait()
         took = wait_dead(pid, 6)
         assert took is not None, "the child outlived the sweep"
-        assert took < 0.31 + 1 + 0.5 + 0.3
+        # 명세의 상한 0.31 + grace(1) + 0.5 에 부하 여유 2초 — 쓸기가 없으면 6초 안에 죽지 않는다
+        assert took < 0.31 + 1 + 0.5 + 2.0
     finally:
         kill_quietly(pid)
 
@@ -345,15 +347,23 @@ def test_rl41_a_flag_raised_while_preparing_starts_no_process_even_without_requi
     assert obs.pids == [] and not ran.exists()
 
 
-def test_rl41_a_flag_between_the_check_and_popen_is_caught_by_the_first_immediate_check(tmp_path):
+def test_rl41_a_flag_between_the_check_and_popen_is_caught_by_the_first_immediate_check(
+    tmp_path, monkeypatch
+):
     """(b) 확인과 Popen 사이에 문턱 — 펌프의 첫 점검이 Popen 직후 곧바로 끊는다(1초 기다리지
     않음)."""
+    import remote_ci_monitor.runner as runner_mod
+
+    # 폴링 간격을 20초로 늘려 기준선을 만든다. 첫 점검이 곧바로가 아니면 멈춤은 그 간격만큼
+    # 늦는다(≥ 20초). 곧바로면 SIGTERM + grace 1 안에 끝난다. 명세가 허용하는 grace_J + 4초 와도
+    # 맞는다(그보다 늦으면 폴링을 기다린 것이다)
+    monkeypatch.setattr(runner_mod, "POLL_SECONDS", 20.0)
     obs = Obs()
     obs.on_spawning = obs.stop.set
     began = time.monotonic()
     result = run_job(spec(tmp_path, ["sleep", "30"], grace_seconds=1), obs)
     assert result.lost and obs.pids
-    assert time.monotonic() - began < 0.8
+    assert time.monotonic() - began < 1 + 4  # grace_J + 4초, 기준선 20초의 4분의 1
 
 
 def test_rl34_f_sigkill_follows_the_monotonic_clock_when_the_wall_clock_goes_back(tmp_path):

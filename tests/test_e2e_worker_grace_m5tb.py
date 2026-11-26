@@ -414,20 +414,32 @@ def test_rl49_a_setsid_descendant_survives_and_the_group_is_gone_so_no_hold(grac
         os.kill(pid, signal.SIGKILL)
 
 
-# ── RL50 — 기한을 넘겨 버려진 heartbeat 가 늦게 닿는다 ────────────────────────────
+# ── RL50 — claim 을 가로지른 heartbeat 가 늦게 닿는다 ─────────────────────────────
 
 
 @pytest.mark.slow
-def test_rl50_a_heartbeat_abandoned_at_its_deadline_lands_late_without_harm(grace):
+def test_rl50_a_heartbeat_sent_before_the_claim_answer_lands_after_it_without_harm(grace):
+    """워커가 놀며 claim 을 기다리는 동안 찍은 heartbeat H(`jobs: []`, `claims_settled` 는 열린
+    claim 앞)를 중계가 붙잡는다. 그 뒤 같은 경로의 heartbeat 는 끊는다 — H 가 서버에 닿는 가장 새
+    seq 다. 그사이 X 가 claim 되어 돈다. H 가 늦게 닿아도 X 를 닫지 않는다: H 의 `claims_settled` 는
+    X 를 돌려준 claim 보다 작다(T5, 결정 339-a). 변이 `t5-ignores-claims-settled` 를 넣으면 H 가
+    X 를 `lost` 로 닫아 빨갛다.
+
+    `hb-stale-seq-judged` 하나만으로는 진짜 워커가 빨강을 만들 수 없다 — 진짜 워커의 낡은 heartbeat
+    은 목록에 없는 잡의 claim 을 늘 「아직 안 끝남」으로 싣는다(R20). 그 변이는 인위적인
+    `claims_settled` 를 싣는 `tests/test_hb_order_m5tb.py` 의 시험이 잡는다."""
     grace.start("build-02", relay=True)
+    grace.relay.hold_next("/worker/heartbeat", refuse_rest=True)
+    assert grace.relay.wait_held(10)  # 잡이 없을 때 찍은 H — X 의 claim 응답보다 앞이다
     x = grace.submit("ship")
     px = grace.pid(x)
-    grace.relay.hold_next("/worker/heartbeat")
-    assert grace.relay.wait_held(10)
-    time.sleep(17)  # 전체 기한 15초를 넘긴다 — 워커는 그 요청을 버리고 다음 heartbeat 를 보낸다
+    wait_until(lambda: grace.relay.refused >= 1, 30, "a later heartbeat to be refused")
     grace.relay.release_held()
+    time.sleep(2)  # H 가 먼저 닿아 판정된다 — 그 뒤에 다른 heartbeat 를 흘린다
+    grace.relay.stop_refusing()
     time.sleep(3)
     assert grace.job(x)["state"] == "running" and alive(px)
+    assert grace.holds() == []
     second = grace.submit("ship")
     time.sleep(3)
     assert grace.job(second)["state"] == "queued"  # 같은 그룹 — 두 프로세스가 같이 살지 않는다

@@ -70,9 +70,33 @@ def test_rl30_out_of_range_or_not_an_integer_fails_to_start(tmp_path, value):
         load(tmp_path, f"disconnect_grace_seconds = {value}")
 
 
-def test_rl30_the_margin_is_the_default_m():
-    """config 의 하한 여유와 기본 워커 grace 10 일 때의 m(15 + 10 + 10)이 같다(결정 320)."""
-    assert DISCONNECT_GRACE_MARGIN_SECONDS == 15 + 10 + 10
+@pytest.mark.parametrize(
+    ("timeout", "beat"),
+    [(60, 5), (10, 1), (120, 5), (300, 5)],  # 기본 · e2e · 둘 · 큰 T
+)
+def test_rl30_the_lowest_accepted_grace_still_lets_the_worker_wait_at_least_l(
+    tmp_path, timeout, beat
+):
+    """config 가 받아들이는 가장 작은 G(하한 L + 여유)에서도 기본 워커 grace 10 의 자기 멈춤
+    문턱 `G − m` 이 L 아래로 내려가지 않는다(결정 320 · §4.1.3). 하한 여유와 워커의 m 이 따로
+    움직이면 — 예를 들어 한쪽만 바꾸면 — 여기서 문턱이 L 과 달라진다."""
+    w, *_ = make_worker(tmp_path)
+    w.timeout_seconds, w.heartbeat_seconds = timeout, beat
+    floor_l = w.connected_age_floor()
+    lowest = floor_l + DISCONNECT_GRACE_MARGIN_SECONDS
+    cfg = load(
+        tmp_path,
+        f"worker_timeout_seconds = {timeout}\nworker_heartbeat_seconds = {beat}\n"
+        f"disconnect_grace_seconds = {lowest}",
+    )
+    assert disconnect_grace(cfg.server) == lowest  # 하한 그 자체는 받는다
+    with pytest.raises(ConfigError):
+        load(
+            tmp_path,
+            f"worker_timeout_seconds = {timeout}\nworker_heartbeat_seconds = {beat}\n"
+            f"disconnect_grace_seconds = {lowest - 1}",
+        )
+    assert w.self_stop_threshold(lowest, 10) == floor_l  # 가장 작은 G 에서 문턱은 정확히 L
 
 
 def test_rl30_claim_freezes_the_grace_and_a_reload_changes_only_the_next_claim(tmp_path):
@@ -493,7 +517,10 @@ def test_rl5_a_409_job_closed_on_a_log_chunk_kills_only_an_irreversible_job(
 
 
 def test_rl34_the_worker_margin_matches_the_config_margin():
-    """config 의 하한 여유와 워커의 m 공식이 따로 움직이지 않는다(§4.3 설정 검증)."""
+    """잠금: 명세 §4.3 이 정한 상수 값(heartbeat 전체 기한 15초 · 감시 틱 1초 · 동시에 매달리는
+    heartbeat 4개 · m = 15 + 10 + 10)을 그대로 적어 둔다. 행동은 위의
+    `test_rl30_the_lowest_accepted_grace_still_lets_the_worker_wait_at_least_l` 과 아래의 감시
+    시험들이 본다 — 이 시험은 값이 몰래 바뀌는 것만 막는다."""
     from remote_ci_monitor import config
 
     assert rw.HEARTBEAT_DEADLINE_SECONDS == config.HEARTBEAT_DEADLINE_SECONDS == 15

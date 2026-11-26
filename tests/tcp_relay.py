@@ -9,6 +9,8 @@
   정지는 실제 서버를 멈춰서 만든다. `resume()` 이 같은 포트로 다시 듣는다.
 - `hold_next(path)` 는 요청줄에 `path` 가 든 다음 연결 하나의 요청 바이트를 붙잡는다.
   `release_held()` 가 그 바이트를 서버로 넘긴다. 나머지 연결은 그대로 흐른다(RL50 의 순서 뒤바꿈).
+  `refuse_rest=True` 면 붙잡은 뒤 같은 경로의 다른 연결은 `stop_refusing()` 까지 끊는다 — 붙잡힌
+  요청이 그 경로의 가장 새 요청으로 서버에 닿게 한다.
 
 워커 클라이언트는 요청마다 새 연결을 쓴다(`urllib`, `Connection: close`). 그래서 연결의 첫 바이트가
 곧 요청줄이다.
@@ -32,6 +34,9 @@ class TcpRelay:
         self._closed = False
         self._conns: list[socket.socket] = []
         self._hold_path: str | None = None
+        self._refuse_path: str | None = None
+        self._refusing = False  # 붙잡은 뒤부터 같은 경로를 끊는다
+        self.refused = 0  # refuse_rest 로 끊은 연결 수
         self._held = threading.Event()  # 세워지면 붙잡은 연결을 놓는다
         self.held_count = 0  # 붙잡았던 연결 수(시험이 「정말 붙잡았나」를 본다)
         self.accepted = 0
@@ -71,6 +76,23 @@ class TcpRelay:
     # ── 한 연결 ──
 
     def _serve(self, client: socket.socket) -> None:
+        first = self._recv(client)
+        if first is None:
+            self._close(client)
+            return
+        if self._should_refuse(first):
+            with self._lock:
+                self.refused += 1
+            self._close(client)
+            return
+        if self._should_hold(first):
+            # 요청 전체(머리 + Content-Length 만큼의 본문)를 먼저 읽어 둔다 — 붙잡힌 사이
+            # 워커가 기한에 연결을 끊어도, 놓을 때 서버가 온전한 요청을 받는다(RL50).
+            # 서버 쪽 연결은 놓은 뒤에 연다 — 오래 빈 연결은 서버가 읽기 시한에 닫는다
+            first = self._read_request(client, first)
+            with self._lock:
+                self.held_count += 1
+            self._held.wait()
         try:
             upstream = socket.create_connection(self.upstream, timeout=30)
         except OSError:
@@ -79,19 +101,31 @@ class TcpRelay:
         upstream.settimeout(None)
         with self._lock:
             self._conns.append(upstream)
-        first = self._recv(client)
-        if first is None:
-            self._close(client, upstream)
-            return
-        if self._should_hold(first):
-            with self._lock:
-                self.held_count += 1
-            self._held.wait()
         if not self._send(upstream, first):
             self._close(client, upstream)
             return
         threading.Thread(target=self._pump, args=(upstream, client), daemon=True).start()
         self._pump(client, upstream)
+
+    def _read_request(self, client: socket.socket, data: bytes) -> bytes:
+        while b"\r\n\r\n" not in data:
+            more = self._recv(client)
+            if more is None:
+                return data
+            data += more
+        head, _, body = data.partition(b"\r\n\r\n")
+        length = 0
+        for line in head.split(b"\r\n")[1:]:
+            name, _, value = line.partition(b":")
+            if name.strip().lower() == b"content-length" and value.strip().isdigit():
+                length = int(value.strip())
+        while len(body) < length:
+            more = self._recv(client)
+            if more is None:
+                break
+            body += more
+            data += more
+        return data
 
     def _should_hold(self, first: bytes) -> bool:
         with self._lock:
@@ -102,7 +136,16 @@ class TcpRelay:
             if path not in line:
                 return False
             self._hold_path = None  # 다음 연결 하나만
+            self._refusing = self._refuse_path is not None
             return True
+
+    def _should_refuse(self, first: bytes) -> bool:
+        with self._lock:
+            path = self._refuse_path if self._refusing else None
+        if path is None:
+            return False
+        line = first.split(b"\r\n", 1)[0].decode("latin-1", "replace")
+        return path in line
 
     def _recv(self, s: socket.socket) -> bytes | None:
         try:
@@ -161,11 +204,19 @@ class TcpRelay:
             self._listen()
         self._flow.set()
 
-    def hold_next(self, path: str) -> None:
-        """요청줄에 `path` 가 든 다음 연결 하나를 붙잡는다."""
+    def hold_next(self, path: str, *, refuse_rest: bool = False) -> None:
+        """요청줄에 `path` 가 든 다음 연결 하나를 붙잡는다. `refuse_rest` 면 그 뒤 같은 경로의
+        연결을 `stop_refusing()` 까지 끊는다."""
         self._held.clear()
         with self._lock:
             self._hold_path = path
+            self._refuse_path = path if refuse_rest else None
+            self._refusing = False
+
+    def stop_refusing(self) -> None:
+        with self._lock:
+            self._refuse_path = None
+            self._refusing = False
 
     def release_held(self) -> None:
         self._held.set()
