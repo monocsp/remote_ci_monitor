@@ -2461,3 +2461,66 @@ def test_b11_m_a_name_setup_cannot_judge_closes(tmp_path):
     assert setup.unread_may_be_rcm(tmp_path / "server.plist")
     assert not setup.unread_may_be_rcm(tmp_path / "com.example.backup.plist")
     assert not setup.unread_may_be_rcm(tmp_path / "ci-hub.service")
+
+
+#: setup 이 설치한 자기 서비스의 조각을 지키는 거절 문장이 말하는 다음 할 일(batch 11 L1)
+REMOVE_FIRST = (
+    "remove the installed service first — see the `to remove:` line from the run that "
+    "installed it"
+)
+
+
+def _own_installed(cfg: Path, home: Path, tmp_path: Path) -> tuple[list[str], Path, Path, bytes]:
+    argv = coordinator_args(tmp_path / "data")
+    assert go(Fake(), *argv) == 0
+    staged, installed = _installed_and_staged(cfg, home, "darwin")
+    installed.parent.mkdir(parents=True, exist_ok=True)
+    installed.write_bytes(staged.read_bytes())
+    return argv, staged, installed, (cfg / "server.toml").read_bytes()
+
+
+@pytest.mark.parametrize("force", [[], ["--force", "all"], ["--force", "config"]])
+def test_b11_l1_the_own_service_refusal_says_to_remove_it_first(
+    cfg, home, tmp_path, no_system_places, force
+):
+    # batch 11 L1(v2-1): setup 이 설치한 자기 서비스의 설정을 지키는 거절은 다음 할 일(먼저 내린다,
+    # 설치한 실행의 `to remove:` 줄)을 말하고, 거짓 길(`--force service` 가 다시 쓴다)을 말하지
+    # 않는다
+    argv, staged, installed, before = _own_installed(cfg, home, tmp_path)
+    fake = Fake()
+    assert go(fake, *argv, *force) == 1, fake.text
+    err = fake.err.getvalue()
+    assert "this is test.rcm.server's config — refusing" in err, err
+    assert REMOVE_FIRST in err, err
+    assert "--force" not in err.split("refusing", 1)[1], err
+    assert (cfg / "server.toml").read_bytes() == before
+
+
+def test_b11_l2_force_service_alone_on_the_installed_service_is_refused(
+    cfg, home, tmp_path, no_system_places
+):
+    # batch 11 L2(v2-2): `--force service` 하나만 준 재실행도 설치된 자기 서비스의 설정에서 멈춘다
+    # — 설정 · staged 서비스 파일 · 설치 파일 어느 것도 바뀌지 않는다
+    argv, staged, installed, before = _own_installed(cfg, home, tmp_path)
+    staged_before, installed_before = staged.read_bytes(), installed.read_bytes()
+    fake = Fake()
+    assert go(fake, *argv, "--force", "service") == 1, fake.text
+    err = fake.err.getvalue()
+    assert "this is test.rcm.server's config — refusing" in err, err
+    assert REMOVE_FIRST in err, err
+    assert (cfg / "server.toml").read_bytes() == before
+    assert staged.read_bytes() == staged_before
+    assert installed.read_bytes() == installed_before
+
+
+def test_b11_l1_the_hint_is_only_for_the_service_setup_wrote():
+    # batch 11 L1: 그 안내는 setup 이 쓴 자기 서비스(라벨 · 설치 자리 · 같은 바이트)에만 붙는다 —
+    # 다른 운영 서비스를 내리라고 말하지 않는다
+    svc = core.RcmService(
+        name="lbl", file=Path("/s/lbl.plist"), names=("lbl",), config=Path("/c/x.toml"), data=b"x"
+    )
+    base = dict(label="lbl", force_service=False, fold_case=False, installed=svc.file)
+    ours = core.production_refusal([svc], {"--config": svc.config}, written=(b"x",), **base)
+    assert ours is not None and REMOVE_FIRST in ours, ours
+    other = core.production_refusal([svc], {"--config": svc.config}, written=(b"y",), **base)
+    assert other is not None and "config — refusing" in other and REMOVE_FIRST not in other
