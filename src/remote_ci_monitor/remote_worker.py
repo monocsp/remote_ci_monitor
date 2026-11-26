@@ -625,6 +625,13 @@ class _JobSender:
                 ob.done = True
         except ClientError as e:
             done = self._refused(step, e)
+            if done:
+                # 그 항목은 정리됐다(4xx 버림 · 409 job_closed · log_gap). 앞 시도가 남긴 표식은
+                # 낡았다 — 남기면 끝난 지 300초 지난 잡에서 다음 항목(산출물)을 해 보지도 않고
+                # finish 가 먼저 간다(batch-5 #3)
+                self.local_error = False  # mutcheck: local-error-kept-after-a-drop
+                self.spool_unreadable = False
+                self.last_5xx = False
             ob.save()
             return done
         ob.save()

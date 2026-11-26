@@ -7743,6 +7743,16 @@ MUTANTS = (
             "test_b5_1_ok_at_is_replaced_without_fsync_while_the_report_queue_is_synced",
         ),
     ),
+    Mutant(
+        # 4xx 버림 · 409 job_closed 뒤 로컬 오류 표식을 남긴다 — 산출물을 건너뛴다(batch-5 #3)
+        name="local-error-kept-after-a-drop",
+        path="src/remote_ci_monitor/remote_worker.py",
+        old="                self.local_error = False  # mutcheck: local-error-kept-after-a-drop\n",
+        new="                pass\n",
+        tests=(
+            "tests/test_worker_outbox_m5tb.py::test_b5_3_a_dropped_item_clears_the_local_error_mark",
+        ),
+    ),
 )
 
 
