@@ -1846,9 +1846,16 @@ class _Run:
             )
             return
         if Path(theirs).expanduser().resolve() != mine.resolve():
+            # 찾은 서비스는 이 설정을 쓰지 않는다 — 시험 설치 옆의 운영 서비스일 수 있다. 「the
+            # service」 만 말하면 그 서비스가 자기 것인지 알 수 없었다(온보딩 시험 OB2). 라벨과
+            # 파일을 대고 다른 설치의 설정이라고 말한다. 판정 · `--json` 의 키는 그대로다
+            sf = self._service_file
+            label = sf.path.stem if sf is not None else "the service"
+            shown = self.mask(str(mine))
             self.warnings.append(
-                f"the service starts rcm with --config {self.mask(theirs)}, not "
-                f"{self.mask(str(mine))} — measured with the file given"
+                f"no service starts rcm with --config {shown} — {label} "
+                f"({self.service['file']}) starts rcm with --config {self.mask(theirs)}, another "
+                f"install's config; {shown} was measured as given"
             )
 
     def config_dirs(self, env: Mapping[str, str]) -> list[Path]:

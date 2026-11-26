@@ -4659,6 +4659,18 @@ MUTANTS = (
             "test_ob1_a_worker_toml_outside_this_configs_folder_is_another_installs",
         ),
     ),
+    Mutant(
+        # doctor 가 찾은 서비스가 다른 설정으로 떠도 「the service starts rcm with …」 만 말한다 —
+        # 시험 설치에서 그 서비스가 남의 것인지 알 수 없다(온보딩 시험 OB2)
+        name="ob2-doctor-another-installs-service-unnamed",
+        path="src/remote_ci_monitor/doctor.py",
+        old='                f"no service starts rcm with --config {shown} — {label} "\n',
+        new='                f"the service starts rcm with --config {shown} — {label} "\n',
+        tests=(
+            "tests/test_onboarding_findings.py::"
+            "test_ob2_doctor_says_the_service_it_found_runs_another_config",
+        ),
+    ),
 )
 
 

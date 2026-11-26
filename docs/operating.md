@@ -343,7 +343,10 @@ directory (a systemd unit outside `~/.config/systemd/user/` without `WorkingDire
 are read (`~/.config/rcm/worker.toml`, `~/.config/rcm/server.toml`); pass `--config` for a file
 anywhere else. `--config` and `--server` given to `rcm doctor` win, with a warning when the
 service starts with another `--config` (or a relative one, which depends on the service's working
-directory and is not compared). A `coordinator` or `coordinator-worker` report
+directory and is not compared). That warning says no service starts rcm with the config given,
+names the service it found by label and file with the config that service uses, another
+install's, and says the given file was measured as given: on a test install next to a running
+one, the `service` row is the running install's service, not the test's. A `coordinator` or `coordinator-worker` report
 with no server config anywhere is a usage error (exit 2): it does not ask whatever answers on port
 8787 with the built-in defaults. When the service file cannot be read and no `--config` is given,
 or the config the service names cannot be read, rcm does not know what the service runs with: the
