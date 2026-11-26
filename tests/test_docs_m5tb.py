@@ -506,3 +506,47 @@ def test_rl28_operating_says_a_waiter_behind_an_unreachable_job_has_no_eta_and_t
     assert "takes no lane in the estimate" in body
     assert "assume that waiting job does not use the lane" in body
     assert "may come later than shown once the worker is back" in body
+
+
+# ── P6-1: P5 엣지 감사의 GAP 이 문서에 남긴 것 ──────────────────────────────────
+
+
+def test_g10_operating_says_a_fenced_split_session_shows_running_until_the_grace():
+    """# RL28 P6-1 G10: 명세 §9(m5tb-workplan.md:2170) — 펜싱된 분단 중에는 끊김 줄 없이
+    running(ETA 포함)으로 보이다가 G 에 닫힌다. 「When a worker cannot be reached」에 그 한계를."""
+    body = flat(section(OPERATING, UNREACHABLE))
+    assert "a network split" in body
+    assert (
+        "its jobs show `running`, with an ETA and no lost-contact line, until the grace runs out"
+        in body
+    )
+    assert "configuration.md#a-lost-connection-disconnect_grace_seconds" in body
+
+
+def test_g5_g6_operating_says_a_cancelling_job_stops_and_nothing_counts_while_unreachable():
+    """# RL28 P6-1 G5 · G6: 취소 중인 잡의 문장(rcm top · rcm wait 이 찍는 그대로)과, 끊긴 동안은
+    웹이 세지 않고 초과 · 멈춤을 판정하지 않는다는 것."""
+    from remote_ci_monitor.core.render_text import unreachable_text
+
+    body = flat(section(OPERATING, UNREACHABLE))
+    assert unreachable_text("build-02", cancelling=True) in body
+    assert "#812 worker build-02 is back — the job is being cancelled" in body
+    assert "never `overdue` or `stuck`" in body
+    assert "stops counting" in body
+
+
+def test_g2_g3_g4_g7_g9_operating_quotes_the_new_hold_lines():
+    """# RL45 P6-1: `rcm eta` · 빈 큐의 `rcm top` · 홀드를 만든 잡의 `rcm wait` 줄과, `worker`
+    키가 없는 항목은 읽을 수 없는 항목이라는 것. 줄은 코드가 찍는 그대로 인용한다."""
+    from remote_ci_monitor.core.render_text import hold_owner_line, hold_top_lines
+
+    body = flat(section(OPERATING, HELD))
+    assert "`rcm eta`" in body and "no `N ahead`" in body
+    assert "`queue — empty · a held group does not start until it is released`" in body
+    top = hold_top_lines([{"job_id": 812, "group": "irreversible:ship", "worker": None}])
+    assert top is not None and f"`{top[0].strip()}`" in body, top
+    owner = hold_owner_line(
+        {"hold": {"released_at": None}, "concurrency_group": "irreversible:ship"}, job_id=812
+    )
+    assert owner is not None and f"`{owner}`" in body, owner
+    assert "no job number, no group, or no `worker` key" in body

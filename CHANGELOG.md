@@ -79,6 +79,13 @@ of a key bumps that number and is listed here.
   `--json` (`doctor_version` stays 1). A hold list with an entry rcm cannot read is shown as
   unknown everywhere, never as a shorter list.
   ([#285](https://github.com/monocsp/remote_ci_monitor/pull/285))
+- **Holds and lost contact reach every estimate.** `rcm eta` for a preset of a held group, or for a
+  job waiting on one, gives no wait, finish or `N ahead` and says why; with an empty queue
+  `rcm top` no longer promises an immediate start while a group is held; the held job's own
+  `rcm wait` names the group and `rcm release-hold N`. A job that was being cancelled when its
+  worker went out of reach is cancelled when the worker is back, and the screens now say so. While
+  contact is lost a job is never `overdue` or `stuck`, and the web row stops counting its time.
+  ([#285](https://github.com/monocsp/remote_ci_monitor/pull/285))
 - **Hold notifications.** Every notification carries `RCM_EVENT`, `RCM_HOLD`, `RCM_HOLD_GROUP` and
   `RCM_HOLD_NOTE` (and `event` · `hold` in a webhook body); a `[[notify]]` rule with
   `on = ["irreversible_hold"]` is called once for each new hold. The default `on` is unchanged.

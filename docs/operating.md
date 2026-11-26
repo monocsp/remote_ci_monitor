@@ -1205,6 +1205,20 @@ see it in words, never the code:
 | web queue and «Needs a look» | `lost contact with build-02 — the job goes on if the worker is back within the grace period`, listed right after `worker down` |
 | `rcm top` | the same sentence on the job's reason line, `eta —` |
 | `rcm wait` and `rcm run`, while they wait (stderr) | `#812 lost contact with worker build-02 — the job goes on if the worker is back within the grace period` once, and `#812 worker build-02 is back — the job goes on` if it returns |
+| `rcm eta --job 812` | `#812 · running · elapsed …`, `eta —` and the same sentence; a job waiting in its group behind it gets `⛓ blocked by #812 · <group> · frees in —` |
+
+A job that was being cancelled does not go on: the worker stops it when it is back. For such a
+job the sentence is `lost contact with build-02 — the job is cancelled when the worker is back, or
+ends as lost after the grace period`, and the line when the worker returns is
+`#812 worker build-02 is back — the job is being cancelled`. While rcm cannot reach the worker it
+knows only what it heard last: the job is never `overdue` or `stuck` in that time, and the web row
+stops counting its step and elapsed time and shows a grey lane instead of the running one.
+
+One case has no lost-contact line. When a worker process is replaced by a newer one with the same
+token while the first one cannot be reached (a network split), its jobs show `running`, with an
+ETA and no lost-contact line, until the grace runs out and closes them: the worker name has a live
+session, so its lanes are not `down` (see
+[disconnect grace](configuration.md#a-lost-connection-disconnect_grace_seconds)).
 
 Neither `rcm wait` nor `rcm run` ends during the grace: each ends with the job's own result when
 the worker comes back, or with exit 3 when the grace runs out, or at its own `--timeout` with
@@ -1245,7 +1259,9 @@ People see a hold in words, without the code:
 |---|---|
 | web «Needs a look» | one entry per hold, even when no job waits on that group: `Group irreversible:ship is held: job #812 (ship) on build-02 closed without a stop confirmation. Check build-02 for a leftover process, then run rcm release-hold 812.` The held job's row in Recent carries a `group held` chip |
 | `rcm wait` and `rcm run`, while they wait (stderr) | `#821 needs action · group irreversible:ship is held by job #812 — check that machine for a leftover process, then ask an admin to run rcm release-hold 812`; `rcm wait --return-on-action` ends there with exit 4 |
-| `rcm top` | the waiting job's reason line: `needs action · group irreversible:ship is held by #812 — rcm release-hold 812 after checking the machine` |
+| `rcm top` | the waiting job's reason line: `needs action · group irreversible:ship is held by #812 — rcm release-hold 812 after checking the machine`. With no job in the queue it does not promise an immediate start: `queue — empty · a held group does not start until it is released`, then one line per hold, `group irreversible:ship is held by #812 — rcm release-hold 812 after checking the machine` |
+| `rcm eta` | a preset of a held group, or a job waiting on one, gets `wait —` and `eta —` with the same reason sentence as `rcm top`, and no `N ahead`: the job does not move until the hold is released |
+| `rcm wait` on the held job itself | after its `lost` line, `#812 group irreversible:ship is held — check the machine for a leftover process, then ask an admin to run rcm release-hold 812`; the exit code stays 3 |
 | `rcm check` | one `warn  irreversible hold` row per hold; a hold is a warning, never a FAIL, so the exit code does not change |
 | `rcm doctor` (roles `worker` and `coordinator-worker`) | a `needs action` line for each hold of a job that ran on this machine: `a job that ran here was closed without a stop confirmation — check for a leftover process, then ask an admin to run rcm release-hold N`; `--json` lists them in `irreversible_holds` (`null` when unknown). When rcm does not know them, the text output says so in one line, `group holds: unknown — rcm could not learn this machine's group holds from the server`, rather than nothing. The exit code rules do not change |
 
@@ -1253,7 +1269,8 @@ A job of the server's own local lane has no worker: the web and `rcm check` say 
 local lane» and «check the server». When the server could not read its holds
 (`irreversible_holds: null`), the web says `unknown — group holds unavailable` instead of «nothing
 to look at», and `rcm check` prints one warning row saying so. An entry rcm cannot read (no job
-number or no group) makes the whole list unknown in all three places, rather than a shorter list
+number, no group, or no `worker` key: `worker: null` means the local lane, so a missing one cannot
+be read as local) makes the whole list unknown in all three places, rather than a shorter list
 that looks complete: the web says the same `unknown — group holds unavailable`, `rcm check` prints
 `could not read every group hold the server sent — unknown`, and `rcm doctor --json` has
 `irreversible_holds: null`.
