@@ -378,6 +378,35 @@ def test_rl2_rl7b_a_server_stop_past_g(grace):
     assert alive(py)
 
 
+# ── RL8 (a) — 분단 중 취소, G 안에 복귀 ─────────────────────────────────────────
+
+
+@pytest.mark.slow
+def test_rl8_a_a_cancel_during_the_partition_ends_both_jobs_cancelled_after_the_return(grace):
+    """분단(`worker_timeout` 을 넘겨 조용함) 중에 표식 · 일반 잡을 취소한다. 요청은 `cancelling`
+    으로 남고, 자기 멈춤 문턱(63초) 전에 연결이 돌아오면 첫 heartbeat 의 `cancel` 로 두 프로세스가
+    끝나 `cancelled`(종료 2)다. 조용했던 시간은 취소 미확인 창에 세지 않으므로 표식 잡도
+    `cancel_unconfirmed` 가 아니고 홀드 0 이다(T4)."""
+    grace.start("build-02", "build-03", relay=True)
+    x = grace.submit("ship")
+    y = grace.submit("plain")
+    px, py = grace.pid(x), grace.pid(y)
+    grace.relay.pause()
+    time.sleep(14)  # worker_timeout 10 을 넘긴 조용함
+    for jid in (x, y):
+        assert rcm("cancel", str(jid), env=grace.env).returncode == 0
+    time.sleep(6)  # 옛 `kill_at + 2H` 가 조용한 동안 지난다
+    assert grace.job(x)["state"] == grace.job(y)["state"] == "cancelling"
+    assert alive(px) and alive(py)
+    grace.relay.resume()
+    assert grace.wait_exit(x, 60) == 2 and grace.wait_exit(y, 60) == 2
+    for jid, pid in ((x, px), (y, py)):
+        doc = grace.job(jid)
+        assert doc["state"] == "cancelled" and doc["summary_code"] != "cancel_unconfirmed", doc
+        wait_until(lambda pid=pid: is_dead(pid), 10, f"pid {pid} of the cancelled job to end")
+    assert grace.holds() == []
+
+
 # ── RL10 — 같은 토큰의 둘째 프로세스 ────────────────────────────────────────────
 
 
