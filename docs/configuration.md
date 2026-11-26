@@ -1515,6 +1515,10 @@ without delivering everything while the worker keeps running (the server asks fo
 protocol, or an error outside a report step), the job stays listed and its lane takes no job until
 the worker restarts; the next process sends the queue from disk. The worker syncs `outbox.json`
 to disk, the file and its folder, every time it saves it, so an OS crash does not leave it empty.
+`ok_at.json`, the time the worker sent the last request the server answered, is replaced the
+same way but not synced, so a slow disk never delays a heartbeat. If a folder cannot be synced,
+the worker logs it once per process
+(`session folder: cannot sync a folder to disk (<error>) — an OS crash may lose the last saved report`).
 
 The server writes each piece at the length it has committed and answers with the new offset. A
 piece it already has is ignored, a piece ahead of it gets `409 log_gap` and the worker resends
@@ -1535,17 +1539,22 @@ a line end every 64 KiB. If a secret straddles such a cut, its first part stays 
 | 24 hours after the job ended | sends the finish without the rest of the log; a finish that still cannot go is dropped with a log line (`#N report: finish not delivered in 24h — dropping the report`) |
 | the bundle file in the queue is gone or cannot be read | logs `#N artifacts: cannot read the bundle (<error>) — the finish reports upload_failed` and sends the finish; the bundle is `failed` (`upload_failed`) |
 | a report step fails with an unexpected error (a bug, a local fault) | retries with backoff and logs `#N <step>: unexpected <Error> — retrying` once; 300 s after the job ended it sends the finish first (`#N report: still failing with an unexpected error 300s after the job ended — sending the finish first`) |
-| `outbox.json` cannot be saved (a full disk) | keeps the report in memory and keeps sending; logs `#N report: cannot save outbox.json (<error>) — the report is only in memory; a restart before it is sent loses it` once |
+| `outbox.json` cannot be saved (a full disk) | keeps the report in memory and keeps sending; logs `#N report: cannot save outbox.json (<error>) — the report is only in memory; a restart before it is sent loses it` once; for a queue a stopped process left, the line starts with `dead session <id>` |
 
-An answer with a 2xx status whose body is not JSON counts as a server error (HTTP 502): the
-worker sends the same item again.
+An answer with a 2xx status whose body is not JSON counts as a server error (HTTP 502). The
+report queue, claim and heartbeat try again; register stops the worker with exit 2, and the
+service manager starts it again.
 
 A worker restarted on the same data folder with the same token and server sends what its last
 process left, with that process's session, before it registers; a server that keeps answering
 with errors for 300 s makes it register anyway
 (`dead session <id> queue not delivered after 300s of server errors — registering; job #N will close as restarted-without-job`).
-Time without a connection does not count toward the 300 s; time the spooled log cannot be read
-does, and so does time lost to an unexpected error. A job folder whose `outbox.json` is missing,
+Only time the server answers counts toward the 300 s: not time without a connection, and not a
+local error (the spooled log cannot be read, an unexpected error). When only the log or the
+bundle of a job that ended fails that way, the finish still goes first 300 s after the job
+ended. Any other queue stopped by a local error is not waited for
+(`dead session <id> job #N: stopped on a local error (<what>) — registering without waiting; job #N will close as restarted-without-job`).
+A job folder whose `outbox.json` is missing,
 empty or not JSON while its `stream.log` is there cannot be sent: the worker logs
 `dead session <id> job #N: outbox unreadable (<why>) — the job will close as restarted-without-job; spool kept in <folder>`
 and moves the spool to `<data_dir>/worker-sessions/unreadable-<session>-<id>/`, which the
