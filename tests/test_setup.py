@@ -2593,3 +2593,105 @@ def test_b11_l5_darwin_compares_labels_without_case(cfg, home, tmp_path):
     ask = dict(label="lbl", written=(), force_service=False)
     assert "label — refusing" in (core.production_refusal([svc], {}, fold_case=True, **ask) or "")
     assert core.production_refusal([svc], {}, fold_case=False, **ask) is None
+
+
+# ── P6 재확인 5라운드(batch 12) ──
+
+
+def _rcm_venv(tmp_path: Path) -> Path:
+    """remote_ci_monitor 가 설치된 venv — `site-packages` 에 그 dist-info 가 있다."""
+    venv = _server_venv(tmp_path)
+    info = venv / "lib" / "python3.11" / "site-packages" / "remote_ci_monitor-0.0.0.dist-info"
+    info.mkdir(parents=True)
+    return venv
+
+
+def _agent(home: Path, label: str, argv: list[str]) -> Path:
+    plist = home / "Library" / "LaunchAgents" / f"{label}.plist"
+    plist.parent.mkdir(parents=True, exist_ok=True)
+    plist.write_bytes(plistlib.dumps({"Label": label, "ProgramArguments": argv}))
+    return plist
+
+
+@pytest.mark.parametrize("how", ["a-link-named-otherwise", "a-script-in-an-rcm-venv"])
+def test_b12_m_a_program_that_is_rcm_under_another_name_is_read(cfg, home, tmp_path, how):
+    # batch 12 MED(v1-1): 이름과 라벨이 rcm 같지 않아도 프로그램이 rcm 이면 rcm 서비스다 —
+    # realpath 로 푼 이름이 rcm 이거나(`~/.local/bin/ci-hub` → `<venv>/bin/rcm`), remote_ci_monitor
+    # 가 설치된 venv 의 bin 에 있다. 그 서비스의 config 를 지킨다
+    venv = _rcm_venv(tmp_path)
+    if how == "a-link-named-otherwise":
+        program = home / ".local" / "bin" / "ci-hub"
+        program.parent.mkdir(parents=True)
+        program.symlink_to(venv / "bin" / "rcm")
+    else:
+        program = venv / "bin" / "ci-hub"
+        program.write_text("#!/bin/sh\n")
+    config = tmp_path / "hub" / "server.toml"
+    config.parent.mkdir()
+    config.write_text(f'[server]\ndata_dir = "{tmp_path / "hub-data"}"\n')
+    _agent(home, "com.example.hub", [str(program), "serve", "--config", str(config)])
+    before = config.read_bytes()
+    fake = Fake()
+    argv = coordinator_args(tmp_path / "data", "--config", str(config), "--force", "all")
+    assert go(fake, *argv) == 1, fake.text
+    assert "this is com.example.hub's config — refusing" in fake.err.getvalue(), fake.text
+    assert config.read_bytes() == before
+
+
+@pytest.mark.parametrize("how", ["another-venv", "python-in-an-rcm-venv"])
+def test_b12_m_a_program_in_a_venv_that_is_not_rcm_passes(cfg, home, tmp_path, how):
+    # 다른 프로그램의 venv 에 든 실행 파일, rcm 이 설치된 venv 의 파이썬이 다른 스크립트를 띄우는
+    # 서비스는 rcm 서비스가 아니다
+    if how == "another-venv":
+        venv = _server_venv(tmp_path)
+        program = venv / "bin" / "hub"
+    else:
+        venv = _rcm_venv(tmp_path)
+        program = venv / "bin" / "python3"
+    program.write_text("#!/bin/sh\n")
+    _agent(home, "com.example.hub", [str(program), "w.py", "--config", str(tmp_path / "c")])
+    fake = Fake()
+    assert go(fake, *coordinator_args(tmp_path / "data")) == 0, fake.text
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "cd /srv;rcm serve --config {config}",
+        "(rcm serve --config {config})",
+        "'rcm' serve --config {config}",
+        "$(which rcm) serve --config {config}",
+    ],
+    ids=["after-a-semicolon", "subshell", "quoted", "command-substitution"],
+)
+def test_b12_m_a_shell_command_line_that_runs_rcm_closes(cfg, home, tmp_path, command):
+    # batch 12 MED(v1-2): `sh -c` 안의 rcm 을 낱말로 나눠 보는 규칙(`looks_like_rcm`)은
+    # `;rcm` · `(rcm` · `'rcm'` · `$(which rcm)` 를 놓쳤다 — 명령 줄에 rcm 이 보이는데 어디서
+    # 무엇을 띄우는지 읽지 못하면 닫는 쪽이다(거절 + 파일 이름)
+    hub = _hand_unit(home, tmp_path, f'ExecStart=/bin/sh -c "{command}"')
+    fake = Fake(platform="linux")
+    assert go(fake, *coordinator_args(tmp_path / "data")) == 1, fake.text
+    err = fake.err.getvalue()
+    assert str(hub["unit"]) in err and "runs rcm in a way setup cannot read" in err, err
+    assert "refusing" in err, err
+    _nothing_written(cfg, tmp_path / "data")
+
+
+@pytest.mark.parametrize("how", ["shell-unit", "ci-watch-plist"])
+def test_b12_m_a_command_line_without_rcm_passes(cfg, home, tmp_path, how):
+    # rcm 낱말이 명령 줄에 없는 서비스는 그대로 지나간다 — rcm-ci-connect 의 ci-watch 처럼
+    # 라벨과 경로(`~/.config/rcm/…`, `rcm_ci_watch.py`)에만 rcm 이 든 서비스도 그렇다
+    if how == "shell-unit":
+        _hand_unit(home, tmp_path, 'ExecStart=/bin/sh -c "cd /srv && ./hub --fast"')
+    else:
+        scripts = home / ".config" / "rcm" / "scripts"
+        argv = [
+            "/opt/homebrew/bin/python3",
+            str(scripts / "rcm_ci_watch.py"),
+            "--config",
+            str(home / ".config" / "rcm" / "ci-watch.toml"),
+            "--once",
+        ]
+        _agent(home, "com.remote-ci-monitor.ci-watch", argv)
+    fake = Fake(platform="linux" if how == "shell-unit" else "darwin")
+    assert go(fake, *coordinator_args(tmp_path / "data")) == 0, fake.text
