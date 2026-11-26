@@ -432,6 +432,9 @@ class ServiceFile:
     workdir_unknown: bool = False
     #: 사용자 유닛인 것을 안다(`~/.config/systemd/user/` · setup 자리) — `%h` 가 그 홈이다
     user_unit: bool = False
+    #: systemd 유닛의 `[Service]` 에 적힌 ExecStart= 명령 모두(빈 `ExecStart=` 가 지운 것은 뺀다).
+    #: `argv` 는 그중 rcm 으로 풀리는 첫 명령, 없으면 마지막 명령이다(batch 12 L1)
+    exec_argvs: list[list[str]] = field(default_factory=list)
     #: 띄우는 명령 줄에 systemd 가 서비스의 환경으로 펼치는 `$VAR` · `${VAR}` 가 있다 — rcm 은
     #: 펼치지 않으므로 그 인자의 값(`--config` · `--data-dir` …)은 모른다(batch 11 L4)
     launch_vars: bool = False
@@ -675,7 +678,17 @@ def read_service_file(
     workdir: str | None = None
     workdir_unknown = False
     user: str | None = None
+    #: ExecStart= 마다 (argv, 실행 파일, rcm 으로 푼 인자, `$VAR` 가 있나, 풀지 않은 지정자가 있나)
+    execs: list[tuple[list[str], str | None, dict[str, Any] | None, bool, bool]] = []
+    section: str | None = None
     for number, line in unit_lines(text):
+        if line.startswith("[") and line.endswith("]"):
+            section = line[1:-1].strip()
+            continue
+        if section not in (None, "Service"):
+            # systemd 는 `[Service]` 밖의 ExecStart= · Environment= 를 서비스에 쓰지 않는다
+            # (batch 12 L1). 섹션 머리가 없는 줄은 예전처럼 읽는다
+            continue
         key, _, value = line.partition("=")
         # `=` 앞뒤의 빈칸은 버린다(systemd.syntax(7)) — `ExecStart = rcm …` 도 ExecStart= 다
         key, value = key.strip(), value.strip()
@@ -700,6 +713,9 @@ def read_service_file(
                         continue
                     env[k] = expanded
             elif key == "ExecStart":
+                if not value:  # 빈 값은 그때까지의 명령을 지운다(systemd.service 「ExecStart=」)
+                    execs.clear()
+                    continue
                 argv = shlex.split(value)
                 exec_vars = any(has_exec_variable(a) for a in argv)
                 expanded_argv = [expand_specifiers(a, home) for a in argv]
@@ -715,8 +731,7 @@ def read_service_file(
                     # `$$` 는 글자 `$` 다(systemd.service 「Command lines」 — `$NAME` 은 환경변수)
                     argv = [a.replace("$$", "$") for a in expanded_argv if a is not None]
                 program = argv[0].lstrip("@-:+!") if argv else None
-                launch = rcm_launch(program, argv)
-                command = None if launch is None else launch["command"]
+                execs.append((argv, program, rcm_launch(program, argv), exec_vars, unexpanded))
             elif key == "WorkingDirectory":
                 # `-` 앞머리는 「없어도 된다」, `~` 는 사용자의 홈이다
                 # (systemd.exec 「WorkingDirectory=」)
@@ -733,6 +748,13 @@ def read_service_file(
                 nofile_unit = 1 << 20 if first == "infinity" else int(first)
         except ValueError:
             unreadable.append(f"line {number} ({key}=)")
+    # ExecStart= 가 여럿이면(Type=oneshot) rcm 으로 풀리는 첫 명령을 읽는다 — 마지막 줄만 읽으면
+    # 앞줄의 rcm 을 놓친다(batch 12 L1). 없으면 마지막 명령이다
+    last = execs[-1] if execs else ([], None, None, False, False)
+    argv, program, launch, exec_vars, unexpanded = next(
+        (e for e in execs if e[2] is not None), last
+    )
+    command = None if launch is None else launch["command"]
     return ServiceFile(
         p,
         dc.SYSTEMD,
@@ -748,6 +770,7 @@ def read_service_file(
         launch_vars=exec_vars,
         label=p.stem,
         argv=argv,
+        exec_argvs=[e[0] for e in execs],
         workdir=None if workdir_unknown else workdir,
         workdir_unknown=workdir_unknown,
         user_unit=home is not None,

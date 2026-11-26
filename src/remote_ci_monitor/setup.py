@@ -336,6 +336,13 @@ def rcm_program(program: str | None, env: Mapping[str, str]) -> bool:
     return (venv / "pyvenv.cfg").is_file() and any(installed)
 
 
+def _runs_rcm(argv: Sequence[str], env: Mapping[str, str]) -> bool:
+    """명령 하나(argv)가 rcm 을 띄우는 것처럼 보이나 — 실행 파일이 rcm 이거나(`rcm_program`)
+    명령 줄에 rcm 이 보인다(`_RCM_COMMAND`)."""
+    program = argv[0].lstrip("@-:+!") if argv else None
+    return rcm_program(program, env) or any(_RCM_COMMAND.search(word) for word in argv)
+
+
 #: 띄우는 명령이 `python -m remote_ci_monitor` 인가 — 패키지 이름만 준 꼴(batch 10 M2)
 _PACKAGE_MODULE = ["-m", "remote_ci_monitor"]
 
@@ -437,6 +444,10 @@ def _rcm_service(path: Path, *, home: Path, root: bool) -> core.RcmService | Non
         return core.RcmService(name, file, names, data=data, problem=why)
 
     launch = _launch(sf)
+    if sum(_runs_rcm(argv, sf.env) for argv in sf.exec_argvs) > 1:
+        # rcm 을 띄우는 ExecStart= 가 둘 이상이다 — 어느 것의 설정을 지킬지 고르지 않고 닫는
+        # 쪽이다(batch 12 L1)
+        return problem("it has several ExecStart= lines that start rcm")
     if launch is None:
         exec_unread = [u for u in sf.unreadable_lines if "ExecStart" in u]
         if exec_unread and data is not None and _RCM_BYTES.search(data):
@@ -445,7 +456,8 @@ def _rcm_service(path: Path, *, home: Path, root: bool) -> core.RcmService | Non
             return problem(f"setup cannot read its {exec_unread[0]}")
         if rcm_program(sf.program, sf.env) or doctor.looks_like_rcm(sf):
             return problem("setup cannot tell which rcm command it starts")
-        if any(_RCM_COMMAND.search(word) for word in [sf.program or "", *sf.argv]):
+        commands = [[sf.program or "", *sf.argv], *sf.exec_argvs]
+        if any(_RCM_COMMAND.search(word) for argv in commands for word in argv):
             # `sh -c "cd x;rcm serve"` · `(rcm …)` · `'rcm'` · `$(which rcm)` — 낱말로 나눠
             # 보는 `looks_like_rcm` 이 놓친다. 명령 줄에 rcm 이 보이면 닫는 쪽이다(batch 12 MED)
             return problem(
