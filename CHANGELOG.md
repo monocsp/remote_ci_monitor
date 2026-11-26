@@ -14,10 +14,12 @@ of a key bumps that number and is listed here.
   (`worker protocol 2 required: upgrade rcm on this worker`, the worker exits 3 and its service
   starts it again), and a new worker stops with exit 3 against an older server. A worker that
   follows the server's version upgrades itself; pin nothing across this release.
+  ([#284](https://github.com/monocsp/remote_ci_monitor/pull/284))
 - **Database v26.** The server migrates on its first start (worker sessions, the values a job's
   claim freezes, and the new group-hold table). An older rcm refuses the migrated database.
 
 ### Changed
+  ([#284](https://github.com/monocsp/remote_ci_monitor/pull/284))
 - **A remote job outlives a short loss of contact.** A worker the server has not heard for
   `worker_timeout_seconds` still shows `down`, but its running jobs keep running and become
   `lost` only after `[server] disconnect_grace_seconds` (default 600, at least
@@ -26,6 +28,7 @@ of a key bumps that number and is listed here.
   stops its jobs, reports them `lost` (`worker_replaced`) and exits 0.
 
 ### Added
+  ([#284](https://github.com/monocsp/remote_ci_monitor/pull/284))
 - **`irreversible = true` for presets whose work must not run twice at once.** The worker stops
   such a job itself before the grace runs out (`worker_self_stopped`), the command runs under a
   supervisor that ends its process group when the worker is killed, and a close without a
@@ -33,11 +36,14 @@ of a key bumps that number and is listed here.
   group gets `irreversible:<name>`, global). Waiting jobs of a held group show reason
   `needs_action` with `action.code = "irreversible_hold"`; `/api/status` and `/api/health` list
   open holds in `irreversible_holds`, and `GET /jobs/N` carries `hold`.
+  ([#284](https://github.com/monocsp/remote_ci_monitor/pull/284))
 - **`rcm release-hold N [--reason TEXT] [--json]`** releases a group hold after an admin checked
   the machine (exit 0 released, 1 no open hold, 2 refused, 3 unreachable).
+  ([#284](https://github.com/monocsp/remote_ci_monitor/pull/284))
 - **Hold notifications.** Every notification carries `RCM_EVENT`, `RCM_HOLD`, `RCM_HOLD_GROUP` and
   `RCM_HOLD_NOTE` (and `event` · `hold` in a webhook body); a `[[notify]]` rule with
   `on = ["irreversible_hold"]` is called once for each new hold. The default `on` is unchanged.
+  ([#284](https://github.com/monocsp/remote_ci_monitor/pull/284))
 
 ## [0.11.1] - 2026-11-26
 
