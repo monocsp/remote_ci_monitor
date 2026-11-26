@@ -72,15 +72,19 @@ def _multicast_socket(port: int, *, bind_ip: str = "0.0.0.0", loop: bool = True)
         # INADDR_ANY 만 가입하면 기본 경로 인터페이스에서만 듣는다(실측: 유선 + Wi-Fi 멀티홈
         # 서버가 Wi-Fi 쪽 질의를 못 들었다). 루프백에도 — LAN 쪽 멀티캐스트를 받지 못하는
         # 프로세스라도 같은 호스트의 질의기에는 답한다. 이미 가입한 인터페이스는 EADDRINUSE — 무시.
+        # 루프백 가입은 덤이다 — 세지 않는다. 실제 인터페이스 가입이 하나도 안 되면(오프라인 ·
+        # 기본 경로 없음) 루프백만 되어도 광고는 꺼진 것으로 올린다(`start()` False + `error`).
         joined = 0
         failure: OSError | None = None
         for iface in ("0.0.0.0", *local_ipv4s(), LOOPBACK_IF):
             mreq = struct.pack("4s4s", socket.inet_aton(MDNS_GROUP), socket.inet_aton(iface))
             try:
                 s.setsockopt(socket.IPPROTO_IP, socket.IP_ADD_MEMBERSHIP, mreq)
-                joined += 1
             except OSError as e:
-                failure = e
+                if iface != LOOPBACK_IF:
+                    failure = e
+                continue
+            joined += iface != LOOPBACK_IF
         if not joined:
             raise failure if failure is not None else OSError("cannot join the multicast group")
         s.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_TTL, 255)
