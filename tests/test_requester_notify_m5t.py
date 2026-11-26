@@ -607,3 +607,56 @@ def test_tn11_a_job_that_never_started_says_nothing_about_artifacts(monkeypatch,
         assert "#381 cancelled" in err.splitlines(), (state, err)
         assert "artifacts" not in err, (state, err)
         assert last_json(out)["artifacts"] == doc["artifacts"]  # JSON 은 그대로 싣는다
+
+
+def test_tn7_the_notification_says_exit_3_and_exit_4_in_their_own_words(monkeypatch, capsys):
+    """끝 줄이 없는 끝(종료 3 · 4)도 알림 본문이 무엇이 일어났는지 말한다."""
+    sent = capture_notifications(monkeypatch)
+    # 종료 3, 시간 초과: 잡은 아직 돈다 — 끝 줄이 없고 종료 코드를 말한다
+    running = wait_doc(state="running", exit_code=None, job_seconds=None)
+    rc, out, _err, escaped = wait_notify_once(monkeypatch, capsys, code=3, doc=running)
+    assert escaped is None and rc == 3
+    assert sent.pop() == ("rcm", "#381 wait ended · exit 3")
+    # 종료 3, 서버를 잃음: 잡 문서를 한 번도 못 봤다
+    rc, out, _err, escaped = wait_notify_once(monkeypatch, capsys, code=3, doc=None)
+    assert escaped is None and rc == 3
+    assert sent.pop() == ("rcm", "#381 wait ended · exit 3")
+    # 종료 4, 사람이 할 일: 표식 한 줄이 본문이다
+    asking = wait_doc(
+        state="running",
+        exit_code=None,
+        job_seconds=None,
+        action={"code": "approve_release", "note": "tap approve", "at": "2026-11-26T01:05:00Z"},
+    )
+    rc, out, _err, escaped = wait_notify_once(monkeypatch, capsys, code=4, doc=asking)
+    assert escaped is None and rc == 4
+    assert sent.pop() == ("rcm", "#381 needs action · approve_release · tap approve")
+    assert sent == []
+
+
+def test_tn6_os_notify_failures_warn_once_and_never_raise(monkeypatch, tmp_path):
+    """알림 도구의 실패 갈래 넷 — 지원 안 하는 OS · 0 아닌 종료 · 시간 초과 · 시작 못 함."""
+    monkeypatch.setattr(sys, "platform", "win32")
+    assert cli.os_notify("rcm", "#381 succeeded") == (
+        "warning: --notify: no notifier on this platform (win32) — none sent"
+    )
+    monkeypatch.setattr(sys, "platform", "linux")
+    bin_dir = tmp_path / "fail-bin"
+    bin_dir.mkdir()
+    monkeypatch.setenv("PATH", str(bin_dir))
+    tool = bin_dir / "notify-send"
+    tool.write_text("#!/bin/sh\nexit 3\n")
+    tool.chmod(0o755)
+    assert cli.os_notify("rcm", "#381 succeeded") == "warning: --notify: notify-send exited 3"
+    tool.write_text("#!/bin/sh\nexec /bin/sleep 5\n")
+    monkeypatch.setattr(cli, "NOTIFY_TIMEOUT_SECONDS", 0.3)
+    started = time.monotonic()
+    assert cli.os_notify("rcm", "#381 succeeded") == (
+        "warning: --notify: notify-send did not finish in 0.3s"
+    )
+    assert time.monotonic() - started < 4  # 도구를 끝까지 기다리지 않았다
+    tool.write_text("#!/nonexistent/interpreter\n")
+    got = cli.os_notify("rcm", "#381 succeeded")
+    assert got is not None and got.startswith("warning: --notify: notify-send could not start ("), (
+        got
+    )
