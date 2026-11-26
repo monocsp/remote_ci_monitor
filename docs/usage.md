@@ -54,8 +54,9 @@ from the config files that exist, and writes no role anywhere.
    instead.
 2. **Install and start the service.** Run the lines setup printed under `next —`, exactly as
    printed: on macOS a `mkdir -p`, a `cp -n` into `~/Library/LaunchAgents/` and a
-   `cmp -s … && launchctl bootstrap gui/$(id -u) …`; on Linux `sudo loginctl enable-linger $USER`
-   (so the service outlives your login) and `systemctl --user … enable --now`. Then
+   `cmp -s … && launchctl bootstrap gui/501 …` (with your own user id in place of `501`); on
+   Linux `sudo loginctl enable-linger $USER` (so the service outlives your login) and
+   `systemctl --user … enable --now`. Then
    `curl http://127.0.0.1:8787/api/health` answers. The log is
    `~/Library/Logs/rcm/server.log` on macOS and `~/.local/state/rcm/server.log` on Linux.
 3. **Make a token.** Run the first line setup printed under `tokens —`,

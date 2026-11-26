@@ -145,12 +145,14 @@ path; setup warns when it could only find an `rcm` on `PATH`.
 In a systemd unit a path with a space, `%` or `$` is written the way systemd reads it (quoted,
 `%%`, `$$`); a path with a line break or another control character is refused with exit 2.
 
-**It registers and starts nothing.** It prints the lines to run yourself, with absolute paths:
+**It registers and starts nothing.** It prints the lines to run yourself, with absolute paths and
+your numeric user id in `gui/<uid>` (`gui/501`, what `id -u` prints), so a pasted line holds no
+shell substitution:
 
 ```sh
 mkdir -p <log folder> <LaunchAgents folder>
 cp -n <config dir>/service/<label>.plist <LaunchAgents folder>/<label>.plist
-cmp -s <config dir>/service/<label>.plist <LaunchAgents folder>/<label>.plist && launchctl bootstrap gui/$(id -u) <LaunchAgents folder>/<label>.plist || echo "not started: the installed file differs from the one setup wrote, or the start failed; to replace an installed one: launchctl bootout, cp without -n, launchctl bootstrap"
+cmp -s <config dir>/service/<label>.plist <LaunchAgents folder>/<label>.plist && launchctl bootstrap gui/<uid> <LaunchAgents folder>/<label>.plist || echo "not started: the installed file differs from the one setup wrote, or the start failed; to replace an installed one: launchctl bootout, cp without -n, launchctl bootstrap"
 ```
 
 On Linux the start is `systemctl --user daemon-reload && systemctl --user enable --now
@@ -160,8 +162,8 @@ when you log out. `cp -n` never replaces a file already installed, and the start
 installed file is the one setup just wrote. When a service with the same label is already loaded
 (setup only asks: `launchctl print`, or `systemctl --user is-active` and `is-enabled`), it says so
 and leaves it alone. Then, and when `--force service` rewrote a service file that was there, it
-also prints the order that replaces the installed one: `launchctl bootout gui/$(id -u)/<label>`,
-`cp` without `-n`, `launchctl bootstrap gui/$(id -u) <file>`, or `systemctl --user disable --now
+also prints the order that replaces the installed one: `launchctl bootout gui/<uid>/<label>`,
+`cp` without `-n`, `launchctl bootstrap gui/<uid> <file>`, or `systemctl --user disable --now
 <unit>`, `cp`, `systemctl --user daemon-reload`, `systemctl --user enable --now <unit>`. Only
 launchd's `Could not find service` and systemd's `is-active` exit 3 with `inactive` or `unknown`
 on its output count as not loaded (`activating` or `reloading` does not, and `failed` means the
@@ -171,7 +173,7 @@ printed start may fail on that machine. Once the file is installed, `rcm doctor`
 installed copy, `--label` or not.
 
 **To remove it.** Unload the service, then delete the installed file and the files setup wrote.
-On macOS: `launchctl bootout gui/$(id -u)/<label>` and `rm -f ~/Library/LaunchAgents/<label>.plist`;
+On macOS: `launchctl bootout gui/<uid>/<label>` and `rm -f ~/Library/LaunchAgents/<label>.plist`;
 on Linux: `systemctl --user disable --now <unit>`, `rm -f ~/.config/systemd/user/<unit>` and
 `systemctl --user daemon-reload`. The config file and `<config dir>/service/<file>` go the same
 way; a `data_dir` and its database stay until you delete them. setup prints this as one

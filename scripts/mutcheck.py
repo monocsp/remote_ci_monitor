@@ -3884,10 +3884,13 @@ MUTANTS = (
         name="setup-remove-line-without-cmp",
         path="src/remote_ci_monitor/core/setup.py",
         old=(
-            '            service = f"{same} && {{ launchctl bootout gui/$(id -u)/{q(label)}; '
+            '            service = f"{same} && {{ launchctl bootout {gui_domain(uid)}/{q(label)}; '
             '{gone}; }}; "\n'
         ),
-        new='            service = f"{{ launchctl bootout gui/$(id -u)/{q(label)}; {gone}; }}; "\n',
+        new=(
+            '            service = f"{{ launchctl bootout {gui_domain(uid)}/{q(label)}; '
+            '{gone}; }}; "\n'
+        ),
         tests=(
             "tests/test_setup.py::"
             "test_b8_3_the_remove_line_takes_the_installed_file_only_when_setup_wrote_it",
@@ -3908,11 +3911,11 @@ MUTANTS = (
         name="setup-remove-line-unload-gates-the-rm",
         path="src/remote_ci_monitor/core/setup.py",
         old=(
-            '            service = f"{same} && {{ launchctl bootout gui/$(id -u)/{q(label)}; '
+            '            service = f"{same} && {{ launchctl bootout {gui_domain(uid)}/{q(label)}; '
             '{gone}; }}; "\n'
         ),
         new=(
-            '            service = f"{same} && launchctl bootout gui/$(id -u)/{q(label)} && '
+            '            service = f"{same} && launchctl bootout {gui_domain(uid)}/{q(label)} && '
             '{gone}; "\n'
         ),
         tests=(
@@ -4669,6 +4672,19 @@ MUTANTS = (
         tests=(
             "tests/test_onboarding_findings.py::"
             "test_ob2_doctor_says_the_service_it_found_runs_another_config",
+        ),
+    ),
+    Mutant(
+        # setup 이 찍는 launchctl 줄이 셸 치환 `gui/$(id -u)` 로 돌아간다 — 사람이 붙여 넣는 줄에
+        # 치환이 있고, 안전 훅이 그 줄을 막는다(온보딩 시험 OB3)
+        name="ob3-setup-gui-domain-command-substitution",
+        path="src/remote_ci_monitor/core/setup.py",
+        old='    return f"gui/{os.getuid() if uid is None else uid}"\n',
+        new='    return "gui/$(id -u)"\n',
+        tests=(
+            "tests/test_onboarding_findings.py::"
+            "test_ob3_setup_prints_the_numeric_uid_not_a_command_substitution",
+            "tests/test_onboarding_findings.py::test_ob3_core_commands_take_the_uid_they_are_given",
         ),
     ),
 )

@@ -51,8 +51,8 @@ rcm 을 쓰는 머신에는 저마다 역할이 있다. `rcm setup` 이 역할 �
    [도는 설치 옆의 시험 설치](#도는-설치-옆의-시험-설치)를 따른다.
 2. **서비스를 설치하고 띄운다.** setup 이 `next —` 아래에 찍은 줄을 찍힌 그대로 친다. macOS 에서는
    `mkdir -p`, `~/Library/LaunchAgents/` 로 복사하는 `cp -n`,
-   `cmp -s … && launchctl bootstrap gui/$(id -u) …` 다. Linux 에서는
-   `sudo loginctl enable-linger $USER`(로그아웃해도 서비스가 남게 한다)와
+   `cmp -s … && launchctl bootstrap gui/501 …` 이다(`501` 자리에는 내 사용자 id 가 찍힌다).
+   Linux 에서는 `sudo loginctl enable-linger $USER`(로그아웃해도 서비스가 남게 한다)와
    `systemctl --user … enable --now` 다. 그러면 `curl http://127.0.0.1:8787/api/health` 가
    답한다. 로그는 macOS 에서 `~/Library/Logs/rcm/server.log`, Linux 에서
    `~/.local/state/rcm/server.log` 다.
