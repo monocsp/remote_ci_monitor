@@ -386,8 +386,11 @@ it misses does not exit 1, and "nothing would come to this machine" is not claim
 The coordinator's `[[tools]]` hints show for the server's own lane too.
 
 The service file is found in this order: `--service-file`; with `--config FILE`, the one `rcm setup`
-put in the `service/` folder next to `FILE` (its copy in the install place instead, once that copy
-holds the same bytes or starts rcm with `--config FILE`); the standard places
+put in the `service/` folder next to `FILE` (its copy in the install place instead, whenever a copy
+with the same label is installed there — bytes and `--config` are not compared); this step runs
+only for a `--config` outside the default config folder, and when that folder holds none of the
+role's files, several, or one rcm cannot read, it picks nothing and the next place is tried, so a
+config in the default folder goes straight to the standard order; the standard places
 (`~/Library/LaunchAgents/com.remote-ci-monitor.*.plist`, `~/.config/systemd/user/rcm-*.service`,
 and the system places `/Library/LaunchDaemons/com.remote-ci-monitor.*.plist` and
 `/etc/systemd/system/rcm-*.service`, where the Linux server install above puts

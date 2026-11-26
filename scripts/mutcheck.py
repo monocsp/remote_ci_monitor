@@ -4702,6 +4702,20 @@ MUTANTS = (
         ),
     ),
     Mutant(
+        # 같은 라벨의 설치본이 setup 사본을 이기지 않고 늘 setup 사본을 고른다 — 설치본 우선
+        # (6-B-V2)이 깨져 손으로 고친 설치본 대신 설치하지 않은 사본으로 잰다
+        name="ob2-doctor-staged-copy-beats-the-installed-copy",
+        path="src/remote_ci_monitor/doctor.py",
+        old="        out.append(there if there is not None and there.is_file() else p)\n",
+        new="        out.append(p)\n",
+        tests=(
+            "tests/test_onboarding_findings.py::"
+            "test_ob2_trial_config_measures_the_installed_copy_of_the_same_label",
+            "tests/test_onboarding_findings.py::"
+            "test_ob2_doctor_prefers_the_installed_copy_of_this_configs_service_file",
+        ),
+    ),
+    Mutant(
         # 기본 설정 폴더의 `--config` 에서도 새 단계가 돈다 — 설치하지 않은 setup 사본이 표준
         # 라벨의 설치된 서비스를 이겨 예전 결과가 바뀐다(PR #277 검토 MED 1)
         name="ob2-doctor-new-stage-runs-for-the-default-config",

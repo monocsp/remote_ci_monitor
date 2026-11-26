@@ -314,10 +314,12 @@ def test_ob2_trial_config_measures_the_installed_copy_of_the_same_label(
     home, trial_server, tmp_path, capsys
 ):
     """# OB2 — 기본이 아닌 `--config` 에서도 같은 라벨로 설치 자리에 사본이 있으면 그 사본을 잰다
-    — 바이트 · `--config` 를 견주지 않는다(설치본 우선, 6-B-V2)."""
+    — 바이트 · `--config` 를 견주지 않는다(설치본 우선, 6-B-V2). 표준 라벨로 도는 다른 설치의
+    서비스와 setup 사본이 곁에 있어도 같은 라벨의 설치본이 둘 다 이긴다."""
     trial, staged = _trial_install(tmp_path, trial_server.port)
     installed = home / "Library" / "LaunchAgents" / f"{TRIAL_LABEL}.plist"
     _hand_edited(staged, installed)
+    _server_plist(home, home / ".config" / "rcm" / "server.toml")
     _code, raw = _doctor(capsys, "--role", "coordinator-worker", "--config", str(trial), "--json")
     doc = json.loads(raw)
     assert doc["service"]["file"] == f"~/Library/LaunchAgents/{TRIAL_LABEL}.plist", doc["service"]
