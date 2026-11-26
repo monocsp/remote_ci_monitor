@@ -7019,6 +7019,91 @@ MUTANTS = (
         tests=("tests/web/unreachable_m5tb.test.js",),
         runner="node",
     ),
+    Mutant(
+        # `rcm wait` · `rcm run` 이 워커가 돌아온 것을 말하지 않는다 — 「연락이 끊김」이 마지막
+        # 말로 남아 잡이 아직 끊긴 것으로 읽힌다(RL28, P3 r1)
+        name="grace-back-line-dropped",
+        path="src/remote_ci_monitor/cli.py",
+        old='        return f"#{jid} {who} is back — the job goes on"\n',
+        new="        return None\n",
+        tests=(
+            "tests/test_queue_unreachable_m5tb.py::test_rl28_rcm_wait_says_when_the_worker_is_back",
+            "tests/test_queue_unreachable_m5tb.py::"
+            "test_rl28_rcm_run_prints_the_same_lines_while_it_waits",
+        ),
+    ),
+    Mutant(
+        # 끊김 줄을 한 번이 아니라 폴링마다 찍는다(RL28, P3 r1)
+        name="grace-lost-line-every-poll",
+        path="src/remote_ci_monitor/cli.py",
+        old=(
+            "            if self.away:\n                return None\n            self.away = True\n"
+        ),
+        new="            self.away = True\n",
+        tests=(
+            "tests/test_queue_unreachable_m5tb.py::"
+            "test_rl28_rcm_wait_says_once_that_the_worker_is_unreachable_and_keeps_waiting",
+        ),
+    ),
+    Mutant(
+        # 늦게 온 결과를 사람용 줄로 말하지 않는다(RL29 · §4.6, P3 r1)
+        name="late-result-line-dropped",
+        path="src/remote_ci_monitor/core/render_text.py",
+        old='    late = job.get("late_result")\n',
+        new="    late = None\n",
+        tests=(
+            "tests/test_queue_unreachable_m5tb.py::"
+            "test_rl29_rcm_wait_shows_a_late_result_as_one_line_that_does_not_count",
+        ),
+    ),
+    Mutant(
+        # 웹이 서버가 못 읽은 홀드 목록(null)을 「홀드 없음」으로 읽는다(RL45, P3 r1)
+        name="holds-null-read-as-none",
+        path="src/remote_ci_monitor/web/app.js",
+        old="    if (!Array.isArray(h)) return null;   // mutcheck: holds-null-read-as-none",
+        new="    if (!Array.isArray(h)) return [];",
+        tests=("tests/web/unreachable_m5tb.test.js",),
+        runner="node",
+    ),
+    Mutant(
+        # doctor 가 키 없는(옛 서버) · null 인 홀드 목록을 「없음」으로 읽는다(RL45, P3 r1)
+        name="doctor-holds-missing-read-as-none",
+        path="src/remote_ci_monitor/doctor.py",
+        old="    if not isinstance(raw, list):\n        return None\n    out = []\n",
+        new="    if not isinstance(raw, list):\n        return ()\n    out = []\n",
+        tests=(
+            "tests/test_hold_display_m5tb.py::"
+            "test_rl45_doctor_json_has_the_key_and_lists_only_this_machines_holds",
+        ),
+    ),
+    Mutant(
+        # doctor 가 못 읽는 홀드 항목을 빼고 나머지만 보인다(RL45, P3 r1)
+        name="doctor-hold-unreadable-entry-dropped",
+        path="src/remote_ci_monitor/doctor.py",
+        old=(
+            "        if not isinstance(job_id, int) or isinstance(job_id, bool):\n"
+            "            return None\n"
+        ),
+        new=(
+            "        if not isinstance(job_id, int) or isinstance(job_id, bool):\n"
+            "            continue\n"
+        ),
+        tests=(
+            "tests/test_hold_display_m5tb.py::"
+            "test_rl45_doctor_json_is_null_when_one_hold_cannot_be_read",
+        ),
+    ),
+    Mutant(
+        # coordinator-worker 의 doctor 가 원격 워커의 홀드까지 이 머신의 할 일로 보인다(RL45, P3 r1)
+        name="coordinator-worker-holds-not-local",
+        path="src/remote_ci_monitor/doctor.py",
+        old='                self.holds = [h for h in health.holds if h["worker"] is None]\n',
+        new="                self.holds = list(health.holds)\n",
+        tests=(
+            "tests/test_hold_display_m5tb.py::"
+            "test_rl45_coordinator_worker_sees_the_local_lane_holds",
+        ),
+    ),
 )
 
 
