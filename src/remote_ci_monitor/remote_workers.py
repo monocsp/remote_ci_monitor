@@ -104,9 +104,11 @@ MAX_SEQ = 2**53 - 1
 #: janitor 한 틱에 유예로 닫는 잡의 상한(결정 339-g). 늦게 닫는 것은 안전한 쪽이라 판단이고 재지
 #: 않았다 — 서버 재시작 뒤 한꺼번에 넘어도 다른 janitor 일을 막지 않는다
 GRACE_CLOSES_PER_TICK = 20
-#: 세션마다 기억하는 「조용했다가 다시 들림」 기록의 수(T4). 취소 중 잡의 창은 그 가운데 요청 뒤의
-#: 것만 보고, 최근 것만 있어도 판정이 맞다 — 더 오래된 기록은 이미 지난 창이다
-RESUMED_KEEP = 8
+#: 세션마다 기억하는 「조용했다가 다시 들림」 기록 수의 상한(T4) — 메모리 상한일 뿐이다. 기록은
+#: `_prune_resumed` 가 열린 취소의 가장 이른 요청보다 오래된 것부터 지운다. 개수로 자르면 요청을
+#: 걸친 침묵을 끝낸 기록(창의 시작)이 그 뒤의 짧은 침묵 기록들에 밀려 지워졌다(P3 3라운드 LOW).
+#: 이 상한에 닿으려면 취소 하나가 열린 동안 2H 넘는 침묵이 이만큼 있어야 한다
+RESUMED_KEEP = 1024
 
 
 def _api_error(status: int, message: str, **extra: Any) -> Exception:
@@ -1457,6 +1459,26 @@ class RemoteWorkersMixin:
                 deadline = max(deadline, at + window)
         return deadline
 
+    def _prune_resumed(self, jobs: list[Job], now: datetime) -> None:
+        """창이 볼 일 없는 「다시 들림」 기록을 지운다(T4 · P3 3라운드 LOW). `jobs` 는 그 세션의
+        busy 잡 전부이고 `now` 는 그 목록을 읽기 전 시각이다.
+
+        창은 요청 뒤의 기록만 본다(`_cancel_deadline`). 그래서 열린 취소 가운데 가장 이른 요청
+        이전의 기록은 쓰이지 않는다. 열린 취소가 없으면 기준은 `now` 다 — 목록을 읽은 뒤에 온
+        취소의 요청은 `now` 뒤라 그 전의 기록을 보지 않는다."""
+        floors: dict[str, datetime] = {}
+        for job in jobs:
+            key = job.worker_session_id or f"legacy:{job.worker_name}"
+            floor = floors.get(key, now)
+            if job.state == CANCELLING and job.cancel is not None:
+                floor = min(floor, job.cancel.requested_at)  # mutcheck: resumed-pruned-past-request
+            floors[key] = floor
+        with self._heard_lock:
+            for key, floor in floors.items():
+                records = self._resumed.get(key)
+                if records:
+                    records[:] = [r for r in records if r[0] > floor]
+
     def _close_unconfirmed_cancels(self, jobs: list[Job], now: datetime) -> list[int]:
         """살아 있는 워커가 취소를 확인하지 않으면 `kill_at + 2 × heartbeat` 뒤 서버가 닫는다.
         `kill_at` 은 `_cancel_deadline` 이 조용했던 시간만큼 민다. 홀드가 걸린 잡 id 를 돌려준다 —
@@ -1464,6 +1486,7 @@ class RemoteWorkersMixin:
         # 순환 import 를 피한다(위 finish 의 `outcome_for` 와 같다)
         from remote_ci_monitor.worker import cancel_outcome
 
+        self._prune_resumed(jobs, now)
         held: list[int] = []
         slack = timedelta(seconds=2 * self.config.server.worker_heartbeat_seconds)
         for job in jobs:

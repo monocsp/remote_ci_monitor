@@ -6558,6 +6558,20 @@ MUTANTS = (
             "test_rl54_every_finish_outside_the_store_decides_the_hold",
         ),
     ),
+    Mutant(
+        # 「다시 들림」 기록을 열린 취소와 상관없이 지운다 — 창의 시작이 사라져 일찍 닫힌다
+        name="resumed-pruned-past-request",
+        path="src/remote_ci_monitor/remote_workers.py",
+        old=(
+            "                floor = min(floor, job.cancel.requested_at)  # mutcheck: "
+            "resumed-pruned-past-request\n"
+        ),
+        new="                floor = floor\n",
+        tests=(
+            "tests/test_worker_selfstop_m5tb.py::"
+            "test_rl8_a_many_short_silences_after_the_cancel_do_not_drop_where_its_window_began",
+        ),
+    ),
 )
 
 

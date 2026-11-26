@@ -1395,6 +1395,48 @@ def test_rl8_a_a_partition_shorter_than_worker_timeout_starts_the_cancel_window_
     assert [(h["job_id"], h["cause"]) for h in holds(srv)] == [(a, "cancel_unconfirmed")]
 
 
+def test_rl8_a_many_short_silences_after_the_cancel_do_not_drop_where_its_window_began(srv):
+    """P3 3라운드 LOW(A4): 세션마다 「다시 들림」 기록을 최근 8개만 두면, 요청을 걸친 침묵을 끝낸
+    기록(창의 시작)이 그 뒤의 짧은 침묵 기록들에 밀려 지워진다. 그러면 창이 요청 때부터로 돌아가
+    워커가 취소를 들은 지 창보다 짧은데 `cancel_unconfirmed` 로 닫힌다. 기록은 열린 취소의 가장
+    이른 요청보다 오래된 것만 지운다."""
+    srv.cfg.server.grace_seconds = 120  # kill 창 120초 — 짧은 침묵 여러 번이 창 안에 든다
+    srv.registered("build-02")
+    a = srv.queued_job(preset="ship")
+    assert srv.claimed("build-02", 1) == a
+    assert srv.heartbeat("build-02", jobs=[a])[0] == 200
+    srv.clock.advance(1)
+    assert srv.cancel(a)[1]["state"] == "cancelling"
+    srv.clock.advance(50)  # 요청을 걸친 침묵(2H 넘고 worker_timeout 안)
+    status, body = srv.heartbeat("build-02", jobs=[a])
+    assert status == 200 and body["cancel"] == [a]  # 창이 여기서 시작한다
+    heard = srv.clock()
+    for _ in range(9):  # 2H(10초)를 넘는 짧은 침묵 아홉 번 — 기록 아홉 개가 더 쌓인다
+        srv.clock.advance(11)
+        assert srv.heartbeat("build-02", jobs=[a])[0] == 200
+        assert srv.store.get_job(a).state == CANCELLING  # 들은 지 창(120 + 2H)이 안 지났다
+    while (srv.clock() - heard).total_seconds() < 120 + 2 * 5:
+        srv.clock.advance(5)
+        srv.heartbeat("build-02", jobs=[a])
+        if (srv.clock() - heard).total_seconds() < 120 + 2 * 5:
+            assert srv.store.get_job(a).state == CANCELLING
+    j = srv.store.get_job(a)
+    assert j.state == CANCELLED and j.summary_code == "cancel_unconfirmed"
+
+
+def test_rl8_a_resumed_records_older_than_every_open_cancel_are_dropped(srv):
+    """A4 의 반대쪽: 열린 취소가 없는 세션의 「다시 들림」 기록은 쌓이지 않는다 — 다음 취소의 요청은
+    지금 뒤라 지금까지의 기록을 보지 않는다."""
+    srv.registered("build-02")
+    a = srv.queued_job(preset="ship")
+    assert srv.claimed("build-02", 1) == a
+    for _ in range(12):
+        srv.clock.advance(11)
+        assert srv.heartbeat("build-02", jobs=[a])[0] == 200
+    session = srv.store.get_job(a).worker_session_id
+    assert srv.app._resumed.get(session, []) == []
+
+
 def test_rl7_a_cancel_window_that_ran_out_while_the_server_was_down_starts_again(srv):
     """서버가 꺼진 동안 취소 중 잡의 `kill_at + 2H` 가 지났다. 다시 뜬 서버의 첫 틱과, 워커가
     `worker_timeout` 안에 돌아와 보낸 첫 heartbeat 가 그 잡을 `cancel_unconfirmed` 로 닫으면 안
