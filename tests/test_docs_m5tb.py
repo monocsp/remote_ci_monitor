@@ -277,3 +277,10 @@ def test_p63_2_the_irreversible_section_says_its_job_shows_no_retry_limit():
     `max_attempts` 가 null 이다."""
     body = flat(section(CONFIGURATION, IRREVERSIBLE))
     assert "its job document shows `max_attempts: null`" in body
+
+
+def test_p63_3_the_irreversible_section_says_a_late_cancel_keeps_the_failed_close():
+    """# P6-3 #3 취소가 명령을 멈추기 전에 명령이 반복 종료 코드로 끝나면 `failed` 다."""
+    body = flat(section(CONFIGURATION, IRREVERSIBLE))
+    assert "A cancel that has not stopped the command yet does not change that" in body
+    assert "the job ends `failed`, as any job that does not retry does" in body
