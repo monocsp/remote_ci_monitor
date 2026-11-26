@@ -171,14 +171,18 @@ FINISH_HOLD_SECONDS = 300
 #: 보내면 버린다
 RETRANSMIT_SECONDS = 24 * 3600
 #: 죽은 세션 D 의 큐가 서버 오류(HTTP 응답)를 받는 시간이 이만큼이면 큐를 디스크에 둔 채 등록한다
-#: (결정 337 · §4.4 의 7). 연결 실패 시간은 세지 않는다
+#: (결정 337 · §4.4 의 7). 연결 실패 시간은 세지 않는다. 워커의 단조 시계(`mono_fn`)로 잰다(§4.1.3
+#: 「D 큐 등록 대기(3판)」) — 벽시계가 뛰면 일찍 등록하고, 서 있으면 끝없이 기다린다(batch-9 #3)
 DEAD_SESSION_WAIT_SECONDS = 300
 #: 잡마다 보내는 스레드의 백오프(§4.5) — 1초에서 두 배씩 30초까지. 도는 잡에는 횟수 상한이 없다
 BACKOFF_START_SECONDS = 1.0
 BACKOFF_MAX_SECONDS = 30.0
 #: D 의 등록 대기가 상한(`DEAD_SESSION_WAIT_SECONDS`)에 닿은 뒤 빚진 finish(`owes_finish`)를
-#: 기다리는 상한 — 그때 날아가던 요청 하나 · 백오프 한 번 · finish 요청 하나(batch-8). 실제
-#: 시간으로 잰다. 벽시계가 뒤로 가면 끝난 지 300초가 늦게 오니 이것이 대기를 끝낸다
+#: 기다리는 상한 — 백오프 한 번과 보통 요청 두 번(batch-8). 등록은 이보다 더 기다리지 않는다.
+#: 그동안 finish 를 한 번 보내 보지만, 그 큐의 보내는 스레드가 로그 POST(시한 60초) · 번들
+#: PUT(시한 300초)에 묶여 있으면 finish 를 해 보지 못하고 잡은 restarted-without-job 으로 닫힌다
+#: (batch-9 #1 — 등록이 그 요청을 기다리지 않는 것이 맞다). 단조 시계(`mono_fn`)로 잰다. 벽시계가
+#: 뒤로 가면 끝난 지 300초가 늦게 오니 이것이 대기를 끝낸다
 OWED_FINISH_WAIT_SECONDS = BACKOFF_MAX_SECONDS + 2 * WORKER_REQUEST_TIMEOUT_SECONDS
 #: 멈추는 중(신호 · 펜싱)이면 보내는 스레드가 이만큼 더 해 보고 나머지는 디스크에 남긴다 — 다음
 #: 프로세스가 죽은 세션의 큐로 보낸다(§4.4 의 7). 옛 `REPORT_RETRIES` 의 합(1 + 2 + 4)과 같다
@@ -1961,11 +1965,10 @@ class RemoteWorker:
 
     def send_dead_queues(self) -> None:
         """등록 전에 D 의 큐를 D 의 세션 id 로 보낸다(§4.4 의 7 · 결정 326 · 337). 등록이 D 를
-        펜싱하면
-        D 의 finish 가 버려지기 때문이다. 서버가 응답하는(HTTP 상태가 오는) 시간으로 300초가 지나면
-        남은 큐를 디스크에 둔 채 등록한다 — 연결 실패 시간은 세지 않는다. 로컬 오류(예상 못 한
-        예외 · 못 읽는 스풀)는 한 번 지나가는 것일 수 있어 같은 상한 안에서 다시 해 보고, 그
-        시간이 섞였으면 줄이 그렇게 말한다(batch-7)."""
+        펜싱하면 D 의 finish 가 버려지기 때문이다. 서버가 응답하는(HTTP 상태가 오는) 시간이
+        단조 시계로 300초가 되면 남은 큐를 디스크에 둔 채 등록한다 — 연결 실패 시간은 세지
+        않는다. 로컬 오류(예상 못 한 예외 · 못 읽는 스풀)는 한 번 지나가는 것일 수 있어
+        같은 상한 안에서 다시 해 보고, 그 시간이 섞였으면 줄이 그렇게 말한다(batch-7)."""
         senders = self.dead_queues()
         if not senders:
             return
@@ -1977,12 +1980,15 @@ class RemoteWorker:
         answered = 0.0
         local = False  # 센 시간에 로컬 오류가 섞였다
         cut: set[int] = set()  # 상한에 닿아 멈춘 큐
-        capped_at: float | None = None  # 상한에 처음 닿은 때(실제 시간)
-        last = self._epoch()
+        capped_at: float | None = None  # 상한에 처음 닿은 때(단조 시계)
+        # 두 대기 모두 단조 시계로 잰다(§4.1.3 「D 큐 등록 대기(3판)」, batch-9 #3). 끝난 지
+        # 300초 · 24시간은 디스크의 `ended_at` 이라 보내는 스레드가 벽시계로 따로 본다
+        clock = self.mono_fn  # mutcheck: dead-session-wall-clock
+        last = clock()
         while any(s.alive() for s in senders):
             if self.stopping.wait(0.05):
                 break
-            now = self._epoch()
+            now = clock()
             # 살아 있는 D 의 큐 가운데 마지막 시도가 서버의 오류 응답이었던 것이 있을 때만 센다.
             # 깃발은 큐마다 둔다 — 워커 하나의 깃발은 끝난 큐의 옛 503 을 다른 큐의 연결 실패
             # 시간에 남겼다
@@ -1995,10 +2001,10 @@ class RemoteWorker:
             if answered >= DEAD_SESSION_WAIT_SECONDS:  # mutcheck: dead-session-wait-forever
                 why = "server errors or local errors" if local else "server errors"
                 # 빚진 finish 를 기다리는 데도 고정된 상한이 있다. 보내는 쪽의 백오프와 요청 시한이
-                # 실제 시간이라 실제 시간으로 잰다 — 벽시계는 뒤로 갈 수 있다(batch-8 #1)
+                # 실제 시간이라 단조 시계로 잰다 — 벽시계는 뒤로 갈 수 있다(batch-8 #1)
                 if capped_at is None:
-                    capped_at = time.monotonic()
-                waited = time.monotonic() - capped_at
+                    capped_at = now
+                waited = now - capped_at
                 late = waited >= OWED_FINISH_WAIT_SECONDS  # mutcheck: owed-finish-waits-forever
                 owed = False
                 for s in senders:

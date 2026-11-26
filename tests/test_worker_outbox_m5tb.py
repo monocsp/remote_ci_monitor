@@ -2262,14 +2262,37 @@ def test_b7_3_a_finish_sent_first_says_what_it_leaves_behind(tmp_path, fast):
 # ── batch-8: 빚진 finish 대기의 상한 · 「not sent」 줄의 갈래 ─────────────────────────
 
 
+class _ClocksStop(FakeServer):
+    """처음 `ticks` 번의 요청만 두 시계를 민다 — 그 뒤 두 시계가 다 선다. D 의 클라이언트는
+    사본이라 남은 횟수를 사본과 나눈다."""
+
+    def __init__(self, clock: WClock, *, tick: float, ticks: int) -> None:
+        super().__init__(clock, tick=tick)
+        self.left = [ticks]
+
+    def __copy__(self) -> _ClocksStop:
+        other = _ClocksStop.__new__(_ClocksStop)
+        other.__dict__.update(self.__dict__)
+        return other
+
+    def _next(self, route: str) -> None:
+        with self.lock:
+            self.left[0] -= 1
+            if self.left[0] < 0:
+                self.tick = 0.0
+        super()._next(route)
+
+
 def test_b8_1_a_registration_does_not_wait_on_a_finish_whose_end_is_ahead_of_the_clock(
     tmp_path, fast
 ):
     """# batch-8 #1 벽시계가 뒤로 가 D 큐의 `ended_at` 이 미래다. 그 잡의 나이는 음수라 finish 가
     먼저 가지 않는다. 등록 상한은 「빚진 finish」를 기다리는데, 음수 나이를 빚으로 보면 시계가
-    따라잡을 때까지(여기서는 1년) 등록이 기다린다. 음수 나이는 빚진 finish 가 없다."""
+    따라잡을 때까지(여기서는 1년) 등록이 기다린다. 음수 나이는 빚진 finish 가 없다.
+    batch-9 #3: 등록 대기는 단조 시계로 잰다. 두 시계가 요청 8번(320초) 뒤에 멈추니, 빚으로 보면
+    단조 60초 상한도 오지 않아 등록이 끝나지 않는다. 대기 고리의 박자와 상관없이 갈린다."""
     clock = WClock()
-    fake = FakeServer(clock, tick=40)
+    fake = _ClocksStop(clock, tick=40, ticks=8)
     w1 = wworker(tmp_path, fake, clock)
     w1.prepare_sessions()
     ended_queue(w1, 7, b"x\n")

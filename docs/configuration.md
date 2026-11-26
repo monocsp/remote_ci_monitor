@@ -1554,11 +1554,15 @@ Time without a connection does not count toward the 300 s. A local error (the sp
 cannot be read, an unexpected error) counts like a server error, because it may pass on the next
 try; when one was among the 300 s, the line says so
 (`dead session <id> queue not delivered after 300s of server errors or local errors — registering; job #N will close as restarted-without-job`).
-The finish of a job that ended is tried at least once before that: when a server error or a
-local error holds the queue, the finish goes first 300 s after the job ended, and registration
-waits for that try at most 60 s past the 300 s (one 30 s backoff and two 15 s requests); after
-that it registers with the line above. A job whose end time is ahead of the clock (the clock went
-back) is not waited for.
+When a server error or a local error holds the queue of a job that ended, its finish goes
+first 300 s after the job ended, and registration waits for that finish no more than 60 s past
+its 300 s (one 30 s backoff and two 15 s requests); after that it registers with the line above.
+The worker tries the finish in that time when the queue is free; when the queue is held by a log
+request (up to 60 s) or a bundle upload (up to 300 s), the finish is not tried and the job closes
+as restarted-without-job. Registration counts both waits on the monotonic clock, so setting the
+wall clock forward or back does not shorten or stall them; the 300 s after the job ended is the
+wall clock against the end time on disk. A job whose end time is ahead of the clock (the clock
+went back) is not waited for.
 A job folder whose `outbox.json` is missing,
 empty or not JSON while its `stream.log` is there cannot be sent: the worker logs
 `dead session <id> job #N: outbox unreadable (<why>) — the job will close as restarted-without-job; spool kept in <folder>`

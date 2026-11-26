@@ -7985,6 +7985,23 @@ MUTANTS = (
             "test_b8_3_b_finish_sent_first_behind_the_bundle_names_only_the_bundle",
         ),
     ),
+    # ── M5t-b PR2 · batch-9 ──
+    Mutant(
+        # D 큐 등록 대기를 벽시계로 잰다 — 벽시계가 앞으로 뛰면 일찍 등록하고, 서 있으면 끝없이
+        # 기다린다(§4.1.3 「D 큐 등록 대기(3판)」, batch-9 #3)
+        name="dead-session-wall-clock",
+        path="src/remote_ci_monitor/remote_worker.py",
+        old="        clock = self.mono_fn  # mutcheck: dead-session-wall-clock\n",
+        new="        clock = self._epoch\n",
+        tests=(
+            "tests/test_worker_outbox_m5tb.py::"
+            "test_b9_3_a_a_wall_clock_step_forward_does_not_shorten_the_dead_session_wait",
+            "tests/test_worker_outbox_m5tb.py::"
+            "test_b9_3_b_a_wall_clock_that_went_back_and_stands_does_not_stall_the_dead_session_wait",
+            "tests/test_worker_outbox_m5tb.py::"
+            "test_b8_1_b_the_wait_for_an_owed_finish_has_a_fixed_cap",
+        ),
+    ),
 )
 
 
