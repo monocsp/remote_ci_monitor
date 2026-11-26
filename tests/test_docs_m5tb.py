@@ -92,3 +92,28 @@ def test_every_hold_env_key_of_a_notification_is_documented():
     for key in [*keys, "RCM_HOLD_CAUSE", "RCM_HOLD_WORKER"]:
         assert f"`{key}`" in text, key
     assert "group held — run rcm release-hold <job>" in text
+
+
+# ── README 두 언어의 명령 표(P2-4 · §4.12) ───────────────────────────────────
+
+#: 명령 표에 둘 `rcm release-hold` 행의 첫 칸 — 표의 다른 admin 명령처럼 잡 번호는 `N`
+RELEASE_HOLD_CELL = "`rcm release-hold N [--reason TEXT] [--json]`"
+#: 그 행이 가리키는 절 — docs/operating.md 의 「When a group is held: `rcm release-hold`」
+RELEASE_HOLD_LINK = "docs/operating.md#when-a-group-is-held-rcm-release-hold"
+
+
+def test_readme_command_tables_list_release_hold_in_both_languages():
+    """README.md · README.ko.md 의 「Session commands」 표가 같은 한 줄을 싣는다
+    (관리자 표시 · 운영 문서 절 링크)."""
+    from remote_ci_monitor.cli import build_parser
+
+    sub = next(a for a in build_parser()._actions if a.__class__.__name__ == "_SubParsersAction")
+    hold_help = sub.choices["release-hold"].format_help()
+    assert "--reason" in hold_help and "--json" in hold_help
+    assert "## When a group is held: `rcm release-hold`" in OPERATING
+    admin = {"README.md": "(admin)", "README.ko.md": "(관리자)"}
+    for name, word in admin.items():
+        table = section((ROOT / name).read_text(), "Session commands")
+        rows = [line for line in table.splitlines() if line.startswith(f"| {RELEASE_HOLD_CELL} |")]
+        assert len(rows) == 1, name
+        assert word in rows[0] and f"]({RELEASE_HOLD_LINK})" in rows[0], name
