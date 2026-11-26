@@ -16,6 +16,19 @@ of a key bumps that number and is listed here.
   ([#268](https://github.com/monocsp/remote_ci_monitor/pull/268))
 
 ### Added
+- **A first run from start to finish.** The README's new «First run» section names the four
+  roles, gives the shortest path in five lines and, on a machine that already runs rcm as a
+  service, sends you to a test install first (also in the README's top links). The usage guide's
+  new «Getting started» section walks it step by step: on one machine through `rcm setup`,
+  installing the printed service, the token, `rcm doctor` and `rcm check` to the first
+  `rcm run ok` and `rcm wait --notify`; then adding a worker or a client, a test install next to
+  one that already runs (its own port, label, config and data folder), and undoing it all. The
+  README is shorter: the Store tab's screens and the gate loop step by step moved to the usage
+  guide (section 10 and section 4), and its Status line names the current release. The server
+  template (`rcm init server`, `rcm setup`, `examples/server.toml`) ends with a commented toolchain
+  catalog: `[[probes]]` and `[[tools]]` install hints for Flutter, Xcode, Android, Node and Python
+  that pass the start checks once uncommented. Its `[[notify]]` comment now lists `RCM_MACHINE`.
+  ([#275](https://github.com/monocsp/remote_ci_monitor/pull/275))
 - **`rcm wait` says where the job ran, and what became of its artifacts.** Its end line for a
   finished job is `#381 succeeded on build-02 · 6m 31s · artifacts ready`: the machine, the time,
   the failed step of a failed job and the artifact state (left out when the preset declares no

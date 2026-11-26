@@ -990,6 +990,18 @@ Workers get the table with the rest of the spec (`GET /worker/spec`, a worker to
 `/api/status` or `/api/machines`, which may be readable without a token. A worker strips control
 characters once more before it prints a hint.
 
+**A toolchain catalog to start from.** The server template (what `rcm init server` and
+`rcm setup` write, and `examples/server.toml`) ends with a commented toolchain catalog:
+`[[probes]]` and `[[tools]]` entries for Flutter, iOS (Xcode and CocoaPods), Android (JDK and the
+SDK's `sdkmanager`), Node and Python, each with notes on what trips a service up. Lines starting
+with one `#` are config: remove the `# ` of the entries you want. Lines starting with `##` are
+notes. Uncommented as a whole, the catalog passes the start checks, and every hint in it belongs to
+a probe, so none warns. None of these names is built into rcm, and the lines were tried on one
+Apple Silicon Mac only: check each on your machines. Version rules ("Xcode 27 or newer") belong in
+a [check preset](#proving-a-machine-works-checks), since rcm compares no versions. macOS's
+`/usr/bin/java` is a stub that rcm's Command Line Tools rule does not recognise, so give a Java
+preset a JDK of its own (`JAVA_HOME` and `PATH` in `[presets.env]`).
+
 ### Naming what failed
 
 The `failed: …` lines, `failed_step` and the history above come from one place: the
