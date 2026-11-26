@@ -514,6 +514,14 @@ def start_job(w, monkeypatch, job: dict[str, Any]):
     t = threading.Thread(target=w.run_claimed, args=(1, job), daemon=True)
     t.start()
     assert runner.started.wait(5)
+    # M5t-b PR2: 준비 phase 는 그 잡의 보내는 스레드가 보내고, 그 2xx 도 보낸 시각으로 `ok_at` 을
+    # 올린다(결정 320). 시험이 시계를 민 뒤에 보내면 새 `ok_at` 이 감시의 판정을 지운다 — rcm-ci
+    # #4345 의 test_rl34_the_watchdog_judges_while_heartbeat_hangs 가 40번에 5~8번 그랬다
+    # (batch-5). 시계를 밀기 전에 phase 가 갔는지 본다
+    deadline = time.monotonic() + 5
+    while runner.observer.outbox.phase is not None and time.monotonic() < deadline:
+        time.sleep(0.005)
+    assert runner.observer.outbox.phase is None, "the job's phase was not sent"
     return runner, t
 
 
