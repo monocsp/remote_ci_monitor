@@ -7,6 +7,8 @@ of a key bumps that number and is listed here.
 
 ## [Unreleased]
 
+## [0.11.1] - 2026-11-26
+
 ### Added
 - **Windows (WSL) in the usage guide.** Section 3 has a new «Windows (WSL)» part for a session on
   a Windows computer: Ubuntu 24.04 in WSL2 (22.04's Python 3.10 is too old), pipx from apt, a
@@ -2483,7 +2485,8 @@ Python 3.11+ standard library only — zero runtime dependencies. API schema: `s
 - No partial-upload resume: an interrupted snapshot upload ends as `cancelled`; run `rcm run` again.
 - Basic auth is clear text — use it only behind TLS (Tailscale HTTPS or a reverse proxy).
 
-[Unreleased]: https://github.com/monocsp/remote_ci_monitor/compare/v0.11.0...HEAD
+[Unreleased]: https://github.com/monocsp/remote_ci_monitor/compare/v0.11.1...HEAD
+[0.11.1]: https://github.com/monocsp/remote_ci_monitor/compare/v0.11.0...v0.11.1
 [0.11.0]: https://github.com/monocsp/remote_ci_monitor/compare/v0.10.0...v0.11.0
 [0.10.0]: https://github.com/monocsp/remote_ci_monitor/compare/v0.9.0...v0.10.0
 [0.9.0]: https://github.com/monocsp/remote_ci_monitor/compare/v0.8.0...v0.9.0
