@@ -269,7 +269,9 @@ def test_status_is_json_serializable_with_expected_shape():
         "server",
         "presets",
         "pools",
+        "irreversible_holds",  # M5t-b §4.8 — 열린 그룹 홀드(없으면 []) · 키 추가만
     }
+    assert back["irreversible_holds"] == []
     assert set(back["server"]) == {
         "version",
         "uptime_seconds",

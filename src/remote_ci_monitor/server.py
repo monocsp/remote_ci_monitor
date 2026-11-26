@@ -114,6 +114,7 @@ from remote_ci_monitor.core.model import (
     Job,
     JobLink,
     Median,
+    OpenHold,
     Paused,
     Pool,
     Preset,
@@ -148,6 +149,8 @@ from remote_ci_monitor.core.startup import Startup, noop_step
 from remote_ci_monitor.core.status import (
     action_json,
     artifacts_json,
+    hold_doc_json,
+    hold_item_json,
     iso,
     queue_row_json,
     recent_json,
@@ -493,6 +496,23 @@ class _DbSnapshot:
     scheduled: list[Job] | None = field(default_factory=list)
     scheduled_error: str | None = None
     scheduled_error_code: str | None = None
+    #: 열린 그룹 홀드(M5t-b §4.8) — 큐 행의 사유와 `irreversible_holds`. 큐 절의 일부다
+    open_holds: list[OpenHold] = field(default_factory=list)
+
+
+def open_hold_of(row: dict[str, Any]) -> OpenHold:
+    """`store.open_holds()` 의 행 → `OpenHold`."""
+    return OpenHold(
+        job_id=int(row["job_id"]),
+        group=row["group"],
+        scope=row["scope"],
+        pool=row["pool"],
+        host_key=row.get("host_key"),
+        since=row.get("since"),
+        preset=row.get("preset"),
+        worker=row.get("worker"),
+        cause=row.get("cause") or "",
+    )
 
 
 def with_chain_action(row: QueueRow, action: Action | None) -> QueueRow:
@@ -1157,6 +1177,8 @@ class App(RemoteWorkersMixin, CapabilitiesMixin, ShelfAppMixin):
         )
         if out is None:
             raise ApiError(409, f"job #{job_id} has no open hold", code="no_hold")
+        self._mark_dirty()  # 대기 잡의 사유와 `irreversible_holds` 가 바뀌었다
+        self.log(f"job #{job_id}: group hold released by {t.name}")
         at = out["released_at"]
         released = at.replace(microsecond=0).isoformat().replace("+00:00", "Z") if at else None
         return {**out, "released_at": released}
@@ -3429,11 +3451,15 @@ class App(RemoteWorkersMixin, CapabilitiesMixin, ShelfAppMixin):
         queue_error = None
         queue_error_code: str | None = None
         chain_actions: dict[int, Action] = {}
+        open_holds: list[OpenHold] = []
         try:
             jobs = self.store.list_active()
             markers = self.store.markers_for([j.id for j in jobs if j.state in BUSY_STATES])
             # 사슬 표식(M5s 결정 233)은 큐 행의 일부다 — 못 읽으면 큐 절 전체가 실패다
             chain_actions = self.store.chain_actions(jobs)
+            # 열린 그룹 홀드(M5t-b §4.8)도 큐 행의 사유다 — 못 읽고 「홀드 없음」으로 그리면
+            # 막힌 잡이 그냥 기다리는 것처럼 보인다(fail-open 금지)
+            open_holds = [open_hold_of(h) for h in self.store.open_holds()]
         except Exception as e:  # noqa: BLE001
             queue_error, queue_error_code = _error_text(e), _error_code(e)
         medians, pool_medians, medians_error, medians_error_code = self._load_medians(now, cfg)
@@ -3494,6 +3520,7 @@ class App(RemoteWorkersMixin, CapabilitiesMixin, ShelfAppMixin):
             host_step_medians=host_step_medians,
             recent_actions=recent_actions,
             chain_actions=chain_actions,
+            open_holds=open_holds,
         )
 
     def _host_step_view(
@@ -3699,6 +3726,7 @@ class App(RemoteWorkersMixin, CapabilitiesMixin, ShelfAppMixin):
                 None: self.local_host_key(),
                 **{v.id: h for v in views if v.kind == "remote" and (h := self.host_of(v.id))},
             },
+            open_holds=snap.open_holds,
         )
         rows = [with_chain_action(r, snap.chain_actions.get(r.job.id)) for r in rows]
         if pool is None:
@@ -3814,6 +3842,7 @@ class App(RemoteWorkersMixin, CapabilitiesMixin, ShelfAppMixin):
             pools=tuple(pools),
             base_url=self.base_url(host),
             local_machine=self.local_machine(),  # M5t-a — 로컬 레인 잡의 `ran_on`
+            irreversible_holds=tuple(snap.open_holds),  # M5t-b §4.8
         )
         tails: dict[int, list[str]] = {}
         if queue and token is not None:
@@ -3867,7 +3896,7 @@ class App(RemoteWorkersMixin, CapabilitiesMixin, ShelfAppMixin):
             raise ApiError(404, "no such job")
         now = self.now_fn()
         if job.is_terminal:
-            return self._terminal_view(job, host)
+            return self._with_hold(self._terminal_view(job, host), job.id)
         if job.is_scheduled:
             # 예약 잡(M5s)은 큐 행이 아니다 — 「방금 끝났다」로 읽으면 끝난 잡처럼 보인다
             doc = scheduled_json(job, base_url=self.base_url(host))
@@ -3878,14 +3907,19 @@ class App(RemoteWorkersMixin, CapabilitiesMixin, ShelfAppMixin):
         if row is None:  # 방금 끝났다
             job = self.store.get_job(job_id)
             assert job is not None
-            return self._terminal_view(job, host)
+            return self._with_hold(self._terminal_view(job, host), job.id)
         log_tail = None
         if tail > 0 and row.job.state in BUSY_STATES and self.can_read_log(row.job, token):
             log_tail = tail_lines(self.log_path(job_id), min(tail, MAX_TAIL))
         doc = queue_row_json(
             row, base_url=self.base_url(host), log_tail=log_tail, local=self.local_machine()
         )
-        return self._with_artifacts(doc, row.job, host)
+        return self._with_hold(self._with_artifacts(doc, row.job, host), job_id)
+
+    def _with_hold(self, doc: dict[str, Any], job_id: int) -> dict[str, Any]:
+        """잡 문서에 그 잡의 그룹 홀드(M5t-b §4.8)를 **더한다** — 열렸든 풀렸든, 없으면 null."""
+        doc["hold"] = hold_doc_json(self.store.hold_of(job_id))
+        return doc
 
     def _terminal_view(self, job: Job, host: str | None) -> dict[str, Any]:
         """종료 잡의 문서 — 최근 행 모양 + 산출물 + 스텝 타임라인(M5j) + 이름별 이력(M5h)."""
@@ -5505,6 +5539,12 @@ class App(RemoteWorkersMixin, CapabilitiesMixin, ShelfAppMixin):
         else:
             with self._lock:
                 self._capacity_error = None
+        try:
+            holds: list[dict[str, Any]] | None = [
+                hold_item_json(open_hold_of(h)) for h in self.store.open_holds()
+            ]
+        except Exception:  # noqa: BLE001 — 정보 칸이다. 못 읽으면 null(모름)이지 [] 가 아니다
+            holds = None
         strict_cancel = bool(self.config.server.cancel_requires_submission_token)
         body = {
             "ok": ok,
@@ -5550,6 +5590,9 @@ class App(RemoteWorkersMixin, CapabilitiesMixin, ShelfAppMixin):
             # 예약 실행을 안다(M5s 결정 206). 옛 서버는 모르는 `start_at` 을 **무시하고 바로
             # 돌린다** — `rcm run --at` · `--in` 은 이 키가 있을 때만 보낸다
             "schedule": True,
+            # 열린 그룹 홀드(M5t-b §4.8, 정보 — 503 조건은 아니다: 홀드는 서버가 아프다는 뜻이
+            # 아니다). 못 읽으면 null
+            "irreversible_holds": holds,
         }
         if not ok:
             if not db_ok:

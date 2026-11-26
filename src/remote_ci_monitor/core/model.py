@@ -140,6 +140,9 @@ REASON_CHECK_PENDING = "check_pending"
 #: 도는 잡이 「사람이 할 일」 표식(`::rcm::action::`)을 찍었다(M5s 결정 213). 행동 가능 — 잡이
 #: 직접 무엇을 해 달라고 말했다. 사람을 기다리는 잡은 대개 조용해서 `stuck` 보다 앞에 둔다.
 REASON_NEEDS_ACTION = "needs_action"
+#: 열린 그룹 홀드에 막힌 대기 잡의 `action.code`(M5t-b §4.8 · 결정 330). 사유는 새 값이 아니라
+#: `needs_action` 이다 — 홀드는 사람(admin)이 그 머신을 보고 `rcm release-hold` 로만 풀린다.
+ACTION_IRREVERSIBLE_HOLD = "irreversible_hold"
 
 #: M5n 배치 · 그룹 범위 (DB 에 그대로 들어가는 값)
 PLACEMENT_POOL = "pool"
@@ -761,6 +764,22 @@ class LocalMachine:
 
 
 @dataclass(frozen=True)
+class OpenHold:
+    """열린 그룹 홀드 하나(`irreversible_holds` 행, M5t-b §4.12). 그룹 · 범위 · 풀 · 호스트는 닫는
+    트랜잭션이 잡 행에서 복사한 것이다 — 지금 설정을 읽지 않는다(결정 339-d)."""
+
+    job_id: int
+    group: str
+    scope: str
+    pool: str
+    host_key: str | None = None
+    since: datetime | None = None
+    preset: str | None = None
+    worker: str | None = None
+    cause: str = ""
+
+
+@dataclass(frozen=True)
 class StatusModel:
     generated_at: datetime
     display_timezone: str | None
@@ -770,3 +789,5 @@ class StatusModel:
     base_url: str | None = None
     #: 이 서버 머신(M5t-a). 없으면 로컬 레인 잡의 `ran_on` 은 null 이다
     local_machine: LocalMachine | None = None
+    #: 열린 그룹 홀드(M5t-b §4.8) — `/api/status` 의 `irreversible_holds`. 없으면 빈 튜플
+    irreversible_holds: tuple[OpenHold, ...] = ()

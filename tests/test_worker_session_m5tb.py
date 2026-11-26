@@ -997,3 +997,95 @@ def test_rl45_rcm_release_hold_is_its_own_command_with_a_help_line(capsys):
         cli.main(["release-hold", "--help"])
     out = capsys.readouterr().out
     assert "after you checked the machine" in out and "--reason" in out
+
+
+# ── 홀드의 기계 판독 표면(RL45 의 PR1 몫 · §4.8 · 결정 330 「어디서나 needs_action」 · 350) ──
+
+HOLD_ITEM_KEYS = {"job_id", "preset", "group", "scope", "worker", "cause", "since"}
+HOLD_DOC_KEYS = {
+    "cause",
+    "created_at",
+    "released_at",
+    "release_kind",
+    "released_by",
+    "release_reason",
+    "history",
+}
+
+
+@pytest.fixture
+def srv2(tmp_path):
+    s = WorkerServer(tmp_path, presets=[*PRESETS, sh("ship2", "echo ship2", irreversible=True)])
+    yield s
+    s.close()
+
+
+def test_rl45_a_job_waiting_on_a_held_group_needs_action_with_the_hold_as_blocker(srv):
+    jid = _held(srv)
+    waiting = srv.queued_job(preset="ship")
+    other = srv.queued_job(preset="ok")  # 다른 그룹 — 홀드와 무관
+    row = srv.row(waiting)
+    assert row["reason"] == "needs_action"
+    assert row["action"]["code"] == "irreversible_hold"
+    assert f"rcm release-hold {jid}" in row["action"]["note"]
+    assert row["action"]["at"] is not None
+    assert row["blocked_by"] == {
+        "job_id": jid,
+        "group": "irreversible:ship",
+        "remaining_seconds": None,
+    }
+    assert row["estimate"]["finish_at"] is None
+    assert row["estimate"]["wait_seconds"] is None
+    assert srv.row(other)["reason"] != "needs_action"
+    assert srv.row(other)["blocked_by"] is None
+    # 풀면 그 사유가 사라진다
+    assert srv.req("POST", f"/jobs/{jid}/release-hold", token="admin", json_body={})[0] == 200
+    after = srv.row(waiting)
+    assert after["reason"] != "needs_action" and after["action"] is None
+
+
+def test_rl45_status_and_health_list_every_open_hold_and_health_stays_as_it_was(srv2):
+    srv = srv2
+    srv.registered("build-02")
+    code0, health0 = srv.req("GET", "/api/health")
+    assert health0["irreversible_holds"] == []
+    assert srv.status()["irreversible_holds"] == []
+    a = _held(srv)
+    b = running(srv, preset="ship2")
+    srv.store.finish(b, LOST, now=srv.clock(), summary="x", hold_cause="orphan_unverified")
+    srv.queued_job(preset="ship")  # 첫 홀드에만 대기 잡이 있다
+    holds = srv.status()["irreversible_holds"]
+    assert [h["job_id"] for h in holds] == [a, b]
+    assert all(set(h) == HOLD_ITEM_KEYS for h in holds)
+    assert holds[0]["group"] == "irreversible:ship" and holds[0]["scope"] == "global"
+    assert holds[0]["preset"] == "ship" and holds[0]["worker"] == "build-02"
+    assert holds[1]["cause"] == "orphan_unverified"
+    assert holds[0]["since"].endswith("Z")
+    code1, health1 = srv.req("GET", "/api/health")
+    assert [h["job_id"] for h in health1["irreversible_holds"]] == [a, b]
+    # 정보일 뿐이다 — 홀드로 ok · 503 이 바뀌지 않는다
+    assert (code1, health1["ok"]) == (code0, health0["ok"])
+    srv.req("POST", f"/jobs/{a}/release-hold", token="admin", json_body={})
+    assert [h["job_id"] for h in srv.status()["irreversible_holds"]] == [b]
+
+
+def test_rl45_the_job_document_carries_the_hold_and_its_release(srv):
+    srv.registered("build-02")
+    plain = running(srv, preset="ok")
+    srv.finish("build-02", plain, "succeeded", exit_code=0)
+    assert srv.req("GET", f"/jobs/{plain}", token="alice")[1]["hold"] is None
+    jid = _held(srv)
+    doc = srv.req("GET", f"/jobs/{jid}", token="alice")[1]
+    assert set(doc["hold"]) == HOLD_DOC_KEYS
+    assert doc["hold"]["cause"] == "worker_unreachable"
+    assert doc["hold"]["released_at"] is None
+    assert [h["action"] for h in doc["hold"]["history"]] == ["created"]
+    srv.req("POST", f"/jobs/{jid}/release-hold", token="admin", json_body={"reason": "ps -g: none"})
+    hold = srv.req("GET", f"/jobs/{jid}", token="alice")[1]["hold"]
+    assert hold["released_by"] == "macmini-admin"
+    assert hold["release_reason"] == "ps -g: none"
+    assert hold["release_kind"] == "admin" and hold["released_at"].endswith("Z")
+    assert [h["action"] for h in hold["history"]] == ["created", "released"]
+    # 대기 잡 문서도 `hold` 키를 싣는다(그 잡 자신의 홀드 — 없으면 null)
+    waiting = srv.queued_job(preset="ship")
+    assert srv.req("GET", f"/jobs/{waiting}", token="alice")[1]["hold"] is None
