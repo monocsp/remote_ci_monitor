@@ -7,18 +7,26 @@ requester)은 NUL·제어문자를 지우고 4 KB 로 자른다 — 알림 스�
 from __future__ import annotations
 
 import json
-from collections.abc import Iterable, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
 from remote_ci_monitor.core import artifacts as art
 from remote_ci_monitor.core.model import NOTIFY_DEFAULT_STATES
 from remote_ci_monitor.core.progress import clean_line
+from remote_ci_monitor.core.queue import hold_note
 
 ENV_TEXT_LIMIT = 4096
 #: 훅에 넘기는 실패 이름의 최대 개수(M5o 결정 119). 전체는 `GET /jobs/<id>` 의 `failures[]` 에 있다.
 MAX_NOTIFY_FAILURES = 20
 _KEEP = {"\n", "\t"}
+#: 알림의 사건(`RCM_EVENT` · URL 본문 `event`, M5t-b 결정 339-e). 잡 끝 알림과 opt-in 홀드 알림
+EVENT_JOB_FINISHED = "job_finished"
+EVENT_IRREVERSIBLE_HOLD = "irreversible_hold"
+#: `[[notify]] on` 에 적을 수 있는 종료 상태 밖의 값 — 홀드마다 한 번. 기본에는 들지 않는다
+NOTIFY_ON_HOLD = EVENT_IRREVERSIBLE_HOLD
+#: opt-in 홀드 알림의 중복 막기 행 이름 앞머리 — 규칙 이름에는 `:` 가 없어 잡 끝 행과 겹치지 않는다
+HOLD_ROW_PREFIX = "hold:"
 
 
 @dataclass(frozen=True)
@@ -31,6 +39,31 @@ class NotifyRule:
     argv: tuple[str, ...] | None = None
     url: str | None = None
     timeout_seconds: int = 30
+
+
+def hold_rules_for(preset: str, rules: Iterable[NotifyRule]) -> list[NotifyRule]:
+    """홀드 알림을 받을 규칙 — `on` 에 `irreversible_hold` 를 적었고 `presets` 가 맞는 것(§4.12)."""
+    return [
+        r for r in rules if NOTIFY_ON_HOLD in r.on and (r.presets is None or preset in r.presets)
+    ]
+
+
+def hold_summary(hold: Mapping[str, Any], job_id: int, preset: str) -> str:
+    """opt-in 홀드 알림의 `RCM_SUMMARY` — 영어 한 줄이고 경로가 없다(§4.12)."""
+    worker = hold.get("worker")
+    where = worker if worker else "the server's local lane"
+    check = worker if worker else "the server"
+    return (
+        f"group {hold.get('group')} is held: job #{int(job_id)} ({preset}) on {where} closed "
+        f"without a stop confirmation — check {check}, then rcm release-hold {int(job_id)}"
+    )
+
+
+def hold_body(hold: Mapping[str, Any] | None, job_id: int) -> dict[str, Any]:
+    """모든 알림의 URL 본문 `hold` — `{held, group, note}`. 홀드가 없으면 거짓과 빈 값이다."""
+    if hold is None:
+        return {"held": False, "group": "", "note": ""}
+    return {"held": True, "group": str(hold.get("group") or ""), "note": hold_note(job_id)}
 
 
 def rules_for(job_state: str, preset: str, rules: Iterable[NotifyRule]) -> list[NotifyRule]:
@@ -132,11 +165,16 @@ def notify_env(
     failures: Sequence[str] = (),
     failures_truncated: bool = False,
     shelf_url: str = "",
+    event: str = EVENT_JOB_FINISHED,
+    hold: Mapping[str, Any] | None = None,
 ) -> dict[str, str]:
     """알림 argv 에 줄 env. 값은 전부 문자열, 없는 값은 빈 문자열.
 
     `failures` 는 그 잡의 실패 이름 대장(`job_failures`, 잡이 찍은 순서 — M5o 결정 119).
-    `shelf_url` 은 keep 인 잡의 보관함 링크(`shelf_url()` — 아니면 빈 값, M5p 결정 144)."""
+    `shelf_url` 은 keep 인 잡의 보관함 링크(`shelf_url()` — 아니면 빈 값, M5p 결정 144).
+    `hold` 는 알림 행을 만들 때 **한 번** 읽은 그 잡의 열린 홀드(`store.hold_of`, M5t-b 339-e)다.
+    없으면 None 이고 `RCM_HOLD=0` 과 빈 그룹 · 빈 한 줄이 된다 — 키 집합은 늘 같다."""
+    held = hold is not None  # mutcheck: job-end-hold-env-missing
     requester = job_row.get("requester") or {}
     if isinstance(requester, dict):
         requester_label = requester.get("label") or requester.get("name") or ""
@@ -181,4 +219,24 @@ def notify_env(
         "RCM_ACTION_NOTE": sanitize_text(action.get("note")),
         # 잡이 돈 머신(M5t-a 결정 248 f) — 잡 행의 `ran_on`. 시작하지 못했거나 모르면 빈 값이다
         "RCM_MACHINE": sanitize_text(job_row.get("ran_on")),
+        # 그룹 홀드(M5t-b 결정 339-e): 사건 이름과 그 잡의 열린 홀드. 홀드가 없으면 0 과 빈 값이다
+        "RCM_EVENT": sanitize_text(event),
+        "RCM_HOLD": "1" if held else "0",
+        "RCM_HOLD_GROUP": sanitize_text(hold.get("group")) if held else "",  # type: ignore[union-attr]
+        "RCM_HOLD_NOTE": hold_note(int(job_row.get("id") or 0)) if held else "",
     }
+
+
+def hold_env(
+    job_row: dict[str, Any], rule_name: str, hold: Mapping[str, Any], **kw: Any
+) -> dict[str, str]:
+    """opt-in 홀드 알림의 env — 잡 알림 env(`RCM_EVENT=irreversible_hold`)에 `RCM_HOLD_CAUSE` ·
+    `RCM_HOLD_WORKER` 를 더하고 `RCM_SUMMARY` 를 홀드 한 줄로 바꾼다(§4.12). 워커는 로컬 레인이면
+    빈 값이다."""
+    env = notify_env(job_row, rule_name, event=EVENT_IRREVERSIBLE_HOLD, hold=hold, **kw)
+    env["RCM_SUMMARY"] = sanitize_text(
+        hold_summary(hold, int(job_row.get("id") or 0), str(job_row.get("preset") or ""))
+    )
+    env["RCM_HOLD_CAUSE"] = sanitize_text(hold.get("cause"))
+    env["RCM_HOLD_WORKER"] = sanitize_text(hold.get("worker"))
+    return env

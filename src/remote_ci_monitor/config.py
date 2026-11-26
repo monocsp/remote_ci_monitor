@@ -41,7 +41,7 @@ from remote_ci_monitor.core.model import (
     Preset,
     RetryPolicy,
 )
-from remote_ci_monitor.core.notify import NotifyRule
+from remote_ci_monitor.core.notify import NOTIFY_ON_HOLD, NotifyRule
 from remote_ci_monitor.core.supersede import SUPERSEDE_MODES, SUPERSEDE_OFF
 
 ENV_PREFIX = "RCM"
@@ -796,12 +796,13 @@ def parse_notify(raw: Any) -> NotifyRule:
         raise ConfigError(f"{where}: unknown key(s): {', '.join(unknown)}")
     on_raw = raw.get("on")
     if on_raw is None:
-        on = frozenset(NOTIFY_DEFAULT_STATES)
+        # 기본은 잡 끝 알림뿐이다 — `irreversible_hold` 는 적은 규칙만 받는다(M5t-b 결정 339-e 6차)
+        on = frozenset(NOTIFY_DEFAULT_STATES)  # mutcheck: hold-notify-default-on
     else:
         on_list = _str_list(f"{where} on", on_raw, allow_empty=False)
-        bad = [st for st in on_list if st not in TERMINAL_STATES]
+        bad = [st for st in on_list if st not in TERMINAL_STATES and st != NOTIFY_ON_HOLD]
         if bad:
-            raise ConfigError(f"{where}: on must be terminal states, got {bad}")
+            raise ConfigError(f"{where}: on must be terminal states or {NOTIFY_ON_HOLD}, got {bad}")
         on = frozenset(on_list)
     presets_raw = raw.get("presets")
     presets = (

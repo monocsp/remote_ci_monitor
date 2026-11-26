@@ -87,6 +87,11 @@ ENV_KEYS = {
     "RCM_ACTION_NOTE",
     # M5t-a 결정 248 f — 잡이 돈 머신(`ran_on`). 시작 못 한 잡은 빈 값
     "RCM_MACHINE",
+    # M5t-b 결정 339-e — 모든 알림이 홀드를 말한다(홀드가 없으면 `0` 과 빈 값)
+    "RCM_EVENT",
+    "RCM_HOLD",
+    "RCM_HOLD_GROUP",
+    "RCM_HOLD_NOTE",
 }
 
 

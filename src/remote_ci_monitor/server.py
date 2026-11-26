@@ -162,6 +162,7 @@ from remote_ci_monitor.core.supersede import SUPERSEDE_OFF, successor_of, supers
 from remote_ci_monitor.events import (
     JOB_KINDS,
     KIND_HOST_SAMPLE,
+    KIND_IRREVERSIBLE_HOLD,
     KIND_JOB_CHANGED,
     KIND_JOB_FINISHED,
     KIND_MARKER,
@@ -670,6 +671,11 @@ class App(RemoteWorkersMixin, CapabilitiesMixin, ShelfAppMixin):
             self.log(f"recovered on start: lost={lost} cancelled_uploads={cancelled}")
             for job_id in [*lost, *cancelled]:
                 self._publish_job(None, job_id)
+            # 로컬 레인 표식 잡의 `server_restarted` 홀드(F76)도 알린다. 알림 스레드는 아직 없지만
+            # 사건은 서버 로그 한 줄을 남기고, 기동 스캔이 `hold:` 행이 없는 열린 홀드를 보낸다
+            for job_id in lost:
+                if self.store.has_open_hold(job_id):
+                    self._hold_created(job_id)
         # 예약(M5s) — 꺼진 동안 마감을 넘긴 것은 이미 닫혔고 시각이 된 것은 이미 올랐다. 레인이
         # 뜨기 전이다. 알림 스레드는 아직 없지만 종료 잡은 `Notifier` 가 기동 때 DB 로 다시 줍는다
         self._after_schedule(expired, promoted)
@@ -1043,6 +1049,15 @@ class App(RemoteWorkersMixin, CapabilitiesMixin, ShelfAppMixin):
                 self.publish(KIND_JOB_CHANGED, {"job_id": job.retried_as, "state": SCHEDULED})
         else:
             self.publish(KIND_JOB_CHANGED, {"job_id": job.id, "state": job.state})
+
+    def _on_hold_created(self, job_id: int) -> None:
+        """홀드를 만든 커밋 뒤 · 잠금 밖(`RemoteWorkersMixin._hold_created` 가 부른다, §4.12).
+
+        대기열 사유가 바뀌었으니 캐시를 더럽히고, 알림 스레드가 opt-in 규칙을 부르게 버스 사건
+        `irreversible_hold` 를 낸다."""
+        self._mark_dirty()
+        # mutcheck: hold-notify-missing
+        self.publish(KIND_IRREVERSIBLE_HOLD, {"job_id": int(job_id)})
 
     def _on_job_change(self, job_id: int) -> None:
         self._publish_job(None, job_id)

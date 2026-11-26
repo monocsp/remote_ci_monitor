@@ -3193,11 +3193,26 @@ class Store:
     def list_unnotified_finished(self, since: datetime) -> list[Job]:
         """알림 행이 하나도 없는 종료 잡(since 이후에 끝난 것). 시작 시 스캔용."""
         marks = ",".join("?" * len(TERMINAL_STATES))
+        # 홀드 알림 행(`hold:<규칙>`, M5t-b §4.12)은 잡 끝 알림 행이 아니다 — 세면 홀드 알림이
+        # 먼저 간 잡의 잡 끝 알림을 기동 스캔이 영영 놓친다
+        sent = (
+            "SELECT job_id FROM notifications "
+            "WHERE notify_name NOT LIKE 'hold:%'"  # mutcheck: hold-notify-blocks-job-scan
+        )
         return self._jobs(
             f"SELECT * FROM jobs WHERE state IN ({marks}) AND finished_at >= ? "
-            "AND id NOT IN (SELECT job_id FROM notifications) ORDER BY id",
+            f"AND id NOT IN ({sent}) ORDER BY id",
             (*sorted(TERMINAL_STATES), _ts(since)),
         )
+
+    def open_hold_jobs(self, since: datetime) -> list[int]:
+        """since 이후에 만든 열린 홀드의 잡 id(만든 순서) — 홀드 알림의 기동 스캔용(§4.12)."""
+        rows = self._conn().execute(
+            "SELECT job_id FROM irreversible_holds WHERE released_at IS NULL AND created_at >= ? "
+            "ORDER BY created_at, job_id",
+            (_ts(since),),
+        )
+        return [int(r["job_id"]) for r in rows]
 
     def add_joiner(self, job_id: int, name: str, label: str, now: datetime) -> bool:
         conn = self._conn()
