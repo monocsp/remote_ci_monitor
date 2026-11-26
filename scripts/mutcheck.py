@@ -6281,6 +6281,21 @@ MUTANTS = (
             "test_rl45_status_says_null_not_empty_when_the_holds_cannot_be_read",
         ),
     ),
+    # ── M5t-b P3 1라운드 LOW — 홀드 없이 닫는 mark_lost_for_worker ──
+    Mutant(
+        # 워커를 잃어 닫는 길이 표식 잡의 그룹을 홀드하지 않는다
+        name="mark-lost-for-worker-no-hold",
+        path="src/remote_ci_monitor/store.py",
+        old=(
+            "                # mutcheck: mark-lost-for-worker-no-hold\n"
+            '                self._hold_tx(conn, int(row["id"]), "worker_unreachable", ts)\n'
+        ),
+        new="                pass\n",
+        tests=(
+            "tests/test_irreversible_hold_m5tb.py::"
+            "test_rl42_mark_lost_for_worker_follows_the_hold_rule",
+        ),
+    ),
 )
 
 

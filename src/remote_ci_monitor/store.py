@@ -4933,7 +4933,11 @@ class Store:
         summary_code: str | None = None,
         summary_args: dict[str, Any] | None = None,
     ) -> list[int]:
-        """그 워커의 running·cancelling 잡을 전부 lost 로. 닫은 잡 id 목록."""
+        """그 워커의 running·cancelling 잡을 전부 lost 로. 닫은 잡 id 목록.
+
+        확인 없는 닫힘이라 표식 잡이면 같은 트랜잭션에서 그 그룹을 홀드한다(M5t-b 결정 330 —
+        `finish(hold_cause=…)` 와 같은 규칙). 홀드를 알리는 것은 호출자의 몫이다
+        (`_hold_created`)."""
         conn = self._conn()
         ts = _ts(now)
         busy = ",".join("?" * len(BUSY_STATES))
@@ -4956,6 +4960,8 @@ class Store:
                     lane=None,
                     phase=None,
                 )
+                # mutcheck: mark-lost-for-worker-no-hold
+                self._hold_tx(conn, int(row["id"]), "worker_unreachable", ts)
                 lost.append(int(row["id"]))
             conn.execute("COMMIT")
         except Exception:

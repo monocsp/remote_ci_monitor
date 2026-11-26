@@ -376,7 +376,7 @@ def test_rl54_a_legacy_worker_forgetting_its_irreversible_job_announces_the_hold
     assert hold_events(sub) == [jid]
 
 
-HOLD_MAKERS = {"finish", "recover_on_start", "open_session"}
+HOLD_MAKERS = {"finish", "recover_on_start", "open_session", "mark_lost_for_worker"}
 
 
 def _calls(fn: Any, attr: str) -> list[Any]:
