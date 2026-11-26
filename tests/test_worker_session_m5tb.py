@@ -2494,5 +2494,6 @@ def test_rl6_a_an_unbroken_remote_job_keeps_its_exit_code_and_the_wait_json_keys
     failing = outcome in ("failed", "timed_out")
     base = BASE_TERMINAL_DOC_KEYS | (BASE_FAILURE_KEYS if failing else frozenset())
     assert base - keys == set()  # 기존 키 불변
-    assert keys - base == {"hold"}  # 더한 키만 있다
+    # 더한 키만 있다 — PR2 가 `late_result` · `log_complete` 를 더했다(M5t-b §4.6)
+    assert keys - base == {"hold", "late_result", "log_complete"}
     assert got["hold"] is None

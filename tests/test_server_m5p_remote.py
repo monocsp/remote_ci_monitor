@@ -14,6 +14,7 @@ import io
 import os
 import tarfile
 import threading
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -95,12 +96,17 @@ def wrap_finish(srv, hook) -> None:
     srv.store.finish = finish  # type: ignore[method-assign]
 
 
-def test_b6_a_remote_keep_job_is_shelved_like_a_local_one(srv, tmp_path):
+def test_b6_a_remote_keep_job_is_shelved_like_a_local_one(srv, tmp_path, monkeypatch):
     seen: dict[int, Any] = {}
+    received: list[datetime] = []
 
     def snap(job_id: int) -> None:
+        received.append(datetime.now(UTC))
         seen[job_id] = (srv.store.shelf_item(job_id), srv.store.get_job(job_id).state)
 
+    # 워커는 벽시계를 쓴다. 서버 시계가 과거에 멈춰 있으면 워커의 끝난 시각이 수신 시각보다
+    # 미래라 서버가 그 끝으로 자른다(M5t-b 결정 277) — 이 시험의 서버도 벽시계를 따른다
+    monkeypatch.setattr(srv.app, "now_fn", lambda: datetime.now(UTC))
     wrap_finish(srv, snap)
     jid = run_remote(srv, tmp_path)
     item, state = seen[jid]
@@ -112,9 +118,8 @@ def test_b6_a_remote_keep_job_is_shelved_like_a_local_one(srv, tmp_path):
     job = srv.store.get_job(jid)
     assert final.job_state == SUCCEEDED
     assert final.job_finished_at == job.finished_at.timestamp()
-    assert (
-        final.job_finished_at != srv.clock.now.timestamp()
-    )  # 워커가 보낸 시각이지 받은 시각이 아니다
+    # 워커가 보낸 시각이지 받은 시각이 아니다 — 수집 · 업로드 뒤에 받았다
+    assert job.finished_at < received[-1]
 
 
 def test_b8_a_fetch_then_ack_waits_for_the_shelf(srv, tmp_path):

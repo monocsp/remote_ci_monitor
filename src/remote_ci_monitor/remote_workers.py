@@ -330,6 +330,16 @@ def _log_bytes(body: dict[str, Any]) -> int | None:
     return _int_field(body, "log_bytes", 0, MAX_SEQ)
 
 
+def _clamp(at: datetime, started: datetime | None, received: datetime) -> datetime:
+    """워커가 보낸 끝난 시각을 `[started_at, 수신 시각]` 안으로(결정 277) — `job_seconds` 가 음수가
+    되지 않는다."""
+    if at > received:  # mutcheck: finished-at-unclamped
+        return received
+    if started is not None and at < started:
+        return started
+    return at
+
+
 def _parse_iso(raw: Any) -> datetime | None:
     """워커가 보낸 ISO Z 시각. 이상하면 None — 조용히 수신 시각으로 물러선다."""
     if not isinstance(raw, str) or not raw:
@@ -1283,7 +1293,7 @@ class RemoteWorkersMixin:
                 return self._narrow_confirm(token, job_id, session, body, gone)
         job = self._session_job(token, job_id, session)
         if job.state not in BUSY_STATES:
-            raise self._closed_answer(token, job, session, gone)
+            raise self._closed_answer(token, job, session, gone, body)
         reported = body.get("outcome")
         if reported not in WORKER_OUTCOMES:
             raise _api_error(400, f"outcome must be one of {', '.join(WORKER_OUTCOMES)}")
@@ -1298,8 +1308,9 @@ class RemoteWorkersMixin:
         log_bytes = _log_bytes(body)
         now = self.now_fn()
         # 실행 종료 시각(선택). 수집·업로드가 끼어도 v1 의 `finished_at`·`job_seconds` 가
-        # 밀리지 않게 워커가 실어 보낸다(§10). 이상하면 조용히 수신 시각으로 물러선다.
-        ended = _parse_iso(body.get("finished_at")) or now
+        # 밀리지 않게 워커가 실어 보낸다(§10). 이상하면 조용히 수신 시각으로 물러선다. 워커 시계가
+        # 어긋났으면 `[started_at, 수신 시각]` 의 가까운 끝으로 자른다(M5t-b 결정 277)
+        ended = _clamp(_parse_iso(body.get("finished_at")) or now, job.started_at, now)
         disposition = body.get("artifacts")
         if disposition is not None and not isinstance(disposition, dict):
             raise _api_error(400, "artifacts must be an object")
@@ -1384,7 +1395,8 @@ class RemoteWorkersMixin:
             st = current.state if current else "unknown"
             if current is not None and st not in BUSY_STATES:
                 # 확인과 닫기 사이에 janitor 가 닫았다 — 늦은 보고와 같은 답(P3 1라운드 LOW)
-                raise self._closed_answer(token, current, session, gone)  # mutcheck: race-closed
+                # mutcheck: race-closed
+                raise self._closed_answer(token, current, session, gone, body)
             racing = preflight is not None or state == RETRIED
             if not racing or current is None or st != CANCELLING:
                 raise _api_error(409, f"job #{job.id} is {st}", state=st)
@@ -1403,7 +1415,7 @@ class RemoteWorkersMixin:
                 st = current.state if current else "unknown"
                 if current is not None and st not in BUSY_STATES:
                     # 재시도 직전에 janitor 가 닫았다 — 위와 같은 답 · mutcheck: race-closed-retry
-                    raise self._closed_answer(token, current, session, gone)
+                    raise self._closed_answer(token, current, session, gone, body)
                 raise _api_error(409, f"job #{job.id} is {st}", state=st)
         if hold_cause is not None and self.store.has_open_hold(job.id):
             self._hold_created(job.id)
@@ -1413,11 +1425,34 @@ class RemoteWorkersMixin:
         return {"job_id": job.id, "state": state}
 
     def _closed_answer(
-        self, token: TokenInfo, job: Job, session: str | None, gone: bool | None
+        self,
+        token: TokenInfo,
+        job: Job,
+        session: str | None,
+        gone: bool | None,
+        body: dict[str, Any] | None = None,
     ) -> Exception:
         """이미 닫힌 잡에 온 finish(T14)의 답 — 409 `code: job_closed`. 같은 세션의 `group_gone:
-        true` 는 그 잡의 열린 홀드를 푼다 — 확인은 뒤에 와도 참이다(§4.12 표의 1). `late_result`
-        기록은 PR2 다. 앞에서 닫혀 있었든 확인과 닫기 사이에 닫혔든 같은 답이다."""
+        true` 는 그 잡의 열린 홀드를 푼다 — 확인은 뒤에 와도 참이다(§4.12 표의 1). 잡이 `lost` 면
+        늦은 결과를 한 번 남긴다(§4.6 · 결정 256 · 274) — 기록과 홀드 풀기는 한 트랜잭션이다. 앞에서
+        닫혀 있었든 확인과 닫기 사이에 닫혔든 같은 답이다."""
+        late = None
+        if job.state == LOST and session is not None and body is not None:
+            late = self._record_late(token, job, session, gone, body)
+        if late is not None:
+            recorded, released = late
+            if released:
+                self.log(f"job #{job.id}: hold released — the worker confirmed the group is gone")
+                self._publish_job(None, job.id)
+                self.wake.set()
+            return _api_error(
+                409,
+                f"job #{job.id} is {job.state}",
+                state=job.state,
+                code="job_closed",
+                late_result_recorded=recorded,
+                hold_released=released,
+            )
         released = (
             gone is True  # mutcheck: hold-released-without-group-gone
             and session is not None
@@ -1435,7 +1470,37 @@ class RemoteWorkersMixin:
             f"job #{job.id} is {job.state}",
             state=job.state,
             code="job_closed",
+            late_result_recorded=False,
             hold_released=released,
+        )
+
+    def _record_late(
+        self, token: TokenInfo, job: Job, session: str, gone: bool | None, body: dict[str, Any]
+    ) -> tuple[bool, bool] | None:
+        """늦은 finish 의 본문을 검사하고 `late_result` 를 남긴다. 펜싱된 세션은 None(2차 Q-B)."""
+        reported = body.get("outcome")
+        if reported not in WORKER_OUTCOMES:
+            raise _api_error(400, f"outcome must be one of {', '.join(WORKER_OUTCOMES)}")
+        rc = body.get("exit_code")
+        if rc is not None and (isinstance(rc, bool) or not isinstance(rc, int)):
+            raise _api_error(400, "exit_code must be an integer or null")
+        log_bytes = _log_bytes(body)
+        now = self.now_fn()
+        ended = _clamp(_parse_iso(body.get("finished_at")) or now, job.started_at, now)
+        payload = {
+            "outcome": reported,
+            "exit_code": rc,
+            "finished_at": iso(ended),
+            "received_at": iso(now),
+        }
+        return self.store.record_late_result(
+            job.id,
+            session=session,
+            payload=payload,
+            log_bytes=log_bytes,
+            gone=gone,
+            by=token.name,
+            now=now,
         )
 
     def _narrow_confirm(
@@ -1493,6 +1558,16 @@ class RemoteWorkersMixin:
             raise _api_error(400, "artifacts.state is not a known state")
         row = self.store.get_bundle(job_id)
         if state == art.READY:
+            # `ready` 는 묶음이 서버에 실제로 있을 때만이다. 행 · 해시 · 파일을 모두 본다(M5t-b
+            # 결정 275 · F63). 업로드 없이 온 `ready` 를 적으면 내려받기가 없는 파일을 가리킨다
+            stored = (row or {}).get("bundle_sha256")
+            on_disk = (self.config.data_dir / "artifacts" / str(job_id) / "bundle.tar").is_file()
+            if not stored or not on_disk:  # mutcheck: artifact-ready-without-bundle
+                self.store.set_bundle_failed(job_id, art.FAILED, "upload_failed", None, now)
+                return
+            if reported.get("bundle_sha256") != stored:
+                self.store.set_bundle_failed(job_id, art.FAILED, "hash_mismatch", None, now)
+                return
             # 무엇을 모았는지는 **워커가** 안다. 서버는 자기가 받은 바이트를 안다 — 올라온 행이
             # 있으면 그 해시·바이트를 쓰고, 없으면 워커 말을 그대로 적는다. 파일이 실제로 없으면
             # 내려받기가 503 을 내고 재시작 화해가 `unavailable` 로 고친다(§3 · §9).

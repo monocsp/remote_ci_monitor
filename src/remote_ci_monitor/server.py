@@ -3876,10 +3876,15 @@ class App(RemoteWorkersMixin, CapabilitiesMixin, ShelfAppMixin):
                         tails[row.job.id] = t
         doc = status_json(model, log_tails=tails)
         self._inject_artifacts(doc, model)
+        recent_ids = [
+            int(row["id"]) for pool in doc.get("pools", []) for row in pool.get("recent") or []
+        ]
+        complete = self.store.log_complete_for(recent_ids) if recent_ids else {}
         for pool in doc.get("pools", []):
             # 최근 행의 표식(M5s) — 순수 층은 마커를 모른다. 큐 행은 진행(마커)에서 이미 왔다
             for row in pool.get("recent") or []:
                 row["action"] = action_json(snap.recent_actions.get(row.get("id")))
+                row["log_complete"] = complete.get(int(row["id"]))  # M5t-b §4.6
             # 예약 행(M5s 결정 233) — 반복의 다음 시도가 사슬의 표식을 이어받는다
             for row in pool.get("scheduled") or []:
                 scheduled_action(row, snap.chain_actions.get(row.get("id")))
@@ -3952,7 +3957,10 @@ class App(RemoteWorkersMixin, CapabilitiesMixin, ShelfAppMixin):
             base_url=self.base_url(host),
             action=self._last_action(job.id),
             local=self.local_machine(),
+            log_complete=self.store.log_complete_for((job.id,)).get(job.id),
         )
+        # 유예 · 취소로 닫힌 원격 잡에 같은 세션의 결과가 늦게 왔으면 그 내용(M5t-b §4.6). 키 추가만
+        doc["late_result"] = self.store.late_result_of(job.id)
         step_names = self._with_step_timeline(self._with_artifacts(doc, job, host), job)
         return self._with_failures(doc, job, step_names=step_names)
 

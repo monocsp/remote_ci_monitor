@@ -5415,6 +5415,64 @@ class Store:
                 out[int(row["id"])] = None if raw is None else bool(raw)
         return out
 
+    def record_late_result(
+        self,
+        job_id: int,
+        *,
+        session: str,
+        payload: dict[str, Any],
+        log_bytes: int | None,
+        gone: bool | None,
+        by: str,
+        now: datetime,
+    ) -> tuple[bool, bool] | None:
+        """늦은 결과(M5t-b §4.6 · 결정 256 · 274) — `BEGIN IMMEDIATE` 하나 안에서 한다.
+
+        잡이 `lost` 이고 그 세션이 claim 했고 그 세션이 펜싱되지 않았을 때만 간다(아니면 None).
+        `late_result` 사건이 아직 없을 때만 한 건 넣고 `log_complete` 를 finish 의 규칙으로 쓴다.
+        잡 상태 · 요약 · 끝난 시각 · 로그 · 마커 · 산출물은 그대로다. `gone` 이 참이면 그 잡의 열린
+        홀드를 푼다(결정 330). 돌려주는 것은 (기록했나, 홀드를 풀었나)."""
+        ts = _ts(now)
+        conn = self._conn()
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            row = conn.execute(
+                "SELECT state, worker_session_id, worker_name, log_offset, log_complete "
+                "FROM jobs WHERE id=?",
+                (job_id,),
+            ).fetchone()
+            srow = conn.execute(
+                "SELECT fenced_at FROM worker_sessions WHERE id=?", (session,)
+            ).fetchone()
+            if (
+                row is None
+                or row["state"] != LOST
+                or row["worker_session_id"] != session
+                or srow is None
+                or srow["fenced_at"] is not None  # mutcheck: fenced-late-result-recorded
+            ):
+                conn.execute("ROLLBACK")
+                return None
+            recorded = False
+            seen = conn.execute(
+                "SELECT 1 FROM events WHERE job_id=? AND kind=?", (job_id, EVENT_LATE_RESULT)
+            ).fetchone()
+            if seen is None:  # mutcheck: late-result-twice
+                complete = _log_complete(row, log_bytes)
+                # mutcheck: late-result-changes-state
+                conn.execute("UPDATE jobs SET log_complete=? WHERE id=?", (complete, job_id))
+                body = {**payload, "log_complete": None if complete is None else bool(complete)}
+                self._event(conn, job_id, EVENT_LATE_RESULT, body, ts)
+                recorded = True
+            released = gone is True and self._release_hold_tx(
+                conn, job_id, kind=RELEASE_WORKER, by=by, reason=None, ts=ts
+            )
+            conn.execute("COMMIT")
+        except Exception:
+            conn.execute("ROLLBACK")
+            raise
+        return recorded, bool(released)
+
     def late_result_of(self, job_id: int) -> dict[str, Any] | None:
         """그 잡의 `late_result` 사건(많아야 하나)의 내용. 없으면 None."""
         row = (
