@@ -136,6 +136,12 @@ def service_file_name(label: str, manager: str) -> str:
     return unit_name(label) if manager == SYSTEMD else f"{label}.plist"
 
 
+def staged_service_dir(config: Path) -> Path:
+    """`--service-file` 이 없을 때 setup 이 서비스 파일을 두는 폴더 — 설정 파일 옆 `service/`.
+    doctor 가 `--config` 의 서비스 파일을 찾는 자리도 이 함수다(온보딩 시험 OB2)."""
+    return config.parent / "service"
+
+
 def log_file_name(label: str) -> str:
     """로그 파일 이름은 라벨에서 만든다. 표준 라벨은 지금의 이름(`server.log` ·
     `worker.log`) 그대로다(6-B-V7) — 운영 문서와 doctor 가 그 이름을 읽는다."""
@@ -872,7 +878,7 @@ def where(
         if service_file is not None:
             service = abs_path(service_file, home=home, cwd=cwd, expand_user=expand_user)
         else:
-            service = conf.parent / "service" / service_file_name(chosen, manager)
+            service = staged_service_dir(conf) / service_file_name(chosen, manager)
         place = install_place_of(
             service, home, fold_case=fold_case, xdg=xdg_config_home(environ), resolve=resolve
         )

@@ -4687,6 +4687,23 @@ MUTANTS = (
             "tests/test_onboarding_findings.py::test_ob3_core_commands_take_the_uid_they_are_given",
         ),
     ),
+    Mutant(
+        # doctor 가 `--config` 옆 `service/` 의 서비스 파일을 보지 않는다 — 시험 설치가 자기
+        # 서비스 파일을 못 찾고 도는 설치의 서비스로 잰다(온보딩 시험 OB2 의 근본 원인)
+        name="ob2-doctor-skips-this-configs-service-file",
+        path="src/remote_ci_monitor/doctor.py",
+        old=(
+            "    own = [] if config_file is None else "
+            "_own_service_files(config_file, home, user_home)\n"
+        ),
+        new="    own: list[Path] = []\n",
+        tests=(
+            "tests/test_onboarding_findings.py::"
+            "test_ob2_doctor_measures_the_service_file_setup_put_next_to_this_config",
+            "tests/test_onboarding_findings.py::"
+            "test_ob2_doctor_prefers_the_installed_copy_of_this_configs_service_file",
+        ),
+    ),
 )
 
 

@@ -827,6 +827,46 @@ def _matching(
     return out
 
 
+def _service_files_in(folder: Path) -> list[Path]:
+    return sorted(p for p in folder.glob("*") if p.suffix in (".plist", ".service") and p.is_file())
+
+
+def _starts_with_config(path: Path, config: Path, user_home: str | None) -> bool:
+    """그 서비스 파일이 rcm 을 `--config <config>`(절대 경로)로 띄우는가. 못 읽으면 False."""
+    try:
+        sf = read_service_file(path, user_home=user_home)
+    except ServiceFileUnreadable:
+        return False
+    theirs = (sf.launch or {}).get("config")
+    if not theirs or not Path(theirs).expanduser().is_absolute():
+        return False
+    return Path(theirs).expanduser().resolve() == config.resolve()
+
+
+def _own_service_files(config: Path, home: Path, user_home: str | None) -> list[Path]:
+    """`--config` 의 설치가 쓰는 서비스 파일 후보 — setup 이 그 설정 옆에 둔 파일
+    (`core.setup.staged_service_dir`, setup 이 쓰는 자리와 같은 규칙)마다 하나.
+
+    setup 이 찍은 복사 명령으로 설치 자리에 옮겼으면 서비스 관리자가 읽는 그 파일을 잰다
+    (6-B-V2). 설치 자리의 같은 이름 파일이 이 설치의 것인지는 setup 이 찍는 `cmp -s` 와 같은
+    규칙(내용이 같다)이나, 그 파일이 이 설정으로 rcm 을 띄우는 것으로 가린다 — 다른 설치가 같은
+    라벨을 쓰면 그 파일은 이 설치의 것이 아니다."""
+    out: list[Path] = []
+    for p in _service_files_in(setup_core.staged_service_dir(config)):
+        named = setup_core.label_of_file(p.name)
+        there = setup_core.install_path(*named, home) if named else None
+        if there is not None and there.is_file():
+            try:
+                same = there.read_bytes() == p.read_bytes()
+            except OSError:
+                same = False
+            if same or _starts_with_config(there, config, user_home):
+                out.append(there)
+                continue
+        out.append(p)
+    return out
+
+
 def pick_service_file(
     explicit: str | None,
     role: str,
@@ -834,9 +874,15 @@ def pick_service_file(
     home: Path,
     config_dir: Path,
     unreadable: list[ServiceFileUnreadable] | None = None,
+    config_file: Path | None = None,
 ) -> ServiceFile | None:
-    """찾는 순서: `--service-file`, 표준 라벨의 설치 자리(사용자 자리와 시스템 자리
-    `/etc/systemd/system` · `/Library/LaunchDaemons`), setup 의 자리 `<config dir>/service/*`.
+    """찾는 순서: `--service-file`, `config_file`(사람이 준 `--config`)의 설치가 쓰는 서비스 파일,
+    표준 라벨의 설치 자리(사용자 자리와 시스템 자리 `/etc/systemd/system` ·
+    `/Library/LaunchDaemons`), setup 의 자리 `<config dir>/service/*`.
+
+    `config_file` 의 자리를 먼저 보는 것은 시험 설치 때문이다 — 도는 설치 옆의 시험 설치에서
+    doctor 가 시험 설치의 서비스 파일을 못 보고 도는 설치의 서비스로 쟀다(온보딩 시험 OB2). 그
+    자리에 이 역할의 파일이 없을 때만 아래 순서로 간다.
 
     설치 자리를 setup 자리보다 먼저 본다 — 서비스 관리자가 실제로 읽는 파일이다(6-B-V2). 후보는
     그 역할의 `rcm` 하위 명령을 띄우는 파일로 거른다. 같은 자리에 둘 이상이면 사람이 고르고,
@@ -869,9 +915,7 @@ def pick_service_file(
     system_files = sorted(LAUNCH_DAEMONS_DIR.glob(LAUNCH_AGENTS_GLOB)) + sorted(
         SYSTEM_UNIT_DIR.glob(SYSTEMD_GLOB)
     )
-    staged = sorted(
-        p for p in staged_dir.glob("*") if p.suffix in (".plist", ".service") and p.is_file()
-    )
+    staged = _service_files_in(staged_dir)
     # `rcm setup --label` 로 쓴 서비스는 표준 라벨의 글롭에 걸리지 않는다. setup 자리의 파일마다
     # setup 이 찍은 복사 명령의 목적지를 같은 규칙(`core.setup.install_path`, 6-B-V1)으로 풀어 설치
     # 자리 후보에 더한다 — 설치한 뒤에는 서비스 관리자가 읽는 그 파일을 잰다
@@ -883,7 +927,8 @@ def pick_service_file(
         place = launch_agents if named[1] == setup_core.LAUNCHD else user_units
         if there.is_file() and there not in place:
             place.append(there)
-    for stage in (launch_agents + user_units + system_files, staged):
+    own = [] if config_file is None else _own_service_files(config_file, home, user_home)
+    for stage in (own, launch_agents + user_units + system_files, staged):
         before = len(skipped)
         found = _matching(stage, role, skipped, user_home)
         if len(skipped) > before:
@@ -1640,6 +1685,10 @@ class _Run:
                 home=Path(self.home),
                 config_dir=user_config_dir(),
                 unreadable=skipped,
+                # 준 설정의 설치가 쓰는 서비스 파일을 먼저 본다(온보딩 시험 OB2)
+                config_file=(
+                    Path(self.opts.config).expanduser().absolute() if self.opts.config else None
+                ),
             )
         except ServiceFileUnreadable as e:
             sf, broken = None, e

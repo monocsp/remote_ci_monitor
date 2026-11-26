@@ -160,9 +160,10 @@ unset RCM_TOKEN                                # 시험 토큰이 export 된 채
 있으므로 블록의 줄은 같은 터미널에서 차례로 친다. `rcm serve` 만 따로 연 터미널에서 돌린다.
 
 시험 설치에서도 `rcm version` · `rcm doctor` · `rcm setup` 은 도는 설치의 기본 설정 · 서비스 ·
-캐시를 보여 줄 수 있다. 이 명령들은 기본 자리도 보기 때문이다. 그때 `rcm doctor` 는 찾은 서비스가
-다른 설치의 설정으로 rcm 을 띄운다고 말하고, `rcm setup` 은 그 설치의 `worker.toml` 이 이 설정과
-별개라고 말한다. 시험 클라이언트를 시험 서버에 묶는 것은 위 블록처럼 `RCM_SERVER` 와
+캐시를 보여 줄 수 있다. 이 명령들은 기본 자리도 보기 때문이다. `rcm doctor --config
+~/rcm-test/server.toml` 은 setup 이 `~/rcm-test/service/` 에 둔 서비스 파일로 잰다. 그 폴더에 파일이
+없을 때만 도는 설치의 서비스로 재고, 그 서비스가 다른 설치의 설정으로 rcm 을 띄운다고 말한다.
+`rcm setup` 은 도는 설치의 `worker.toml` 이 이 설정과 별개라고 말한다. 시험 클라이언트를 시험 서버에 묶는 것은 위 블록처럼 `RCM_SERVER` 와
 `RCM_TOKEN`(또는 `--server`)이다.
 
 시험 빌드에 도는 설치의 `--config` 나 `--data-dir` 을 주지 않는다. DB 를 여는 rcm 은 그 DB 를 자기

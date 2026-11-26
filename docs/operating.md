@@ -347,8 +347,10 @@ anywhere else. `--config` and `--server` given to `rcm doctor` win, with a warni
 service starts with another `--config` (or a relative one, which depends on the service's working
 directory and is not compared). That warning says no service starts rcm with the config given,
 names the service it found by label and file with the config that service uses, another
-install's, and says the given file was measured as given: on a test install next to a running
-one, the `service` row is the running install's service, not the test's. A `coordinator` or `coordinator-worker` report
+install's, and says the given file was measured as given. With `--config`, the service file
+`rcm setup` put next to that config (in its `service/` folder) is looked at first, so a test install
+next to a running one measures its own service; only a test install without one of its own falls
+back to the running install's service, with that warning. A `coordinator` or `coordinator-worker` report
 with no server config anywhere is a usage error (exit 2): it does not ask whatever answers on port
 8787 with the built-in defaults. When the service file cannot be read and no `--config` is given,
 or the config the service names cannot be read, rcm does not know what the service runs with: the
@@ -379,7 +381,9 @@ needs them — is `unknown` with `applies: unknown`: it is never read as a `pool
 it misses does not exit 1, and "nothing would come to this machine" is not claimed while it might.
 The coordinator's `[[tools]]` hints show for the server's own lane too.
 
-The service file is found in this order: `--service-file`; the standard places
+The service file is found in this order: `--service-file`; with `--config FILE`, the one `rcm setup`
+put in the `service/` folder next to `FILE` (its copy in the install place instead, once that copy
+holds the same bytes or starts rcm with `--config FILE`); the standard places
 (`~/Library/LaunchAgents/com.remote-ci-monitor.*.plist`, `~/.config/systemd/user/rcm-*.service`,
 and the system places `/Library/LaunchDaemons/com.remote-ci-monitor.*.plist` and
 `/etc/systemd/system/rcm-*.service`, where the Linux server install above puts
