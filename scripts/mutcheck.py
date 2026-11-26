@@ -7391,6 +7391,21 @@ MUTANTS = (
             "test_p6_2_rl45_eta_for_new_carries_the_presets_group_scope",
         ),
     ),
+    Mutant(
+        # 행의 사유 문장이 state 를 보지 않아 `rcm eta --job` · `rcm top` 이 취소 중인 끊긴 잡에
+        # 「이어진다」고 쓴다(결정 322, P6-2)
+        name="row-grace-cancel-ignores-state",
+        path="src/remote_ci_monitor/core/render_text.py",
+        old=(
+            '        cancelling = row.get("state") == CANCELLING'
+            "  # mutcheck: row-grace-cancel-ignores-state\n"
+        ),
+        new="        cancelling = False\n",
+        tests=(
+            "tests/test_queue_unreachable_m5tb.py::"
+            "test_p6_2_rl28_rcm_eta_job_of_a_cancelling_job_in_the_grace_says_it_is_cancelled",
+        ),
+    ),
 )
 
 

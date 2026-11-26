@@ -670,3 +670,12 @@ def test_p6_2_rl45_eta_for_new_carries_the_presets_group_scope():
     for scope in ("pool", "global"):
         got = wait_for(scope)
         assert got is not None and got > 0, (scope, got)
+
+
+def test_p6_2_rl28_rcm_eta_job_of_a_cancelling_job_in_the_grace_says_it_is_cancelled(fake, capsys):
+    """# RL28 P6-2: `rcm eta --job` 도 취소 중인 끊긴 잡에 「이어진다」고 하지 않는다 —
+    `unknown_eta_reason` 이 state 를 읽는다(결정 322)."""
+    out = eta_job(fake, capsys, [top_row(state="cancelling")], 907)
+    assert f"lost contact with mac2 — {CANCEL_TAIL}" in out, out
+    assert "goes on" not in out, out
+    assert GRACE not in out

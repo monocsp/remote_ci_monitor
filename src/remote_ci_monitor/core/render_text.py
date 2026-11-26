@@ -691,8 +691,10 @@ def _plain_reason_text(row: dict[str, Any], workers: list[dict[str, Any]] | None
             f"over by {fmt_duration(over)} · expected {fmt_duration(est.get('expected_seconds'))}"
         )
     if reason == "worker_unreachable_grace":
-        # 끊김 유예(M5t-b §4.8) — 원문 코드는 드러내지 않는다
-        return unreachable_text(row.get("ran_on"), cancelling=row.get("state") == CANCELLING)
+        # 끊김 유예(M5t-b §4.8) — 원문 코드는 드러내지 않는다. 취소 중이면 「돌아오면 취소된다」
+        # (결정 322) — `rcm top` 과 `rcm eta --job` 이 이 문장을 쓴다
+        cancelling = row.get("state") == CANCELLING  # mutcheck: row-grace-cancel-ignores-state
+        return unreachable_text(row.get("ran_on"), cancelling=cancelling)
     if reason == "needs_action":
         # 잡이 찍은 「사람이 할 일」(M5s). note 는 서버가 제어문자를 지운 한 줄이지만 옛 서버나
         # 가짜 서버의 문서일 수 있어 `rcm wait` 의 `action_line` 처럼 한 번 더 씻는다
