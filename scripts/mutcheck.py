@@ -4614,6 +4614,94 @@ MUTANTS = (
             "test_tl3_a_capacity_error_is_logged_once_not_on_every_health_call",
         ),
     ),
+    # ── m5t-a-w3 F: setup 그물의 과잉 차단 줄이기 ──
+    Mutant(
+        # 런처 낱말을 명령 자리가 아니어도 센다 — `grep -n expect x; rcm status` 의 `expect` ·
+        # `git log --grep xargs` 의 `xargs` 가 런처가 된다(m5t-a-w3 F1)
+        name="guard-launcher-word-in-any-place-counts",
+        path="tools/guard_production.py",
+        old="                if commandish or script:\n",
+        new="                if True:\n",
+        tests=(
+            "tests/test_guard_production_setup.py::"
+            "test_f1_a_launcher_word_that_is_not_in_a_command_place_is_not_a_launcher",
+        ),
+    ),
+    Mutant(
+        # `-x` · `-X` 를 명령이 fd 가 아니어도 fd 의 실행 플래그로 본다 — `tar -x` 가 런처가 된다
+        # (m5t-a-w3 F1)
+        name="guard-dash-x-of-another-command-counts",
+        path="tools/guard_production.py",
+        old='    return bool(names & _FD) and bool({"-x", "-X"}.intersection(words))\n',
+        new='    return bool({"-x", "-X"}.intersection(words))\n',
+        tests=(
+            "tests/test_guard_production_setup.py::"
+            "test_f1_a_launcher_word_that_is_not_in_a_command_place_is_not_a_launcher",
+        ),
+    ),
+    Mutant(
+        # `-exec` 를 명령이 find 가 아니어도 실행 플래그로 본다 — `grep -- -exec` 가 런처가 된다
+        # (m5t-a-w3 F1)
+        name="guard-dash-exec-of-another-command-counts",
+        path="tools/guard_production.py",
+        old="    if names & _FINDS and _FIND_FLAGS.intersection(words):\n",
+        new="    if _FIND_FLAGS.intersection(words):\n",
+        tests=(
+            "tests/test_guard_production_setup.py::"
+            "test_f1_a_launcher_word_that_is_not_in_a_command_place_is_not_a_launcher",
+        ),
+    ),
+    Mutant(
+        # 실행되지 않는 따옴표 글(제목 · 커밋 메시지 · 본문) 안의 rcm 낱말을 센다 — `T='feat(cli):
+        # rcm wait …'` 뒤의 `"$T"` · `"$H/…"` 가 막힌다(m5t-a-w3 F2)
+        name="guard-quoted-text-rcm-word-counts",
+        path="tools/guard_production.py",
+        old="        script, inert = prose and live_prose, prose and not live_prose\n",
+        new="        script, inert = prose, False\n",
+        tests=(
+            "tests/test_guard_production_setup.py::"
+            "test_f2_rcm_words_inside_quoted_text_do_not_arm_the_net",
+        ),
+    ),
+    Mutant(
+        # 실행되는 따옴표 글(`sh -c '…'` · `eval '…'` · `xargs sh -c`)까지 세지 않는다 — 그 안의
+        # rcm 이 그물을 지난다(m5t-a-w3 F2)
+        name="guard-running-quoted-text-ignored",
+        path="tools/guard_production.py",
+        old="        script, inert = prose and live_prose, prose and not live_prose\n",
+        new="        script, inert = False, prose\n",
+        tests=(
+            "tests/test_guard_production_setup.py::"
+            "test_f2_quoted_text_that_runs_and_launchers_in_a_command_place_are_still_denied",
+        ),
+    ),
+    Mutant(
+        # 히어독 본문을 명령 줄로 자른다 — `python3 - <<'EOF'` 의 pty 프로그램이 다른 명령이 되어
+        # 런처가 사라진다(m5t-a-w3 F)
+        name="guard-heredoc-read-as-commands",
+        path="tools/guard_production.py",
+        old=(
+            "                    raise _Unreadable  # 히어독 본문은 명령이 아니다 — 줄 단위로 "
+            "자르면 틀린다\n"
+        ),
+        new="                    pass\n",
+        tests=(
+            "tests/test_guard_production_setup.py::"
+            "test_f2_quoted_text_that_runs_and_launchers_in_a_command_place_are_still_denied",
+        ),
+    ),
+    Mutant(
+        # `eval` · `sh -c` 가 실행할 글을 치환이 만드는 꼴을 보지 않는다 — `eval "$(printf 'rcm
+        # %s' …)"` 가 지난다(m5t-a-w3 F)
+        name="guard-shell-built-code-allowed",
+        path="tools/guard_production.py",
+        old="        if seat.shell and variable and names_rcm:\n",
+        new="        if False:\n",
+        tests=(
+            "tests/test_guard_production_setup.py::"
+            "test_f2_quoted_text_that_runs_and_launchers_in_a_command_place_are_still_denied",
+        ),
+    ),
 )
 
 
