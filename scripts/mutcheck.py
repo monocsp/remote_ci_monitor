@@ -8,7 +8,9 @@
 변이 목록(개수는 `MUTANTS` 가 정본이다 — 문서의 숫자는 머지마다 썩는다):
   M5t-a PR7 — `m5t-live-port-check-takes-8787` · `m5t-live-plist-home-unchecked`: 실기 하네스의
      bootstrap 전 검사가 운영 포트를 받음 · plist 의 HOME 을 안 봄
-     (`scripts/acceptance/m5t_live.sh`, `docs/m5t-workplan.md` §7 · TR16)
+     (`scripts/acceptance/m5t_live.sh`, `docs/m5t-workplan.md` §7 · TR16);
+     `m5t-live-home-not-isolated` · `m5t-live-rcm-env-kept` · `m5t-live-bootout-label-unchecked`:
+     격리가 HOME 을 안 바꿈 · RCM_* 를 안 지움 · bootout 직전 라벨 재검사 없음(PR #276 P3)
   M5t-a PR6 — `m5t-core-names-a-catalog-tool`: 코어가 툴체인 카탈로그의 도구 이름을 상수로 가짐
      (`hostsample.py`, `docs/m5t-workplan.md` §4.5 · TD23)
   M5t-a PR5 — `m5t-ran-on-*` 둘(시작 전 잡 · 다른 머신의 로컬 잡에 이름을 지음) ·
@@ -4667,6 +4669,43 @@ MUTANTS = (
         old='  { [ "$v" = "$th" ] && is_test_path "$v" "$base" "$home"; } || {\n',
         new="  true || {\n",
         tests=("tests/test_acceptance_m5t_live.py::test_tr16_plist_check_takes_test_values_only",),
+    ),
+    Mutant(
+        # 실기 하네스가 HOME 을 시험 폴더로 바꾸지 않는다 — setup 이 진짜 홈의 LaunchAgents · 로그
+        # 자리를 고른다 (PR #276 P3 MED 3, 명세 §7)
+        name="m5t-live-home-not-isolated",
+        path="scripts/acceptance/m5t_live.sh",
+        old='  export HOME="$b/home"\n',
+        new="  :\n",
+        tests=(
+            "tests/test_acceptance_m5t_live.py::"
+            "test_tr16_isolate_env_drops_rcm_and_points_home_and_xdg_into_the_base",
+        ),
+    ),
+    Mutant(
+        # 실기 하네스가 셸의 RCM_* 를 지우지 않는다 — RCM_SERVER · RCM_TOKEN 이 운영 서버로 이끈다
+        # (PR #276 P3 MED 3, 명세 §7)
+        name="m5t-live-rcm-env-kept",
+        path="scripts/acceptance/m5t_live.sh",
+        old=r"""  for v in $(env | sed -n 's/^\(RCM_[A-Za-z0-9_]*\)=.*/\1/p'); """
+        + 'do unset "$v"; done\n',
+        new="  :\n",
+        tests=(
+            "tests/test_acceptance_m5t_live.py::"
+            "test_tr16_isolate_env_drops_rcm_and_points_home_and_xdg_into_the_base",
+        ),
+    ),
+    Mutant(
+        # 실기 하네스가 bootout 직전에 라벨을 다시 보지 않는다 — 바뀐 LABEL 이면 운영 서비스를
+        # 내린다 (PR #276 P3 MED 3, 명세 §7 · TR16)
+        name="m5t-live-bootout-label-unchecked",
+        path="scripts/acceptance/m5t_live.sh",
+        old='  if is_test_label "$LABEL"; then\n',
+        new="  if true; then\n",
+        tests=(
+            "tests/test_acceptance_m5t_live.py::"
+            "test_tr16_bootout_checks_the_label_again_and_removes_only_a_test_file",
+        ),
     ),
 )
 
