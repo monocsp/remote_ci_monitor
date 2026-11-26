@@ -839,7 +839,8 @@ yours to do. Open or close it yourself and that choice is remembered.
 
 ![the banner, the down pill and the pool header when a worker stops answering](images/ui/web-worker-down.png)
 
-1. A **banner** says what happened.
+1. A **banner** says what happened, without a number for the grace:
+   `Worker mac2-worker unreachable — its jobs go on if back within the grace period, else end as lost`.
 2. The worker's pill turns **down**.
 3. Its pool is marked as having no worker, and jobs there wait with that reason and **no ETA** —
    nothing pretends they are about to start. A job that was running on that worker keeps running

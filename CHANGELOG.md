@@ -83,6 +83,14 @@ of a key bumps that number and is listed here.
 - **`/api/status` no longer answers 500 when its queue section fails.** That section is `null`
   and the rest of the document is served, as for the other sections.
   ([#284](https://github.com/monocsp/remote_ci_monitor/pull/284))
+- **The web's unreachable-worker banner no longer says the running jobs are lost.** It says they
+  go on if the worker is back within the disconnect grace and end `lost` otherwise
+  (`Worker mac2-worker unreachable — its jobs go on if back within the grace period, else end as
+  lost`), in both languages.
+- **Korean screens pick the right particle after a name like `mac2-worker`.** A Latin word of
+  three letters or more that ends in a vowel and `r` now takes the form without a final consonant
+  (`워커 mac2-worker와`, not `mac2-worker과`); short acronyms such as `HDR` are still read letter by
+  letter.
 
 ## [0.11.1] - 2026-11-26
 

@@ -368,6 +368,43 @@ def test_rl28_both_usage_guides_show_the_grace_and_the_two_wait_lines():
         assert "`lost`" in body, heading
     assert "not resumed automatically" not in usage
     assert "자동으로 재개되지도 않는다" not in usage_ko
-    assert "`… 연락이 끊김 · 유예 시간 안에 돌아오면 이어서 진행`" in flat(
+    # 조사 고침(batch-3) 뒤로는 이름까지 인용한다 — 「mac2-worker과」가 아니다
+    assert "`워커 mac2-worker와 연락이 끊김 · 유예 시간 안에 돌아오면 이어서 진행`" in flat(
         section(usage_ko, "워커가 멈추면")
+    )
+
+
+def test_rl28_both_usage_guides_quote_the_banner_as_it_is_now():
+    """# RL28 「When a worker stops」 1번은 띠를 지금 문장대로 인용한다(i18n.js 의
+    `header.workers_unreachable_one`). 옛 「결과를 잃는다 · 알 수 없다」는 남지 않는다."""
+    en = (
+        "`Worker mac2-worker unreachable — its jobs go on if back within the grace period,"
+        " else end as lost`"
+    )
+    ko = "`워커 mac2-worker 연결 끊김 — 유예 시간 안에 돌아오면 작업이 이어지고 넘기면 결과를 잃음`"
+    usage = flat(section((ROOT / "docs" / "usage.md").read_text(), "When a worker stops"))
+    usage_ko = flat(section((ROOT / "docs" / "usage.ko.md").read_text(), "워커가 멈추면"))
+    assert en in usage
+    assert en in usage_ko and ko in usage_ko
+    i18n = (ROOT / "src" / "remote_ci_monitor" / "web" / "i18n.js").read_text()
+    assert en.strip("`").replace("mac2-worker", '" + a.name + "') in i18n
+    assert ko.strip("`").replace("mac2-worker", '" + a.name + "') in i18n
+    for text in (usage, usage_ko):
+        assert "running jobs are lost" not in text
+        assert "결과를 알 수 없습니다" not in text
+
+
+def test_operating_says_an_unreported_job_waits_on_disk_not_a_minute():
+    """§4.5(PR2) — 못 보낸 보고는 디스크 큐에 남아 24시간 안에 다시 보낸다. 옛 「1분 뒤 포기」
+    문장은 돌아오지 않는다(드레인 끝의 1분 기다림은 남는다 — 그 뒤 큐는 디스크에 있다)."""
+    body = flat(OPERATING)
+    assert "gives the report up" not in body
+    assert "After that minute it logs" not in body
+    assert "keeps it in its heartbeats" not in body
+    assert "in a queue on disk" in body
+    assert "`job #<id> still not reported — restarting anyway`, leaves the queue on disk" in body
+    assert "for up to 24 hours after the job ends" in body
+    assert (
+        "`#<id> report: log and artifacts not delivered in 24h — sending the finish without them`"
+        in body
     )

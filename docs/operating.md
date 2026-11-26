@@ -969,10 +969,15 @@ rcm: following server v0.8.1 (installed v0.8.0) — fetched 707.7 KB
 If the server goes back to the worker's own version before the jobs finish, the drain is cancelled
 (`server runs v0.8.0 again — drain cancelled`) and the lanes take jobs again; if it moves to a
 third version, the worker restarts for that one. A job that finishes while the server is away
-(for example during the few seconds it is being replaced) is not given up: the worker keeps it in
-its heartbeats and reports it again after the next answered heartbeat, before it registers again,
-and at the end of a drain, for up to a minute, so the new registration does not close that job as
-lost. After that minute it logs `job #<id> still not reported` and gives the report up. The restart leaves `RCM_WORKER_RESTARTED_AT` in its environment: within 5 minutes of
+(for example during the few seconds it is being replaced) is not given up: the worker keeps the
+job's log, its artifacts and its result in a queue on disk and sends them in order once the server
+answers again. A lane takes no new job until the queue of its last job is sent. At the end of a
+drain the worker waits up to a minute for that queue; then it logs
+`job #<id> still not reported — restarting anyway`, leaves the queue on disk, and the restarted
+worker sends it before it registers again, so the new registration does not close that job as
+lost. The log and the artifacts are sent again for up to 24 hours after the job ends; after that
+the worker logs `#<id> report: log and artifacts not delivered in 24h — sending the finish without
+them`, and the job's log is marked incomplete. The restart leaves `RCM_WORKER_RESTARTED_AT` in its environment: within 5 minutes of
 it, a server version change seen in a heartbeat does not drain again
 (`server runs v0.8.1 — not draining: restarted 60s ago`), and jobs go on being served. A refused
 registration drains at any time, because that lane cannot take jobs. While the server does not
