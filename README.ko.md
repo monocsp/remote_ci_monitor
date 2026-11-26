@@ -47,7 +47,7 @@
 빌드 머신은 macOS(Apple Silicon · Intel)와 Linux. Windows 는 범위 밖이고, Windows 의 세션은 WSL
 로 제출한다([Windows (WSL)](docs/usage.ko.md#windows-wsl)).
 
-Status: **v0.11.0, M5t-a 출시 · 다음은 M5t-b 와 M5t-c**. GitHub 백엔드는 없고 계획도 없다. 계획서는 `PLAN.md`, 변경
+Status: **v0.11.1, M5t-a 출시 · 다음은 M5t-b 와 M5t-c**. GitHub 백엔드는 없고 계획도 없다. 계획서는 `PLAN.md`, 변경
 이력은 `CHANGELOG.md`.
 
 ## Install
