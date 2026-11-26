@@ -28,6 +28,7 @@ of a key bumps that number and is listed here.
   template (`rcm init server`, `rcm setup`, `examples/server.toml`) ends with a commented toolchain
   catalog: `[[probes]]` and `[[tools]]` install hints for Flutter, Xcode, Android, Node and Python
   that pass the start checks once uncommented. Its `[[notify]]` comment now lists `RCM_MACHINE`.
+  ([#275](https://github.com/monocsp/remote_ci_monitor/pull/275))
 - **`rcm wait` says where the job ran, and what became of its artifacts.** Its end line for a
   finished job is `#381 succeeded on build-02 · 6m 31s · artifacts ready`: the machine, the time,
   the failed step of a failed job and the artifact state (left out when the preset declares no
