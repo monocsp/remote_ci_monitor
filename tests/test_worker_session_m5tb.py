@@ -951,6 +951,63 @@ def test_rl38_the_sweep_deletes_only_old_and_lockable_folders(tmp_path):
         os.close(fd)
 
 
+def test_rl15_the_new_process_stops_the_orphan_before_its_first_claim(srv, tmp_path):
+    """같은 데이터 폴더로 새 프로세스를 띄우면 claim 을 시작하기 **전에** 죽은 세션의 표식 잡
+    그룹을 정리한다 — 첫 claim 이 서버에 닿는 순간 고아 pid 는 이미 없고, 정리 결과가 워커 로그에
+    남는다. 등록은 그 세션을 `previous_sessions` 로 싣는다."""
+    url = f"http://127.0.0.1:{srv.port}"
+    cfg = WorkerConfig(
+        server=url,
+        token=srv.tokens["build-02"],
+        data_dir=str(tmp_path / "w"),
+        lanes=1,
+        grace_seconds=1,
+    )
+    logs: list[str] = []
+    w = RemoteWorker(cfg, log=logs.append)
+    w.config.data_path.mkdir(parents=True, exist_ok=True)
+    worker_register = w.register
+
+    def short_polls() -> dict[str, Any]:
+        answer = worker_register()
+        w.claim_wait_seconds = 1  # 시험 시간만 — 멈춘 뒤 레인이 20초 claim 을 다 기다리지 않게
+        return answer
+
+    w.register = short_polls  # type: ignore[method-assign]
+    grp = _spawn_group(["sleep", "30"])
+    seen: dict[str, Any] = {}
+    real_claim = srv.app.worker_claim
+    real_register = srv.app.worker_register
+
+    def register(token: Any, body: Any) -> dict[str, Any]:
+        seen.setdefault("previous", list((body or {}).get("previous_sessions") or []))
+        return real_register(token, body)
+
+    def claim(token: Any, body: Any, *a: Any, **kw: Any) -> Any:
+        if "alive_at_first_claim" not in seen:
+            seen["alive_at_first_claim"] = grp.poll() is None
+            w.stop()
+        return real_claim(token, body, *a, **kw)
+
+    srv.app.worker_register = register  # type: ignore[method-assign]
+    srv.app.worker_claim = claim  # type: ignore[method-assign]
+    try:
+        start = rw.process_start(grp.pid)
+        d = _dead_folder(
+            w, rw.owner_of(w.config, "build-02"), {6: {"pgid": grp.pid, "start": start}}
+        )
+        out: dict[str, Any] = {}
+        t = threading.Thread(target=lambda: out.update(code=w.run()), daemon=True)
+        t.start()
+        t.join(40)
+        assert not t.is_alive()
+        assert seen.get("alive_at_first_claim") is False  # 첫 claim 전에 정리됐다
+        assert seen["previous"] == [d.name]
+        assert any(m.startswith(f"orphan #6: stopped process group {grp.pid}") for m in logs)
+    finally:
+        _kill(grp.pid)
+
+
 def test_rl31_the_recheck_confirms_and_sends_one_narrow_finish_as_the_dead_session(tmp_path):
     fake = _Who()
     w = _worker(tmp_path, fake)
