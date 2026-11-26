@@ -24,6 +24,7 @@ from __future__ import annotations
 import copy
 import dataclasses
 import fcntl
+import functools
 import hashlib
 import json
 import os
@@ -344,6 +345,10 @@ class _JobSender:
         self._stop_deadline: float | None = None
         self._last_log = time.monotonic()
         self._abandon_said = False
+        # 스레드가 끝나면 한 번 부를 것(`when_ended`) — 레인이 먼저 풀린 큐의 정리
+        self._end_lock = threading.Lock()
+        self._ended = False
+        self._on_end: Callable[[], None] | None = None
         self.thread = threading.Thread(target=self.run, name=f"rcm-report-{job_id}", daemon=True)
 
     @property
@@ -356,6 +361,14 @@ class _JobSender:
 
     def alive(self) -> bool:
         return self.thread.is_alive()
+
+    def when_ended(self, fn: Callable[[], None]) -> None:
+        """보내는 스레드가 끝나면 `fn` 을 한 번 부른다. 이미 끝났으면 지금 이 스레드에서 부른다."""
+        with self._end_lock:
+            if not self._ended:
+                self._on_end = fn
+                return
+        fn()
 
     def finished(self) -> bool:
         """큐가 끝났다 — 보낼 것이 남지 않았다(`done`) 또는 끝나지 않은 잡의 로그를 다 보냈다(D)."""
@@ -470,6 +483,11 @@ class _JobSender:
             self.gave_up = True
         finally:
             self.ob.close()
+            with self._end_lock:
+                self._ended = True
+                fn, self._on_end = self._on_end, None
+            if fn is not None:
+                fn()
 
     def _stopping_past_deadline(self) -> bool:
         if self.dead is not None or not self.proc.stopping.is_set():
@@ -2584,13 +2602,22 @@ class RemoteWorker:
             ob.ended_at = self._epoch()
         ob.save()
         sender.wake.set()
-        gave_up = not self._await_queue(job_id, sender)
+        self._await_queue(job_id, sender)
+        # 레인은 풀려도 큐는 보내는 스레드가 끝날 때까지 heartbeat 목록에 남는다 — 드레인 한도가
+        # 지난 큐는 exec 까지 계속 보낸다. 먼저 빼면 exec 전의 heartbeat 하나로 서버가 그 잡을
+        # 「잊힌 잡」(T5)으로 닫는다(§4.5 · F10, rcm-ci 4341)
+        ended = functools.partial(self._queue_ended, job_id, sender)
+        sender.when_ended(ended)  # mutcheck: queued-job-left-the-heartbeat
+
+    def _queue_ended(self, job_id: int, sender: _JobSender) -> None:
+        """잡의 보내는 스레드가 끝났다 — heartbeat 목록에서 빼고, 다 보냈으면 폴더를 지운다."""
         with self._lock:
             self.running.pop(job_id, None)
             if self._senders.get(job_id) is sender:
                 self._senders.pop(job_id, None)
             # 못 보냈으면 폴더를 남긴다 — 다음 프로세스가 죽은 세션의 큐로 보낸다(§4.4 의 7).
             # 지우면 finish 와 그 확인이 사라진다(P6-2 #3)
+            gave_up = not sender.ob.done
             if gave_up:  # mutcheck: unsent-finish-folder-dropped
                 return
         self._forget_job_dir(job_id)  # 보고가 끝났다 — 다음 프로세스가 판정할 것이 없다
@@ -2598,7 +2625,8 @@ class RemoteWorker:
     def _await_queue(self, job_id: int, sender: _JobSender) -> bool:
         """레인이 제 잡의 큐가 끝나기를 기다린다. 끝났으면(`done`) 참. 멈추는 중이면 보내는 스레드가
         `STOP_REPORT_SECONDS` 뒤 디스크에 남기고 끝난다. 드레인 중이면 `DRAIN_REPORT_SECONDS` 까지만
-        기다린다 — 그 뒤는 오늘처럼 exec 하고 새 이미지가 등록 전에 보낸다(M5q · §4.4)."""
+        기다린다 — 그 뒤 레인은 풀리고 오늘처럼 exec 한다. 보내는 스레드는 멈추지 않고 exec 까지
+        보낸다. 남은 것은 디스크에 있고 새 이미지가 등록 전에 보낸다(M5q · §4.4)."""
         waited_since: float | None = None
         while sender.alive():
             sender.thread.join(0.2)
@@ -2608,8 +2636,6 @@ class RemoteWorker:
                 if now - waited_since >= DRAIN_REPORT_SECONDS and not sender.ob.done:
                     # 큐는 디스크에 남는다 — 새 이미지가 등록 전에 죽은 세션의 큐로 보낸다
                     self.log(f"job #{job_id} still not reported — restarting anyway")
-                    sender.halt.set()
-                    sender.thread.join(2)
                     return False
         return sender.ob.done
 

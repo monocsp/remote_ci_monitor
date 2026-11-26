@@ -375,7 +375,12 @@ def test_rl12_b_a_report_left_by_the_drain_exec_is_sent_before_the_new_image_reg
         failing["on"] = False
         stack.wait_registered(NEW, timeout=60)
         job = stack.srv.store.get_job(jid)
-        assert job.state == SUCCEEDED and job.exit_code == 0, (job.state, job.summary)
+        assert job.state == SUCCEEDED and job.exit_code == 0, (
+            job.state,
+            job.summary,
+            events,
+            log.read_text(),
+        )
         ok = [at for kind, at, st in events if kind == "finish" and st == 200]
         new_reg = [at for kind, at, v in events if kind == "register" and v == NEW]
         assert len(ok) == 1 and new_reg and ok[0] < new_reg[0], events

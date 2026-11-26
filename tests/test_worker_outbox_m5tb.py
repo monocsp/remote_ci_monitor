@@ -875,10 +875,58 @@ def test_rl12_b_drain_gives_up_after_the_limit_and_leaves_the_queue_on_disk(
     lane.start()
     lane.join(10)
     assert not lane.is_alive(), "the lane still waits for its queue past DRAIN_REPORT_SECONDS"
-    assert 7 not in w.running
+    assert 7 in w.running  # 큐가 안 끝난 잡은 heartbeat 목록에 남는다(rl12_b_b_a)
     assert (w._job_dir(7) / "outbox.json").is_file()  # 새 이미지가 등록 전에 보낸다
     assert any("restarting anyway" in x for x in w.logs)
     s.halt.set()
+
+
+def test_rl12_b_b_a_queue_past_the_drain_limit_stays_in_the_heartbeat_until_it_is_sent(
+    tmp_path, fast, monkeypatch
+):
+    """드레인 한도(60초)가 지나 레인은 풀려도 그 잡의 큐는 끝나지 않았다. heartbeat 의 `jobs` 에는
+    큐가 안 끝난 잡이 남는다(§4.5 「레인은 자기 잡의 큐가 끝날 때까지」 · F10). 빼면 exec 전에
+    도는 heartbeat 하나로 서버가 그 잡을 「잊힌 잡」(T5, `worker_restarted_without_job`)으로
+    닫는다 — rcm-ci 4341 의 RL12 b e2e 실패가 그것이었다. 보내는 스레드는 exec 까지 계속
+    보내고, 보낸 뒤에야 목록에서 빠지고 폴더가 지워진다(드레인이 취소돼도 결과를 잃지 않는다)."""
+    monkeypatch.setattr(rw, "DRAIN_REPORT_SECONDS", 0.3)
+    clock = WClock()
+    fake = FakeServer(clock)
+    w = wworker(tmp_path, fake, clock)
+    w.prepare_sessions()
+    fake.script["finish"] = [http(503)] * 100000
+    ob = rw.JobOutbox(w._job_dir(7))
+    s = rw._JobSender(w, 7, ob).start()
+    w._senders[7] = s
+    with w._lock:
+        w.running[7] = 1
+    w.draining.set()
+    lane = threading.Thread(
+        target=w._finish, args=(7, SUCCEEDED, 0, None, None), kwargs={"group_gone": True}
+    )
+    lane.daemon = True
+    lane.start()
+    lane.join(10)
+    assert not lane.is_alive()
+    sent: list[list[int]] = []
+
+    def heartbeat_call(jobs: list[int], seq: int, settled: int) -> dict[str, Any]:
+        sent.append(list(jobs))
+        return {}
+
+    w._heartbeat_call = heartbeat_call  # type: ignore[method-assign]
+    w.heartbeat_once()
+    assert sent == [[7]], "the heartbeat dropped a job whose report is still queued"
+    try:
+        fake.script["finish"].clear()  # 서버가 돌아왔다(또는 드레인이 취소됐다)
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline and (7 in w.running or w._job_dir(7).exists()):
+            time.sleep(0.01)
+        assert [c[3] for c in fake.calls if c[0] == "finish"][-1] == SUCCEEDED
+        assert 7 not in w.running and 7 not in w._senders
+        assert not w._job_dir(7).exists()  # 보냈다 — 다음 프로세스가 판정할 것이 없다
+    finally:
+        s.halt.set()
 
 
 def test_rl23_snapshot_download_cut_off_is_lost_snapshot_unreachable(tmp_path, fast):
