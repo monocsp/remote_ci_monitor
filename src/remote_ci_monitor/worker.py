@@ -347,12 +347,13 @@ class Worker(threading.Thread):
                 pass
 
     @staticmethod
-    def _hold_cause(job: Job, gone: bool | None) -> str | None:
+    def _hold_cause(job: Job | None, gone: bool | None) -> str | None:
         """로컬 레인의 확인(§4.12 확인 표 4행): 러너가 돌아온 뒤 그룹이 사라졌음을 서버가 직접 본다.
         표식 잡인데 `group_gone` 이 참이 아니면 확인 없는 닫힘이다 — 같은 트랜잭션에서 홀드한다.
         `_reap_group` 이 SIGKILL 2초 뒤에도 그룹을 봤거나(거짓) `_abandon` 이 못 끝냈거나
-        모를 때다."""
-        if job.irreversible is True and gone is not True:  # mutcheck: local-lane-group-unchecked
+        모를 때다. 잡을 읽지 못했으면(None) 표식 잡으로 본다 — 닫힌 쪽이다."""
+        irreversible = job is None or job.irreversible is True
+        if irreversible and gone is not True:  # mutcheck: local-lane-group-unchecked
             return "group_not_gone"
         return None
 
@@ -427,7 +428,44 @@ class Worker(threading.Thread):
                     self._changed(current.id)
                 except Exception:  # noqa: BLE001
                     pass
+            else:
+                claimed = getattr(e, "claimed_job_id", None)
+                if claimed is not None:  # mutcheck: unread-claim-left-running
+                    self._close_unread_claim(int(claimed), str(err))
             self._set(WORKER_DOWN, None, err)
+
+    def _close_unread_claim(self, job_id: int, err: str) -> None:
+        """claim 은 커밋됐는데 잡을 읽지 못했다(`Store.claim` 이 예외에 id 를 싣는다, P3 3라운드
+        LOW). 그대로 두면 잡이 `running` 으로 남고 재시작이 표식 잡의 그룹을 거짓으로 홀드한다.
+        명령은 돈 적이 없으니 그룹이 없다는 것이 확인된 닫힘이다. 그사이 들어온 취소는 이긴다
+        (`_fail_before_start`). 다시 읽어도 못 읽으면 `running` · `cancelling` 에서 실패로
+        닫는다."""
+        gone = True  # 띄운 적 없다
+        try:
+            try:
+                job = self.store.get_job(job_id)
+            except Exception:  # noqa: BLE001 — 다시 못 읽으면 id 로만 닫는다
+                job = None
+            if job is not None:
+                self._fail_before_start(
+                    job, "worker_error", hold_cause=self._hold_cause(job, gone), detail=err
+                )
+            else:
+                text, code, args = outcome.summary("worker_error", detail=err)
+                self.store.finish(
+                    job_id,
+                    FAILED,
+                    now=self.now_fn(),
+                    exit_code=None,
+                    summary=text,
+                    summary_code=code,
+                    summary_args=args,
+                    only_from=(RUNNING, CANCELLING),
+                    hold_cause=self._hold_cause(None, gone),
+                )
+            self._changed(job_id)
+        except Exception:  # noqa: BLE001 — 닫지 못하면 재시작의 `recover_on_start` 가 맡는다
+            pass
 
     def _result_close(
         self, job: Job, result: Any

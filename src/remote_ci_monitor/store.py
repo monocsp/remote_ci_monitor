@@ -3540,7 +3540,13 @@ class Store:
         except Exception:
             conn.execute("ROLLBACK")
             raise
-        return self.get_job(job_id)
+        try:
+            return self.get_job(job_id)
+        except Exception as e:
+            # 커밋은 됐다 — 집힌 잡 id 를 예외에 실어 호출자가 그 잡을 닫게 한다. 모르면 잡이
+            # `running` 으로 남고 재시작이 표식 잡의 그룹을 거짓으로 홀드한다(P3 3라운드 LOW)
+            e.claimed_job_id = job_id  # type: ignore[attr-defined]  # mutcheck: claim-id-lost
+            raise
 
     def _effective_jobs_sql(self) -> tuple[str, list[Any]]:
         """잡 표에 유효 그룹 `eg` · 범위 `es` 를 붙인 파생 표(M5t-b 결정 330 · RL48).

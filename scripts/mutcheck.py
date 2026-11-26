@@ -6351,7 +6351,7 @@ MUTANTS = (
         name="local-lane-group-unchecked",
         path="src/remote_ci_monitor/worker.py",
         old=(
-            "        if job.irreversible is True and gone is not True:  # mutcheck: "
+            "        if irreversible and gone is not True:  # mutcheck: "
             "local-lane-group-unchecked\n"
         ),
         new="        if False:\n",
@@ -6619,6 +6619,31 @@ MUTANTS = (
         tests=(
             "tests/test_hold_notify_m5tb.py::"
             "test_rl54_a_failing_hold_announcement_does_not_stop_the_rest_of_the_tick",
+        ),
+    ),
+    Mutant(
+        # claim 이 커밋한 뒤 잡을 읽지 못하면 집힌 id 를 잃는다 — 잡이 running 으로 남는다
+        name="claim-id-lost",
+        path="src/remote_ci_monitor/store.py",
+        old=(
+            "            e.claimed_job_id = job_id  # type: ignore[attr-defined]  # mutcheck: "
+            "claim-id-lost\n"
+        ),
+        new="            pass\n",
+        tests=(
+            "tests/test_hold_notify_m5tb.py::"
+            "test_rl54_a_local_claim_that_commits_and_then_cannot_read_the_job_closes_it_unheld",
+        ),
+    ),
+    Mutant(
+        # 레인이 예외에 실린 집힌 잡 id 를 보지 않는다 — 잡이 running 으로 남는다
+        name="unread-claim-left-running",
+        path="src/remote_ci_monitor/worker.py",
+        old="                if claimed is not None:  # mutcheck: unread-claim-left-running\n",
+        new="                if False:\n",
+        tests=(
+            "tests/test_hold_notify_m5tb.py::"
+            "test_rl54_a_local_claim_that_commits_and_then_cannot_read_the_job_closes_it_unheld",
         ),
     ),
 )

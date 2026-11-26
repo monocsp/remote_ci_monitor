@@ -708,6 +708,61 @@ def test_rl54_a_local_lane_close_that_loses_to_a_cancel_keeps_the_hold_decision(
     assert events == ([jid] if held else [])
 
 
+def test_rl54_a_local_claim_that_commits_and_then_cannot_read_the_job_closes_it_unheld(
+    tmp_path, monkeypatch
+):
+    """P3 3라운드 LOW(B2): 로컬 claim 이 커밋한 뒤 잡을 다시 읽다(`get_job`) 터지면 레인은 집힌 잡
+    id 를 몰라 그 잡이 `running` 으로 남았다. 재시작하면 `recover_on_start` 가 표식 잡의 그룹을
+    홀드한다 — 명령은 돈 적이 없는데. claim 은 그 id 를 예외에 실어 넘기고, 레인은 그 잡을 홀드
+    없이 닫는다(띄운 적 없다)."""
+    import sqlite3
+    import time
+
+    from remote_ci_monitor.core.model import FAILED
+    from test_worker_api import WorkerServer, sh
+
+    launched: list[int] = []
+    srv = WorkerServer(
+        tmp_path, presets=[sh("ship", "echo ship", irreversible=True)], workers=False
+    )
+    try:
+        store = srv.store
+        real_claim, real_get = store.claim, store.get_job
+        state = {"in_claim": False, "raised": False}
+
+        def claim(*a: Any, **kw: Any):
+            state["in_claim"] = True
+            try:
+                return real_claim(*a, **kw)
+            finally:
+                state["in_claim"] = False
+
+        def get_job(job_id: int):
+            if state["in_claim"] and not state["raised"]:
+                state["raised"] = True
+                raise sqlite3.OperationalError("disk I/O error")
+            return real_get(job_id)
+
+        monkeypatch.setattr(store, "claim", claim)
+        monkeypatch.setattr(store, "get_job", get_job)
+        from remote_ci_monitor import worker as worker_mod
+
+        monkeypatch.setattr(worker_mod, "run_job", lambda spec, *_a, **_k: launched.append(1))
+        jid = srv.queued_job(preset="ship")
+        srv.app.start()
+        deadline = time.monotonic() + 10
+        while not real_get(jid).is_terminal:
+            assert time.monotonic() < deadline, f"job {jid} stayed {real_get(jid).state}"
+            time.sleep(0.02)
+        assert state["raised"] is True
+        j = real_get(jid)
+        assert (j.state, j.summary_code) == (FAILED, "worker_error")
+        assert launched == []
+        assert not store.has_open_hold(jid)
+    finally:
+        srv.close()
+
+
 def test_rl54_the_server_hands_its_hold_announcer_to_the_local_lanes(tmp_path, monkeypatch):
     """서버가 로컬 레인을 띄울 때 홀드 알림(`_hold_created`)을 넘긴다 — 안 넘기면 위 홀드가
     알림 없이 남는다."""
