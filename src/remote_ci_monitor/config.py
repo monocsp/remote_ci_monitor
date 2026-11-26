@@ -132,6 +132,9 @@ class ServerSection:
     worker_timeout_seconds: int = 60  # heartbeat 이 이만큼 없으면 워커 down · 잡 lost (M5b-2)
     worker_heartbeat_seconds: int = 5  # 워커에게 알려 주는 heartbeat 주기
     worker_claim_wait_seconds: int = 20  # `/worker/claim` long-poll 상한
+    # 원격 잡의 끊김 유예(M5t-b 결정 263 · 335). None = 적지 않음 → `disconnect_grace()` 가
+    # `max(600, L + 35)` 를 쓴다. 적으면 `L + 35` 이상 86400 이하. claim 때 잡 행에 얼린다
+    disconnect_grace_seconds: int | None = None
     # 잡 산출물(M5e). 전부 설정 키다 — 기본값만 결정 41 이고 운영자가 바꾼다.
     artifact_retention_hours: int = 24  # TTL. `ready` 가 된 시각부터 잰다
     max_artifact_bytes: int = 1_073_741_824  # 잡당 원본 바이트 상한 (1 GiB)
@@ -588,11 +591,15 @@ def _coerce_scalar(where: str, value: Any, kind: type) -> Any:
     raise ConfigError(f"{where}: unsupported type {kind.__name__}")
 
 
+#: 기본이 None 인 정수 키(「적지 않음」과 값을 가른다). 나머지 None 기본 키는 bool 로 읽는다
+_OPTIONAL_INT_KEYS = frozenset({"disconnect_grace_seconds"})
+
+
 def _apply_section(section: Any, name: str, values: dict[str, Any], origin: str) -> None:
     kinds = {f.name: type(getattr(section, f.name)) for f in fields(section)}
     for key, kind in list(kinds.items()):
         if kind is type(None):  # `bool | None`(advertise) — 값이 오면 bool 로 읽는다
-            kinds[key] = bool
+            kinds[key] = int if key in _OPTIONAL_INT_KEYS else bool
     for key, value in values.items():
         if key not in kinds:
             raise ConfigError(f"[{name}] unknown key '{key}' ({origin})")
@@ -1370,6 +1377,35 @@ def _validate_shelf(cfg: ServerConfig) -> None:
             )
 
 
+#: 워커 heartbeat 요청의 전체 기한 T_req(M5t-b 결정 335). 워커의 `HEARTBEAT_DEADLINE_SECONDS` 와
+#: 같아야 한다 — 시험이 잠근다
+HEARTBEAT_DEADLINE_SECONDS = 15
+#: 기본 워커 grace 10 일 때의 m = T_req + grace + 여유 10(결정 320). 워커의
+#: `HEARTBEAT_DEADLINE_SECONDS + 10 + SELF_STOP_SLACK_SECONDS` 와 같다 — 시험이 잠근다
+DISCONNECT_GRACE_MARGIN_SECONDS = 35
+DISCONNECT_GRACE_DEFAULT_SECONDS = 600
+DISCONNECT_GRACE_MAX_SECONDS = 86400
+
+
+def connected_age_floor(timeout_seconds: int, heartbeat_seconds: int) -> int:
+    """하한 L = max(T, 2H + 3·T_req + 5)(결정 335) — 연결된 워커의 `ok_at` 나이 상한(§4.1.5)."""
+    return max(timeout_seconds, 2 * heartbeat_seconds + 3 * HEARTBEAT_DEADLINE_SECONDS + 5)
+
+
+def disconnect_grace_floor(s: ServerSection) -> int:
+    """`disconnect_grace_seconds` 의 하한 L + 35. 기본 설정(T 60 · H 5)이면 95 다."""
+    floor = connected_age_floor(s.worker_timeout_seconds, s.worker_heartbeat_seconds)
+    return floor + DISCONNECT_GRACE_MARGIN_SECONDS  # mutcheck: grace-lower-bound-dropped
+
+
+def disconnect_grace(s: ServerSection) -> int:
+    """쓰는 유예. 적지 않았으면 `max(600, L + 35)` — 큰 `worker_timeout_seconds` 를 쓰던 설정이
+    업그레이드 뒤 기동에 실패하지 않게 한다(V1-9)."""
+    if s.disconnect_grace_seconds is None:
+        return max(DISCONNECT_GRACE_DEFAULT_SECONDS, disconnect_grace_floor(s))
+    return s.disconnect_grace_seconds
+
+
 def _validate_server(cfg: ServerConfig, *, check_tools: bool = True) -> None:
     s = cfg.server
     # 0 은 분배 전용 코디네이터다 — 로컬 레인 없이 잡을 받아 원격 워커에 나눠 준다(M5t-a 결정 243)
@@ -1444,6 +1480,20 @@ def _validate_server(cfg: ServerConfig, *, check_tools: bool = True) -> None:
         raise ConfigError("[server] worker_heartbeat_seconds must be >= 1")
     if s.worker_heartbeat_seconds >= s.worker_timeout_seconds:
         raise ConfigError("[server] worker_heartbeat_seconds must be < worker_timeout_seconds")
+    if s.disconnect_grace_seconds is not None:
+        floor = disconnect_grace_floor(s)
+        g = s.disconnect_grace_seconds
+        if (
+            isinstance(g, bool)
+            or not isinstance(g, int)
+            or not (floor <= g <= DISCONNECT_GRACE_MAX_SECONDS)
+        ):
+            raise ConfigError(
+                f"[server] disconnect_grace_seconds must be an integer between {floor} and "
+                f"{DISCONNECT_GRACE_MAX_SECONDS} (floor = max(worker_timeout_seconds, "
+                f"2 x worker_heartbeat_seconds + 50) + 35); remove the key to use "
+                f"{max(DISCONNECT_GRACE_DEFAULT_SECONDS, floor)}"
+            )
     for key in (
         "artifact_retention_hours",
         "max_artifact_bytes",

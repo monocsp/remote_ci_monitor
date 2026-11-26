@@ -21,6 +21,7 @@ HTTP 핸들러는 얇게 여기를 부른다.
 from __future__ import annotations
 
 import hashlib
+import re
 import secrets
 import sqlite3
 import tarfile
@@ -32,7 +33,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from remote_ci_monitor.collect import CollectResult
-from remote_ci_monitor.config import _NAME_RE
+from remote_ci_monitor.config import _NAME_RE, disconnect_grace
 from remote_ci_monitor.core import artifacts as art
 from remote_ci_monitor.core import outcome
 from remote_ci_monitor.core.artifacts import BundleFile
@@ -64,7 +65,7 @@ from remote_ci_monitor.core.progress import parse_marker
 from remote_ci_monitor.core.status import iso, source_json
 from remote_ci_monitor.materialize import MaterializeError, assemble_tar_from_manifest
 from remote_ci_monitor.release_secrets import mask_bytes
-from remote_ci_monitor.store import LaneBusy, TokenInfo, WorkerRow
+from remote_ci_monitor.store import RELEASE_WORKER, LaneBusy, TokenInfo, WorkerRow
 
 if TYPE_CHECKING:
     from remote_ci_monitor.config import ServerConfig
@@ -80,6 +81,19 @@ WORKER_OUTCOMES = (SUCCEEDED, FAILED, TIMED_OUT, CANCELLED, LOST)
 SUMMARY_RESTARTED = "worker {name} restarted without the job"
 SUMMARY_UNREACHABLE = "worker {name} unreachable for {seconds}s"
 SUMMARY_CANCEL_UNCONFIRMED = "worker did not confirm the cancel"
+
+#: 워커 프로토콜 판(M5t-b §4.7 · 결정 258 · 270). 1 은 세션이 없는 옛 판이다
+WORKER_PROTOCOL = 2
+#: 409 `protocol_required` 의 문구. 「not registered」를 담지 않는다 — 옛 워커는 claim 409 의
+#: `error` 에 그 부분 문자열이 있으면 재등록 루프를 돈다(결정 329 · F40)
+PROTOCOL_REQUIRED = "worker protocol 2 required: upgrade rcm on this worker"
+SESSION_FENCED = "this worker process was replaced by a newer one with the same token"
+SESSION_FOREIGN = "session belongs to another worker"
+#: 본문이 없는 워커 라우트(log · tree · artifacts)의 세션 헤더(§4.10)
+SESSION_HEADER = "X-RCM-Worker-Session"
+_SESSION_RE = re.compile(r"^[0-9a-f]{32}$")
+#: heartbeat `seq` · `claims_settled` · claim `claim_seq` 의 상한(JSON 정수가 잃지 않는 범위)
+MAX_SEQ = 2**53 - 1
 
 
 def _api_error(status: int, message: str, **extra: Any) -> Exception:
@@ -163,6 +177,37 @@ def _preflight_summary(
         # 바꾼다). 워커는 이 400 을 보고 잡을 자기 문장으로 닫는다.
         raise _api_error(400, f"summary_args: {e}") from e
     return outcome.summary(code, **clean)
+
+
+def _lost_summary(
+    body: dict[str, Any], reported: Any, name: str
+) -> tuple[str, str, dict[str, Any]] | None:
+    """finish 의 `lost` 코드(`outcome.LOST_CODES`, M5t-b 결정 278). `outcome = lost` 일 때만 받고
+    인자는 코드마다 정한 키만 지난다. `worker_replaced` 의 이름은 서버가 토큰 이름으로 채운다."""
+    code = body.get("summary_code")
+    if code not in outcome.LOST_CODES:
+        return None
+    if reported != LOST:
+        raise _api_error(400, f"summary_code {code} needs outcome lost")
+    args = body.get("summary_args", {})
+    if not isinstance(args, dict):
+        raise _api_error(400, "summary_args must be an object")
+    try:
+        clean = outcome.clean_args(code, args, strict=True)
+    except outcome.OutcomeError as e:
+        raise _api_error(400, f"summary_args: {e}") from e
+    if code == "worker_replaced":
+        clean = {"name": name}
+    return outcome.summary(code, **clean)
+
+
+def _group_gone(body: dict[str, Any]) -> bool | None:
+    """finish 의 `group_gone`(결정 330): 러너가 돌아온 뒤 그 잡의 프로세스 그룹이 사라졌다는
+    확인. 없으면 None(옛 워커)이고 확인이 아니다."""
+    v = body.get("group_gone")
+    if v is not None and not isinstance(v, bool):
+        raise _api_error(400, "group_gone must be true or false")
+    return v
 
 
 def _stream_to_file(stream: Any, dest: Path, length: int) -> str:
@@ -268,6 +313,14 @@ class RemoteWorkersMixin:
         # heartbeat 이 없다(커밋만 보이고 기록은 안 보이면 다시 lost 다)
         self._fresh_claims: dict[str, set[int]] = {}
         self._fresh_claims_lock = threading.Lock()
+        # M5t-b(결정 328 · 339-a · 339-g): 세션마다 서버가 마지막으로 들은 단조 시각 `heard` 와
+        # 받아들인 heartbeat `seq`. 메모리에만 두고 바닥은 기동 단조 시각이다(결정 266). 레거시
+        # 요청은 `legacy:<이름>` 키를 쓴다. 판정 잠금은 세션마다 하나(`_session_locks`)이고
+        # `_heard_lock` 은 그 사전에 접근하는 짧은 메모리 잠금이다 — 그 안에서 DB 를 만지지 않는다.
+        self._heard_lock = threading.Lock()
+        self._heard: dict[str, float] = {}
+        self._hb_seq: dict[str, int] = {}
+        self._session_locks: dict[str, threading.Lock] = {}
         self._synthetic_said: set[str] = set()  # 합성 그룹 로그는 프리셋마다 한 번(결정 330)
 
     def _sync_irreversible(self) -> None:
@@ -289,6 +342,90 @@ class RemoteWorkersMixin:
                     f"preset {p.name}: irreversible without concurrency_group — using group "
                     f"{p.concurrency_group} ({p.concurrency_scope})"
                 )
+
+    # ── 세션 (M5t-b §4.2) ────────────────────────────────────────────────────
+
+    def _session_lock(self, key: str) -> threading.Lock:
+        with self._heard_lock:
+            lock = self._session_locks.get(key)
+            if lock is None:
+                lock = self._session_locks[key] = threading.Lock()
+            return lock
+
+    def _hear(self, key: str) -> None:
+        """서버가 그 세션(또는 레거시 이름)의 인증된 요청을 들었다 — 세션별 잠금 안에서 올린다."""
+        now = self.mono_fn()  # type: ignore[attr-defined]
+        with self._session_lock(key):
+            with self._heard_lock:
+                self._heard[key] = max(self._heard.get(key, now), now)
+
+    def heard_at(self, key: str) -> float:
+        """`max(heard(S), 기동)` — 유예의 시작점(결정 266). 들은 적이 없으면 기동 단조 시각."""
+        with self._heard_lock:
+            heard = self._heard.get(key)
+        floor = self.started_mono  # type: ignore[attr-defined]
+        return floor if heard is None else max(heard, floor)
+
+    @staticmethod
+    def _session_arg(raw: Any, where: str = "worker_session_id") -> str | None:
+        """세션 id 의 모양(32자 소문자 hex). 없으면 None — 레거시(옛 워커)다. 모양이 틀리면 400."""
+        if raw is None:
+            return None
+        if not isinstance(raw, str) or not _SESSION_RE.match(raw):
+            raise _api_error(400, f"{where} must be 32 lowercase hex characters")
+        return raw
+
+    @staticmethod
+    def _session_list(body: dict[str, Any], key: str) -> list[str]:
+        raw = body.get(key, [])
+        if not isinstance(raw, list) or len(raw) > 64:
+            raise _api_error(400, f"{key} must be a list of session ids")
+        out: list[str] = []
+        for x in raw:
+            if not isinstance(x, str) or not _SESSION_RE.match(x):
+                raise _api_error(400, f"{key} must be a list of session ids")
+            out.append(x)
+        return out
+
+    @staticmethod
+    def _protocol_required() -> Exception:
+        return _api_error(
+            409, PROTOCOL_REQUIRED, code="protocol_required", worker_protocol=WORKER_PROTOCOL
+        )
+
+    def _current_session(self, token: TokenInfo, session_id: str) -> None:
+        """세션 판정(§4.2 · T8 · T10 · T19). 현재 세션이면 `heard` 를 올린다.
+
+        표에 없으면 409 `not_registered`(워커는 같은 id 로 재등록한다), 다른 이름의 세션이면 403
+        (`heard` 를 남의 이름으로 올려 표식 잡이 닫히지 않게 하는 길을 막는다), 펜싱됐으면 409
+        `session_fenced`. 세션 행은 잠금 밖에서 읽는다 — WAL 이라 읽기는 쓰기를 기다리지 않는다."""
+        row = self.store.get_session(session_id)
+        if row is None:
+            raise _api_error(409, f"worker {token.name} is not registered", code="not_registered")
+        if row.worker_name != token.name:  # mutcheck: session-name-unchecked
+            raise _api_error(403, SESSION_FOREIGN)
+        if row.fenced_at is not None:
+            raise _api_error(409, SESSION_FENCED, code="session_fenced")
+        self._hear(session_id)
+
+    def _legacy_gate(self, token: TokenInfo) -> None:
+        """세션 없는 요청(옛 워커, 결정 262). 그 이름에 레거시 busy 잡이 있을 때만 받는다."""
+        if not self.store.has_legacy_busy(token.name):
+            raise self._protocol_required()
+        self._hear(f"legacy:{token.name}")
+
+    def _gate(self, token: TokenInfo, session_id: str | None) -> None:
+        if session_id is None:
+            self._legacy_gate(token)
+        else:
+            self._current_session(token, session_id)
+
+    def _forget_session_memory(self, session_ids: list[str]) -> None:
+        """펜싱된 세션의 받아들인 seq 는 더 쓰지 않는다(§4.2). `heard` 는 그 세션의 busy 잡이 닫힐
+        때까지 남긴다 — janitor 가 `heard + G` 로 그 잡을 닫아야 한다."""
+        with self._heard_lock:
+            for sid in session_ids:
+                self._hb_seq.pop(sid, None)
 
     # ── 인증 ────────────────────────────────────────────────────────────────
 
@@ -415,7 +552,10 @@ class RemoteWorkersMixin:
         version = body.get("version")
         if version is not None and not isinstance(version, str):
             raise _api_error(400, "version must be a string")
-        if version != self.version:
+        session = self._session_arg(body.get("worker_session_id"))
+        previous = self._session_list(body, "previous_sessions")
+        unverified = self._session_list(body, "unverified_sessions")
+        if version != self.version:  # mutcheck: register-session-before-version
             # 이 검사는 아래의 lost 처리보다 먼저다 — 따라가기 전의 409 가 도는 잡을 닫으면 안 된다.
             # `server_version` 은 M5q 의 워커가 따라갈 버전이다(키 추가뿐 — 옛 워커는 무시한다)
             raise _api_error(
@@ -424,35 +564,79 @@ class RemoteWorkersMixin:
                 "install the same release",
                 server_version=self.version,
             )
+        if session is None:
+            # 버전 검사 **뒤**다(RL13). 옛 워커(프로토콜 1)는 새 서버에 등록하지 못한다(결정 262)
+            raise self._protocol_required()
+        # ── M5t-c 의 `pair_proof` 검사 자리(M5t-c 결정 287 · F52): 버전 · 프로토콜 검사 뒤, 아래의
+        # 어떤 부작용(세션 넣기 · 펜싱 · 능력 지우기 · 호스트 사실 교체 · 잡 닫기)보다도 앞 ──
         now = self.now_fn()
-        # 등록 = 새 프로세스. 옛 프로세스가 잡고 있던 잡은 아무도 이어 받지 않는다(재현성)
-        text, code, args = outcome.summary("worker_restarted_without_job", name=token.name)
-        with self._fresh_claims_lock:
-            self._fresh_claims.pop(token.name, None)  # 옛 프로세스에 넘긴 잡은 아래에서 다 닫힌다
-        lost = self.store.mark_lost_for_worker(
-            token.name, now, text, summary_code=code, summary_args=args
-        )
-        for job_id in lost:
-            self._publish_job(None, job_id)
-        if lost:
-            self._drop_log_partial(lost)
-            self.log(f"worker {token.name} re-registered: lost={lost}")
-        s = self.config.server
-        row = self.store.register_worker(
+        host_name = host_name[:200] if host_name else None
+        existing = self.store.get_session(session)
+        if existing is not None:
+            if existing.worker_name != token.name:  # mutcheck: session-name-unchecked
+                raise _api_error(403, SESSION_FOREIGN)
+            if existing.fenced_at is not None:
+                # 펜싱된 프로세스가 재등록해 새 세션을 거꾸로 펜싱하는 핑퐁을 막는다(§4.2 의 5)
+                raise _api_error(409, SESSION_FENCED, code="session_fenced")
+            # 같은 세션의 재등록(레인이 `not_registered` 409 를 받음, T10)은 멱등이다 — 잡을 닫지
+            # 않고 능력 보고도 지우지 않는다. 같은 프로세스라 호스트 사실도 같다
+            row = self.store.register_worker(  # mutcheck: reregister-closes-own-jobs
+                token.name, pool=pool, lanes=lanes, host_name=host_name, version=version, now=now
+            )
+            self._hear(session)
+            self.remember_host(token.name, body.get("host"), replace=True)  # type: ignore[attr-defined]
+            self._mark_dirty()
+            self._publish_server()
+            return self._register_answer(row)
+        names = self.store.session_names([*previous, *unverified])
+        if any(n != token.name for n in names.values()):
+            # 남의 이름에 걸린 잡과 홀드를 풀 수 없게(T19 · V1-8)
+            raise _api_error(403, SESSION_FOREIGN)
+        opened = self.store.open_session(
             token.name,
+            session,
+            previous=previous,
+            unverified=unverified,
+            now=now,
             pool=pool,
             lanes=lanes,
-            host_name=host_name[:200] if host_name else None,
+            host_name=host_name,
             version=version,
-            now=now,
         )
-        # 등록 = 새 프로세스. 옛 프로세스의 능력 보고는 이 프로세스의 것이 아니다 — 새로 잴 때까지
-        # 이 워커는 「보고 없음」이고 any-capable 잡을 안 받는다(M5n 결정 91, fail-closed)
+        self._forget_session_memory(opened.fenced)
+        self._hear(session)
+        with self._fresh_claims_lock:
+            self._fresh_claims.pop(token.name, None)  # 레거시 잡은 위에서 닫혔다
+        for job_id in opened.closed:
+            self._publish_job(None, job_id)
+        if opened.closed:
+            self._drop_log_partial(opened.closed)
+            self.log(
+                f"worker {token.name} registered session {session[:8]}: "
+                f"lost={opened.closed}" + (f" legacy={opened.legacy}" if opened.legacy else "")
+            )
+        if opened.released:
+            self.log(f"worker {token.name}: hold released by the new session: {opened.released}")
+            for job_id in opened.released:
+                self._publish_job(None, job_id)
+        for job_id in opened.legacy:
+            if self.store.has_open_hold(job_id):
+                self._hold_created(job_id)
+        row = self.store.get_worker(token.name)
+        assert row is not None
+        # 새 세션 = 새 프로세스. 옛 프로세스의 능력 보고는 이 프로세스의 것이 아니다 — 새로 잴
+        # 때까지 이 워커는 「보고 없음」이고 any-capable 잡을 안 받는다(M5n 결정 91, fail-closed)
         self.forget_report(token.name)  # type: ignore[attr-defined]
         # 호스트 사실(M5t-a §4.5) — 메모리에만 둔다. 안 보낸 옛 워커면 「모름」으로 바꾼다
         self.remember_host(token.name, body.get("host"), replace=True)  # type: ignore[attr-defined]
         self._mark_dirty()
         self._publish_server()
+        if opened.closed or opened.released:
+            self.wake.set()
+        return self._register_answer(row)
+
+    def _register_answer(self, row: WorkerRow) -> dict[str, Any]:
+        s = self.config.server
         return {
             "generation": self.generation,  # type: ignore[attr-defined]
             "name": row.name,
@@ -461,12 +645,20 @@ class RemoteWorkersMixin:
             "heartbeat_seconds": s.worker_heartbeat_seconds,
             "worker_timeout_seconds": s.worker_timeout_seconds,
             "claim_wait_seconds": s.worker_claim_wait_seconds,
+            "worker_protocol": WORKER_PROTOCOL,
         }
+
+    def _hold_created(self, job_id: int) -> None:
+        """홀드를 만든 커밋 뒤 · 잠금 밖에서 — 서버 로그 한 줄과 버스 사건(§4.12)."""
+        self.log(f"job #{job_id}: irreversible group held until rcm release-hold {job_id}")
+        on_hold = getattr(self, "_on_hold_created", None)
+        if on_hold is not None:
+            on_hold(job_id)
 
     def _registered(self, token: TokenInfo) -> WorkerRow:
         row = self.store.get_worker(token.name)
         if row is None:
-            raise _api_error(409, f"worker {token.name} is not registered")
+            raise _api_error(409, f"worker {token.name} is not registered", code="not_registered")
         return row
 
     # ── claim ───────────────────────────────────────────────────────────────
@@ -520,6 +712,9 @@ class RemoteWorkersMixin:
                 "group": job.concurrency_group,
                 "timeout_seconds": job.timeout_seconds,
                 "started_at": iso(job.started_at),
+                # claim 때 얼린 값(결정 257) — 워커는 이 값만 쓴다. 최상위 키는 늘리지 않는다(F58)
+                "irreversible": bool(job.irreversible),
+                "disconnect_grace_seconds": job.disconnect_grace_seconds,
             },
             "tree_url": f"/worker/jobs/{job.id}/tree",
             "preset": preset_doc,
@@ -529,6 +724,11 @@ class RemoteWorkersMixin:
         """잡이 있으면 payload, 없으면 None(204). 기다림은 `claim_wait_seconds` 상한."""
         if not isinstance(body, dict):
             raise _api_error(400, "body must be a JSON object")
+        session = self._session_arg(body.get("worker_session_id"))
+        if session is None:
+            raise self._protocol_required()  # 옛 워커의 새 claim 은 받지 않는다(결정 262)
+        claim_seq = _int_field(body, "claim_seq", 1, MAX_SEQ)
+        self._current_session(token, session)
         row = self._registered(token)
         lane = _int_field(body, "lane", 1, row.lanes, default=1)
         s = self.config.server
@@ -538,8 +738,9 @@ class RemoteWorkersMixin:
         if not self.store.touch_worker(token.name, now):
             # 이제 워커 행이 사라질 수 있다(은퇴 정리) — 그 뒤에 claim 하면 아무도 못 거두는
             # 잡이 된다. 다시 등록하라고 말한다.
-            raise _api_error(409, "worker is not registered")
-        job, hold = self._try_claim(token.name, row.pool, lane, now)
+            raise _api_error(409, "worker is not registered", code="not_registered")
+        who = (session, claim_seq)
+        job, hold = self._try_claim(token.name, row.pool, lane, now, who)
         if job is not None:
             return self._claim_payload(job)
         # 보류된 레인은 **슬롯을 안 잡는다**. 8개뿐인 long-poll 슬롯을 보류 레인이 먹으면
@@ -552,7 +753,7 @@ class RemoteWorkersMixin:
             deadline = time.monotonic() + wait  # 주입 시계(now_fn)가 아니라 실제 경과 시간
             while not self.stop.is_set():
                 woke = self.wake.wait(CLAIM_POLL_SECONDS)
-                job, _hold = self._try_claim(token.name, row.pool, lane, self.now_fn())
+                job, _hold = self._try_claim(token.name, row.pool, lane, self.now_fn(), who)
                 if job is not None:
                     return self._claim_payload(job)
                 if time.monotonic() >= deadline:
@@ -565,29 +766,35 @@ class RemoteWorkersMixin:
             self._claim_slots.release()
         return None
 
-    def _try_claim(self, name: str, pool: str, lane: int, now: datetime):
-        """(잡, 보류) — 둘 다 None 이면 큐가 빈 것이다."""
+    def _try_claim(self, name: str, pool: str, lane: int, now: datetime, who: tuple[str, int]):
+        """(잡, 보류) — 둘 다 None 이면 큐가 빈 것이다. `who` 는 (세션, claim_seq)."""
+        session, claim_seq = who
         try:
             if self.store.get_paused() is not None:
                 return None, None
             claimant = self.claimant_for(name, pool, now)  # type: ignore[attr-defined]
 
-            def claim_and_remember():
-                with self._fresh_claims_lock:
-                    job = self.store.claim(
-                        lane,
-                        now,
-                        pool=pool,
-                        worker_name=name,
-                        claimant=claimant,
-                        now_fn=self.now_fn,  # 시작 마감은 트랜잭션 안의 시각으로(M5s)
-                    )
-                    if job is not None:
-                        self._fresh_claims.setdefault(name, set()).add(job.id)
-                    return job
+            def claim():
+                return self.store.claim(
+                    lane,
+                    now,
+                    pool=pool,
+                    worker_name=name,
+                    claimant=claimant,
+                    now_fn=self.now_fn,  # 시작 마감은 트랜잭션 안의 시각으로(M5s)
+                    session_id=session,
+                    claim_seq=claim_seq,
+                    grace_seconds=disconnect_grace(self.config.server),
+                )
 
-            job, hold = self.admit(lane, name, now, claim_and_remember)
+            job, hold = self.admit(lane, name, now, claim)
         except LaneBusy as e:
+            # 펜싱된 세션(또는 레거시)의 잡이 그 레인을 잡고 있다 — 확인이나 유예 만료까지 기다릴
+            # 일이라 409 를 쏟지 않고 「잡 없음」으로 답한다(결정 261 · F10). 자기 세션의 잡이면
+            # 오늘처럼 409 다
+            taken = [j for j in self.store.jobs_of_worker(name) if j.lane == lane]
+            if taken and all(j.worker_session_id != session for j in taken):
+                return None, None
             raise _api_error(409, str(e)) from e
         except sqlite3.OperationalError as e:
             # 잠금·바쁨만 일시 오류다. `no such table` 같은 영구 결함을 「다시 해 보라」고 하면
@@ -615,19 +822,27 @@ class RemoteWorkersMixin:
             for job_id in job_ids:
                 self._log_partial.pop(job_id, None)
 
-    def _owned_active(self, token: TokenInfo, job_id: int) -> Job:
-        """이 워커가 claim 한 활성 잡. 남의 잡 403 · 종료 잡 409(늦은 보고는 무시)."""
+    def _session_job(self, token: TokenInfo, job_id: int, session: str | None) -> Job:
+        """세션 판정 뒤 이 세션이 claim 한 잡(끝났어도). 남의 잡 · 다른 세션의 잡은 403."""
+        self._gate(token, session)
         job = self.store.get_job(job_id)
         if job is None:
             raise _api_error(404, "no such job")
-        if job.worker_name != token.name:
+        if job.worker_name != token.name or job.worker_session_id != session:
             raise _api_error(403, "not your job")
-        if job.state not in BUSY_STATES:
-            raise _api_error(409, f"job #{job.id} is {job.state}", state=job.state)
         return job
 
-    def worker_tree_path(self, token: TokenInfo, job_id: int) -> Path:
-        job = self._owned_active(token, job_id)
+    def _owned_active(self, token: TokenInfo, job_id: int, session: str | None) -> Job:
+        """이 세션이 claim 한 활성 잡. 남의 잡 403 · 종료 잡 409 `job_closed`(늦은 보고는 무시)."""
+        job = self._session_job(token, job_id, session)
+        if job.state not in BUSY_STATES:
+            raise _api_error(
+                409, f"job #{job.id} is {job.state}", state=job.state, code="job_closed"
+            )
+        return job
+
+    def worker_tree_path(self, token: TokenInfo, job_id: int, session: str | None) -> Path:
+        job = self._owned_active(token, job_id, session)
         if job.source.mode == MODE_GIT_REF:
             raise _api_error(404, "git_ref jobs are fetched by the worker")
         job_dir = self.job_dir(job.id)
@@ -646,7 +861,8 @@ class RemoteWorkersMixin:
     def worker_phase(self, token: TokenInfo, job_id: int, body: Any) -> dict[str, Any]:
         if not isinstance(body, dict):
             raise _api_error(400, "body must be a JSON object")
-        job = self._owned_active(token, job_id)
+        session = self._session_arg(body.get("worker_session_id"))
+        job = self._owned_active(token, job_id, session)
         phase = body.get("phase")
         if phase not in WORKER_PHASES:
             raise _api_error(400, f"phase must be one of {', '.join(WORKER_PHASES)}")
@@ -657,10 +873,12 @@ class RemoteWorkersMixin:
         self._publish_job(None, job.id)
         return {"job_id": job.id, "phase": phase}
 
-    def worker_log(self, token: TokenInfo, job_id: int, data: bytes) -> dict[str, Any]:
+    def worker_log(
+        self, token: TokenInfo, job_id: int, data: bytes, session: str | None = None
+    ) -> dict[str, Any]:
         """raw 바이트를 `log.txt` 에 붙이고 줄 단위로 마커를 파싱한다. 잘린 마지막 줄은 다음
-        요청과 이어 붙인다."""
-        job = self._owned_active(token, job_id)
+        요청과 이어 붙인다. PR1 은 세션 헤더만 보고 오프셋 헤더는 읽지 않는다(§4.5 PR 경계)."""
+        job = self._owned_active(token, job_id, session)
         now = self.now_fn()
         # 릴리스 비밀은 서버에 있다 — 원격 워커의 stdout 도 같은 규칙으로 지운다. 요청 하나가
         # 한 배치라, 두 요청에 걸쳐 잘린 값은 못 지운다(러너가 줄 단위로 flush 하므로 드물다).
@@ -690,18 +908,12 @@ class RemoteWorkersMixin:
 
     # ── 잡 산출물 (M5e) ─────────────────────────────────────────────────────
 
-    def _worker_job(self, token: TokenInfo, job_id: int) -> Job:
-        """그 워커가 잡은 잡. **종료됐어도 답한다** — 모호한 finish 를 푸는 것이 이 라우트다(§6)."""
-        job = self.store.get_job(job_id)
-        if job is None:
-            raise _api_error(404, "no such job")
-        if job.worker_name != token.name:
-            raise _api_error(403, "not your job")
-        return job
-
-    def worker_artifacts_status(self, token: TokenInfo, job_id: int) -> dict[str, Any]:
-        """업로드 처리 상태와 잡 상태. 내용은 주지 않는다(§6)."""
-        job = self._worker_job(token, job_id)
+    def worker_artifacts_status(
+        self, token: TokenInfo, job_id: int, session: str | None = None
+    ) -> dict[str, Any]:
+        """업로드 처리 상태와 잡 상태. 내용은 주지 않는다(§6). **종료됐어도 답한다** — 모호한
+        finish 를 푸는 것이 이 라우트다."""
+        job = self._session_job(token, job_id, session)
         row = self.store.get_bundle(job.id)
         return {
             "job_id": job.id,
@@ -724,10 +936,11 @@ class RemoteWorkersMixin:
         )
 
     def worker_receive_artifacts(
-        self, token: TokenInfo, job_id: int, stream: Any, length: int
+        self, token: TokenInfo, job_id: int, stream: Any, length: int, session: str | None = None
     ) -> tuple[int, dict[str, Any]]:
         """워커가 올린 묶음을 받는다. (상태 코드, 본문). 같은 해시의 재시도는 멱등이다(§6)."""
-        job = self._owned_active(token, job_id)  # 종료된 잡은 409 — 죽은 잡을 되살리지 않는다
+        # 종료된 잡은 409 — 죽은 잡을 되살리지 않는다
+        job = self._owned_active(token, job_id, session)
         policy = self.job_artifact_policy(job)
         allowance = art.archive_allowance(policy.max_bytes, policy.max_files)
         if length > allowance:
@@ -784,7 +997,35 @@ class RemoteWorkersMixin:
 
         if not isinstance(body, dict):
             raise _api_error(400, "body must be a JSON object")
-        job = self._owned_active(token, job_id)
+        session = self._session_arg(body.get("worker_session_id"))
+        gone = _group_gone(body)
+        if session is not None:
+            srow = self.store.get_session(session)
+            if srow is not None and srow.worker_name == token.name and srow.fenced_at is not None:
+                return self._narrow_confirm(token, job_id, session, body, gone)
+        job = self._session_job(token, job_id, session)
+        if job.state not in BUSY_STATES:
+            # 늦은 보고(T14). 같은 세션의 `group_gone: true` 는 그 잡의 열린 홀드를 푼다 — 확인은
+            # 뒤에 와도 참이다(§4.12 표의 1). `late_result` 기록은 PR2 다
+            released = (
+                gone is True  # mutcheck: hold-released-without-group-gone
+                and session is not None
+                and self.store.release_hold(
+                    job.id, kind=RELEASE_WORKER, by=token.name, reason=None, now=self.now_fn()
+                )
+                is not None
+            )
+            if released:
+                self.log(f"job #{job.id}: hold released — the worker confirmed the group is gone")
+                self._publish_job(None, job.id)
+                self.wake.set()
+            raise _api_error(
+                409,
+                f"job #{job.id} is {job.state}",
+                state=job.state,
+                code="job_closed",
+                hold_released=released,
+            )
         reported = body.get("outcome")
         if reported not in WORKER_OUTCOMES:
             raise _api_error(400, f"outcome must be one of {', '.join(WORKER_OUTCOMES)}")
@@ -794,7 +1035,8 @@ class RemoteWorkersMixin:
         given = body.get("summary")
         if given is not None and not isinstance(given, str):
             raise _api_error(400, "summary must be a string")
-        preflight = _preflight_summary(body, reported, rc)
+        lost_coded = _lost_summary(body, reported, token.name)
+        preflight = None if lost_coded is not None else _preflight_summary(body, reported, rc)
         now = self.now_fn()
         # 실행 종료 시각(선택). 수집·업로드가 끼어도 v1 의 `finished_at`·`job_seconds` 가
         # 밀리지 않게 워커가 실어 보낸다(§10). 이상하면 조용히 수신 시각으로 물러선다.
@@ -804,8 +1046,13 @@ class RemoteWorkersMixin:
             raise _api_error(400, "artifacts must be an object")
         markers = self.store.markers(job.id)
         lost_text, lost_code, lost_args = outcome.summary("worker_stopped_while_running")
-        if given:  # 워커가 자기 문장을 보냈으면 그대로 쓴다 — 코드는 붙이지 않는다
+        if lost_coded is not None:
+            lost_text, lost_code, lost_args = lost_coded
+        elif given:  # 워커가 자기 문장을 보냈으면 그대로 쓴다 — 코드는 붙이지 않는다
             lost_text, lost_code, lost_args = given[:200], None, {}
+        # 표식 잡을 닫는 보고에 프로세스 그룹이 사라졌다는 확인이 없으면 같은 트랜잭션에서 홀드를
+        # 만든다(결정 330). 결과는 그대로이고 확인만 없는 것이다 — 옛 워커 · 레거시 잡이 그렇다
+        hold_cause = None if gone is True else "group_not_gone"
 
         def _fields(now_job: Job, reported: str, preflight: Any) -> tuple[str, dict[str, Any]]:
             """이 보고를 `store.finish` 인자로. 취소가 끼어들면 같은 함수를 다시 부른다."""
@@ -866,7 +1113,9 @@ class RemoteWorkersMixin:
         only_from = (RUNNING,) if preflight is not None else None
         # 반복(M5s 결정 225)의 `retried` 는 `store.finish` 가 스스로 `running` 에서만 받는다 — 그
         # 사이 취소가 들어왔으면 거절되고, 아래 대체 경로가 `cancelled` 로 닫는다(다음 시도 없음)
-        if not self.store.finish(job.id, now=ended, only_from=only_from, **fields):
+        if not self.store.finish(
+            job.id, now=ended, only_from=only_from, hold_cause=hold_cause, **fields
+        ):
             current = self.store.get_job(job.id)
             st = current.state if current else "unknown"
             racing = preflight is not None or state == RETRIED
@@ -875,14 +1124,63 @@ class RemoteWorkersMixin:
             # 취소가 이겼다 — 프로세스는 없었으니 여느 취소처럼 요청자 이름으로 닫는다. 이
             # 대체 경로가 없으면 잡은 종료 상태에 못 가고 heartbeat 시한까지 `running` 이다.
             state, fields = _fields(current, CANCELLED, None)
-            if not self.store.finish(job.id, now=ended, only_from=(CANCELLING,), **fields):
+            if not self.store.finish(
+                job.id, now=ended, only_from=(CANCELLING,), hold_cause=hold_cause, **fields
+            ):
                 current = self.store.get_job(job.id)
                 st = current.state if current else "unknown"
                 raise _api_error(409, f"job #{job.id} is {st}", state=st)
+        if hold_cause is not None and self.store.has_open_hold(job.id):
+            self._hold_created(job.id)
         self._publish_job(None, job.id)
         self._publish_server()
         self.wake.set()
         return {"job_id": job.id, "state": state}
+
+    def _narrow_confirm(
+        self, token: TokenInfo, job_id: int, session: str, body: dict[str, Any], gone: bool | None
+    ) -> dict[str, Any]:
+        """펜싱된 세션에 허용하는 단 하나의 요청(결정 261): `lost` + `worker_replaced` finish.
+
+        잡이 busy 면 조건부로 닫는다. `group_gone` 이 참이 아니면 같은 트랜잭션에서 홀드다. 잡이
+        이미 끝났고 열린 홀드가 있으면 `group_gone: true` 일 때만 푼다. 그 밖의 모든 요청은 409
+        `session_fenced` 이고 아무것도 반영하지 않는다 — 늦은 finish 도 `late_result` 로 남기지
+        않는다(2차 Q-B). `heard` 는 올리지 않는다."""
+        fenced = _api_error(409, SESSION_FENCED, code="session_fenced")
+        if body.get("outcome") != LOST or body.get("summary_code") != "worker_replaced":
+            raise fenced
+        job = self.store.get_job(job_id)
+        if job is None or job.worker_name != token.name or job.worker_session_id != session:
+            raise fenced
+        now = self.now_fn()
+        if job.state in BUSY_STATES:
+            text, code, args = outcome.summary("worker_replaced", name=token.name)
+            cause = None if gone is True else "group_not_gone"
+            if self.store.finish(
+                job.id,
+                LOST,
+                now=now,
+                summary=text,
+                summary_code=code,
+                summary_args=args,
+                only_from=BUSY_STATES,
+                hold_cause=cause,
+            ):
+                self._drop_log_partial([job.id])
+                if cause is not None and self.store.has_open_hold(job.id):
+                    self._hold_created(job.id)
+                self._publish_job(None, job.id)
+                self._publish_server()
+                self.wake.set()
+                return {"job_id": job.id, "state": LOST}
+            job = self.store.get_job(job_id) or job
+        if gone is True and self.store.release_hold(
+            job.id, kind=RELEASE_WORKER, by=token.name, reason=None, now=now
+        ):
+            self._publish_job(None, job.id)
+            self.wake.set()
+            return {"job_id": job.id, "state": job.state, "hold_released": True}
+        raise _api_error(409, f"job #{job.id} is {job.state}", state=job.state, code="job_closed")
 
     def _record_disposition(self, job_id: int, reported: dict[str, Any], now: datetime) -> None:
         """워커가 보고한 산출물 처분을 쓴다(§5).
@@ -946,30 +1244,33 @@ class RemoteWorkersMixin:
     def worker_heartbeat(self, token: TokenInfo, body: Any) -> dict[str, Any]:
         if not isinstance(body, dict):
             raise _api_error(400, "body must be a JSON object")
-        self._registered(token)
-        now = self.now_fn()
-        self.store.touch_worker(token.name, now)
-        with self._fresh_claims_lock:
-            active = self.store.jobs_of_worker(token.name)
-            # `jobs` 를 안 보내는 heartbeat 도 「직전」으로 센다 — 워커의 heartbeat 은 한 스레드에서
-            # 차례로 돌아서, 다음 목록은 이 응답을 받은 **뒤에** 찍힌다
-            spared = self._fresh_claims.pop(token.name, set())
+        session = self._session_arg(body.get("worker_session_id"))
         known = body.get("jobs")
-        if known is not None:
-            if not isinstance(known, list) or any(
-                isinstance(x, bool) or not isinstance(x, int) for x in known
-            ):
-                raise _api_error(400, "jobs must be a list of job ids")
-            forgotten = [j for j in active if j.id not in set(known) and j.id not in spared]
-            for job in forgotten:
-                text, code, args = outcome.summary("worker_restarted_without_job", name=token.name)
-                self.store.finish(
-                    job.id, LOST, now=now, summary=text, summary_code=code, summary_args=args
-                )
-                self._publish_job(None, job.id)
-            if forgotten:
-                self._drop_log_partial([f.id for f in forgotten])
-                active = [j for j in active if j.id not in {f.id for f in forgotten}]
+        if known is not None and (
+            not isinstance(known, list)
+            or any(isinstance(x, bool) or not isinstance(x, int) for x in known)
+        ):
+            raise _api_error(400, "jobs must be a list of job ids")
+        if session is None:
+            self._legacy_gate(token)
+            self._registered(token)
+            now = self.now_fn()
+            self.store.touch_worker(token.name, now)
+            active = self._legacy_forgotten(token, known, now)
+            closed: list[dict[str, Any]] = []
+        else:
+            seq = _int_field(body, "seq", 1, MAX_SEQ)
+            settled = _int_field(body, "claims_settled", 0, MAX_SEQ)
+            self._current_session(token, session)
+            self._registered(token)
+            now = self.now_fn()
+            self.store.touch_worker(token.name, now)
+            active = self._session_forgotten(token, session, known, seq, settled, now)
+            # 그 세션의 이미 닫힌 잡(결정 321 · 322). 닫힌 상태는 되돌아오지 않으므로 늦게 온
+            # heartbeat 의 목록으로 만들어도 맞다
+            closed = self.store.closed_jobs_of(
+                session, known or []
+            )  # mutcheck: closed-jobs-omitted
         sample = body.get("host_sample")
         if sample is not None:
             try:
@@ -984,6 +1285,7 @@ class RemoteWorkersMixin:
         self._mark_dirty()
         return {
             "cancel": cancel,
+            "closed_jobs": closed,
             "paused": self.store.get_paused() is not None,
             "timeout_seconds": self.config.server.worker_timeout_seconds,
             # 세대가 바뀌었으면 워커는 `/worker/spec` 을 다시 받고 다시 잰다(M5n §4.2)
@@ -991,6 +1293,93 @@ class RemoteWorkersMixin:
             # 워커가 서버 버전이 바뀐 것을 보고 드레인한다(M5q ③ · PR B2). 옛 워커는 무시한다
             "server_version": self.version,
         }
+
+    def _legacy_forgotten(
+        self, token: TokenInfo, known: list[int] | None, now: datetime
+    ) -> list[Job]:
+        """옛 워커의 「잊힌 잡」 — 그 이름의 레거시 잡에만, 오늘의 `_fresh_claims` 규칙 그대로(T11).
+        옛 워커는 heartbeat 을 한 스레드에서 차례로 보낸다."""
+        with self._fresh_claims_lock:
+            active = self.store.legacy_jobs_of_worker(token.name)
+            spared = self._fresh_claims.pop(token.name, set())
+        if known is None:
+            return active
+        forgotten = [j for j in active if j.id not in set(known) and j.id not in spared]
+        for job in forgotten:
+            text, code, args = outcome.summary("worker_restarted_without_job", name=token.name)
+            self.store.finish(
+                job.id,
+                LOST,
+                now=now,
+                summary=text,
+                summary_code=code,
+                summary_args=args,
+                only_from=BUSY_STATES,
+                hold_cause="worker_restarted_without_job",
+            )
+            self._publish_job(None, job.id)
+        if forgotten:
+            self._drop_log_partial([f.id for f in forgotten])
+        return [j for j in active if j.id not in {f.id for f in forgotten}]
+
+    def _session_forgotten(
+        self,
+        token: TokenInfo,
+        session: str,
+        known: list[int] | None,
+        seq: int,
+        settled: int,
+        now: datetime,
+    ) -> list[Job]:
+        """T5(결정 339-a · 339-b): 그 세션의 heartbeat 가 받아들인 것보다 큰 `seq` 를 싣고, 그 잡을
+        돌려준 claim 이 워커에서 끝난 뒤(`claims_settled ≥ claim_seq`) 찍은 목록에 잡이 없으면
+        워커는 그 잡을 받지 않았고 앞으로도 받을 수 없다 — `lost` 로 닫는다.
+
+        그래도 「목록에 없다」는 지금 상태라서 확인이 아니다. 표식 잡이면 같은 트랜잭션에서 홀드를
+        건다. 판정과 닫기는 그 세션의 잠금 안이다 — 같은 세션의 다른 heartbeat 와 줄을 선다."""
+        closed: list[int] = []
+        held: list[int] = []
+        with self._session_lock(session):
+            with self._heard_lock:
+                accepted = self._hb_seq.get(session, 0)
+                fresh = seq > accepted  # mutcheck: hb-stale-seq-judged
+                if fresh:
+                    self._hb_seq[session] = seq
+            active = self.store.jobs_of_session(session)
+            if fresh and known is not None:
+                listed = set(known)
+                forgotten = [
+                    j
+                    for j in active
+                    if j.id not in listed
+                    and j.claim_seq is not None
+                    and j.claim_seq <= settled  # mutcheck: t5-ignores-claims-settled
+                ]
+                text, code, args = outcome.summary("worker_restarted_without_job", name=token.name)
+                for job in forgotten:
+                    if self.store.finish(
+                        job.id,
+                        LOST,
+                        now=now,
+                        summary=text,
+                        summary_code=code,
+                        summary_args=args,
+                        only_from=BUSY_STATES,
+                        # mutcheck: t5-confirms-irreversible
+                        hold_cause="worker_restarted_without_job",
+                    ):
+                        closed.append(job.id)
+                        if self.store.has_open_hold(job.id):
+                            held.append(job.id)
+        # 알림 · 발행은 잠금을 놓은 뒤에(§4.2)
+        for job_id in closed:
+            self._publish_job(None, job_id)
+        for job_id in held:
+            self._hold_created(job_id)
+        if closed:
+            self._drop_log_partial(closed)
+            self.wake.set()
+        return [j for j in active if j.id not in set(closed)]
 
     def _close_unconfirmed_cancels(self, jobs: list[Job], now: datetime) -> None:
         """살아 있는 워커가 취소를 확인하지 않으면 `kill_at + 2 × heartbeat` 뒤 서버가 닫는다."""
@@ -1015,6 +1404,8 @@ class RemoteWorkersMixin:
                     now=now,
                     **closing,
                     only_from=(CANCELLING,),
+                    # 들리는 워커가 취소를 확인하지 않았다 — 프로세스가 아직 돌 수 있다(결정 330)
+                    hold_cause="cancel_unconfirmed",
                 ):
                     self._drop_log_partial([job.id])
                     self._publish_job(None, job.id)

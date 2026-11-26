@@ -14,6 +14,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import http.client
 import io
 import json
@@ -165,11 +166,6 @@ class WorkerServer:
         cfg.presets = tuple(parse_preset(p) for p in (presets or WORKER_PRESETS))
         self.cfg = cfg
         self.clock = Clock()
-        self.worker_names: set[str] = set()
-        self.sessions: dict[str, str] = {}
-        self.claim_seqs: dict[str, int] = {}
-        self.hb_seqs: dict[str, int] = {}
-        self.settled: dict[str, int] = {}
         self.store = Store(cfg.data_dir / "rcm.sqlite3")
         self.tokens: dict[str, str] = {
             "alice": self.store.add_token("alice-laptop", admin=False, now=T0),
@@ -206,9 +202,44 @@ class WorkerServer:
     # gitleaks, docs/m5tb-workplan.md §8). `/worker/*` 요청은 이 세션을 자동으로 싣고, claim 은
     # `claim_seq` 를, heartbeat 는 `seq` 와 `claims_settled`(돌아온 마지막 claim_seq)를 싣는다.
 
+    # 하위 클래스(`M5nServer` 등)가 `__init__` 을 따로 두므로 상태는 처음 쓸 때 만든다
+    @property
+    def worker_names(self) -> set[str]:
+        return self.__dict__.setdefault("_worker_names", set())
+
+    @property
+    def sessions(self) -> dict[str, str]:
+        return self.__dict__.setdefault("_sessions", {})
+
+    @property
+    def claim_seqs(self) -> dict[str, int]:
+        return self.__dict__.setdefault("_claim_seqs", {})
+
+    @property
+    def hb_seqs(self) -> dict[str, int]:
+        return self.__dict__.setdefault("_hb_seqs", {})
+
+    @property
+    def settled(self) -> dict[str, int]:
+        return self.__dict__.setdefault("_settled", {})
+
+    def _is_worker(self, token: str | None) -> bool:
+        """이 이름이 워커 토큰인가 — 토큰을 넘겨받아 다시 띄운 서버도 알아본다."""
+        if token is None or token not in self.tokens:
+            return False
+        if token not in self.worker_names:
+            info = self.store.verify_token(self.tokens[token])
+            if info is None or info.kind != "worker":
+                return False
+            self.worker_names.add(token)
+        return True
+
     def session(self, worker: str) -> str:
+        """그 워커 이름의 지금 프로세스 세션. 데이터 폴더와 이름으로 정한다 — 같은 data_dir 로 다시
+        띄운 서버(재시작 시험)에서도 같은 프로세스가 같은 세션으로 이어 보고한다."""
         if worker not in self.sessions:
-            self.sessions[worker] = secrets.token_hex(16)
+            seed = f"{self.cfg.data_dir}|{worker}|{self.__dict__.get('_gen', 0)}"
+            self.sessions[worker] = hashlib.sha256(seed.encode()).hexdigest()[:32]
         return self.sessions[worker]
 
     def new_process(self, worker: str) -> str:
@@ -256,7 +287,7 @@ class WorkerServer:
         hdrs = dict(headers or {})
         if (
             not legacy
-            and token in self.worker_names
+            and self._is_worker(token)
             and path.startswith("/worker/")
             and path != "/worker/spec"
         ):

@@ -219,7 +219,11 @@ from remote_ci_monitor.release_state import (
     version_name_check,
 )
 from remote_ci_monitor.release_verify import run_verify
-from remote_ci_monitor.remote_workers import MAX_WORKER_LOG_BODY, RemoteWorkersMixin
+from remote_ci_monitor.remote_workers import (
+    MAX_WORKER_LOG_BODY,
+    SESSION_HEADER,
+    RemoteWorkersMixin,
+)
 from remote_ci_monitor.shelf_copier import ShelfCopier
 from remote_ci_monitor.shelf_server import ShelfAppMixin, ShelfHandlerMixin, is_shelf_path
 from remote_ci_monitor.store import (
@@ -4384,7 +4388,16 @@ class App(RemoteWorkersMixin, CapabilitiesMixin, ShelfAppMixin):
         return self.worker_spec()
 
     def worker_capabilities(self, token: TokenInfo, body: Any) -> dict[str, Any]:
-        """`POST /worker/capabilities` — 등록된 워커의 보고(§4.2). 세대가 다르면 409."""
+        """`POST /worker/capabilities` — 등록된 워커의 보고(§4.2). 세대가 다르면 409.
+
+        M5t-b: 현재 세션만 보고한다 — 세션이 없으면 409 `protocol_required`, 펜싱된 세션은 409
+        `session_fenced` 이고 아무것도 반영하지 않는다(RL11)."""
+        if not isinstance(body, dict):
+            raise ApiError(400, "body must be a JSON object")
+        session = self._session_arg(body.get("worker_session_id"))
+        if session is None:
+            raise self._protocol_required()
+        self._current_session(token, session)
         row = self._registered(token)
         try:
             self.receive_capabilities(token.name, row.host_name, body)
@@ -6283,9 +6296,11 @@ class Handler(ShelfHandlerMixin, BaseHTTPRequestHandler):
             raise ApiError(404, "not found")
         job_id = int(m.group(1))
         what = m.group(2)
+        # 본문이 없는 라우트는 세션을 헤더로 싣는다(M5t-b §4.10). 모양이 틀리면 400(`error` 만)
+        session = self.app._session_arg(self.headers.get(SESSION_HEADER), where=SESSION_HEADER)
         if what == "tree":
             self._only(method, "GET")
-            tar_path = self.app.worker_tree_path(t, job_id)
+            tar_path = self.app.worker_tree_path(t, job_id, session)
             size = tar_path.stat().st_size
             self.send_response(200)
             self.send_header("Content-Type", "application/gzip")
@@ -6307,7 +6322,7 @@ class Handler(ShelfHandlerMixin, BaseHTTPRequestHandler):
             return
         if what == "artifacts":
             if method == "GET":
-                self._send_json(200, self.app.worker_artifacts_status(t, job_id))
+                self._send_json(200, self.app.worker_artifacts_status(t, job_id, session))
                 return
             self._only(method, "PUT")
             ctype = (self.headers.get("Content-Type") or "").split(";")[0].strip().lower()
@@ -6320,7 +6335,9 @@ class Handler(ShelfHandlerMixin, BaseHTTPRequestHandler):
                 )
             self.connection.settimeout(self.config.server.artifact_transfer_timeout_seconds)
             try:
-                status, body = self.app.worker_receive_artifacts(t, job_id, self.rfile, length)
+                status, body = self.app.worker_receive_artifacts(
+                    t, job_id, self.rfile, length, session
+                )
             finally:
                 self.connection.settimeout(REQUEST_TIMEOUT)
                 self.app.transfer_slots.release()
@@ -6341,7 +6358,7 @@ class Handler(ShelfHandlerMixin, BaseHTTPRequestHandler):
                 self.connection.settimeout(REQUEST_TIMEOUT)
             if len(data) < n:
                 raise ApiError(400, "log body interrupted")
-            self._send_json(200, self.app.worker_log(t, job_id, data))
+            self._send_json(200, self.app.worker_log(t, job_id, data, session))
             return
         body = self._json_body()
         if what == "phase":

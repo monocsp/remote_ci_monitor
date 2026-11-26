@@ -781,6 +781,17 @@
       return "worker " + a.name + " unreachable for " + a.seconds + "s";
     },
     "outcome.cancel_unconfirmed": "worker did not confirm the cancel",
+    "outcome.worker_self_stopped": function (a) {
+      return "worker stopped the job itself after " + a.seconds + "s without the server";
+    },
+    "outcome.worker_replaced": function (a) {
+      return "worker " + a.name + " was replaced by a new process";
+    },
+    "outcome.snapshot_unreachable": "the worker could not reach the server for the snapshot",
+    "outcome.orphan_unverified": function (a) {
+      return "worker " + a.name + " unreachable for " + a.seconds +
+        "s; the job may still be running on that machine, check it";
+    },
 
     // ── 오류 종류(결정 37) ──────────────────────────────────────────────────
     "error.internal_error": "internal error",
@@ -1985,6 +1996,17 @@
       return "워커 " + withJosa(a.name, "이/가") + " " + a.seconds + "초 동안 응답 없음";
     },
     "outcome.cancel_unconfirmed": "워커가 취소를 확인하지 않음",
+    "outcome.worker_self_stopped": function (a) {
+      return "서버와 " + a.seconds + "초 동안 연락이 끊겨 워커가 작업을 스스로 멈춤";
+    },
+    "outcome.worker_replaced": function (a) {
+      return "워커 " + withJosa(a.name, "이/가") + " 새 프로세스로 바뀜";
+    },
+    "outcome.snapshot_unreachable": "워커가 스냅샷을 받으려 했지만 서버에 닿지 못함",
+    "outcome.orphan_unverified": function (a) {
+      return "워커 " + withJosa(a.name, "이/가") + " " + a.seconds +
+        "초 동안 응답 없음 — 같은 작업이 그 머신에서 아직 돌 수 있으니 확인하세요";
+    },
 
     "error.internal_error": "내부 오류",
     "error.database_unavailable": "데이터베이스를 쓸 수 없음",

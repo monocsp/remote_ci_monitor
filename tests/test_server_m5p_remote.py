@@ -200,6 +200,7 @@ def test_e53_a_malicious_outer_bundle_cannot_plant_links_or_escape(srv, tmp_path
     path = tmp_path / "evil.tar"
     path.write_bytes(buf.getvalue())
     wc = WorkerClient(f"http://127.0.0.1:{srv.port}", srv.tokens["lin-01"])
+    wc.session_id = srv.session("lin-01")  # M5t-b: 그 잡을 claim 한 세션으로 보고한다
     receipt = wc.upload_bundle(jid, path)
     assert receipt["bundle_sha256"] == hashlib.sha256(buf.getvalue()).hexdigest()
     wc.finish(

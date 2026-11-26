@@ -975,6 +975,28 @@ class WorkerRow:
     last_seen_at: datetime
 
 
+@dataclass(frozen=True)
+class SessionRow:
+    """워커 세션 행(M5t-b 결정 265). `fenced_at` 이 None 이면 그 이름의 현재 세션이다."""
+
+    id: str
+    worker_name: str
+    registered_at: datetime | None
+    fenced_at: datetime | None
+    fenced_by: str | None
+    orphan_unverified: bool
+
+
+@dataclass(frozen=True)
+class SessionOpened:
+    """`open_session` 이 한 트랜잭션에서 한 일 — 닫은 잡(레거시 포함) · 푼 홀드 · 펜싱한 세션."""
+
+    closed: list[int]
+    legacy: list[int]
+    released: list[int]
+    fenced: list[str]
+
+
 def _ts(dt: datetime | None) -> float | None:
     if dt is None:
         return None
@@ -4849,6 +4871,10 @@ class Store:
             if gone:
                 marks = ",".join("?" * len(gone))
                 conn.execute(f"DELETE FROM workers WHERE name IN ({marks})", tuple(gone))
+                # 세션 행은 워커 행과 함께만 지운다(M5t-b 결정 265, F21)
+                conn.execute(
+                    f"DELETE FROM worker_sessions WHERE worker_name IN ({marks})", tuple(gone)
+                )
             conn.execute("COMMIT")
         except Exception:
             conn.execute("ROLLBACK")
@@ -4908,6 +4934,221 @@ class Store:
             conn.execute("ROLLBACK")
             raise
         return lost
+
+    # ── 워커 세션 (M5t-b 결정 255 · 265 · 336) ────────────────────────────────
+
+    def get_session(self, session_id: str) -> SessionRow | None:
+        row = (
+            self._conn()
+            .execute("SELECT * FROM worker_sessions WHERE id=?", (session_id,))
+            .fetchone()
+        )
+        if row is None:
+            return None
+        return SessionRow(
+            id=row["id"],
+            worker_name=row["worker_name"],
+            registered_at=_dt(row["registered_at"]),
+            fenced_at=_dt(row["fenced_at"]),
+            fenced_by=row["fenced_by"],
+            orphan_unverified=bool(row["orphan_unverified"]),
+        )
+
+    def session_names(self, session_ids: Iterable[str]) -> dict[str, str]:
+        """세션 id → 워커 이름(표에 있는 것만)."""
+        ids = sorted(set(session_ids))
+        if not ids:
+            return {}
+        marks = ",".join("?" * len(ids))
+        return {
+            r["id"]: r["worker_name"]
+            for r in self._conn().execute(
+                f"SELECT id, worker_name FROM worker_sessions WHERE id IN ({marks})", ids
+            )
+        }
+
+    def has_legacy_busy(self, name: str) -> bool:
+        """그 이름에 세션 없이 claim 된(v26 이전) busy 잡이 있나 — 옛 워커의 요청을 받는
+        조건이다(T11)."""
+        busy = ",".join("?" * len(BUSY_STATES))
+        return (
+            self._conn()
+            .execute(
+                f"SELECT 1 FROM jobs WHERE worker_name=? AND worker_session_id IS NULL "
+                f"AND state IN ({busy}) LIMIT 1",
+                (name, *sorted(BUSY_STATES)),
+            )
+            .fetchone()
+            is not None
+        )
+
+    def jobs_of_session(self, session_id: str) -> list[Job]:
+        """그 세션이 claim 해서 아직 busy 인 잡(레인 순)."""
+        busy = ",".join("?" * len(BUSY_STATES))
+        return self._jobs(
+            f"SELECT * FROM jobs WHERE worker_session_id=? AND state IN ({busy}) ORDER BY lane, id",
+            (session_id, *sorted(BUSY_STATES)),
+        )
+
+    def legacy_jobs_of_worker(self, name: str) -> list[Job]:
+        """그 이름의 세션 NULL busy 잡(레거시, T11)."""
+        busy = ",".join("?" * len(BUSY_STATES))
+        return self._jobs(
+            f"SELECT * FROM jobs WHERE worker_name=? AND worker_session_id IS NULL "
+            f"AND state IN ({busy}) ORDER BY lane, id",
+            (name, *sorted(BUSY_STATES)),
+        )
+
+    def closed_jobs_of(self, session_id: str, job_ids: Iterable[int]) -> list[dict[str, Any]]:
+        """heartbeat 응답의 `closed_jobs`(결정 321 · 322) — 목록 가운데 그 세션의 이미 끝난 잡.
+        `had_cancel` 은 잡 행에 취소 요청이 남아 있다는 뜻이다(F61)."""
+        ids = sorted({int(j) for j in job_ids})
+        if not ids:
+            return []
+        marks = ",".join("?" * len(ids))
+        terminal = ",".join("?" * len(TERMINAL_STATES))
+        return [
+            {
+                "id": int(r["id"]),
+                "state": r["state"],
+                "had_cancel": r["cancel_requested_at"] is not None,
+            }
+            for r in self._conn().execute(
+                f"SELECT id, state, cancel_requested_at FROM jobs WHERE id IN ({marks}) "
+                f"AND worker_session_id=? AND state IN ({terminal}) ORDER BY id",
+                (*ids, session_id, *sorted(TERMINAL_STATES)),
+            )
+        ]
+
+    def open_session(
+        self,
+        name: str,
+        session_id: str,
+        *,
+        previous: Sequence[str],
+        unverified: Sequence[str],
+        now: datetime,
+        pool: str,
+        lanes: int,
+        host_name: str | None,
+        version: str | None,
+    ) -> SessionOpened:
+        """처음 보는 세션의 등록(§4.2 의 7) — 한 `BEGIN IMMEDIATE` 안에서 차례로 한다.
+
+        1. `previous` 가운데 같은 이름인 세션의 busy 잡을 `lost`(`worker_restarted_without_job`).
+           새 프로세스가 그 세션의 폴더 잠금을 쥐고 그룹이 사라졌다고 확인했다 — 홀드가 없다.
+        2. 그 세션들의 이미 닫힌 잡에 열린 홀드가 있으면 푼다(`worker`, 토큰 이름).
+        3. 그 이름의 세션 NULL(레거시) busy 잡을 오늘처럼 닫는다. 표식이면 홀드(T17) — 옛
+           프로세스의 신원을 확인할 길이 없다.
+        4. `unverified` 가운데 같은 이름인 세션에 `orphan_unverified = 1`.
+        5. 그 세션들과 다른 현재 세션을 펜싱한다.
+        6. 새 세션 행 · 워커 행.
+
+        다른 이름의 세션 id 는 부르는 쪽이 먼저 403 으로 거른다(T19). 여기서는 같은 이름인 것만
+        건드린다 — 남의 이름에 걸린 잡과 홀드를 풀 수 없게."""
+        conn = self._conn()
+        ts = _ts(now)
+        busy = ",".join("?" * len(BUSY_STATES))
+        terminal = ",".join("?" * len(TERMINAL_STATES))
+        closed: list[int] = []
+        released: list[int] = []
+        fenced: list[str] = []
+        text, code, args = outcome.summary("worker_restarted_without_job", name=name)
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            mine = lambda ids: [  # noqa: E731
+                r["id"]
+                for r in conn.execute(
+                    f"SELECT id FROM worker_sessions WHERE worker_name=? AND id IN "
+                    f"({','.join('?' * len(ids))})",
+                    (name, *ids),
+                )
+            ]
+            prev = mine(sorted(set(previous))) if previous else []
+            unver = mine(sorted(set(unverified))) if unverified else []
+            for sid in prev:
+                for row in conn.execute(
+                    f"SELECT id FROM jobs WHERE worker_session_id=? AND state IN ({busy}) "
+                    "ORDER BY id",
+                    (sid, *sorted(BUSY_STATES)),
+                ).fetchall():
+                    self._close_lost_tx(conn, int(row["id"]), ts, text, code, args)
+                    closed.append(int(row["id"]))
+                for row in conn.execute(
+                    f"SELECT id FROM jobs WHERE worker_session_id=? AND state IN ({terminal}) "
+                    "AND id IN (SELECT job_id FROM irreversible_holds WHERE released_at IS NULL)",
+                    (sid, *sorted(TERMINAL_STATES)),
+                ).fetchall():
+                    if self._release_hold_tx(
+                        conn, int(row["id"]), kind=RELEASE_WORKER, by=name, reason=None, ts=ts
+                    ):
+                        released.append(int(row["id"]))
+            legacy: list[int] = []
+            for row in conn.execute(  # mutcheck: first-register-keeps-legacy
+                f"SELECT id FROM jobs WHERE worker_name=? AND worker_session_id IS NULL "
+                f"AND state IN ({busy}) ORDER BY id",
+                (name, *sorted(BUSY_STATES)),
+            ).fetchall():
+                self._close_lost_tx(conn, int(row["id"]), ts, text, code, args)
+                self._hold_tx(conn, int(row["id"]), "worker_restarted_without_job", ts)
+                legacy.append(int(row["id"]))
+            for sid in unver:
+                conn.execute("UPDATE worker_sessions SET orphan_unverified=1 WHERE id=?", (sid,))
+            fenced = [
+                r["id"]
+                for r in conn.execute(
+                    "SELECT id FROM worker_sessions WHERE worker_name=? AND fenced_at IS NULL "
+                    "AND id != ?",
+                    (name, session_id),
+                )
+            ]
+            fenced = sorted(set(fenced) | set(prev) | set(unver))
+            for sid in fenced:
+                conn.execute(
+                    "UPDATE worker_sessions SET fenced_at=COALESCE(fenced_at, ?), "
+                    "fenced_by=COALESCE(fenced_by, ?) WHERE id=?",
+                    (ts, session_id, sid),
+                )
+            conn.execute(
+                "INSERT INTO worker_sessions (id, worker_name, registered_at) VALUES (?, ?, ?)",
+                (session_id, name, ts),
+            )
+            conn.execute(
+                "INSERT INTO workers (name, pool, lanes, host_name, version, registered_at, "
+                "last_seen_at) VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT(name) DO UPDATE SET "
+                "pool=excluded.pool, lanes=excluded.lanes, host_name=excluded.host_name, "
+                "version=excluded.version, last_seen_at=excluded.last_seen_at",
+                (name, pool, int(lanes), host_name, version, ts, ts),
+            )
+            conn.execute("COMMIT")
+        except Exception:
+            conn.execute("ROLLBACK")
+            raise
+        return SessionOpened(
+            closed=closed + legacy, legacy=legacy, released=released, fenced=fenced
+        )
+
+    def _close_lost_tx(
+        self,
+        conn: sqlite3.Connection,
+        job_id: int,
+        ts: float,
+        text: str,
+        code: str | None,
+        args: dict[str, Any] | None,
+    ) -> None:
+        self._set_state(
+            conn,
+            job_id,
+            LOST,
+            ts,
+            finished_at=ts,
+            summary=text[:200],
+            summary_code=code,
+            summary_args=dump_args(args),
+            lane=None,
+            phase=None,
+        )
 
     # ── 그룹 홀드 (M5t-b 결정 330 · 339-d) ────────────────────────────────────
 
