@@ -202,6 +202,47 @@ def test_gap2_a_fenced_sessions_natural_end_goes_as_the_narrow_confirm(
     assert w.fenced.is_set()
 
 
+def test_gap6_an_artifact_upload_fenced_while_it_streams_publishes_nothing(srv, monkeypatch):
+    """# GAP6 산출물 PUT 은 받기 전에 세션을 한 번 본다. 바이트를 받는 동안 같은 토큰의 새
+    프로세스가 그 세션을 펜싱하면, 받은 뒤 발행하기 전에 다시 보고 버린다 — 409
+    `session_fenced` 이고 묶음 행 · 파일이 남지 않는다(펜싱된 세션은 아무것도 바꾸지 못한다)."""
+    import io
+    import tarfile
+
+    from remote_ci_monitor import remote_workers
+
+    srv.registered("build-02")
+    jid = running(srv)
+    old = srv.session("build-02")
+    buf = io.BytesIO()
+    with tarfile.open(fileobj=buf, mode="w") as tar:
+        data = b"hello\n"
+        info = tarfile.TarInfo("out/a.txt")
+        info.size = len(data)
+        tar.addfile(info, io.BytesIO(data))
+    body = buf.getvalue()
+    real = remote_workers._stream_to_file
+
+    def fenced_midway(stream: Any, part: Path, length: int) -> str:
+        digest = real(stream, part, length)
+        srv.new_process("build-02")
+        srv.registered("build-02")  # 바이트가 다 온 뒤 · 발행 전에 펜싱된다
+        return digest
+
+    monkeypatch.setattr(remote_workers, "_stream_to_file", fenced_midway)
+    status, answer = srv.req(
+        "PUT",
+        f"/worker/jobs/{jid}/artifacts",
+        token="build-02",
+        body=body,
+        headers={"Content-Type": "application/x-tar", "X-RCM-Worker-Session": old},
+    )
+    row = srv.store.get_bundle(jid) or {}
+    assert (status, answer.get("code")) == (409, "session_fenced")
+    assert row.get("bundle_sha256") is None
+    assert not (srv.cfg.data_dir / "artifacts" / str(jid) / "bundle.tar").exists()
+
+
 def test_rl10_an_irreversible_job_confirmed_without_group_gone_holds(srv):
     srv.registered("build-02")
     jid = running(srv, preset="ship")

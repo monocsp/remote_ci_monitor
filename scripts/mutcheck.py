@@ -6745,6 +6745,20 @@ MUTANTS = (
             "test_gap5_a_worker_with_an_open_hold_is_not_forgotten",
         ),
     ),
+    Mutant(
+        # GAP6 산출물 PUT 이 바이트를 받은 뒤 세션을 다시 보지 않는다 — 펜싱된 세션의 묶음이 남는다
+        name="artifact-stream-not-rechecked",
+        path="src/remote_ci_monitor/remote_workers.py",
+        old=(
+            "            self._owned_active(token, job_id, session)  # mutcheck: "
+            "artifact-stream-not-rechecked\n"
+        ),
+        new="            pass\n",
+        tests=(
+            "tests/test_worker_session_m5tb.py::"
+            "test_gap6_an_artifact_upload_fenced_while_it_streams_publishes_nothing",
+        ),
+    ),
 )
 
 

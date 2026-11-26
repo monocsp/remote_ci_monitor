@@ -997,6 +997,8 @@ class RemoteWorkersMixin:
         part = staging / f"{job.id}.{secrets.token_hex(8)}.part"
         try:
             digest = _stream_to_file(stream, part, length)
+            # 받는 동안 세션이 펜싱됐거나 잡이 닫혔을 수 있다 — 발행 전에 다시 본다(P6 GAP6)
+            self._owned_active(token, job_id, session)  # mutcheck: artifact-stream-not-rechecked
             row = self.store.get_bundle(job.id)
             stored = row["bundle_sha256"] if row else None
             if stored and stored != digest:
