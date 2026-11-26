@@ -417,7 +417,8 @@ class _GroupHold:
     group: str
     pool: str
     host: str | None
-    free_at: datetime
+    #: 그룹이 풀리는 시각. None 이면 모른다 — 끊김 유예 중인 잡(M5t-b §4.8)은 언제 끝날지 모른다
+    free_at: datetime | None
     job: Job | None = None  # 도는 잡이면 그 잡(blocked_by 의 근거). 예측 배정이면 None
     est: Estimate | None = None
 
@@ -555,8 +556,9 @@ def compute_queue(
         unreachable = job.worker_name is not None and job.worker_name in down_workers
         if unreachable:
             est = replace(est, finish_at=None)  # 워커가 돌아올지 모른다 — 시각을 지어내지 않는다
-        free_at = now + timedelta(seconds=est.remaining_seconds or 0)
-        if holder_lane is not None and holder_lane in lane_free:
+        # 끊긴 잡의 끝은 모른다 — 그 그룹 뒤의 대기 잡도 그 끝에서 숫자를 지어내지 않는다
+        free_at = None if unreachable else now + timedelta(seconds=est.remaining_seconds or 0)
+        if free_at is not None and holder_lane is not None and holder_lane in lane_free:
             lane_free[holder_lane] = max(lane_free[holder_lane], free_at)
             lane_last_job[holder_lane] = job.id
             idle_since.pop(holder_lane, None)
@@ -609,15 +611,20 @@ def compute_queue(
             )
 
         def group_free_at(key: _LaneKey, group: str | None = group, scope: str = scope):
+            """이 레인에서 그룹이 풀리는 시각 — (아는가, 시각). 쥔 잡 하나라도 끝을 모르면
+            (끊김 유예, M5t-b §4.8) 모른다: 그 레인에는 배정하지 않는다."""
             if not group:
-                return None
+                return True, None
             pool, host = lane_pool(key), lane_host(key)
             times = [
                 h.free_at
                 for h in holds
                 if h.group == group and _scope_matches(scope, h, pool, host)
             ]
-            return max(times) if times else None
+            if any(t is None for t in times):  # mutcheck: group-hold-unknown-end-counted
+                return False, None
+            known = [t for t in times if t is not None]
+            return True, (max(known) if known else None)
 
         def busy_holder(keys: Sequence[_LaneKey], group: str | None = group, scope: str = scope):
             """대기 잡을 막고 있는 **도는** 잡(가장 큰 id). 레인 후보 중 하나라도 맞으면."""
@@ -640,11 +647,13 @@ def compute_queue(
         expected: float | None = None
         source = SOURCE_DEFAULT
         n = 0
+        best: tuple[Any, ...] | None = None
         if not paused and open_cands and held_by is None:
-            best: tuple[Any, ...] | None = None
             for key in open_cands:
                 start = lane_free[key]
-                gf = group_free_at(key)
+                knows, gf = group_free_at(key)
+                if not knows:
+                    continue
                 if gf is not None:
                     start = max(start, gf)
                 e, src, cnt = expected_on(
@@ -654,7 +663,9 @@ def compute_queue(
                 rank = (end, lane_free[key], key[0] or "", key[1])
                 if best is None or rank < best[0]:
                     best = (rank, key, start, end, e, src, cnt)
-            assert best is not None
+        if best is not None:
+            # 모든 레인에서 그룹의 끝을 모르면 배정하지 않는다 — 그 그룹이 풀리기 전에는 claim 되지
+            # 않으므로 레인을 차지하지도 않고, `wait` · `finish` 는 null 이다(M5t-b §4.8)
             _rank, chosen, start, finish, expected, source, n = best
             wait = _seconds(now, start)
             ahead = lane_last_job[chosen]
@@ -675,7 +686,12 @@ def compute_queue(
             BlockedBy(
                 job_id=holder.job.id,  # type: ignore[union-attr]
                 group=group or "",
-                remaining_seconds=holder.est.remaining_seconds,  # type: ignore[union-attr]
+                # 쥔 잡의 끝을 모르면(끊김 유예) 「언제 풀리나」도 모른다 — 지어내지 않는다
+                remaining_seconds=(
+                    holder.est.remaining_seconds  # type: ignore[union-attr]
+                    if holder.free_at is not None  # mutcheck: blocked-by-unknown-end-counted
+                    else None
+                ),
             )
             if holder is not None
             else None

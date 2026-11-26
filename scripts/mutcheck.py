@@ -6942,6 +6942,34 @@ MUTANTS = (
         tests=("tests/web/unreachable_m5tb.test.js",),
         runner="node",
     ),
+    Mutant(
+        # 끊긴 잡이 쥔 그룹의 끝을 아는 것처럼 센다 — 그 뒤 대기 잡이 ETA 를 지어낸다(RL28, P3 r1)
+        name="group-hold-unknown-end-counted",
+        path="src/remote_ci_monitor/core/queue.py",
+        old=(
+            "            if any(t is None for t in times):"
+            "  # mutcheck: group-hold-unknown-end-counted\n"
+        ),
+        new="            if False:\n",
+        tests=(
+            "tests/test_queue_unreachable_m5tb.py::"
+            "test_rl28_a_job_waiting_behind_an_unreachable_job_in_its_group_has_no_eta",
+        ),
+    ),
+    Mutant(
+        # 끊긴 잡에 막힌 대기 잡의 `blocked_by.remaining_seconds` 가 숫자를 보인다(RL28, P3 r1)
+        name="blocked-by-unknown-end-counted",
+        path="src/remote_ci_monitor/core/queue.py",
+        old=(
+            "                    if holder.free_at is not None"
+            "  # mutcheck: blocked-by-unknown-end-counted\n"
+        ),
+        new="                    if True\n",
+        tests=(
+            "tests/test_queue_unreachable_m5tb.py::"
+            "test_rl28_a_job_waiting_behind_an_unreachable_job_in_its_group_has_no_eta",
+        ),
+    ),
 )
 
 

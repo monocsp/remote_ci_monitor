@@ -93,6 +93,41 @@ def test_rl28_another_workers_down_lane_does_not_touch_this_job():
     assert got[906].reason == "running"
 
 
+def test_rl28_a_job_waiting_behind_an_unreachable_job_in_its_group_has_no_eta():
+    """# RL28 끊긴 잡의 끝은 모른다 — 그 그룹 뒤에서 기다리는 잡의 `wait` · `finish` ·
+    `blocked_by.remaining_seconds` 도 그 모르는 끝에서 숫자를 지어내지 않는다(PLAN 「fail-open
+    금지」). 같은 그룹의 다음 대기 잡도 그렇다. 살아 있는 레인은 그 대기 잡이 차지하지 않는다 —
+    그룹이 풀리기 전에는 claim 되지 않으므로, 다른 그룹의 잡은 그 레인의 ETA 를 그대로 갖는다."""
+    lanes = [remote_lane("mac2", "down"), remote_lane("build-02", "idle")]
+    jobs = [
+        busy(910, key="qa", group="devices"),
+        job(911, key="qa", group="devices"),
+        job(912, key="qa", group="devices"),
+        job(913, key="deploy-dev"),
+    ]
+    got = rows(jobs, lanes)
+    assert got[910].reason == GRACE
+    for waiter in (911, 912):
+        w = got[waiter]
+        assert w.reason == "blocked_by_group", w
+        assert w.blocked_by is not None and w.blocked_by.job_id == 910
+        assert w.blocked_by.remaining_seconds is None, w.blocked_by
+        assert w.estimate.wait_seconds is None, w.estimate
+        assert w.estimate.finish_at is None, w.estimate
+    other = got[913]
+    assert other.estimate.wait_seconds == 0 and other.estimate.finish_at is not None
+
+
+def test_rl28_the_same_waiter_behind_a_live_job_keeps_its_eta():
+    """대조: 홀드 잡의 워커가 살아 있으면 오늘처럼 숫자다."""
+    lanes = [remote_lane("mac2", "busy", job_id=910), remote_lane("build-02", "idle")]
+    got = rows([busy(910, key="qa", group="devices"), job(911, key="qa", group="devices")], lanes)
+    w = got[911]
+    assert w.reason == "blocked_by_group"
+    assert w.blocked_by is not None and w.blocked_by.remaining_seconds is not None
+    assert w.estimate.wait_seconds is not None and w.estimate.finish_at is not None
+
+
 def test_rl28_the_reason_is_a_wire_value_right_after_worker_down():
     assert model.REASON_WORKER_UNREACHABLE_GRACE == GRACE
     order = model.ACTIONABLE_REASONS
