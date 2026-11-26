@@ -1910,7 +1910,11 @@ def test_b10_h1_setups_own_service_is_free_of_the_label_check_only(flag, attr, w
     assert core.production_refusal([svc], {}, **own) is None
     target = getattr(svc, attr) / "inner" if attr != "config" else svc.config
     reason = core.production_refusal([svc], {flag: target}, **own)
-    assert reason == f"{flag} {target}: this is lbl's {what} — refusing (nothing was written)"
+    # batch 11 L1: 자기 서비스의 조각을 지키는 거절은 다음 할 일을 붙인다
+    assert reason == (
+        f"{flag} {target}: this is lbl's {what} — refusing (nothing was written); "
+        f"{core.OWN_SERVICE_NEXT}"
+    )
 
 
 @pytest.mark.parametrize(
@@ -2110,7 +2114,8 @@ def test_b10_h2_own_needs_the_install_place_and_the_service_file_is_refused_firs
     same = {"--service-file": Path("/s/lbl.plist")}
     reason = core.production_refusal([svc], same, installed=Path("/s/lbl.plist"), **own)
     assert reason == (
-        "--service-file /s/lbl.plist: this is lbl's service file — refusing (nothing was written)"
+        "--service-file /s/lbl.plist: this is lbl's service file — refusing (nothing was written); "
+        f"{core.OWN_SERVICE_NEXT}"  # batch 11 L1
     )
 
 
@@ -2465,8 +2470,7 @@ def test_b11_m_a_name_setup_cannot_judge_closes(tmp_path):
 
 #: setup 이 설치한 자기 서비스의 조각을 지키는 거절 문장이 말하는 다음 할 일(batch 11 L1)
 REMOVE_FIRST = (
-    "remove the installed service first — see the `to remove:` line from the run that "
-    "installed it"
+    "remove the installed service first — see the `to remove:` line from the run that installed it"
 )
 
 

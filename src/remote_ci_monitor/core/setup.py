@@ -915,6 +915,14 @@ PRODUCTION_PIECES = (
 )
 
 
+#: setup 이 설치한 자기 서비스의 조각을 지키는 거절에 붙는 다음 할 일 — 그 서비스는 `--force` 로
+#: 다시 쓸 수 없다(batch 10 H1). 먼저 내린다(batch 11 L1)
+OWN_SERVICE_NEXT = (
+    "setup installed that service: to set it up again, remove the installed service first — see "
+    "the `to remove:` line from the run that installed it"
+)
+
+
 def same_or_inside(path: Path, root: Path, *, fold_case: bool) -> bool:
     """`path` 가 `root` 이거나 그 안인가 — 글자로 견준다(심볼릭 링크는 호출자가 푼다)."""
     text, top = place_key(path, fold_case=fold_case), place_key(root, fold_case=fold_case)
@@ -952,10 +960,14 @@ def production_refusal(
             )
     mine = {label, unit_name(label)} if label is not None else set()
 
-    def own(svc: RcmService) -> bool:
+    def ours(svc: RcmService) -> bool:
+        """setup 이 쓴 서비스인가 — 라벨이 같고, 그 라벨의 설치 자리에 있고, 바이트가 같다."""
         named = bool(mine.intersection(svc.names))
         placed = installed is not None and same_or_inside(svc.file, installed, fold_case=fold_case)
-        return named and force_service and placed and svc.data is not None and svc.data in written
+        return named and placed and svc.data is not None and svc.data in written
+
+    def own(svc: RcmService) -> bool:
+        return force_service and ours(svc)
 
     for flag, target in targets.items():
         for svc in services:
@@ -963,9 +975,12 @@ def production_refusal(
                 value = getattr(svc, attr)
                 for root in value if isinstance(value, tuple) else (value,):
                     if root is not None and same_or_inside(target, root, fold_case=fold_case):
+                        # setup 이 설치한 자기 서비스면 다음 할 일을 말한다 — `--force` 로는 풀리지
+                        # 않는다(batch 11 L1)
+                        hint = f"; {OWN_SERVICE_NEXT}" if ours(svc) else ""
                         return (
                             f"{flag} {target}: this is {svc.name}'s {what} — refusing (nothing "
-                            "was written)"
+                            f"was written){hint}"
                         )
     for svc in services:
         if mine.intersection(svc.names) and not own(svc):
