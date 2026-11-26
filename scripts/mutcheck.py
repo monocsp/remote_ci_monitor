@@ -6838,6 +6838,8 @@ MUTANTS = (
         tests=(
             "tests/test_worker_session_m5tb.py::"
             "test_p62_3_a_narrow_confirm_that_cannot_be_sent_is_retried_and_keeps_the_job_folder",
+            "tests/test_worker_session_m5tb.py::"
+            "test_p63_1_an_unsent_finish_while_stopping_keeps_the_job_folder_and_parks_nothing",
         ),
     ),
     Mutant(

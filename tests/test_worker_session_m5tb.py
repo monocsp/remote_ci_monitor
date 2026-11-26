@@ -247,6 +247,48 @@ def test_p62_3_a_narrow_confirm_that_cannot_be_sent_is_retried_and_keeps_the_job
     assert (folder / "claim.json").is_file()  # 보내지 못했다 — 다음 프로세스가 판정한다
 
 
+def test_p63_1_an_unsent_finish_while_stopping_keeps_the_job_folder_and_parks_nothing(
+    srv, tmp_path, monkeypatch
+):
+    """# P6-3 #1 펜싱이 아닌 멈춤(SIGTERM · 드레인)에서 finish 를 끝내 보내지 못하면 미룰 곳이
+    없다 — 미뤄 둔 보고는 멈춘 프로세스와 함께 사라진다. 그래서 `_unreported` 에 넣지 않고
+    잡 폴더(`claim.json`)를 남긴다. 다음 프로세스가 이 세션을 죽은 세션으로 판정해 확인을
+    보낸다. 지우면 확인이 사라지고 표식 잡의 그룹은 G 뒤 홀드된다."""
+    import types
+
+    monkeypatch.setattr(rw, "REPORT_RETRIES", (0.0, 0.0, 0.0))
+    srv.registered("build-02")
+    jid = running(srv, preset="ship")
+    url = f"http://127.0.0.1:{srv.port}"
+    cfg = WorkerConfig(
+        server=url, token=srv.tokens["build-02"], data_dir=str(tmp_path / "w"), lanes=1
+    )
+    w = RemoteWorker(cfg, log=lambda m: None)
+    w.session_id = srv.session("build-02")
+    w._bind_session(w.client)
+    w.session_dir = tmp_path / "w" / rw.SESSIONS_DIR / w.session_id
+    folder = w._job_dir(jid)
+    assert folder is not None
+    w._write_claim(jid, True, 600)
+    w._write_proc(jid, None)
+    sent: list[str] = []
+
+    def unreachable(job_id: int, outcome: str, *a: Any, **kw: Any) -> Any:
+        sent.append(outcome)
+        raise ClientError(0, "connection refused")
+
+    monkeypatch.setattr(w.client, "finish", unreachable)
+    w.stopping.set()  # 멈추는 중 — 펜싱은 아니다
+    observer = types.SimpleNamespace(irreversible=True, closed_state=None, finish_sent=False)
+    w._finish(jid, SUCCEEDED, 0, "done", observer, group_gone=True)
+    assert not w.fenced.is_set()
+    assert sent and set(sent) == {SUCCEEDED}  # 결과를 보내려 했고 좁은 확인으로 바꾸지 않았다
+    assert w._unreported == {}  # 멈추는 프로세스에는 미룰 곳이 없다
+    assert jid not in w.running
+    assert (folder / "claim.json").is_file()  # 보내지 못했다 — 다음 프로세스가 판정한다
+    assert job_of(srv, jid).state == RUNNING
+
+
 @pytest.mark.parametrize("gone", [True, None])
 def test_p62_1_a_remote_job_with_a_retry_frozen_before_the_mark_is_not_retried(tmp_path, gone):
     """# P6-2 #1 표식 전에 `[retry]` 로 제출된 잡은 반복 정책을 얼린 채 대기한다. reload 가
