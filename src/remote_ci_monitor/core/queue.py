@@ -555,7 +555,9 @@ def compute_queue(
             est = replace(est, shared=True)
         unreachable = job.worker_name is not None and job.worker_name in down_workers
         if unreachable:
-            est = replace(est, finish_at=None)  # 워커가 돌아올지 모른다 — 시각을 지어내지 않는다
+            # 워커가 돌아올지 모른다 — 시각을 지어내지 않는다. 경과 · 출력 시각은 마지막으로
+            # 들은 값이라 그것으로 초과 · 멈춤을 판정하지 않는다(P6-1 G6)
+            est = replace(est, finish_at=None, overdue=False, stuck=False, stuck_code=None)
         # 끊긴 잡의 끝은 모른다 — 그 그룹 뒤의 대기 잡도 그 끝에서 숫자를 지어내지 않는다
         free_at = None if unreachable else now + timedelta(seconds=est.remaining_seconds or 0)
         if free_at is not None and holder_lane is not None and holder_lane in lane_free:

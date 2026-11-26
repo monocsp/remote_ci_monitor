@@ -7217,6 +7217,33 @@ MUTANTS = (
         tests=("tests/web/unreachable_m5tb.test.js",),
         runner="node",
     ),
+    Mutant(
+        # 끊긴 잡의 마지막으로 들은 경과로 초과 · 멈춤을 판정해 「lost contact」 옆에 「overdue」가
+        # 붙는다(P6-1 G6)
+        name="unreachable-overdue-kept",
+        path="src/remote_ci_monitor/core/queue.py",
+        old=(
+            "            est = replace(est, finish_at=None, overdue=False, stuck=False, "
+            "stuck_code=None)\n"
+        ),
+        new="            est = replace(est, finish_at=None)\n",
+        tests=(
+            "tests/test_queue_unreachable_m5tb.py::"
+            "test_g6_rl28_an_unreachable_job_is_never_overdue_or_stuck",
+        ),
+    ),
+    Mutant(
+        # 웹이 끊긴 잡의 단계 · 경과 초를 스스로 세고 레인을 「도는 중」으로 칠한다(P6-1 G6)
+        name="web-unreachable-row-ticks",
+        path="src/remote_ci_monitor/web/app.js",
+        old=(
+            '    return !(row && row.reason === "worker_unreachable_grace");'
+            "   // mutcheck: web-unreachable-row-ticks"
+        ),
+        new="    return true;",
+        tests=("tests/web/unreachable_m5tb.test.js",),
+        runner="node",
+    ),
 )
 
 

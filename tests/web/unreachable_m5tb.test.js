@@ -374,3 +374,31 @@ describe("G5 — 취소 중인 잡이 끊긴 워커에 있으면 「이어진다
     assert.match(rcm.reasonText(running(901), NOW, status([]), "en").text, /the job goes on/);
   });
 });
+
+describe("G6 — 끊긴 잡의 행은 살아 있는 것처럼 세지 않는다", () => {
+  // 끊긴 동안 아는 것은 마지막으로 들은 값뿐이다 — 클라이언트가 단계 · 경과 초를 계속 세면 잡이
+  // 도는 것처럼 보인다. 행의 레인도 「도는 중」 색이 아니라 회색이다.
+  test("g6 — heardLive: 끊김 사유면 거짓, 다른 행은 참", () => {
+    assert.equal(typeof rcm.heardLive, "function");
+    assert.equal(rcm.heardLive(running(901)), false);
+    assert.equal(rcm.heardLive(running(901, { reason: "running" })), true);
+    assert.equal(rcm.heardLive(waiting(821)), true);
+  });
+  test("g6 — laneClass: 끊긴 잡은 run · stuck · overdue 가 아니다", () => {
+    assert.equal(typeof rcm.laneClass, "function");
+    const est = { elapsed_seconds: 900, overdue: true, stuck: true, finish_at: null };
+    assert.equal(rcm.laneClass(running(901, { estimate: est })), "quiet");
+    assert.equal(rcm.laneClass(running(901, { reason: "stuck", estimate: est })), "stuck");
+    assert.equal(rcm.laneClass(running(901, { reason: "running", estimate: { finish_at: null } })), "run");
+    assert.equal(rcm.laneClass(waiting(821)), null);
+  });
+  test("g6 — 배선: 막대 · 단계 초 · 경과 초 · 펼친 단계가 heardLive 를 본다", () => {
+    const src = APP_SRC();
+    assert.ok(src.indexOf("var live = canTick() && heardLive(row);") !== -1, "renderRow 의 live");
+    assert.ok(src.indexOf("progressBarHtml(row, L(), live)") !== -1, "막대");
+    assert.ok(src.indexOf("stepNowHtml(row.progress, live)") !== -1, "단계 초");
+    assert.ok(src.indexOf("busy && isNum(est.elapsed_seconds) && heardLive(row)") !== -1, "경과 초");
+    assert.ok(src.indexOf("busyRow && canTick() && heardLive(row)") !== -1, "펼친 단계");
+    assert.ok(src.indexOf("var lc = laneClass(row);") !== -1, "레인 색");
+  });
+});

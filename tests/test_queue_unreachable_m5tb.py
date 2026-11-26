@@ -554,3 +554,44 @@ def test_g5_rl28_rcm_wait_on_a_cancelling_job_says_it_is_cancelled_when_the_work
         f"#{JOB} worker mac2 is back — the job is being cancelled",
     ], err
     assert "goes on" not in err
+
+
+# ── P6-1 G6: 끊긴 동안은 살아 있다고 보이지 않는다 ─────────────────────────────────
+
+
+def test_g6_rl28_an_unreachable_job_is_never_overdue_or_stuck():
+    """# RL28 P6-1 G6: 끊긴 잡의 경과 · 출력 시각은 마지막으로 들은 값이다. 그 값으로 「초과」 ·
+    「멈춤」을 판정하면 「lost contact」 옆에 「overdue」가 붙는다. 끊긴 동안은 내지 않는다.
+    대조: 같은 잡이 살아 있는 워커에 있으면 둘 다 참이다."""
+    old = job(930, state=RUNNING, started_min=500, lane=1, worker_name="mac2")
+    quiet = job(
+        931,
+        state=RUNNING,
+        started_min=4,
+        lane=2,
+        worker_name="mac2",
+        last_output_at=ago(minutes=200),
+    )
+    live = rows(
+        [old, quiet],
+        [remote_lane("mac2", "busy", 1, job_id=930), remote_lane("mac2", "busy", 2, job_id=931)],
+    )
+    assert live[930].estimate.overdue and live[931].estimate.stuck, (live[930], live[931])
+    down = rows([old, quiet], [remote_lane("mac2", "down", 1), remote_lane("mac2", "down", 2)])
+    for jid in (930, 931):
+        est = down[jid].estimate
+        assert down[jid].reason == GRACE
+        assert not est.overdue and not est.stuck and est.stuck_code is None, est
+
+
+def test_g6_rl28_rcm_wait_progress_line_has_no_overdue_while_unreachable():
+    """옛 서버가 끊긴 잡에 `overdue: true` 를 보내도 진행 줄은 「lost contact」 옆에 「overdue」를
+    찍지 않는다."""
+    d = {
+        "id": JOB,
+        "state": "running",
+        "reason": GRACE,
+        "estimate": {"elapsed_seconds": 900.0, "finish_at": None, "overdue": True},
+    }
+    assert "overdue" not in cli_mod.describe(d), cli_mod.describe(d)
+    assert "overdue" in cli_mod.describe({**d, "reason": "overdue"})

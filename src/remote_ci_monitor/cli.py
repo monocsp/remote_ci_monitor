@@ -246,7 +246,8 @@ def describe(job: dict[str, Any], *, head: str | None = None) -> str:
         parts.append(f"elapsed {fmt_duration(est['elapsed_seconds'])}")
     if est.get("finish_at"):
         parts.append(f"eta {fmt_clock(est['finish_at'], datetime.now().astimezone().tzinfo)}")
-    elif est.get("overdue"):
+    elif est.get("overdue") and job.get("reason") != REASON_WORKER_UNREACHABLE_GRACE:
+        # 끊긴 동안의 경과는 마지막으로 들은 값이다 — 「lost contact」 옆에 초과를 말하지 않는다(G6)
         parts.append("overdue")
     if job.get("summary") and state in TERMINAL_STATES:
         parts.append(str(job["summary"]))

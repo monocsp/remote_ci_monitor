@@ -576,6 +576,24 @@
   function logCompleteNote(job, lang) {
     return job && job.log_complete === false ? T(lang, "drawer.log_incomplete") : null;
   }
+  /** 워커에서 지금 소식이 오는 행인가(P6-1 G6). 끊김 유예 중이면 아는 것은 마지막으로 들은 값뿐이다 —
+   *  단계 · 경과 초를 스스로 세지 않고, 막대도 세지 않는다. */
+  function heardLive(row) {
+    return !(row && row.reason === "worker_unreachable_grace");   // mutcheck: web-unreachable-row-ticks
+  }
+  /** 행 왼쪽 레인의 형편 한 칸. 우선순위 `stuck > overdue > quiet > running` — 한 행에 채운 칩은 상태
+   *  필 하나뿐이고, 이상은 레인에서 한 번만 빨강으로 말한다. 끊긴 잡은 회색(`quiet`)이다: 도는지
+   *  모르고, 초과 · 멈춤도 마지막으로 들은 값으로는 판정하지 않는다(G6). 서버가 그 둘을 내지 않지만
+   *  옛 서버의 행도 같게 그린다. */
+  function laneClass(row) {
+    var est = (row && row.estimate) || {};
+    var busy = row && (row.state === "running" || row.state === "cancelling");
+    if (busy && !heardLive(row)) return "quiet";
+    if (est.stuck) return "stuck";
+    if (est.overdue) return "overdue";
+    if (est.quiet) return "quiet";
+    return busy ? "run" : null;
+  }
 
   // ── 요약 (항목 23 · 24 · 25) ──
   function notMoving(status, me, lang) {
@@ -3620,7 +3638,7 @@
     ordinal: ordinal, truncate: truncate, stateWord: stateWord, stateGlyph: stateGlyph, personLabel: personLabel,
     reasonText: reasonText, confidenceBadge: confidenceBadge, etaText: etaText,
     elapsedText: elapsedText, notMoving: notMoving, yourJobs: yourJobs, isMine: isMine,
-    holdChip: holdChip, logCompleteNote: logCompleteNote, stuckBand: stuckBand,
+    holdChip: holdChip, logCompleteNote: logCompleteNote, stuckBand: stuckBand, heardLive: heardLive, laneClass: laneClass,
     scheduledOf: scheduledOf, scheduledRowModel: scheduledRowModel, notifyFailuresBadge: notifyFailuresBadge, cancelLocked: cancelLocked, hostPressure: hostPressure,
     jobStorageLine: jobStorageLine, hostRunsNoJobs: hostRunsNoJobs, hostFacts: hostFacts,
     queueHeader: queueHeader, sortQueue: sortQueue, workerPills: workerPills, workersCrowded: workersCrowded, workerName: workerName, hostCards: hostCards, headerNote: headerNote, progressHead: progressHead, progressHeadHtml: progressHeadHtml, queueGroups: queueGroups, runningStep: runningStep,
@@ -4264,16 +4282,14 @@
     // 전체 진행 막대는 접힘과 무관하게 도는 행에 늘 붙는다 — 접기가 「어디까지 왔나」를 감추면
     // 접어 둘 수 없다. 단계 목록·로그 tail·액션만 ▸ 뒤에 있다.
     // 막대는 **진행 시간 칸 안**에 산다(별도의 막대 행이 아니다) — 한 작업이 한 줄이다.
-    var bar = progressBarHtml(row, L(), canTick());
+    // 끊김 유예 중인 행은 마지막으로 들은 값에서 멈춘다 — 스스로 세면 잡이 도는 것처럼 보인다(G6)
+    var live = canTick() && heardLive(row);
+    var bar = progressBarHtml(row, L(), live);
     var mine = isMine(row, state.me);
     var cls = [];
     if (mine) cls.push("mine");
-    // 왼쪽 레인 하나가 행의 형편을 말한다. 우선순위 `stuck > overdue > quiet > running` —
-    // 한 행에 채운 칩은 상태 필 하나뿐이고, 이상은 레인에서 한 번만 빨강으로 말한다.
-    if (est.stuck) cls.push("stuck");
-    else if (est.overdue) cls.push("overdue");
-    else if (est.quiet) cls.push("quiet");
-    else if (busy) cls.push("run");
+    var lc = laneClass(row);
+    if (lc) cls.push(lc);
     if (expanded || placeOpen) cls.push("exp");
     if (state.hl === row.id) cls.push("hl");
     if (row._dim) cls.push("dim");
@@ -4309,7 +4325,7 @@
     var reasonCell = '<span class="reason' + (r.actionable || busy ? " act" : "") + (r.cls ? " " + r.cls : "")
       + '" data-cut="reason" data-label="' + esc(tr("queue.col_reason")) + '" title="' + esc(r.text) + '">' + (r.cls === "blocked" ? icon("chain") + " " : "") + reasonHtml + "</span>";
     // 펼치지 않아도 지금 무엇을 하는지 읽혀야 한다(§4.6-라). 스텝 초는 기준점으로 스스로 센다.
-    var nowStep = busy && !expanded ? stepNowHtml(row.progress) : "";
+    var nowStep = busy && !expanded ? stepNowHtml(row.progress, live) : "";
     if (nowStep) reasonCell += '<div class="sub step-now">' + nowStep + "</div>";
     if (row.state === "uploading" && row.reason === "upload_stalled") reasonCell += '<div class="sub">' + esc(tr("row.stalled_note")) + "</div>";
     if (row._cancelRequested) reasonCell += '<div class="sub">' + esc(tr("row.cancel_requested")) + "</div>";
@@ -4322,7 +4338,7 @@
     if (!expanded && canActRow && !row._cancelRequested && row.state !== "cancelling") reasonCell += '<div class="sub"><button type="button" class="btn danger cancel" data-cancel="' + row.id + '">' + esc(tr("row.cancel")) + "</button></div>";
     else if (!expanded && locked && mine && !!state.token && !state.tokenBad && row.state !== "cancelling") reasonCell += '<div class="sub cancel-locked">' + esc(tr("row.cancel_locked")) + "</div>";
     var el = elapsedText(row, now(), L());
-    var elapsedCell = busy && isNum(est.elapsed_seconds)
+    var elapsedCell = busy && isNum(est.elapsed_seconds) && heardLive(row)
       ? '<span data-tick="elapsed" data-from="' + esc(row.started_at || "") + '">' + esc(el.main) + "</span>" + (el.sub ? '<div class="sub">' + esc(el.sub) + "</div>" : "")
       : (row.state === "queued" ? '<span data-tick="waiting" data-from="' + esc(row.created_at || "") + '">' + esc(el.main) + "</span>" : esc(el.main));
     if (bar) elapsedCell += bar;
@@ -4431,14 +4447,14 @@
   function canTick() { return !state.skewUnknown; }
 
   /** 도는 행 한 줄: 「스텝 2/4 analyze 12s」. 초는 1초 틱이 스스로 센다. */
-  function stepNowHtml(prog) {
+  function stepNowHtml(prog, live) {
     if (!prog || prog.phase === "materializing" || !prog.current_name) return "";
     var cur = runningStep(prog);
     if (!cur) return "";
     var total = isNum(prog.steps_total) ? prog.steps_total : "?";
     var i = isNum(prog.current_index) ? prog.current_index : prog.steps_done;
     var dur = fmtDuration(prog.current_seconds);
-    var secs = canTick() && cur.started_at
+    var secs = live && cur.started_at
       ? '<span data-tick="elapsed" data-from="' + esc(cur.started_at) + '">' + esc(dur) + "</span>"
       : esc(dur);
     // 이름과 시간을 두 칸으로 나눈다 — 이름만 한 줄 말줄임(전문은 title), 몇 초째는 늘 보인다.
@@ -4451,7 +4467,7 @@
     var prog = row.progress;
     if (!prog || prog.phase === "materializing") return "";
     var busyRow = row.state === "running" || row.state === "cancelling";
-    var head = progressHeadHtml(prog, L(), busyRow && canTick());
+    var head = progressHeadHtml(prog, L(), busyRow && canTick() && heardLive(row));
     var steps = Array.isArray(prog.steps) ? prog.steps : [];
     var total = isNum(prog.steps_total) ? prog.steps_total : steps.length;
     var failed = failedStepCount(prog);
@@ -4466,7 +4482,7 @@
       // 같은 잡의 서로 다른 두 값을 읽는다 — 의미는 행 아래 전체 막대 하나가 진다.
       h += '<div class="minibar" aria-hidden="true">' + segs + "</div>";
       h += '<div class="steps">';
-      var live = busyRow && canTick();
+      var live = busyRow && canTick() && heardLive(row);
       steps.forEach(function (s) {
         var c = s.state === "running" ? "run" : s.ok === false ? "fail" : "";
         var tick = live && s.state === "running" && s.started_at ? ' data-tick="elapsed" data-from="' + esc(s.started_at) + '"' : "";
@@ -6640,7 +6656,7 @@
   function jobCardHtml(item) {
     var row = item.row;
     if (!row) return "";
-    var live = !state.skewUnknown && (row.state === "running" || row.state === "cancelling");
+    var live = !state.skewUnknown && (row.state === "running" || row.state === "cancelling") && heardLive(row);
     var h = "";
     if (row.state === "running" || row.state === "cancelling") h += progressBarHtml(row, L(), live);
     var prog = row.progress;
