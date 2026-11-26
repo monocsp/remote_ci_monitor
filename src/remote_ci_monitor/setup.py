@@ -44,7 +44,7 @@ import sys
 import tarfile
 import tomllib
 import urllib.parse
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, TextIO
@@ -239,15 +239,39 @@ def real_path(path: Path) -> Path:
     return Path(os.path.realpath(head)).joinpath(*reversed(tail))
 
 
-def service_places(home: Path, environ: Mapping[str, str]) -> list[tuple[Path, bool]]:
-    """(자리, root 자리인가). 사용자 자리(`~/Library/LaunchAgents`, `~/.config/systemd/user`,
-    `$XDG_CONFIG_HOME/systemd/user`)와 시스템 자리(`SYSTEM_SERVICE_PLACES`)다."""
-    user = [home / "Library" / "LaunchAgents", home / ".config" / "systemd" / "user"]
+def scan_homes() -> list[Path]:
+    """스캔이 사용자 자리를 찾는 홈 — `$HOME` 과 passwd 의 홈(`account_home`) 둘 다다. 다르면 둘
+    다 본다: `HOME=/tmp/x rcm setup --config <진짜 홈>/…` 가 `$HOME` 만 보는 스캔을 지났다(batch
+    10 H3)."""
+    homes = [Path.home()]
+    account = account_home()
+    if account is not None:
+        homes.append(account)
+    return homes
+
+
+def service_places(
+    homes: Sequence[Path], environ: Mapping[str, str]
+) -> list[tuple[Path, bool, Path]]:
+    """(자리, root 자리인가, 그 자리의 홈). 홈마다 사용자 자리(`~/Library/LaunchAgents`,
+    `~/.config/systemd/user` — 실제 홈 아래의 기본 XDG 자리), `$XDG_CONFIG_HOME/systemd/user`,
+    시스템 자리(`SYSTEM_SERVICE_PLACES`)다. 심볼릭 링크를 푼 자리가 같으면 한 번만 본다."""
+    first = homes[0]
+    found: list[tuple[Path, bool, Path]] = []
+    for home in homes:
+        found.append((home / "Library" / "LaunchAgents", False, home))
+        found.append((home / ".config" / "systemd" / "user", False, home))
     xdg = environ.get("XDG_CONFIG_HOME")
     if xdg and os.path.isabs(xdg):
-        user.append(Path(xdg) / "systemd" / "user")
-    out = [(place, False) for place in user]
-    out += [(place, place.name in _ROOT_PLACES) for place in SYSTEM_SERVICE_PLACES]
+        found.append((Path(xdg) / "systemd" / "user", False, first))
+    found += [(place, place.name in _ROOT_PLACES, first) for place in SYSTEM_SERVICE_PLACES]
+    out: list[tuple[Path, bool, Path]] = []
+    seen: set[Path] = set()
+    for place, root, home in found:
+        key = real_path(place)
+        if key not in seen:
+            seen.add(key)
+            out.append((place, root, home))
     return out
 
 
@@ -358,15 +382,15 @@ def _rcm_service(path: Path, *, home: Path, root: bool) -> core.RcmService | Non
 
 
 def scan_services(
-    home: Path | None = None, environ: Mapping[str, str] | None = None
+    homes: Sequence[Path] | None = None, environ: Mapping[str, str] | None = None
 ) -> list[core.RcmService]:
     """이 머신에서 찾을 수 있는 rcm 서비스 — 지원하는 자리의 `*.plist` · `*.service` 만 본다
     (결정 352). 설정은 TOML 로 읽기만 하고 DB 는 열지 않는다. 읽지 못하는 자리(권한)도 닫는
     쪽이다 — 그 안에 rcm 서비스가 있는지 모른다."""
-    home = Path.home() if home is None else home
+    homes = scan_homes() if homes is None else homes
     environ = os.environ if environ is None else environ
     out: list[core.RcmService] = []
-    for place, root in service_places(home, environ):
+    for place, root, home in service_places(homes, environ):
         try:
             entries = sorted(place.iterdir())
         except (FileNotFoundError, NotADirectoryError):

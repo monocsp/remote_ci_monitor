@@ -3850,7 +3850,7 @@ MUTANTS = (
         # `$XDG_CONFIG_HOME/systemd/user` 를 찾지 않는다(결정 352)
         name="setup-scan-xdg-units-missed",
         path="src/remote_ci_monitor/setup.py",
-        old='        user.append(Path(xdg) / "systemd" / "user")\n',
+        old='        found.append((Path(xdg) / "systemd" / "user", False, first))\n',
         new="        pass\n",
         tests=("tests/test_setup.py::test_b9_352_systemd_units_in_every_supported_place_are_seen",),
     ),
@@ -3858,9 +3858,21 @@ MUTANTS = (
         # 시스템 자리(`/Library/LaunchDaemons` · `/etc/systemd/system` …)를 찾지 않는다(결정 352)
         name="setup-scan-system-places-missed",
         path="src/remote_ci_monitor/setup.py",
-        old="    out += [(place, place.name in _ROOT_PLACES) for place in SYSTEM_SERVICE_PLACES]\n",
-        new="    out += []\n",
+        old=(
+            "    found += [(place, place.name in _ROOT_PLACES, first) for place in "
+            "SYSTEM_SERVICE_PLACES]\n"
+        ),
+        new="    found += []\n",
         tests=("tests/test_setup.py::test_b9_352_systemd_units_in_every_supported_place_are_seen",),
+    ),
+    Mutant(
+        # 스캔이 `$HOME` 만 본다 — `HOME=/tmp/x rcm setup --config <진짜 홈>/…` 가 진짜 홈의
+        # 운영 설정을 덮는다(batch 10 H3)
+        name="setup-scan-account-home-missed",
+        path="src/remote_ci_monitor/setup.py",
+        old="        homes.append(account)\n",
+        new="        pass\n",
+        tests=("tests/test_setup.py::test_b10_h3_the_scan_reads_the_account_home_not_only_home",),
     ),
     Mutant(
         # 읽지 못한 rcm 같은 파일을 rcm 이 아닌 것으로 본다(결정 352, 닫는 쪽)
