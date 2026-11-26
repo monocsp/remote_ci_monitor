@@ -7188,6 +7188,35 @@ MUTANTS = (
             "test_g4_rl45_rcm_eta_job_of_a_held_waiter_says_held_and_does_not_count_ahead",
         ),
     ),
+    Mutant(
+        # 끊긴 워커의 취소 중인 잡에 「돌아오면 이어진다」고 말한다 — 다시 붙은 워커는 멈춘다
+        # (결정 322, P6-1 G5). `rcm top` 과 `rcm wait` 이 같은 함수를 쓴다
+        name="grace-cancel-says-goes-on",
+        path="src/remote_ci_monitor/core/render_text.py",
+        old=(
+            "    tail = _GRACE_CANCEL_TAIL if cancelling else _GRACE_TAIL"
+            "  # mutcheck: grace-cancel-says-goes-on\n"
+        ),
+        new="    tail = _GRACE_TAIL\n",
+        tests=(
+            "tests/test_queue_unreachable_m5tb.py::"
+            "test_g5_rl28_rcm_top_does_not_promise_a_cancelling_job_goes_on",
+            "tests/test_queue_unreachable_m5tb.py::"
+            "test_g5_rl28_rcm_wait_on_a_cancelling_job_says_it_is_cancelled_when_the_worker_is_back",
+        ),
+    ),
+    Mutant(
+        # 웹이 끊긴 워커의 취소 중인 잡에 「이어서 진행」이라고 쓴다(결정 322, P6-1 G5)
+        name="web-grace-cancel-says-goes-on",
+        path="src/remote_ci_monitor/web/app.js",
+        old=(
+            'row.state === "cancelling" ? "reason.unreachable_cancelling" : '
+            '"reason.unreachable_grace"'
+        ),
+        new='"reason.unreachable_grace"',
+        tests=("tests/web/unreachable_m5tb.test.js",),
+        runner="node",
+    ),
 )
 
 

@@ -353,3 +353,24 @@ describe("G1 — 「확인이 필요한 작업」 띠가 넘치면 「그 밖에
     assert.ok(src.indexOf("nm.lines.slice(0, 3)") === -1, "renderSummary 가 아직 직접 자른다");
   });
 });
+
+describe("G5 — 취소 중인 잡이 끊긴 워커에 있으면 「이어진다」고 하지 않는다", () => {
+  // 명세 결정 322: 다시 붙은 워커는 취소 요청이 있는 잡을 멈춘다 — 잡은 이어지지 않는다.
+  const row = () => running(901, { state: "cancelling" });
+  test("g5 — 영어: 돌아오면 취소되고 유예를 넘기면 lost", () => {
+    const r = rcm.reasonText(row(), NOW, status([]), "en");
+    assert.equal(r.text, "lost contact with mac2 — the job is cancelled when the worker is back, or ends as lost after the grace period");
+    assert.ok(r.text.indexOf("goes on") === -1, r.text);
+    noCode(r.text);
+  });
+  test("g5 — 한국어: 같은 뜻, 「이어서」 없음", () => {
+    const r = rcm.reasonText(row(), NOW, status([]), "ko");
+    assert.equal(r.text, "워커 mac2와 연락이 끊김 · 돌아오면 취소되고 유예 시간을 넘기면 결과를 잃음");
+    assert.ok(r.text.indexOf("이어서") === -1, r.text);
+  });
+  test("g5 — 머신 이름을 모르면 「워커」, 도는 잡은 오늘 그대로", () => {
+    assert.equal(rcm.reasonText(running(901, { state: "cancelling", ran_on: null }), NOW, status([]), "en").text,
+      "lost contact with the worker — the job is cancelled when the worker is back, or ends as lost after the grace period");
+    assert.match(rcm.reasonText(running(901), NOW, status([]), "en").text, /the job goes on/);
+  });
+});

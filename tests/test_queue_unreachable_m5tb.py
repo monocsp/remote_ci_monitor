@@ -527,3 +527,30 @@ def test_g4_rl45_rcm_eta_job_of_a_held_waiter_says_held_and_does_not_count_ahead
     assert "ahead" not in out, out
     assert "group irreversible:ship is held by #812 — rcm release-hold 812" in out, out
     assert "irreversible_hold" not in out, out
+
+
+# ── P6-1 G5: 취소 중인 잡은 끊긴 워커가 돌아오면 이어지지 않고 취소된다 ─────────────────
+
+CANCEL_TAIL = "the job is cancelled when the worker is back, or ends as lost after the grace period"
+
+
+def test_g5_rl28_rcm_top_does_not_promise_a_cancelling_job_goes_on():
+    """# RL28 P6-1 G5: 명세 결정 322 — 다시 붙은 워커는 취소 요청이 있는 잡을 멈춘다."""
+    _head, reason, *_ = row_block(top_text(top_row(state="cancelling")), 907)
+    assert reason.strip() == f"lost contact with mac2 — {CANCEL_TAIL}", reason
+    assert "goes on" not in reason
+
+
+def test_g5_rl28_rcm_wait_on_a_cancelling_job_says_it_is_cancelled_when_the_worker_is_back(
+    fake, capsys
+):
+    cancelling = {**doc(), "state": "cancelling", "reason": GRACE}
+    back = {**doc(), "state": "cancelling", "reason": "cancelling"}
+    fake.docs = [cancelling, cancelling, back, doc("cancelled")]
+    _code, _out, err = run(capsys, ["wait", "--job", str(JOB), "--poll"])
+    said = [ln for ln in err.splitlines() if "lost contact" in ln or "is back" in ln]
+    assert said == [
+        f"#{JOB} lost contact with worker mac2 — {CANCEL_TAIL}",
+        f"#{JOB} worker mac2 is back — the job is being cancelled",
+    ], err
+    assert "goes on" not in err

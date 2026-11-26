@@ -385,8 +385,9 @@
       case "not_scheduled": out.text = T(lang, "reason.not_scheduled"); out.actionable = true; break;
       case "worker_down": out.text = T(lang, "reason.no_worker"); out.actionable = true; break;
       case "worker_unreachable_grace":
-        // 끊김 유예(M5t-b §4.8 · 결정 276) — 잡은 돈다. 워커가 유예 안에 돌아오면 이어 간다
-        out.text = T(lang, "reason.unreachable_grace", { worker: typeof row.ran_on === "string" && row.ran_on ? row.ran_on : null });
+        // 끊김 유예(M5t-b §4.8 · 결정 276) — 잡은 돈다. 워커가 유예 안에 돌아오면 이어 간다.
+        // 취소 중인 잡은 이어지지 않는다 — 다시 붙은 워커가 멈춘다(결정 322, P6-1 G5)
+        out.text = T(lang, row.state === "cancelling" ? "reason.unreachable_cancelling" : "reason.unreachable_grace", { worker: typeof row.ran_on === "string" && row.ran_on ? row.ran_on : null });   // mutcheck: web-grace-cancel-says-goes-on
         out.actionable = true; out.cls = "stalled"; break;
       default: out.text = T(lang, "reason.unknown");
     }

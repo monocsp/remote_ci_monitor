@@ -488,6 +488,11 @@
       return "lost contact with " + (a.worker || "the worker") +
         " — the job goes on if the worker is back within the grace period";
     },
+    // 취소 중인 잡(결정 322) — 다시 붙은 워커가 멈추므로 이어지지 않는다(P6-1 G5)
+    "reason.unreachable_cancelling": function (a) {
+      return "lost contact with " + (a.worker || "the worker") +
+        " — the job is cancelled when the worker is back, or ends as lost after the grace period";
+    },
     // 그룹 홀드에 막힌 대기 잡(M5t-b §4.8) — `needs action` 뒤에 붙는다
     "reason.held_group": function (a) {
       return "group " + a.group + " is held by #" + a.id + " — rcm release-hold " + a.id +
@@ -1742,6 +1747,10 @@
     "reason.unreachable_grace": function (a) {
       return (a.worker ? "워커 " + withJosa(a.worker, "와/과") : "워커와") +
         " 연락이 끊김 · 유예 시간 안에 돌아오면 이어서 진행";
+    },
+    "reason.unreachable_cancelling": function (a) {
+      return (a.worker ? "워커 " + withJosa(a.worker, "와/과") : "워커와") +
+        " 연락이 끊김 · 돌아오면 취소되고 유예 시간을 넘기면 결과를 잃음";
     },
     // 그룹 이름은 서버가 보낸 글자라 읽는 소리를 모를 수 있다(`irreversible:ship가`) — 이름 바로 뒤에
     // 조사를 붙이지 않는 문장으로 쓴다(P3 r1). 조사는 소리가 정해진 잡 번호 뒤에만 붙인다

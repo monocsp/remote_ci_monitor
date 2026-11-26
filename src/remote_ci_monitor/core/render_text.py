@@ -692,7 +692,7 @@ def _plain_reason_text(row: dict[str, Any], workers: list[dict[str, Any]] | None
         )
     if reason == "worker_unreachable_grace":
         # 끊김 유예(M5t-b §4.8) — 원문 코드는 드러내지 않는다
-        return unreachable_text(row.get("ran_on"))
+        return unreachable_text(row.get("ran_on"), cancelling=row.get("state") == CANCELLING)
     if reason == "needs_action":
         # 잡이 찍은 「사람이 할 일」(M5s). note 는 서버가 제어문자를 지운 한 줄이지만 옛 서버나
         # 가짜 서버의 문서일 수 있어 `rcm wait` 의 `action_line` 처럼 한 번 더 씻는다
@@ -737,17 +737,23 @@ def _plain_reason_text(row: dict[str, Any], workers: list[dict[str, Any]] | None
     return reason or "unknown"
 
 
-def unreachable_text(machine: Any) -> str:
+def unreachable_text(machine: Any, *, cancelling: bool = False) -> str:
     """끊김 유예 중인 잡의 한 줄(M5t-b §4.8 · 결정 276).
 
-    머신 이름(`ran_on`)을 모르면 「the worker」다."""
+    머신 이름(`ran_on`)을 모르면 「the worker」다. 취소 중인 잡은 이어지지 않는다 — 다시 붙은
+    워커는 취소 요청이 있는 잡을 멈춘다(결정 322, P6-1 G5)."""
     name = clean_line(machine) if isinstance(machine, str) else ""
     who = name or "the worker"
-    return f"lost contact with {who} — {_GRACE_TAIL}"
+    tail = _GRACE_CANCEL_TAIL if cancelling else _GRACE_TAIL  # mutcheck: grace-cancel-says-goes-on
+    return f"lost contact with {who} — {tail}"
 
 
 #: 끊김 유예의 뒤 절 — `rcm top` 의 이유 줄과 `rcm wait` 의 줄이 같은 말을 쓴다
 _GRACE_TAIL = "the job goes on if the worker is back within the grace period"
+#: 취소 중인 잡의 뒤 절(결정 322) — 웹의 `reason.unreachable_cancelling` 과 같은 뜻
+_GRACE_CANCEL_TAIL = (
+    "the job is cancelled when the worker is back, or ends as lost after the grace period"
+)
 
 
 def unknown_eta_reason(row: Mapping[str, Any]) -> str | None:
