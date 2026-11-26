@@ -246,6 +246,11 @@ On the same network you do not have to answer the first one. Ask what is out the
 2. One line per server. If exactly one shows up, you can leave `server` out of your config
    entirely and rcm will use it. Nothing found? The server is on another network, or its
    `advertise` is off — put its address in the file by hand.
+3. Several servers on the computer you ask from all show up: rcm also asks over the loopback
+   interface, and each server answers there. A server on another computer has to hear the
+   question on the network. If one is missing on macOS, check that the process running its
+   `rcm serve` has Local Network permission (System Settings > Privacy & Security > Local
+   Network).
 
 Leaving `server` out needs rcm **0.2.2 or newer on both machines**. An older client has no
 discovery at all: it stops with `no server configured` and, unlike `rcm worker`, it never compares
