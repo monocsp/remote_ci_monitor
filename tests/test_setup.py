@@ -2572,3 +2572,24 @@ def test_b11_l4_an_execstart_with_variables_setup_cannot_expand_closes(
     )
     fake = Fake(platform="linux")
     assert go(fake, *coordinator_args(tmp_path / "data")) == 0, fake.text
+
+
+def test_b11_l5_darwin_compares_labels_without_case(cfg, home, tmp_path):
+    # batch 11 L5(v1-7): darwin 은 경로처럼 라벨도 대소문자를 접어 견준다 — 대소문자를 가리지 않는
+    # 디스크에서 `Test.RCM.Server.plist` 와 `test.rcm.server.plist` 는 한 파일이다
+    venv = _server_venv(tmp_path)
+    config = tmp_path / "other" / "server.toml"
+    config.parent.mkdir()
+    config.write_text(f'[server]\ndata_dir = "{tmp_path / "other-data"}"\n')
+    plist = home / "Library" / "LaunchAgents" / "Test.RCM.Server.plist"
+    plist.parent.mkdir(parents=True)
+    argv0 = [str(venv / "bin" / "rcm"), "serve", "--config", str(config)]
+    plist.write_bytes(plistlib.dumps({"Label": "Test.RCM.Server", "ProgramArguments": argv0}))
+    fake = Fake(platform="darwin")
+    assert go(fake, *coordinator_args(tmp_path / "data")) == 1, fake.text
+    assert "this is Test.RCM.Server's label — refusing" in fake.err.getvalue(), fake.text
+    _nothing_written(cfg, tmp_path / "data")
+    svc = core.RcmService(name="LBL", file=Path("/s/LBL.plist"), names=("LBL",))
+    ask = dict(label="lbl", written=(), force_service=False)
+    assert "label — refusing" in (core.production_refusal([svc], {}, fold_case=True, **ask) or "")
+    assert core.production_refusal([svc], {}, fold_case=False, **ask) is None
