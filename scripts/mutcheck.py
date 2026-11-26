@@ -5388,6 +5388,10 @@ MUTANTS = (
         tests=(
             "tests/test_worker_session_m5tb.py::"
             "test_rl44_a_late_finish_with_group_gone_releases_the_hold",
+            # M5t-b PR2: `lost` 잡의 홀드는 late_result 트랜잭션이 풀어 위 시험은 이 줄에 닿지
+            # 않는다 — `lost` 아닌 닫힘(cancel_unconfirmed)이 닿는다(rcm-ci 4343)
+            "tests/test_worker_session_m5tb.py::"
+            "test_rl44_a_b_late_finish_after_an_unconfirmed_cancel_releases_the_hold_only_with_group_gone",
         ),
     ),
     Mutant(
@@ -7039,7 +7043,13 @@ MUTANTS = (
         path="src/remote_ci_monitor/remote_worker.py",
         old='        cut = data.rfind(b"\\n")\n',
         new="        cut = -1\n",
-        tests=("tests/test_worker_outbox_m5tb.py::test_rl17_c_chunks_end_at_a_line_end",),
+        tests=(
+            "tests/test_worker_outbox_m5tb.py::test_rl17_c_chunks_end_at_a_line_end",
+            # 긴 줄 갈래(P3 1라운드)가 생긴 뒤 위 시험은 이 변이에도 줄 끝에서 끝난다 — 줄 여럿을
+            # 한 조각으로 보내는지를 이 시험이 본다(rcm-ci 4343)
+            "tests/test_worker_outbox_m5tb.py::"
+            "test_rl17_c_f_a_running_job_sends_every_whole_line_up_to_the_last_line_end",
+        ),
     ),
     Mutant(
         # `acked` 를 서버가 준 오프셋이 아니라 보낸 길이로 올린다 — 이어 보내기가 어긋난다(RL16 d)
@@ -7434,6 +7444,135 @@ MUTANTS = (
         tests=(
             "tests/test_worker_outbox_m5tb.py::"
             "test_rl20_finish_with_fewer_bytes_received_than_produced_is_log_incomplete",
+        ),
+    ),
+    # ── M5t-b PR2 P3 2라운드 ──
+    Mutant(
+        # 못 읽는 스풀이 끝난 잡의 finish 를 24시간 묶는다 — 서버에서 잡이 running 이다(RL40)
+        name="unreadable-spool-holds-finish",
+        path="src/remote_ci_monitor/remote_worker.py",
+        old=(
+            "        unreadable = self.spool_unreadable"
+            "  # mutcheck: unreadable-spool-holds-finish\n"
+        ),
+        new="        unreadable = False\n",
+        tests=(
+            "tests/test_worker_outbox_m5tb.py::"
+            "test_rl40_b_finished_job_whose_spool_cannot_be_read_sends_the_finish_after_300s",
+        ),
+    ),
+    Mutant(
+        # `written` 보다 짧은 스풀의 짧은 읽기를 조각으로 보낸다 — 쉬지 않고 돈다(RL20)
+        name="short-spool-read-sent",
+        path="src/remote_ci_monitor/remote_worker.py",
+        old="        if len(data) < end - start:  # mutcheck: short-spool-read-sent\n",
+        new="        if False:\n",
+        tests=(
+            "tests/test_worker_outbox_m5tb.py::"
+            "test_rl20_b_b_spool_shorter_than_written_is_unreadable_not_an_empty_piece",
+        ),
+    ),
+    Mutant(
+        # 잡이 끝났는지를 읽은 뒤에 본다 — 그 사이 끝난 잡의 조각이 줄 가운데서 끊긴다(F34)
+        name="chunk-end-seen-after-read",
+        path="src/remote_ci_monitor/remote_worker.py",
+        old=(
+            "        if len(data) >= LOG_PIECE_MAX_BYTES or final:"
+            "  # mutcheck: chunk-end-seen-after-read\n"
+        ),
+        new=(
+            "        if len(data) >= LOG_PIECE_MAX_BYTES or ob.finish is not None"
+            " or self.dead is not None:\n"
+        ),
+        tests=(
+            "tests/test_worker_outbox_m5tb.py::"
+            "test_rl17_c_d_a_job_that_ends_while_its_piece_is_read_is_not_cut_mid_line",
+        ),
+    ),
+    Mutant(
+        # 상한(4 MiB)보다 긴 줄을 자르지 않는다 — 도는 잡의 그 줄이 끝날 때까지 로그가 멈춘다
+        name="long-line-never-cut",
+        path="src/remote_ci_monitor/remote_worker.py",
+        old=(
+            "        if len(data) >= LOG_PIECE_MAX_BYTES or final:"
+            "  # mutcheck: chunk-end-seen-after-read\n"
+        ),
+        new="        if final:\n",
+        tests=(
+            "tests/test_worker_outbox_m5tb.py::"
+            "test_rl17_c_e_a_line_longer_than_the_piece_limit_is_cut_at_the_limit",
+        ),
+    ),
+    Mutant(
+        # 긴 줄을 상한 너머까지 읽는다 — 서버 본문 상한보다 긴 조각이 413 을 받는다
+        name="long-line-read-past-the-limit",
+        path="src/remote_ci_monitor/remote_worker.py",
+        old="            data = ob.read(ob.acked, LOG_PIECE_MAX_BYTES)\n",
+        new="            data = ob.read(ob.acked, 2 * LOG_PIECE_MAX_BYTES)\n",
+        tests=(
+            "tests/test_worker_outbox_m5tb.py::"
+            "test_rl17_c_e_a_line_longer_than_the_piece_limit_is_cut_at_the_limit",
+        ),
+    ),
+    Mutant(
+        # 창 안에 줄 끝이 없으면 머리를 비운다 — 4 KiB 보다 긴 줄 끝에서 걸친 비밀이 남는다(RL18)
+        name="open-line-tail-dropped",
+        path="src/remote_ci_monitor/remote_workers.py",
+        old="    return head, start == 0  # mutcheck: open-line-tail-dropped\n",
+        new='    return (head if start == 0 else b""), start == 0\n',
+        tests=(
+            "tests/test_worker_log_offset_m5tb.py::"
+            "test_rl18_e_b_a_straddling_secret_after_a_line_longer_than_4_kib_is_masked",
+        ),
+    ),
+    Mutant(
+        # 창을 4 KiB 로 고정한다 — 그보다 긴 릴리스 값이 두 조각에 걸치면 남는다(RL18)
+        name="open-line-window-fixed",
+        path="src/remote_ci_monitor/remote_workers.py",
+        old="            window = max(OPEN_LINE_BYTES, max((len(v) for v in values), default=0))\n",
+        new="            window = OPEN_LINE_BYTES\n",
+        tests=(
+            "tests/test_worker_log_offset_m5tb.py::"
+            "test_rl18_e_c_a_value_longer_than_4_kib_that_straddles_is_masked",
+        ),
+    ),
+    Mutant(
+        # 드레인이 취소된 레인이 아직 안 끝난 앞 잡의 큐 위로 claim 한다 — 409 LaneBusy 가 쏟아진다
+        name="lane-claims-over-its-open-queue",
+        path="src/remote_ci_monitor/remote_worker.py",
+        old="            if self._lane_held(lane):  # mutcheck: lane-claims-over-its-open-queue\n",
+        new="            if False:\n",
+        tests=(
+            "tests/test_worker_outbox_m5tb.py::"
+            "test_rl12_b_c_a_lane_freed_by_the_drain_limit_waits_for_its_queue_after_a_cancel",
+        ),
+    ),
+    Mutant(
+        # done 없이 끝난 큐의 잡을 도는 워커가 heartbeat 목록에서 뺀다 — 서버가 T5 로 닫는다
+        name="halted-queue-left-the-heartbeat",
+        path="src/remote_ci_monitor/remote_worker.py",
+        old=(
+            "            if unsent and not self.stopping.is_set():"
+            "  # mutcheck: halted-queue-left-the-heartbeat\n"
+        ),
+        new="            if False:\n",
+        tests=(
+            "tests/test_worker_outbox_m5tb.py::"
+            "test_rl14_a_c_a_queue_that_ends_unsent_while_the_worker_runs_stays_in_the_heartbeat",
+        ),
+    ),
+    Mutant(
+        # 멈추는 프로세스도 못 보낸 잡을 메모리 목록에 남긴다(§4.4 의 7 — 다음 프로세스가 보낸다)
+        name="stopped-queue-kept-in-the-heartbeat",
+        path="src/remote_ci_monitor/remote_worker.py",
+        old=(
+            "            if unsent and not self.stopping.is_set():"
+            "  # mutcheck: halted-queue-left-the-heartbeat\n"
+        ),
+        new="            if unsent:\n",
+        tests=(
+            "tests/test_worker_session_m5tb.py::"
+            "test_p63_1_an_unsent_finish_while_stopping_keeps_the_job_folder_and_parks_nothing",
         ),
     ),
 )

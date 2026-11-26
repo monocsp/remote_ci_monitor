@@ -989,6 +989,31 @@ def test_rl44_a_late_finish_with_group_gone_releases_the_hold(srv):
     assert hold_rows(srv)[0]["release_kind"] == "worker"
 
 
+def test_rl44_a_b_late_finish_after_an_unconfirmed_cancel_releases_the_hold_only_with_group_gone(
+    srv,
+):
+    """확인 없이 `cancelled` 로 닫힌 표식 잡(취소가 워커에 닿지 않았다)의 홀드도 같은 세션의 늦은
+    finish 가 `group_gone: true` 일 때만 푼다(§4.12 표의 1). `lost` 로 닫힌 잡은 M5t-b PR2 부터
+    `late_result` 트랜잭션(`record_late_result`)에서 풀므로 rl44_a 는 이 갈래에 닿지 않는다 — 이
+    시험이 `lost` 아닌 닫힘의 갈래를 본다."""
+    srv.registered("build-02")
+    jid = running(srv, preset="ship")
+    assert srv.store.finish(
+        jid, "cancelled", now=srv.clock(), summary="x", hold_cause="cancel_unconfirmed"
+    )
+    status, body = srv.finish("build-02", jid, "lost")  # group_gone 없음 — 그대로
+    assert status == 409 and body["code"] == "job_closed" and body["hold_released"] is False
+    assert hold_rows(srv)[0]["release_kind"] is None
+    status, body = srv.req(
+        "POST",
+        f"/worker/jobs/{jid}/finish",
+        token="build-02",
+        json_body={"outcome": "lost", "exit_code": None, "group_gone": True},
+    )
+    assert status == 409 and body["hold_released"] is True and body["state"] == "cancelled"
+    assert hold_rows(srv)[0]["release_kind"] == "worker"
+
+
 def test_rl44_a_live_irreversible_finish_without_group_gone_holds(srv):
     srv.registered("build-02")
     jid = running(srv, preset="ship")
