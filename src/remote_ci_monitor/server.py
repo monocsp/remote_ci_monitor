@@ -114,6 +114,7 @@ from remote_ci_monitor.core.model import (
     Job,
     JobLink,
     Median,
+    OpenHold,
     Paused,
     Pool,
     Preset,
@@ -148,6 +149,8 @@ from remote_ci_monitor.core.startup import Startup, noop_step
 from remote_ci_monitor.core.status import (
     action_json,
     artifacts_json,
+    hold_doc_json,
+    hold_item_json,
     iso,
     queue_row_json,
     recent_json,
@@ -159,6 +162,7 @@ from remote_ci_monitor.core.supersede import SUPERSEDE_OFF, successor_of, supers
 from remote_ci_monitor.events import (
     JOB_KINDS,
     KIND_HOST_SAMPLE,
+    KIND_IRREVERSIBLE_HOLD,
     KIND_JOB_CHANGED,
     KIND_JOB_FINISHED,
     KIND_MARKER,
@@ -219,7 +223,11 @@ from remote_ci_monitor.release_state import (
     version_name_check,
 )
 from remote_ci_monitor.release_verify import run_verify
-from remote_ci_monitor.remote_workers import MAX_WORKER_LOG_BODY, RemoteWorkersMixin
+from remote_ci_monitor.remote_workers import (
+    MAX_WORKER_LOG_BODY,
+    SESSION_HEADER,
+    RemoteWorkersMixin,
+)
 from remote_ci_monitor.shelf_copier import ShelfCopier
 from remote_ci_monitor.shelf_server import ShelfAppMixin, ShelfHandlerMixin, is_shelf_path
 from remote_ci_monitor.store import (
@@ -255,7 +263,7 @@ RESOLVE_CONCURRENCY = 2  # 동시에 원격 ls-remote 를 도는 제출 수. 핸
 MANIFEST_CONCURRENCY = 4  # 동시에 메모리에 올리는 manifest 수(32 MB × 핸들러 32개를 막는다)
 _JOB_RE = re.compile(
     r"^/jobs/(\d+)"
-    r"(/tree/manifest|/tree|/log|/cancel|/priority|/keep"
+    r"(/tree/manifest|/tree|/log|/cancel|/priority|/keep|/release-hold"
     r"|/artifacts/archive|/artifacts/ack|/artifacts)?$"
 )
 _SHA_RE = re.compile(r"^[0-9a-f]{64}$")
@@ -489,6 +497,24 @@ class _DbSnapshot:
     scheduled: list[Job] | None = field(default_factory=list)
     scheduled_error: str | None = None
     scheduled_error_code: str | None = None
+    #: 열린 그룹 홀드(M5t-b §4.8) — 큐 행의 사유와 `irreversible_holds`. 큐 절의 일부다.
+    #: 못 읽었으면 None(모름) — `[]` 은 「열린 홀드 없음」이다
+    open_holds: list[OpenHold] | None = field(default_factory=list)
+
+
+def open_hold_of(row: dict[str, Any]) -> OpenHold:
+    """`store.open_holds()` 의 행 → `OpenHold`."""
+    return OpenHold(
+        job_id=int(row["job_id"]),
+        group=row["group"],
+        scope=row["scope"],
+        pool=row["pool"],
+        host_key=row.get("host_key"),
+        since=row.get("since"),
+        preset=row.get("preset"),
+        worker=row.get("worker"),
+        cause=row.get("cause") or "",
+    )
 
 
 def with_chain_action(row: QueueRow, action: Action | None) -> QueueRow:
@@ -527,10 +553,17 @@ class App(RemoteWorkersMixin, CapabilitiesMixin, ShelfAppMixin):
         now_fn: Callable[[], datetime] = _utcnow,
         version: str = __version__,
         debug: bool = False,
+        mono_fn: Callable[[], float] | None = None,
     ):
         self.config = config
         self.store = store
         self.now_fn = now_fn
+        # 단조 시계(M5t-b 결정 266) — 끊김 유예는 벽시계가 아니라 이것으로 잰다. 바닥은 기동 시각.
+        # 주입 시계만 받은 곳(시험)에서는 그 시계를 따른다 — 시간을 미는 시험이 유예도 민다
+        if mono_fn is None:
+            mono_fn = time.monotonic if now_fn is _utcnow else (lambda: now_fn().timestamp())
+        self.mono_fn = mono_fn
+        self.started_mono = mono_fn()
         self.version = version
         self.debug = debug
         self.started_at = now_fn()
@@ -618,6 +651,7 @@ class App(RemoteWorkersMixin, CapabilitiesMixin, ShelfAppMixin):
         # 재고 health 가 그대로 싣는다 — `shutil.which` 를 요청마다 돌리지는 않는다.
         self.preset_env: dict[str, dict[str, Any]] = {}
         self._remote_init()
+        self._sync_irreversible()
         self._capabilities_init()
         self._shelf_init()  # 보관함(M5p) — 전용 전송 슬롯 · zip hold · manifest 캐시
 
@@ -638,6 +672,11 @@ class App(RemoteWorkersMixin, CapabilitiesMixin, ShelfAppMixin):
             self.log(f"recovered on start: lost={lost} cancelled_uploads={cancelled}")
             for job_id in [*lost, *cancelled]:
                 self._publish_job(None, job_id)
+            # 로컬 레인 표식 잡의 `server_restarted` 홀드(F76)도 알린다. 알림 스레드는 아직 없지만
+            # 사건은 서버 로그 한 줄을 남기고, 기동 스캔이 `hold:` 행이 없는 열린 홀드를 보낸다
+            for job_id in lost:
+                if self.store.has_open_hold(job_id):
+                    self._hold_created(job_id)
         # 예약(M5s) — 꺼진 동안 마감을 넘긴 것은 이미 닫혔고 시각이 된 것은 이미 올랐다. 레인이
         # 뜨기 전이다. 알림 스레드는 아직 없지만 종료 잡은 `Notifier` 가 기동 때 DB 로 다시 줍는다
         self._after_schedule(expired, promoted)
@@ -675,6 +714,8 @@ class App(RemoteWorkersMixin, CapabilitiesMixin, ShelfAppMixin):
             now_fn=self.now_fn,
             admit=self._admit_local,
             claimant=self.local_claimant,
+            # 로컬 레인이 확인 없이 닫은 표식 잡의 홀드도 알린다(§4.12 확인 표 4행)
+            on_hold=self._hold_created,
         )
         step("lanes", f"{self.config.server.lanes}")
         self.start_capabilities()
@@ -1012,6 +1053,15 @@ class App(RemoteWorkersMixin, CapabilitiesMixin, ShelfAppMixin):
         else:
             self.publish(KIND_JOB_CHANGED, {"job_id": job.id, "state": job.state})
 
+    def _on_hold_created(self, job_id: int) -> None:
+        """홀드를 만든 커밋 뒤 · 잠금 밖(`RemoteWorkersMixin._hold_created` 가 부른다, §4.12).
+
+        대기열 사유가 바뀌었으니 캐시를 더럽히고, 알림 스레드가 opt-in 규칙을 부르게 버스 사건
+        `irreversible_hold` 를 낸다."""
+        self._mark_dirty()
+        # mutcheck: hold-notify-missing
+        self.publish(KIND_IRREVERSIBLE_HOLD, {"job_id": int(job_id)})
+
     def _on_job_change(self, job_id: int) -> None:
         self._publish_job(None, job_id)
         self._publish_server()
@@ -1129,6 +1179,27 @@ class App(RemoteWorkersMixin, CapabilitiesMixin, ShelfAppMixin):
         if not t.admin:
             raise ApiError(403, "admin token required")
         return t
+
+    def release_hold(self, job_id: int, t: TokenInfo, body: Any) -> dict[str, Any]:
+        """admin 이 그룹 홀드를 푼다(M5t-b §4.12 · 결정 330). 행 갱신과 사건은 한 트랜잭션이다.
+        풀기 전에 그 머신을 보는 일은 사람의 몫이다 — rcm 은 프로세스가 남았는지 모른다."""
+        if self.store.get_job(job_id) is None:
+            raise ApiError(404, f"no job #{job_id}")
+        reason = (body or {}).get("reason") if isinstance(body, dict) else None
+        if reason is not None and not isinstance(reason, str):
+            raise ApiError(400, "reason must be a string")
+        if reason is not None:
+            reason = "".join(c for c in reason if ord(c) >= 32 and ord(c) != 127)[:200]
+        out = self.store.release_hold(
+            job_id, kind="admin", by=t.name, reason=reason or None, now=self.now_fn()
+        )
+        if out is None:
+            raise ApiError(409, f"job #{job_id} has no open hold", code="no_hold")
+        self._mark_dirty()  # 대기 잡의 사유와 `irreversible_holds` 가 바뀌었다
+        self.log(f"job #{job_id}: group hold released by {t.name}")
+        at = out["released_at"]
+        released = at.replace(microsecond=0).isoformat().replace("+00:00", "Z") if at else None
+        return {**out, "released_at": released}
 
     # ── 스토어 탭 — 저장소 · 비밀 · 설정 게이트 (API 계약 v1) ─────────────────
 
@@ -3398,11 +3469,15 @@ class App(RemoteWorkersMixin, CapabilitiesMixin, ShelfAppMixin):
         queue_error = None
         queue_error_code: str | None = None
         chain_actions: dict[int, Action] = {}
+        open_holds: list[OpenHold] | None = None
         try:
             jobs = self.store.list_active()
             markers = self.store.markers_for([j.id for j in jobs if j.state in BUSY_STATES])
             # 사슬 표식(M5s 결정 233)은 큐 행의 일부다 — 못 읽으면 큐 절 전체가 실패다
             chain_actions = self.store.chain_actions(jobs)
+            # 열린 그룹 홀드(M5t-b §4.8)도 큐 행의 사유다 — 못 읽고 「홀드 없음」으로 그리면
+            # 막힌 잡이 그냥 기다리는 것처럼 보인다(fail-open 금지)
+            open_holds = [open_hold_of(h) for h in self.store.open_holds()]
         except Exception as e:  # noqa: BLE001
             queue_error, queue_error_code = _error_text(e), _error_code(e)
         medians, pool_medians, medians_error, medians_error_code = self._load_medians(now, cfg)
@@ -3463,6 +3538,7 @@ class App(RemoteWorkersMixin, CapabilitiesMixin, ShelfAppMixin):
             host_step_medians=host_step_medians,
             recent_actions=recent_actions,
             chain_actions=chain_actions,
+            open_holds=open_holds,
         )
 
     def _host_step_view(
@@ -3668,6 +3744,7 @@ class App(RemoteWorkersMixin, CapabilitiesMixin, ShelfAppMixin):
                 None: self.local_host_key(),
                 **{v.id: h for v in views if v.kind == "remote" and (h := self.host_of(v.id))},
             },
+            open_holds=snap.open_holds or [],
         )
         rows = [with_chain_action(r, snap.chain_actions.get(r.job.id)) for r in rows]
         if pool is None:
@@ -3783,6 +3860,8 @@ class App(RemoteWorkersMixin, CapabilitiesMixin, ShelfAppMixin):
             pools=tuple(pools),
             base_url=self.base_url(host),
             local_machine=self.local_machine(),  # M5t-a — 로컬 레인 잡의 `ran_on`
+            # M5t-b §4.8 — 못 읽었으면 None(모름, `/api/health` 와 같다)
+            irreversible_holds=None if snap.open_holds is None else tuple(snap.open_holds),
         )
         tails: dict[int, list[str]] = {}
         if queue and token is not None:
@@ -3815,7 +3894,8 @@ class App(RemoteWorkersMixin, CapabilitiesMixin, ShelfAppMixin):
                 by_id[job.id] = job
         base = model.base_url or self.base_url()
         for pool in doc.get("pools", []):
-            for row in [*pool.get("queue", []), *pool.get("recent", [])]:
+            # 절이 실패하면 그 값은 null 이다 — 그 자리에서 500 이 되면 안 된다
+            for row in [*(pool.get("queue") or []), *(pool.get("recent") or [])]:
                 job = by_id.get(row.get("id"))
                 if job is not None:
                     row["artifacts"] = self.artifacts_public(job)
@@ -3836,7 +3916,7 @@ class App(RemoteWorkersMixin, CapabilitiesMixin, ShelfAppMixin):
             raise ApiError(404, "no such job")
         now = self.now_fn()
         if job.is_terminal:
-            return self._terminal_view(job, host)
+            return self._with_hold(self._terminal_view(job, host), job.id)
         if job.is_scheduled:
             # 예약 잡(M5s)은 큐 행이 아니다 — 「방금 끝났다」로 읽으면 끝난 잡처럼 보인다
             doc = scheduled_json(job, base_url=self.base_url(host))
@@ -3847,14 +3927,19 @@ class App(RemoteWorkersMixin, CapabilitiesMixin, ShelfAppMixin):
         if row is None:  # 방금 끝났다
             job = self.store.get_job(job_id)
             assert job is not None
-            return self._terminal_view(job, host)
+            return self._with_hold(self._terminal_view(job, host), job.id)
         log_tail = None
         if tail > 0 and row.job.state in BUSY_STATES and self.can_read_log(row.job, token):
             log_tail = tail_lines(self.log_path(job_id), min(tail, MAX_TAIL))
         doc = queue_row_json(
             row, base_url=self.base_url(host), log_tail=log_tail, local=self.local_machine()
         )
-        return self._with_artifacts(doc, row.job, host)
+        return self._with_hold(self._with_artifacts(doc, row.job, host), job_id)
+
+    def _with_hold(self, doc: dict[str, Any], job_id: int) -> dict[str, Any]:
+        """잡 문서에 그 잡의 그룹 홀드(M5t-b §4.8)를 **더한다** — 열렸든 풀렸든, 없으면 null."""
+        doc["hold"] = hold_doc_json(self.store.hold_of(job_id))
+        return doc
 
     def _terminal_view(self, job: Job, host: str | None) -> dict[str, Any]:
         """종료 잡의 문서 — 최근 행 모양 + 산출물 + 스텝 타임라인(M5j) + 이름별 이력(M5h)."""
@@ -4379,7 +4464,16 @@ class App(RemoteWorkersMixin, CapabilitiesMixin, ShelfAppMixin):
         return self.worker_spec()
 
     def worker_capabilities(self, token: TokenInfo, body: Any) -> dict[str, Any]:
-        """`POST /worker/capabilities` — 등록된 워커의 보고(§4.2). 세대가 다르면 409."""
+        """`POST /worker/capabilities` — 등록된 워커의 보고(§4.2). 세대가 다르면 409.
+
+        M5t-b: 현재 세션만 보고한다 — 세션이 없으면 409 `protocol_required`, 펜싱된 세션은 409
+        `session_fenced` 이고 아무것도 반영하지 않는다(RL11)."""
+        if not isinstance(body, dict):
+            raise ApiError(400, "body must be a JSON object")
+        session = self._session_arg(body.get("worker_session_id"))
+        if session is None:
+            raise self._protocol_required()
+        self._current_session(token, session)
         row = self._registered(token)
         try:
             self.receive_capabilities(token.name, row.host_name, body)
@@ -4563,6 +4657,7 @@ class App(RemoteWorkersMixin, CapabilitiesMixin, ShelfAppMixin):
                     summary_code=code,
                     summary_args=args,
                     cancelled_by="server",
+                    only_from=(UPLOADING,),  # 돈 적 없는 잡만 — 홀드를 판단할 그룹이 없다
                 )
                 self._publish_job(None, job_id)
                 raise ApiError(413, f"{summary} — exclude build outputs via .rcmignore") from e
@@ -4940,6 +5035,7 @@ class App(RemoteWorkersMixin, CapabilitiesMixin, ShelfAppMixin):
                 summary_code=code,
                 summary_args=args,
                 cancelled_by="server",
+                only_from=(UPLOADING,),  # 돈 적 없는 잡만 — 홀드를 판단할 그룹이 없다
             )
             self._publish_job(None, job_id)
             raise ApiError(413, f"{summary} — exclude build outputs via .rcmignore")
@@ -5204,6 +5300,8 @@ class App(RemoteWorkersMixin, CapabilitiesMixin, ShelfAppMixin):
         # 거절하므로 `data_dir` 도 바이트 상한도 옛 객체와 새 객체가 같다 — 잡 하나가 두 객체에
         # 걸쳐 읽어도 같은 값을 본다. 다른 구역까지 갈아 끼우려면 이 보장이 먼저 필요하다.
         self.config = fresh
+        # 표식 프리셋 표 — claim 이 다음 잡부터 새 값을 얼린다(M5t-b 결정 257)
+        self._sync_irreversible()
         for worker in self.workers:
             worker.config = fresh
         if self.retention is not None:
@@ -5463,6 +5561,12 @@ class App(RemoteWorkersMixin, CapabilitiesMixin, ShelfAppMixin):
         else:
             with self._lock:
                 self._capacity_error = None
+        try:
+            holds: list[dict[str, Any]] | None = [
+                hold_item_json(open_hold_of(h)) for h in self.store.open_holds()
+            ]
+        except Exception:  # noqa: BLE001 — 정보 칸이다. 못 읽으면 null(모름)이지 [] 가 아니다
+            holds = None
         strict_cancel = bool(self.config.server.cancel_requires_submission_token)
         body = {
             "ok": ok,
@@ -5508,6 +5612,9 @@ class App(RemoteWorkersMixin, CapabilitiesMixin, ShelfAppMixin):
             # 예약 실행을 안다(M5s 결정 206). 옛 서버는 모르는 `start_at` 을 **무시하고 바로
             # 돌린다** — `rcm run --at` · `--in` 은 이 키가 있을 때만 보낸다
             "schedule": True,
+            # 열린 그룹 홀드(M5t-b §4.8, 정보 — 503 조건은 아니다: 홀드는 서버가 아프다는 뜻이
+            # 아니다). 못 읽으면 null
+            "irreversible_holds": holds,
         }
         if not ok:
             if not db_ok:
@@ -6022,6 +6129,12 @@ class Handler(ShelfHandlerMixin, BaseHTTPRequestHandler):
                 t = self.app.require_client_token(self._token())
                 self._send_json(200, self.app.cancel(job_id, t, self._json_body()))
                 return
+            if sub == "/release-hold":
+                # `rcm release-hold N`(M5t-b §4.12 · 결정 330) — admin, Bearer 만(쓰기다)
+                self._only(method, "POST")
+                t = self.app.require_admin(self._token())
+                self._send_json(200, self.app.release_hold(job_id, t, self._json_body()))
+                return
         if path in _STATIC_FILES or path.startswith("/static/"):
             self._only(method, "GET")
             self._read_only_ok()
@@ -6276,9 +6389,11 @@ class Handler(ShelfHandlerMixin, BaseHTTPRequestHandler):
             raise ApiError(404, "not found")
         job_id = int(m.group(1))
         what = m.group(2)
+        # 본문이 없는 라우트는 세션을 헤더로 싣는다(M5t-b §4.10). 모양이 틀리면 400(`error` 만)
+        session = self.app._session_arg(self.headers.get(SESSION_HEADER), where=SESSION_HEADER)
         if what == "tree":
             self._only(method, "GET")
-            tar_path = self.app.worker_tree_path(t, job_id)
+            tar_path = self.app.worker_tree_path(t, job_id, session)
             size = tar_path.stat().st_size
             self.send_response(200)
             self.send_header("Content-Type", "application/gzip")
@@ -6300,7 +6415,7 @@ class Handler(ShelfHandlerMixin, BaseHTTPRequestHandler):
             return
         if what == "artifacts":
             if method == "GET":
-                self._send_json(200, self.app.worker_artifacts_status(t, job_id))
+                self._send_json(200, self.app.worker_artifacts_status(t, job_id, session))
                 return
             self._only(method, "PUT")
             ctype = (self.headers.get("Content-Type") or "").split(";")[0].strip().lower()
@@ -6313,7 +6428,9 @@ class Handler(ShelfHandlerMixin, BaseHTTPRequestHandler):
                 )
             self.connection.settimeout(self.config.server.artifact_transfer_timeout_seconds)
             try:
-                status, body = self.app.worker_receive_artifacts(t, job_id, self.rfile, length)
+                status, body = self.app.worker_receive_artifacts(
+                    t, job_id, self.rfile, length, session
+                )
             finally:
                 self.connection.settimeout(REQUEST_TIMEOUT)
                 self.app.transfer_slots.release()
@@ -6334,7 +6451,7 @@ class Handler(ShelfHandlerMixin, BaseHTTPRequestHandler):
                 self.connection.settimeout(REQUEST_TIMEOUT)
             if len(data) < n:
                 raise ApiError(400, "log body interrupted")
-            self._send_json(200, self.app.worker_log(t, job_id, data))
+            self._send_json(200, self.app.worker_log(t, job_id, data, session))
             return
         body = self._json_body()
         if what == "phase":

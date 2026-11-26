@@ -20,6 +20,7 @@ from statistics import median
 from typing import Any
 
 from remote_ci_monitor.core.model import (
+    ACTION_IRREVERSIBLE_HOLD,
     ACTIVE_STATES,
     CANCELLING,
     DEFAULT_POOL,
@@ -55,10 +56,12 @@ from remote_ci_monitor.core.model import (
     WORKER_DOWN,
     WORKER_HELD,
     WORKER_IDLE,
+    Action,
     BlockedBy,
     Estimate,
     Job,
     Median,
+    OpenHold,
     Placement,
     PlacementNote,  # noqa: F401 — 다시 내보낸다(`queue.PlacementNote`, §11.4)
     Preset,
@@ -420,6 +423,32 @@ def _scope_matches(scope: str, hold: _GroupHold, pool: str, host: str | None) ->
     return hold.pool == pool
 
 
+def hold_note(job_id: int) -> str:
+    """홀드에 막힌 대기 잡의 `action.note` — 알림의 `RCM_HOLD_NOTE` 와 같은 한 줄(§4.12)."""
+    return f"group held — run rcm release-hold {int(job_id)}"
+
+
+def _hold_blocks(
+    hold: OpenHold, group: str, scope: str, lanes: Sequence[tuple[str, str | None]]
+) -> bool:
+    """열린 홀드가 이 대기 잡을 막나 — `store._open_hold_sql` 과 같은 넓은 범위 규칙(fail-closed).
+
+    어느 한쪽이 `global` 이면 막고, 어느 한쪽이 `host` 면 호스트가 같거나 모를 때 막고, 풀이 같으면
+    막는다. `lanes` 는 그 잡이 들어갈 수 있는 (풀, 호스트)들이고 하나라도 맞으면 막힌다."""
+    if hold.group != group:
+        return False
+    if hold.scope == SCOPE_GLOBAL or scope == SCOPE_GLOBAL:
+        return True
+    for pool, host in lanes:
+        if (hold.scope == SCOPE_HOST or scope == SCOPE_HOST) and (
+            host is None or hold.host_key is None or hold.host_key == host
+        ):
+            return True
+        if hold.pool == pool:
+            return True
+    return False
+
+
 def compute_queue(
     jobs: Sequence[Job],
     *,
@@ -435,6 +464,7 @@ def compute_queue(
     host_medians: Mapping[str, Mapping[str, Median]] | None = None,
     host_step_medians: Mapping[tuple[str, str], Mapping[str, StepMedian]] | None = None,
     worker_hosts: Mapping[str | None, str] | None = None,
+    open_holds: Sequence[OpenHold] = (),
 ) -> list[QueueRow]:
     """활성 잡 → 큐 행. 출력 순서는 running → cancelling → 대기(claim 순서).
 
@@ -448,6 +478,9 @@ def compute_queue(
     - 그룹 배제는 **대기 잡의 범위**로(`pool` · `host` · `global`).
     - `host_medians` 가 있으면 기대 시간은 그 호스트에서(`expected_on`), `host_step_medians` 가
       있으면 멈춤 판정은 그 호스트의 단계 표로만 — 다른 호스트로 물러나지 않는다.
+    - `open_holds`(M5t-b §4.8 · 결정 330): 열린 그룹 홀드에 막힌 대기 잡은 `needs_action` +
+      `action.code = irreversible_hold` + `blocked_by` 가 그 홀드 잡이다. 언제 풀릴지 모르므로
+      레인을 차지하지 않고(`_GroupHold` 모의에 넣지 않는다) `wait_seconds` · `finish_at` 은 null.
     """
     progress = progress or {}
     step_medians = step_medians or {}
@@ -548,6 +581,16 @@ def compute_queue(
         open_cands = [k for k in live_cands if lane_info[k].state != WORKER_HELD]
         group = job.concurrency_group
         scope = job.concurrency_scope
+        preset = presets.get(job.preset)
+        if group is None and preset is not None and preset.irreversible:
+            # 표식을 달기 전에 제출된 잡 — claim 은 프리셋의 지금 그룹(합성 포함)으로 본다(RL48)
+            group, scope = preset.concurrency_group, preset.concurrency_scope
+        held_by: OpenHold | None = None
+        if group:
+            hold_lanes = [(lane_pool(k), lane_host(k)) for k in candidates] or [(job.pool, None)]
+            held_by = next(
+                (h for h in open_holds if _hold_blocks(h, group, scope, hold_lanes)), None
+            )
 
         def group_free_at(key: _LaneKey, group: str | None = group, scope: str = scope):
             if not group:
@@ -581,8 +624,7 @@ def compute_queue(
         expected: float | None = None
         source = SOURCE_DEFAULT
         n = 0
-        preset = presets.get(job.preset)
-        if not paused and open_cands:
+        if not paused and open_cands and held_by is None:
             best: tuple[Any, ...] | None = None
             for key in open_cands:
                 start = lane_free[key]
@@ -622,11 +664,21 @@ def compute_queue(
             if holder is not None
             else None
         )
+        action: Action | None = None
+        if held_by is not None:
+            # 홀드가 도는 잡의 그룹 점유보다 먼저 온다 — 남은 시간이 무한한 점유다(§4.8)
+            blocked = BlockedBy(job_id=held_by.job_id, group=held_by.group, remaining_seconds=None)
+            action = Action(
+                code=ACTION_IRREVERSIBLE_HOLD, note=hold_note(held_by.job_id), at=held_by.since
+            )
         # reason
         if job.state == UPLOADING:
             last = job.source.last_received_at or job.created_at
             stalled = _seconds(last, now) > cfg.upload_stall_seconds
             reason = REASON_UPLOAD_STALLED if stalled else REASON_UPLOADING
+        elif held_by is not None:  # mutcheck: hold-reason-not-needs-action
+            # 「어디서나 needs_action」(결정 330) — 정지 · 워커 down 보다 먼저: 사람만 푼다
+            reason = REASON_NEEDS_ACTION
         elif paused:
             reason = REASON_PAUSED
         elif place is not None and not place.workers and place.reason:
@@ -676,6 +728,7 @@ def compute_queue(
                 estimate=est,
                 progress=None,
                 placement_detail=tuple(place.notes[:PLACEMENT_DETAIL_MAX]) if place else (),
+                action=action,
             )
         )
     return rows

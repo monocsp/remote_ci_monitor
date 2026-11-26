@@ -209,6 +209,7 @@ rcm run gate -f scope=full   # 스냅샷 · 합류나 제출 · 업로드 · 대
 | `rcm cancel N` · `rcm pause` · `rcm resume` | 취소(합류자는 합류만 취소된다) · 큐 일시정지·재개(관리자) |
 | `rcm reload [--dry-run]` | 설정 파일과 `include` 파일 다시 읽기 — 프리셋·저장소만, 재시작 없이(관리자). `--dry-run` 은 바뀔 것의 이름만 보이고 아무것도 안 바꾼다 |
 | `rcm bump N [--priority high]` | 대기 중인 작업의 우선순위 변경(관리자) |
+| `rcm release-hold N [--reason TEXT] [--json]` | 그 머신을 확인한 뒤 `irreversible` 작업이 동시성 그룹에 남긴 홀드를 푼다(관리자). `--reason` 은 감사 기록에 남는다. 그 작업에 열린 홀드가 없으면 종료 코드 1 ([그룹이 잡혔을 때](docs/operating.md#when-a-group-is-held-rcm-release-hold)) |
 | `rcm release new [--repo R] [--ios X] [--android Y] [--yes]` · `list` · `delete N` · `open N` | 스토어 버전 드래프트(관리자). 버전 인자가 없으면 `new` 는 **이름만** 묻고 서버의 힌트를 기본값으로 준다 — 엔터는 힌트, `-` 는 그 스토어를 건너뛴다, `--yes` 는 둘 다 힌트로. `open` 은 버전 페이지의 주소를 찍는다 |
 | `rcm release status [REPO] [--build-name X]` | 두 스토어의 심사 상태. 저장소의 `status` 역할을 돌리고 기다린 뒤 스토어마다 버전 · 빌드 · 상태 · 스토어의 원래 낱말을 찍는다(클라이언트 토큰) |
 | `rcm release golive [REPO] --build-name X --platform ios\|android\|both --plan` · `… --confirm-build-number N [--at TIME \| --in DURATION]` | 승인된 빌드의 출시([출시하기](docs/configuration.md#going-live-golive)). `--plan` 은 승인 여부와 승인된 빌드를 읽고 기다린다. 없으면 직접 친 승인 빌드 번호로 지금이나 정한 시각에 출시를 요청한다(관리자). 승인됐다고 저절로 출시되지 않는다 |

@@ -56,6 +56,8 @@ CLIENT = "laptop"  # 클라이언트 토큰 이름 — 취소 요약 `cancelled 
 POOL = "linux"
 GRACE = 2  # [server] grace_seconds
 WORKER_TIMEOUT = 10  # [server] worker_timeout_seconds (하한)
+#: [server] disconnect_grace_seconds — 하한 max(10, 2 + 45 + 5) + 35 = 87 위(M5t-b §7.5 · 정리 3)
+GRACE = 90
 HEARTBEAT = 1  # [server] worker_heartbeat_seconds
 CLAIM_WAIT = 2  # [server] worker_claim_wait_seconds
 REPORT_WINDOW = 1 + 2 + 4  # remote_worker.REPORT_RETRIES — finish 보고를 다시 보내는 창
@@ -73,6 +75,8 @@ LIN_SCRIPT = (
 # 잡 프로세스의 pid(= 프로세스 그룹, 러너가 start_new_session 으로 띄운다)를 적어 둔다
 PID_LINE = 'echo $$ > "$RCM_MARK_DIR/$RCM_JOB_ID.pid"'
 SLOWL_SCRIPT = f"{PID_LINE}; exec sleep 30"
+#: 끊김 유예(G 90초)보다 오래 도는 잡 — 다시 띄운 워커가 고아로 치우는 것을 본다(RL14 b)
+LONGL_SCRIPT = f"{PID_LINE}; exec sleep 400"
 SLOW4_SCRIPT = f"{PID_LINE}; sleep 4; {LIN_SCRIPT}"
 # `sleep 0.3`: 캐시 잡과 같은 이유 — 수 ms 짜리 잡은 50 ms 폴링이 busy 를 못 본다
 DEPLOY_SCRIPT = "cat hello.txt; echo RCM_REF=$RCM_REF; sleep 0.3; echo HEAD=$(git rev-parse HEAD)"
@@ -88,6 +92,7 @@ snapshot_cache = true
 worker_timeout_seconds = 10
 worker_heartbeat_seconds = 1
 worker_claim_wait_seconds = 2
+disconnect_grace_seconds = 90
 
 [[presets]]
 name = "lin"
@@ -107,6 +112,14 @@ name = "slowl"
 pool = "linux"
 argv = ["sh", "-c", '{slowl}']
 timeout_seconds = 120
+[presets.env]
+RCM_MARK_DIR = "{marks}"
+
+[[presets]]
+name = "longl"
+pool = "linux"
+argv = ["sh", "-c", '{longl}']
+timeout_seconds = 900
 [presets.env]
 RCM_MARK_DIR = "{marks}"
 
@@ -315,6 +328,7 @@ class E2EServer:
                 marks=marks,
                 lin=LIN_SCRIPT,
                 slowl=SLOWL_SCRIPT,
+                longl=LONGL_SCRIPT,
                 slow4=SLOW4_SCRIPT,
                 repos=repos,
             )
@@ -776,24 +790,31 @@ def test_killed_worker_leaves_the_job_lost_after_the_timeout_and_a_new_worker_ta
     stack, tree
 ):
     worker = stack.start()
-    jid = stack.submit(tree, "slowl")
+    jid = stack.submit(tree, "longl")
     stack.wait_state(jid, ("running",), 15)
     pid = stack.wait_pid(jid)
     t0 = time.monotonic()
     os.kill(worker.proc.pid, signal.SIGKILL)  # 워커만 — 잡(sleep)은 고아로 남는다(진짜 크래시처럼)
     assert worker.wait_exit(5) == -signal.SIGKILL
-    fin = stack.wait_terminal(jid, timeout=20)
+    # M5t-b(§7.3): timeout 에는 레인만 down 이고 잡은 끊김 유예 G 뒤에 lost 다
+    fin = stack.wait_terminal(jid, timeout=GRACE + 20)
     took = time.monotonic() - t0
     assert fin["state"] == "lost", fin
     assert re.fullmatch(rf"worker {WORKER} unreachable for \d+s", fin["summary"]), fin["summary"]
-    assert WORKER_TIMEOUT - 2 <= took <= 20, took  # timeout 전에는 lost 가 아니다
+    assert GRACE - 2 <= took <= GRACE + 20, took  # 유예 전에는 lost 가 아니다
     doc = stack.status()
     assert [(w["display_name"], w["state"]) for w in remote_lanes(doc)] == [(LANE, "down")]
     assert pool_of(doc, POOL)["lanes"] == 0
     assert stack.server.health()[1]["pools_without_workers"] == [POOL]
-    kill_group(pid)  # 고아 잡은 아무도 안 치운다 — 테스트가 치운다
-    # 워커를 다시 띄우면 등록되고(옛 잡은 이미 lost 라 안 건드린다) 다음 잡을 받는다
-    stack.spawn_worker()
+    assert not is_dead(pid)  # 고아는 아직 살아 있다 — 유예 만료는 프로세스를 건드리지 않는다
+    # 워커를 다시 띄우면(같은 데이터 폴더) 등록 전에 죽은 세션의 고아 그룹을 치운다(M5t-b §7.3 ·
+    # RL14 b · RL15). 옛 잡은 이미 lost 라 등록이 그 요약을 덮지 않는다. 그 뒤 다음 잡을 받는다
+    again = stack.spawn_worker()
+    try:
+        wait_until(lambda: is_dead(pid), 15, f"the restarted worker to stop orphan {pid}")
+    finally:
+        kill_group(pid)  # 실패했을 때만 남는 것을 치운다
+    assert f"orphan #{jid}: stopped process group" in again.log_text(), again.log_text()
     assert stack.job(jid)["summary"] == fin["summary"]  # `restarted without the job` 로 안 바뀐다
     doc = stack.status()
     assert lane_view(doc) == [(LANE, "idle", None)] and pool_of(doc, POOL)["lanes"] == 1

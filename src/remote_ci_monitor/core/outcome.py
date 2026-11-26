@@ -210,6 +210,16 @@ CODES: dict[str, Renderer] = {
     "worker_restarted_without_job": lambda a: f"worker {_s(a, 'name')} restarted without the job",
     "worker_unreachable": lambda a: f"worker {_s(a, 'name')} unreachable for {_s(a, 'seconds')}s",
     "cancel_unconfirmed": lambda a: "worker did not confirm the cancel",
+    # ── 끊김 유예 · 세션(M5t-b 결정 278 · 327). 다섯 끝은 모두 `lost`(종료 3)다 ──────────────
+    "worker_self_stopped": lambda a: (
+        f"worker stopped the job itself after {_s(a, 'seconds')}s without the server"
+    ),
+    "worker_replaced": lambda a: f"worker {_s(a, 'name')} was replaced by a new process",
+    "snapshot_unreachable": lambda a: "the worker could not reach the server for the snapshot",
+    "orphan_unverified": lambda a: (
+        f"worker {_s(a, 'name')} unreachable for {_s(a, 'seconds')}s; the job may still be "
+        "running on that machine, check it"
+    ),
 }
 
 #: 오류 필드의 코드. 파이썬 예외 문자열은 닫힌 집합이 아니라서, 종류만 코드로 말하고
@@ -285,6 +295,17 @@ PREFLIGHT_ARGS: dict[str, dict[str, str | tuple[str, ...]]] = {
     "launch_failed": {"error": "class"},
     "log_unavailable": {"error": "class"},
     "workspace_failed": {"error": "class"},
+}
+
+#: 워커가 finish 에 실어 보낼 수 있는 `lost` 의 코드(M5t-b 결정 278). `outcome = lost` 일 때만 받고
+#: 인자는 코드마다 정한 키만 지난다 — `PREFLIGHT_CODES` 와 같은 엄격함이다. `worker_replaced` 의
+#: `name` 은 서버가 토큰 이름으로 채운다. 서버만 쓰는 `lost` 코드(`worker_unreachable` ·
+#: `worker_restarted_without_job` · `orphan_unverified`)는 여기 없다.
+LOST_CODES: tuple[str, ...] = ("worker_self_stopped", "worker_replaced", "snapshot_unreachable")
+LOST_ARGS: dict[str, dict[str, str | tuple[str, ...]]] = {
+    "worker_self_stopped": {"seconds": "int"},
+    "worker_replaced": {"name": "name"},
+    "snapshot_unreachable": {},
 }
 
 #: 실행 결과 요약의 인자(M5o 결정 117·118). 표의 뜻은 `PREFLIGHT_ARGS` 와 같다 — 여기 없는 키는
@@ -486,6 +507,8 @@ def clean_args(code: str, args: dict[str, Any] | None, *, strict: bool = False) 
     상태에 못 가면 그 잡은 heartbeat 시한까지 `running` 으로 남고, 레인 하나가 아니라 큐가 막힌다.
     """
     schema = PREFLIGHT_ARGS.get(code)
+    if schema is None:
+        schema = LOST_ARGS.get(code)
     if schema is None:
         if strict:
             raise OutcomeError(f"not a preflight code: {code}")

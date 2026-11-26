@@ -14,10 +14,12 @@
 
 from __future__ import annotations
 
+import hashlib
 import http.client
 import io
 import json
 import re
+import secrets
 import socket
 import sqlite3
 import tarfile
@@ -106,6 +108,8 @@ class Clock:
 
     def __init__(self, start: datetime = T0):
         self.now = start
+        self._start = start
+        self._skew = 0.0  # 벽시계만 뛴 양(M5t-b RL27) — 단조 시계는 따라가지 않는다
 
     def __call__(self) -> datetime:
         return self.now
@@ -113,6 +117,15 @@ class Clock:
     def advance(self, seconds: float) -> datetime:
         self.now += timedelta(seconds=seconds)
         return self.now
+
+    def mono(self) -> float:
+        """주입하는 단조 시계(M5t-b 결정 266) — `advance` 와 같이 가고 `jump` 는 따라가지 않는다."""
+        return 1000.0 + (self.now - self._start).total_seconds() - self._skew
+
+    def jump(self, seconds: float) -> datetime:
+        """벽시계만 뛴다(NTP 단계 보정 흉내)."""
+        self._skew += seconds
+        return self.advance(seconds)
 
 
 def at(seconds: float) -> datetime:
@@ -126,7 +139,13 @@ class WorkerServer:
     """
 
     def __init__(
-        self, tmp_path: Path, *, workers: bool = False, lanes: int = 1, **server_overrides: Any
+        self,
+        tmp_path: Path,
+        *,
+        workers: bool = False,
+        lanes: int = 1,
+        presets: list[dict[str, Any]] | None = None,
+        **server_overrides: Any,
     ):
         cfg = ServerConfig()
         cfg.server.data_dir = str(tmp_path / "data")
@@ -144,7 +163,7 @@ class WorkerServer:
         for k, v in server_overrides.items():
             setattr(cfg.server, k, v)
         cfg.repos = (RepoConfig(name="app", url=str(tmp_path / "nowhere.git")),)
-        cfg.presets = tuple(parse_preset(p) for p in WORKER_PRESETS)
+        cfg.presets = tuple(parse_preset(p) for p in (presets or WORKER_PRESETS))
         self.cfg = cfg
         self.clock = Clock()
         self.store = Store(cfg.data_dir / "rcm.sqlite3")
@@ -155,7 +174,7 @@ class WorkerServer:
         }
         for name in ("build-02", "build-03", "lin-01"):
             self.worker_token(name)
-        self.app = App(cfg, self.store, now_fn=self.clock)
+        self.app = App(cfg, self.store, now_fn=self.clock, mono_fn=self.clock.mono)
         self.httpd = make_server(self.app, bind="127.0.0.1", port=0)
         self.port = self.httpd.server_address[1]
         self.thread = threading.Thread(
@@ -175,7 +194,79 @@ class WorkerServer:
         """워커 토큰 하나(kind=worker). 워커 이름은 토큰 이름이다(§2)."""
         secret = self.store.add_token(name, admin=False, now=T0, kind="worker")
         self.tokens[name] = secret
+        self.worker_names.add(name)
         return secret
+
+    # ── 워커 세션(M5t-b 프로토콜 2) ──
+    # 워커 이름마다 프로세스 하나를 흉내 낸다. 세션 id 는 실행 중에 만든다(리터럴 32-hex 금지 —
+    # gitleaks, docs/m5tb-workplan.md §8). `/worker/*` 요청은 이 세션을 자동으로 싣고, claim 은
+    # `claim_seq` 를, heartbeat 는 `seq` 와 `claims_settled`(돌아온 마지막 claim_seq)를 싣는다.
+
+    # 하위 클래스(`M5nServer` 등)가 `__init__` 을 따로 두므로 상태는 처음 쓸 때 만든다
+    @property
+    def worker_names(self) -> set[str]:
+        return self.__dict__.setdefault("_worker_names", set())
+
+    @property
+    def sessions(self) -> dict[str, str]:
+        return self.__dict__.setdefault("_sessions", {})
+
+    @property
+    def claim_seqs(self) -> dict[str, int]:
+        return self.__dict__.setdefault("_claim_seqs", {})
+
+    @property
+    def hb_seqs(self) -> dict[str, int]:
+        return self.__dict__.setdefault("_hb_seqs", {})
+
+    @property
+    def settled(self) -> dict[str, int]:
+        return self.__dict__.setdefault("_settled", {})
+
+    def _is_worker(self, token: str | None) -> bool:
+        """이 이름이 워커 토큰인가 — 토큰을 넘겨받아 다시 띄운 서버도 알아본다."""
+        if token is None or token not in self.tokens:
+            return False
+        if token not in self.worker_names:
+            info = self.store.verify_token(self.tokens[token])
+            if info is None or info.kind != "worker":
+                return False
+            self.worker_names.add(token)
+        return True
+
+    def session(self, worker: str) -> str:
+        """그 워커 이름의 지금 프로세스 세션. 데이터 폴더와 이름으로 정한다 — 같은 data_dir 로 다시
+        띄운 서버(재시작 시험)에서도 같은 프로세스가 같은 세션으로 이어 보고한다."""
+        if worker not in self.sessions:
+            seed = f"{self.cfg.data_dir}|{worker}|{self.__dict__.get('_gen', 0)}"
+            self.sessions[worker] = hashlib.sha256(seed.encode()).hexdigest()[:32]
+        return self.sessions[worker]
+
+    def new_process(self, worker: str) -> str:
+        """같은 토큰의 새 프로세스 — 새 세션 id 로 바꾸고 옛 id 를 돌려준다."""
+        old = self.session(worker)
+        self.sessions[worker] = secrets.token_hex(16)
+        self.claim_seqs.pop(worker, None)
+        self.hb_seqs.pop(worker, None)
+        self.settled.pop(worker, None)
+        return old
+
+    def _with_session(self, worker: str, path: str, json_body: Any, headers: dict[str, str]) -> Any:
+        sid = self.session(worker)
+        if isinstance(json_body, dict):
+            json_body = dict(json_body)
+            json_body.setdefault("worker_session_id", sid)
+            if path == "/worker/claim" and "claim_seq" not in json_body:
+                self.claim_seqs[worker] = self.claim_seqs.get(worker, 0) + 1
+                json_body["claim_seq"] = self.claim_seqs[worker]
+            if path == "/worker/heartbeat":
+                if "seq" not in json_body:
+                    self.hb_seqs[worker] = self.hb_seqs.get(worker, 0) + 1
+                    json_body["seq"] = self.hb_seqs[worker]
+                json_body.setdefault("claims_settled", self.settled.get(worker, 0))
+        elif json_body is None:
+            headers.setdefault("X-RCM-Worker-Session", sid)
+        return json_body
 
     # ── HTTP ──
 
@@ -189,9 +280,18 @@ class WorkerServer:
         body: bytes | None = None,
         headers: dict[str, str] | None = None,
         raw: bool = False,
+        legacy: bool = False,
     ):
+        """`legacy` 면 세션을 싣지 않는다 — 프로토콜 1 의 옛 워커 흉내(M5t-b T11 · T12)."""
         conn = http.client.HTTPConnection("127.0.0.1", self.port, timeout=15)
         hdrs = dict(headers or {})
+        if (
+            not legacy
+            and self._is_worker(token)
+            and path.startswith("/worker/")
+            and path != "/worker/spec"
+        ):
+            json_body = self._with_session(token, path, json_body, hdrs)
         if token:
             hdrs["Authorization"] = f"Bearer {self.tokens.get(token, token)}"
         data = body
@@ -204,6 +304,16 @@ class WorkerServer:
         resp = conn.getresponse()
         payload = resp.read()
         conn.close()
+        if (
+            path == "/worker/claim"
+            and isinstance(json_body, dict)
+            and token in self.worker_names
+            and json_body.get("worker_session_id") == self.sessions.get(token)
+        ):
+            # claim 이 돌아왔다(응답 · 204 · 오류) — 그 번호까지 「끝난 claim」이다(결정 339-a)
+            seq = json_body.get("claim_seq")
+            if isinstance(seq, int):
+                self.settled[token] = max(self.settled.get(token, 0), seq)
         if raw:
             return resp.status, dict(resp.getheaders()), payload
         try:
@@ -304,14 +414,23 @@ class WorkerServer:
         lanes: Any = 1,
         version: str = __version__,
         host_name: str | None = None,
+        **extra: Any,
     ):
+        """`extra` 는 본문에 더한다 — `previous_sessions` · `unverified_sessions`(M5t-b)."""
         body = {
             "pool": pool,
             "lanes": lanes,
             "host_name": host_name or f"{worker}.local",
             "version": version,
+            **extra,
         }
         return self.req("POST", "/worker/register", token=worker, json_body=body)
+
+    def restarted(self, worker: str, **kw: Any) -> dict[str, Any]:
+        """같은 토큰의 새 프로세스가 옛 프로세스의 죽음을 확인하고 등록한다(M5t-b T9) — 옛 세션을
+        `previous_sessions` 로 넘긴다. 오늘의 「재등록 = 옛 잡 lost」가 이 꼴이 되었다(결정 265)."""
+        old = self.new_process(worker)
+        return self.registered(worker, previous_sessions=[old], **kw)
 
     def registered(self, worker: str, **kw: Any) -> dict[str, Any]:
         status, body = self.register(worker, **kw)
@@ -333,9 +452,11 @@ class WorkerServer:
         *,
         jobs: list[int] | None = None,
         host_sample: Any = None,
+        **extra: Any,
     ):
-        """`jobs` 를 안 주면 키 자체를 안 보낸다(선택 필드) — `[]` 와는 다르다."""
-        body: dict[str, Any] = {}
+        """`jobs` 를 안 주면 키 자체를 안 보낸다(선택 필드) — `[]` 와는 다르다. `extra` 는 본문에
+        더한다(`seq` · `claims_settled` 를 직접 줄 때, M5t-b)."""
+        body: dict[str, Any] = dict(extra)
         if jobs is not None:
             body["jobs"] = jobs
         if host_sample is not None:
@@ -546,6 +667,8 @@ def test_register_new_worker_returns_the_protocol_parameters(srv):
         "heartbeat_seconds": HEARTBEAT,
         "worker_timeout_seconds": TIMEOUT,
         "claim_wait_seconds": CLAIM_WAIT,
+        "worker_protocol": 2,  # M5t-b — 워커 프로토콜 판(키 추가만)
+        "fenced_sessions": 0,  # M5t-b P6 GAP8 — 이 등록이 대신한 살아 있던 프로세스 수(키 추가만)
     }
     row = srv.store.get_worker("build-02")
     assert row is not None
@@ -620,9 +743,10 @@ def test_register_rejects_bad_pool_names_and_lane_counts(srv, bad):
 
 
 def test_register_marks_the_workers_running_jobs_lost(srv):
-    """§3 「워커 재시작」: register 는 새 프로세스라는 뜻 — 그 워커 이름의 running·cancelling 잡을
-    먼저 lost(summary `worker <name> restarted without the job`) 로 닫고 등록한다. 레인이 비어
-    새 claim 이 겹치지 않는다. 다른 워커의 잡은 건드리지 않는다."""
+    """§3 「워커 재시작」: 새 프로세스가 옛 세션의 죽음을 확인하고 등록하면(M5t-b T9 ·
+    `previous_sessions`) 그 세션의 running·cancelling 잡을 먼저 lost(summary `worker <name>
+    restarted without the job`) 로 닫고 등록한다. 레인이 비어 새 claim 이 겹치지 않는다. 다른 워커의
+    잡은 건드리지 않는다. M5t-b 결정 265: 명시한 이전 세션의 잡만 닫는다."""
     a = srv.queued_job()
     b = srv.queued_job(token="bob")
     c = srv.queued_job(token="admin")
@@ -633,7 +757,7 @@ def test_register_marks_the_workers_running_jobs_lost(srv):
     assert srv.claimed("build-03", 1) == c
     assert srv.cancel(b, token="bob")[1]["state"] == CANCELLING
     srv.clock.advance(20)
-    srv.registered("build-02", lanes=2)  # 재시작
+    srv.restarted("build-02", lanes=2)  # 재시작
     for jid in (a, b):
         j = srv.store.get_job(jid)
         assert j.state == LOST, (jid, j.state)
@@ -1201,7 +1325,8 @@ def test_heartbeat_response_lists_only_this_workers_cancelling_jobs(srv):
     assert status == 200, body
     assert body.pop("generation")  # M5n — 세대(키 추가만)
     assert body.pop("server_version") == __version__  # M5q B2 — 서버 버전(키 추가만)
-    assert body == {"cancel": [], "paused": False, "timeout_seconds": TIMEOUT}
+    # M5t-b — 그 세션의 닫힌 잡(키 추가만, 결정 321)
+    assert body == {"cancel": [], "closed_jobs": [], "paused": False, "timeout_seconds": TIMEOUT}
     assert srv.cancel(a)[1]["state"] == CANCELLING
     assert srv.cancel(c)[1]["state"] == CANCELLING
     assert srv.heartbeat("build-02", jobs=[a, b])[1]["cancel"] == [a]
@@ -1268,13 +1393,15 @@ def test_heartbeat_spares_a_job_claimed_since_the_last_heartbeat(srv):
     서버에서 커밋되면 heartbeat 은 방금 넘긴 잡 없이 도착한다 — 그걸 「잊었다」로 읽으면 멀쩡한 잡이
     `lost · restarted without the job` 이 된다(CI e2e 가 10-01 · 11-17 에 이걸로 빨갰다).
 
-    규칙: 이 워커의 **직전 heartbeat 뒤에** 넘긴 잡은 이번 heartbeat 에서 빠져 있어도 봐준다.
-    다음 heartbeat 에도 없으면 그때 lost — 진짜로 잊은 잡은 heartbeat 한 번 늦게 닫힌다."""
+    규칙(M5t-b 결정 339-a — 「직전 heartbeat 하나 봐줌」을 대신함): 그 잡을 돌려준 claim 이
+    워커에서 끝나기 **전에** 찍은 목록(`claims_settled < claim_seq`)은 「없음」을 세지 않는다. 끝난
+    뒤 찍은 목록에 없으면 그때 lost."""
     srv.registered("build-02")
     assert srv.heartbeat("build-02", jobs=[])[0] == 200
     a = srv.queued_job()
     assert srv.claimed("build-02", 1) == a
-    assert srv.heartbeat("build-02", jobs=[])[0] == 200  # claim 전에 찍힌 목록
+    # claim 전에 찍힌 목록
+    assert srv.heartbeat("build-02", jobs=[], claims_settled=0)[0] == 200
     assert srv.store.get_job(a).state == RUNNING
     assert srv.heartbeat("build-02", jobs=[a])[0] == 200  # 이제 안다
     assert srv.store.get_job(a).state == RUNNING
@@ -1285,26 +1412,27 @@ def test_heartbeat_spares_a_job_claimed_since_the_last_heartbeat(srv):
 
 
 def test_a_spared_job_still_missing_on_the_next_heartbeat_is_lost(srv):
-    """봐주는 건 한 번뿐이다 — claim 응답이 워커에 끝내 안 닿은 잡은 다음 heartbeat 에 닫힌다.
-    `jobs` 를 안 보내는 heartbeat(옛 워커)도 「직전 heartbeat」로 센다."""
+    """claim 응답이 워커에 끝내 안 닿은 잡은 그 claim 이 워커에서 끝난(오류 · 시한) 뒤의 heartbeat
+    에 닫힌다(M5t-b T5). `jobs` 를 안 보내는 heartbeat 는 판정하지 않는다."""
     srv.registered("build-02")
     a = srv.queued_job()
     assert srv.claimed("build-02", 1) == a
-    assert srv.heartbeat("build-02", jobs=[])[0] == 200
+    assert srv.heartbeat("build-02", jobs=[], claims_settled=0)[0] == 200  # claim 이 아직 열림
     assert srv.store.get_job(a).state == RUNNING
-    assert srv.heartbeat("build-02", jobs=[])[0] == 200
+    assert srv.heartbeat("build-02", jobs=[])[0] == 200  # claim 이 끝났는데 목록에 없다
     assert srv.store.get_job(a).state == LOST
     b = srv.queued_job()
     assert srv.claimed("build-02", 1) == b
-    assert srv.heartbeat("build-02")[0] == 200  # jobs 없음 — 조정은 안 하지만 직전으로 센다
+    assert srv.heartbeat("build-02")[0] == 200  # jobs 없음 — 조정하지 않는다
+    assert srv.store.get_job(b).state == RUNNING
     assert srv.heartbeat("build-02", jobs=[])[0] == 200
     assert srv.store.get_job(b).state == LOST
 
 
 def test_a_heartbeat_landing_between_the_claim_commit_and_its_record_waits(srv, monkeypatch):
-    """claim 커밋과 「넘긴 잡」 기록 사이에 heartbeat 이 끼면, 커밋된 잡은 보이고 기록은 안 보여서
-    다시 lost 다. 둘은 같은 락 안에 있어야 한다 — 여기서는 커밋 직후에 heartbeat 을 쏘고, 그게
-    claim 이 끝날 때까지 기다리는지 본다."""
+    """claim 커밋 직후, claim 응답이 워커에 닿기 전에 heartbeat 이 끼어도 그 잡은 닫히지 않는다.
+    M5t-b(결정 339-a): 그 heartbeat 의 `claims_settled` 는 아직 열린 claim 의 번호보다 작다 —
+    claim 이 끝나기 전에 찍은 목록이라 「없음」을 세지 않는다."""
     srv.registered("build-02")
     assert srv.heartbeat("build-02", jobs=[])[0] == 200
     a = srv.queued_job()
@@ -1329,13 +1457,14 @@ def test_a_heartbeat_landing_between_the_claim_commit_and_its_record_waits(srv, 
 
 
 def test_the_spare_is_per_worker(srv):
-    """다른 워커의 heartbeat 은 이 워커의 「직전」이 아니다."""
+    """다른 워커의 heartbeat 은 이 워커의 잡을 판정하지 않는다 — 판정은 세션 단위다(M5t-b)."""
     srv.registered("build-02")
     srv.registered("build-03")
     a = srv.queued_job()
     assert srv.claimed("build-02", 1) == a
     assert srv.heartbeat("build-03", jobs=[])[0] == 200
-    assert srv.heartbeat("build-02", jobs=[])[0] == 200
+    assert srv.store.get_job(a).state == RUNNING
+    assert srv.heartbeat("build-02", jobs=[], claims_settled=0)[0] == 200
     assert srv.store.get_job(a).state == RUNNING
 
 
@@ -1487,12 +1616,12 @@ def test_partial_log_line_is_dropped_when_the_job_is_closed_as_lost(srv):
     jid = running_job(srv)
     assert srv.log("build-02", jid, b"::rcm::st")[0] == 200
     assert jid in srv.app._log_partial
-    srv.registered("build-02")  # 재등록 = 옛 잡 lost
+    srv.restarted("build-02")  # 새 프로세스가 옛 세션을 이어받음 = 옛 잡 lost
     assert srv.store.get_job(jid).state == "lost"
     assert jid not in srv.app._log_partial
     jid2 = running_job(srv)
     assert srv.log("build-02", jid2, b"partial")[0] == 200
-    srv.clock.advance(TIMEOUT + 1)
+    srv.clock.advance(600 + 1)  # M5t-b: timeout 이 아니라 끊김 유예(기본 600) 뒤에 닫힌다
     assert srv.app.mark_lost_workers(srv.clock()) == [jid2]
     assert jid2 not in srv.app._log_partial
 

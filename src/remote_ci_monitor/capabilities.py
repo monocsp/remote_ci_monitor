@@ -339,6 +339,8 @@ class CapabilitiesMixin:
         빠졌는지로 짐작하게 두지 않는다 — 명세를 풀로 거르게 되면(M5t-c) 빠진 것의 뜻이 바뀐다."""
         remote = _bare_view("")
         return {
+            # 워커 프로토콜 판(M5t-b 결정 270) — 새 워커가 등록 **전에** 본다. 없으면 옛 서버다
+            "worker_protocol": 2,
             "generation": self.generation,
             "probe_interval_seconds": self.config.server.probe_interval_seconds,
             "probes": [

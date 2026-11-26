@@ -23,6 +23,9 @@ KIND_HOST_SAMPLE = "host_sample"
 KIND_SERVER = "server"
 KIND_RESET = "reset"
 KIND_LAG = "lag"
+#: 그룹 홀드를 만든 커밋 뒤 · 잠금 밖에서 낸다(M5t-b §4.12, `{job_id}`). 알림 스레드가
+#: opt-in 규칙을 부른다
+KIND_IRREVERSIBLE_HOLD = "irreversible_hold"
 JOB_KINDS = frozenset({KIND_JOB_CHANGED, KIND_JOB_FINISHED, KIND_MARKER})
 DEFAULT_HISTORY = 2048
 

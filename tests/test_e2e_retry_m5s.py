@@ -68,7 +68,7 @@ max_attempts = 3
 
 [[presets]]
 name = "hold"
-argv = ["sh", "-c", "trap 'exit 75' TERM; i=0; while [ $i -lt 300 ]; do sleep 0.1; \
+argv = ["sh", "-c", "trap 'exit 75' TERM; echo armed; i=0; while [ $i -lt 300 ]; do sleep 0.1; \
 i=$((i+1)); done; exit 75"]
 source_modes = ["git_ref"]
 repo = "app"
@@ -241,6 +241,16 @@ def test_s20_a_cancel_that_makes_the_script_exit_75_closes_cancelled_with_no_ret
     """취소의 SIGTERM 에 스크립트가 75 로 끝나도(로그인 대기 중의 흔한 모양) 반복하지 않는다."""
     root = live.git("hold")["job_id"]
     live.wait_state(root, {RUNNING})
+    # 스크립트가 trap 을 건 뒤에 취소한다. 러너의 첫 점검은 Popen 직후 곧바로라(M5t-b 결정 333)
+    # trap 전에 닿은 SIGTERM 은 셸을 신호로 끝낸다(-15) — 이 시험이 보려는 「75 로 끝남」이 아니다
+    log = live.app.log_path(root)
+    armed_by = time.monotonic() + 15
+    while time.monotonic() < armed_by:
+        if log.is_file() and b"armed" in log.read_bytes():
+            break
+        time.sleep(0.05)
+    else:
+        raise AssertionError(f"job {root} never armed its TERM trap")
     status, _ = live.req("POST", f"/jobs/{root}/cancel", {})
     assert status == 200
     # 실행기는 주입 시계로 1초마다 취소를 본다 — 시계를 민다
@@ -249,7 +259,7 @@ def test_s20_a_cancel_that_makes_the_script_exit_75_closes_cancelled_with_no_ret
         live.clock.advance(2)
         time.sleep(0.05)
     assert live.wait_state(root, {CANCELLED, RETRIED}) == CANCELLED
-    assert live.job(root).exit_code in (75, None)
+    assert live.job(root).exit_code == 75  # 명령이 돌았고 SIGTERM 에 75 로 끝났다
     assert live.store.list_scheduled() == []
 
 

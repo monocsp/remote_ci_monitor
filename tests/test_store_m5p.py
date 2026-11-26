@@ -354,7 +354,7 @@ def keep_info(path: Path) -> tuple[Any, ...]:
 
 
 def test_this_build_is_database_version_24():
-    assert DB_VERSION == 25  # v25 는 M5s(tests/test_schedule_m5s.py) — v24 는 그 아래에 있다
+    assert DB_VERSION == 26  # v25 는 M5s · v26 은 M5t-b — v24 는 그 아래에 있다
 
 
 def test_a18_v23_migrates_to_v24_after_a_v23_backup(data_dir):
@@ -1362,7 +1362,15 @@ def test_d3_a_remote_job_lost_after_shelving_copies_lost_into_the_row(store):
     assert store.finish_shelf_item(
         j.id, ok=True, file_count=1, total_bytes=3, reason_code=None, now=at(52)
     )
-    assert store.mark_lost_for_worker("mac2", at(120), "worker gone") == [j.id]
+    # 원격 워커를 잃었다 — janitor 의 닫기(`mark_lost_workers`)와 같은 호출
+    assert store.finish(
+        j.id,
+        "lost",
+        now=at(120),
+        summary="worker gone",
+        only_from=("running", "cancelling"),
+        hold_cause="worker_unreachable",
+    )
     r = row(store, j.id)
     assert r["state"] == "active"
     assert r["job_state"] == "lost" and r["job_finished_at"] == at(120).timestamp()

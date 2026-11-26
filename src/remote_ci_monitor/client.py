@@ -13,6 +13,7 @@ import hashlib
 import http.client
 import json
 import os
+import secrets
 import socket
 import subprocess
 import tarfile
@@ -85,8 +86,21 @@ class WorkerClient:
         self.server = self._inner.server
         self.token = token
         self.timeout = timeout
+        #: 워커 세션 id(M5t-b 결정 260). spec 을 뺀 모든 `/worker/*` 요청이 싣는다 — JSON
+        #: 본문은 `worker_session_id`, 본문이 없는 라우트는 `X-RCM-Worker-Session` 헤더로.
+        #: 클라이언트 하나가 프로세스 하나의 세션이다. `RemoteWorker` 는 자기 세션으로 덮어쓴다
+        self.session_id: str | None = secrets.token_hex(16)
+        # claim · heartbeat 순번(결정 339-a). 부르는 쪽이 값을 주면 그것을 쓴다(`RemoteWorker`).
+        # 안 주면 이 클라이언트가 센다 — 호출이 차례로 끝나므로 마지막 claim 번호가 끝난 claim 이다
+        self._claim_seq = 0
+        self._hb_seq = 0
+
+    def _session_headers(self) -> dict[str, str] | None:
+        return {"X-RCM-Worker-Session": self.session_id} if self.session_id else None
 
     def _post(self, path: str, body: dict[str, Any], *, timeout: float | None = None) -> Any:
+        if self.session_id is not None:
+            body = {"worker_session_id": self.session_id, **body}
         status, _, raw = self._inner._request("POST", path, json_body=body, timeout=timeout)
         if status == 204 or not raw:
             return None
@@ -100,12 +114,18 @@ class WorkerClient:
         host_name: str | None,
         version: str,
         host: dict[str, Any] | None = None,
+        previous_sessions: list[str] | None = None,
+        unverified_sessions: list[str] | None = None,
     ) -> dict[str, Any]:
         body: dict[str, Any] = {
             "pool": pool,
             "lanes": lanes,
             "host_name": host_name,
             "version": version,
+            # 워커 프로토콜 2(M5t-b §4.10) — 세션은 `_post` 가 싣는다
+            "worker_protocol": 2,
+            "previous_sessions": list(previous_sessions or []),
+            "unverified_sessions": list(unverified_sessions or []),
         }
         if host is not None:
             body["host"] = host  # 호스트 사실(M5t-a §4.5) — 더하기만, 옛 서버는 무시한다
@@ -126,18 +146,32 @@ class WorkerClient:
         """`POST /worker/capabilities` — 이 워커가 잰 지문과 프리셋별 도구(M5n §4.2)."""
         return self._post("/worker/capabilities", body) or {}
 
-    def claim(self, lane: int, wait_seconds: int = 0) -> dict[str, Any] | None:
-        """잡이 있으면 claim 응답, 없으면(204) None. long-poll 이라 타임아웃을 넉넉히 둔다."""
-        return self._post(
-            "/worker/claim",
-            {"lane": lane, "wait_seconds": wait_seconds},
-            timeout=self.timeout + wait_seconds + 5,
-        )
+    def claim(
+        self, lane: int, wait_seconds: int = 0, *, claim_seq: int | None = None
+    ) -> dict[str, Any] | None:
+        """잡이 있으면 claim 응답, 없으면(204) None. long-poll 이라 타임아웃을 넉넉히 둔다.
+        `claim_seq` 는 세션별 claim 순번이다(M5t-b 결정 339-a)."""
+        if claim_seq is None:
+            self._claim_seq += 1
+            claim_seq = self._claim_seq
+        body: dict[str, Any] = {"lane": lane, "wait_seconds": wait_seconds, "claim_seq": claim_seq}
+        return self._post("/worker/claim", body, timeout=self.timeout + wait_seconds + 5)
 
     def heartbeat(
-        self, jobs: list[int], host_sample: dict[str, Any] | None = None
+        self,
+        jobs: list[int],
+        host_sample: dict[str, Any] | None = None,
+        *,
+        seq: int | None = None,
+        claims_settled: int | None = None,
     ) -> dict[str, Any]:
-        body: dict[str, Any] = {"jobs": list(jobs)}
+        """`seq` · `claims_settled` 는 목록을 찍은 순간의 값이다(M5t-b 결정 339-a)."""
+        if seq is None:
+            self._hb_seq += 1
+            seq = self._hb_seq
+        if claims_settled is None:
+            claims_settled = self._claim_seq
+        body: dict[str, Any] = {"jobs": list(jobs), "seq": seq, "claims_settled": claims_settled}
         if host_sample is not None:
             body["host_sample"] = host_sample
         return self._post("/worker/heartbeat", body) or {}
@@ -150,6 +184,7 @@ class WorkerClient:
             "User-Agent": f"rcm/{__version__}",
             "Accept": "application/gzip",
             "Authorization": f"Bearer {self.token}",
+            **(self._session_headers() or {}),
         }
         req = urllib.request.Request(url, method="GET", headers=headers)
         dest.parent.mkdir(parents=True, exist_ok=True)
@@ -196,6 +231,7 @@ class WorkerClient:
             content_length=len(data),
             content_type="application/octet-stream",
             timeout=max(self.timeout, 60.0),
+            extra_headers=self._session_headers(),
         )
         return json.loads(raw) if raw else {}
 
@@ -210,8 +246,12 @@ class WorkerClient:
         finished_at: str | None = None,
         summary_code: str | None = None,
         summary_args: dict[str, Any] | None = None,
+        group_gone: bool | None = None,
     ) -> dict[str, Any]:
         body: dict[str, Any] = {"outcome": outcome, "exit_code": exit_code}
+        if group_gone is not None:
+            # 그 잡의 프로세스 그룹이 사라졌다는 확인(M5t-b 결정 330) — 모르면 싣지 않는다
+            body["group_gone"] = group_gone
         if summary is not None:
             body["summary"] = summary
         if summary_code is not None:
@@ -241,12 +281,15 @@ class WorkerClient:
                 content_length=size,
                 content_type="application/x-tar",
                 timeout=max(self.timeout, 300.0),
+                extra_headers=self._session_headers(),
             )
         return json.loads(raw) if raw else {}
 
     def bundle_status(self, job_id: int) -> dict[str, Any]:
         """`GET /worker/jobs/{id}/artifacts` — 모호한 finish 응답을 푼다(M5e §6)."""
-        _status, _headers, raw = self._inner._request("GET", f"/worker/jobs/{job_id}/artifacts")
+        _status, _headers, raw = self._inner._request(
+            "GET", f"/worker/jobs/{job_id}/artifacts", extra_headers=self._session_headers()
+        )
         return json.loads(raw) if raw else {}
 
     def health(self) -> dict[str, Any]:
@@ -854,6 +897,11 @@ class Client:
         (M5j G5) — 있으면 본문에 싣고, 없으면 오늘처럼 빈 본문이다(옛 서버는 키를 무시한다)."""
         body = {"cancel_token": cancel_token} if cancel_token else {}
         return self.post_json(f"/jobs/{job_id}/cancel", body)
+
+    def release_hold(self, job_id: int, *, reason: str | None = None) -> dict[str, Any]:
+        """`POST /jobs/{id}/release-hold`(admin, M5t-b §4.12)."""
+        body = {"reason": reason} if reason else {}
+        return self.post_json(f"/jobs/{job_id}/release-hold", body)
 
     def gc(self, *, dry_run: bool = False, timeout: float | None = None) -> dict[str, Any]:
         """`POST /gc`(admin). 스캔이 오래 걸릴 수 있어 **자기 시한**을 쓴다 — 일반 요청의

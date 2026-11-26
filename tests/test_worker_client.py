@@ -187,6 +187,8 @@ def test_register_returns_the_protocol_parameters(srv):
         "heartbeat_seconds": HEARTBEAT,
         "worker_timeout_seconds": TIMEOUT,
         "claim_wait_seconds": CLAIM_WAIT,
+        "worker_protocol": 2,  # M5t-b — 워커 프로토콜 판(키 추가만)
+        "fenced_sessions": 0,  # M5t-b P6 GAP8 — 이 등록이 대신한 살아 있던 프로세스 수(키 추가만)
     }
     row = srv.store.get_worker(WORKER)
     assert row is not None and (row.pool, row.lanes, row.host_name) == ("linux", 2, "b02.local")
@@ -443,7 +445,7 @@ def test_heartbeat_returns_cancel_paused_timeout_and_always_sends_the_job_list(s
     hb = wc.heartbeat([jid], None)
     assert hb.pop("generation")  # M5n — 세대(키 추가만)
     assert hb.pop("server_version") == __version__  # M5q B2 — 서버 버전(키 추가만)
-    assert hb == {"cancel": [], "paused": False, "timeout_seconds": TIMEOUT}
+    assert hb == {"cancel": [], "closed_jobs": [], "paused": False, "timeout_seconds": TIMEOUT}
     assert srv.cancel(jid)[1]["state"] == CANCELLING
     assert wc.heartbeat([jid], None)["cancel"] == [jid]
     srv.clock.advance(3)

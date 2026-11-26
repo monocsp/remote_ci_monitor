@@ -208,6 +208,8 @@
   qa-1 mdns — `md-responder-skips-the-loopback-join` · `md-querier-skips-the-loopback-send`: 같은
      호스트의 서버가 루프백으로 듣지 · 묻지 않음
      (`mdns.py`, `tests/test_mdns_servers_on_one_host.py`)
+  M5t-b PR1 — 워커 세션 · 펜싱 · 끊김 유예 · 감시 스레드 · 감독자 · 그룹 홀드 · 홀드 알림의
+     변이(`docs/m5tb-workplan.md` §7.4 의 PR1 행 + P2 가 더한 것). 이름 목록은 `--list`
   qa-2 mdns — `md-responder-counts-the-loopback-join`: 루프백 가입만 되어도 광고가 켜진 것으로 침
      (`mdns.py`, `tests/test_mdns_servers_on_one_host.py`)
 
@@ -532,37 +534,13 @@ MUTANTS = (
         tests=("tests/test_reload_dry_run.py",),
     ),
     # ── heartbeat 이 방금 넘긴 잡을 봐준다(2026-11-18, CI e2e 의 거짓 lost) ──
-    Mutant(
-        # 봐주기가 없다 — claim 직전에 찍힌 heartbeat 목록이 방금 넘긴 잡을 lost 로 닫는다
-        name="heartbeat-spare-removed",
-        path="src/remote_ci_monitor/remote_workers.py",
-        old="if j.id not in set(known) and j.id not in spared]",
-        new="if j.id not in set(known)]",
-        tests=("tests/test_worker_api.py",),
-    ),
-    Mutant(
-        # claim 커밋이 락 밖이다 — 커밋과 기록 사이에 낀 heartbeat 이 다시 lost 를 만든다
-        name="heartbeat-spare-claim-outside-lock",
-        path="src/remote_ci_monitor/remote_workers.py",
-        old="""                with self._fresh_claims_lock:
-                    job = self.store.claim(
-                        lane,
-                        now,
-                        pool=pool,
-                        worker_name=name,
-                        claimant=claimant,
-                        now_fn=self.now_fn,  # 시작 마감은 트랜잭션 안의 시각으로(M5s)
-                    )
-""",
-        new=(
-            "                job = self.store.claim(\n"
-            "                    lane, now, pool=pool, worker_name=name, claimant=claimant,\n"
-            "                    now_fn=self.now_fn,\n"
-            "                )\n"
-            "                with self._fresh_claims_lock:\n"
-        ),
-        tests=("tests/test_worker_api.py",),
-    ),
+    # (옛 `heartbeat-spare-removed` 도 지웠다 — 봐줄 잡을 적던 집합에 쓰는 줄이 없어 늘 비어
+    # 있었다. 그 규칙은 `t5-ignores-claims-settled` · `hb-stale-seq-judged` ·
+    # `claim-settled-before-running` 이 감시한다)
+    # (옛 `heartbeat-spare-claim-outside-lock` 은 지웠다 — 워커 프로토콜 2 에서 레거시 claim 이
+    # 없어져 잠금 밖 claim 이 생길 코드가 없다. 그 규칙은 claim 트랜잭션이 얼리는 `claim_seq` 와
+    # T5 판정이 지키고 `t5-ignores-claims-settled` · `hb-stale-seq-judged` ·
+    # `claim-settled-before-running` 이 감시한다)
     # ── claim 이 정지를 같은 트랜잭션에서 다시 본다(2026-11-19, 정지 중 집기) ──
     Mutant(
         # 정지 검사가 없다 — 호출자의 `get_paused` 뒤에 걸린 정지를 놓치고 잡을 집는다
@@ -1435,7 +1413,9 @@ MUTANTS = (
         path="src/remote_ci_monitor/remote_workers.py",
         old="        if version != self.version:\n            # 이 검사는",
         new=(
-            '        self.store.mark_lost_for_worker(token.name, self.now_fn(), "lost")\n'
+            # 그 워커의 도는 잡을 lost 로 닫는다(옛 `mark_lost_for_worker` 는 지웠다)
+            "        for _j in self.store.jobs_of_worker(token.name):\n"
+            '            self.store.finish(_j.id, "lost", now=self.now_fn(), summary="lost")\n'
             "        if version != self.version:\n            # 이 검사는"
         ),
         tests=("tests/test_server_m5q_worker.py",),
@@ -4896,6 +4876,1989 @@ MUTANTS = (
         tests=(
             "tests/test_mdns_servers_on_one_host.py::"
             "test_md8_only_the_loopback_joined_means_advertise_is_off",
+        ),
+    ),
+    # ── M5t-b PR1 — 워커 세션 · 펜싱 · 끊김 유예 · 감독자 · 그룹 홀드(m5tb §7.4) ──
+    Mutant(
+        # M5t-b PR1 (P2-2 사례)
+        name="popen-check-only-with-requires",
+        path="src/remote_ci_monitor/runner.py",
+        old=(
+            "        if observer.should_stop():  # mutcheck: popen-check-only-with-requires\n"
+            "            return RunResult(rc=None, started=started, finis"
+            "hed=started, lost=True, group_gone=True)\n"
+            "        if observer.should_cancel():"
+        ),
+        new=(
+            "        if spec.requires and observer.should_stop():\n"
+            "            return RunResult(rc=None, started=started, finis"
+            "hed=started, lost=True, group_gone=True)\n"
+            "        if spec.requires and observer.should_cancel():"
+        ),
+        tests=(
+            "tests/test_job_supervisor_m5tb.py::"
+            "test_rl41_a_flag_raised_while_preparing_starts_no_process_even_without_requires",
+        ),
+    ),
+    Mutant(
+        # M5t-b PR1 (P2-2 사례)
+        name="m5tb-first-check-waits-a-second",
+        path="src/remote_ci_monitor/runner.py",
+        old="    check(now_fn())  # 첫 점검은 곧바로",
+        new="    pass  # 첫 점검은 곧바로",
+        tests=(
+            "tests/test_job_supervisor_m5tb.py::"
+            "test_rl41_a_flag_between_the_check_and_popen_is_caught_by_the_first_immediate_check",
+        ),
+    ),
+    Mutant(
+        # M5t-b PR1 (P2-2 사례)
+        name="runner-grace-wall-clock",
+        path="src/remote_ci_monitor/runner.py",
+        old="        if term_mono and not result.kill_sent and mono_fn() - term_mono[0] >= grace:",
+        new=(
+            "        if term_mono and not result.kill_sent and (now - res"
+            "ult.term_sent_at).total_seconds() >= grace:"
+        ),
+        tests=(
+            "tests/test_job_supervisor_m5tb.py::"
+            "test_rl34_f_sigkill_follows_the_monotonic_clock_when_the_wall_clock_goes_back",
+        ),
+    ),
+    Mutant(
+        # M5t-b PR1 (P2-2 사례)
+        name="m5tb-no-supervisor-wrap",
+        path="src/remote_ci_monitor/runner.py",
+        old="        argv = supervised_argv(spec) if spec.irreversible else list(spec.argv)",
+        new="        argv = list(spec.argv)",
+        tests=(
+            "tests/test_job_supervisor_m5tb.py::"
+            "test_rl43_the_supervisor_wraps_only_an_irreversible_job",
+        ),
+    ),
+    Mutant(
+        # M5t-b PR1 (P2-2 사례)
+        name="reap-grace-from-leader-end",
+        path="src/remote_ci_monitor/runner.py",
+        old="    kill_at = term_mono[0] + grace  # mutcheck: reap-grace-from-leader-end",
+        new="    kill_at = leader_end + grace",
+        tests=(
+            "tests/test_job_supervisor_m5tb.py::"
+            "test_rl51_c_the_runner_reaps_from_its_first_sigterm_not_from_the_leader_end",
+        ),
+    ),
+    Mutant(
+        # M5t-b PR1 (P2-2 사례)
+        name="m5tb-no-s7-reap",
+        path="src/remote_ci_monitor/runner.py",
+        old="        result.group_gone = _reap_group(proc, result, term_mono, grace, mono_fn)",
+        new="        result.group_gone = True",
+        tests=(
+            "tests/test_job_supervisor_m5tb.py::"
+            "test_rl43_d_a_killed_supervisor_is_reaped_by_the_runner",
+        ),
+    ),
+    Mutant(
+        # M5t-b PR1 (P2-2 사례)
+        name="supervisor-no-parent-check",
+        path="src/remote_ci_monitor/job_supervisor.py",
+        old="        if os.getppid() != parent:  # mutcheck: supervisor-no-parent-check",
+        new="        if False:",
+        tests=(
+            "tests/test_job_supervisor_m5tb.py::"
+            "test_rl52_a_wrong_parent_starts_nothing_and_exits_125_with_the_marker",
+        ),
+    ),
+    Mutant(
+        # M5t-b PR1 (P2-2 사례)
+        name="supervisor-ignores-parent-death",
+        path="src/remote_ci_monitor/job_supervisor.py",
+        old=(
+            "        if parent_changed or os.getppid() == parent:  # mutc"
+            "heck: supervisor-ignores-parent-death"
+        ),
+        new="        if True:",
+        tests=(
+            "tests/test_job_supervisor_m5tb.py::test_rl43_the_worker_dying_ends_the_command_group",
+            "tests/test_e2e_worker_grace_m5tb.py::"
+            "test_rl43_killing_the_worker_ends_the_irreversible_command_but_not_a_plain_one",
+        ),
+    ),
+    Mutant(
+        # M5t-b PR1 (P2-2 사례)
+        name="supervisor-no-post-command-sweep",
+        path="src/remote_ci_monitor/job_supervisor.py",
+        old="    while _members_left(pgid):  # mutcheck: supervisor-no-post-command-sweep",
+        new="    while False:",
+        tests=(
+            "tests/test_job_supervisor_m5tb.py::"
+            "test_rl51_the_supervisor_sweeps_a_term_ignoring_child_after_the_command_ends",
+        ),
+    ),
+    Mutant(
+        # M5t-b PR1 (P2-2 사례)
+        name="supervisor-popen-window-term-dropped",
+        path="src/remote_ci_monitor/job_supervisor.py",
+        old=(
+            "    if term and term[0] < popen_done:  # mutcheck: superviso"
+            "r-popen-window-term-dropped"
+        ),
+        new="    if False:",
+        tests=(
+            "tests/test_job_supervisor_m5tb.py::"
+            "test_rl51_a_sigterm_in_the_popen_window_reaches_the_command",
+        ),
+    ),
+    Mutant(
+        # M5t-b PR1 (P2-2 사례)
+        name="supervisor-failure-exit-one",
+        path="src/remote_ci_monitor/job_supervisor.py",
+        old="    return SUPERVISOR_NOT_STARTED_EXIT  # mutcheck: supervisor-failure-exit-one",
+        new="    return 1",
+        tests=(
+            "tests/test_job_supervisor_m5tb.py::"
+            "test_rl52_a_wrong_parent_starts_nothing_and_exits_125_with_the_marker",
+        ),
+    ),
+    Mutant(
+        # M5t-b PR1 (P2-2 사례)
+        name="supervisor-not-isolated",
+        path="src/remote_ci_monitor/runner.py",
+        old='        "-I",  # mutcheck: supervisor-not-isolated\n',
+        new="",
+        tests=(
+            "tests/test_job_supervisor_m5tb.py::"
+            "test_rl52_fake_modules_on_pythonpath_and_in_the_workspace_are_not_read",
+        ),
+    ),
+    Mutant(
+        # M5t-b PR1 (P2-2 사례)
+        name="adopt-foreign-session",
+        path="src/remote_ci_monitor/remote_worker.py",
+        old=(
+            '            if _read_json(entry / "owner.json") != owner:  #'
+            " mutcheck: adopt-foreign-session\n"
+            "                continue"
+        ),
+        new="            if False:\n                continue",
+        tests=(
+            "tests/test_worker_session_m5tb.py::"
+            "test_rl38_a_foreign_or_ownerless_folder_is_not_locked_judged_or_touched",
+        ),
+    ),
+    Mutant(
+        # M5t-b PR1 (P2-2 사례)
+        name="orphan-kill-no-lstart",
+        path="src/remote_ci_monitor/remote_worker.py",
+        old="    if recorded != now:  # mutcheck: orphan-kill-no-lstart\n",
+        new="    if False:\n",
+        tests=(
+            "tests/test_worker_session_m5tb.py::test_rl15_a_reused_pid_is_left_alone_and_confirmed",
+        ),
+    ),
+    Mutant(
+        # M5t-b PR1 (P2-2 사례)
+        name="ps-lstart-locale",
+        path="src/remote_ci_monitor/remote_worker.py",
+        old='    env = dict(os.environ, LC_ALL="C", TZ="UTC")  # mutcheck: ps-lstart-locale',
+        new="    env = dict(os.environ)",
+        tests=(
+            "tests/test_worker_session_m5tb.py::"
+            "test_rl15_ps_is_read_in_the_c_locale_and_utc_and_a_locale_answer_is_unknown",
+        ),
+    ),
+    Mutant(
+        # M5t-b PR1 (P2-2 사례)
+        name="m5tb-no-previous-sessions",
+        path="src/remote_ci_monitor/remote_worker.py",
+        old="                if self.previous_sessions or self.unverified_sessions:\n",
+        new="                if False:\n",
+        tests=(
+            "tests/test_worker_session_m5tb.py::"
+            "test_rl14_dead_sessions_go_to_previous_or_unverified_in_the_first_register",
+        ),
+    ),
+    Mutant(
+        # M5t-b PR1 (P2-2 사례)
+        name="m5tb-leaderless-group-confirmed",
+        path="src/remote_ci_monitor/remote_worker.py",
+        old='        if _group_alive(pgid):\n            log(f"orphan #{job_dir.name}: leader gone',
+        new='        if False:\n            log(f"orphan #{job_dir.name}: leader gone',
+        tests=(
+            "tests/test_worker_session_m5tb.py::"
+            "test_rl31_a_leaderless_group_is_unknown_and_left_alone",
+        ),
+    ),
+    Mutant(
+        # M5t-b PR1 (P2-2 사례)
+        name="m5tb-recheck-never-sends",
+        path="src/remote_ci_monitor/remote_worker.py",
+        old=(
+            "        client = copy.copy(self.client)\n"
+            "        try:\n"
+            "            client.session_id = dead.session_id\n"
+            "            client.finish("
+        ),
+        new=(
+            "        client = copy.copy(self.client)\n"
+            "        try:\n"
+            "            client.session_id = dead.session_id\n"
+            "            return verdict\n"
+            "            client.finish("
+        ),
+        tests=(
+            "tests/test_worker_session_m5tb.py::"
+            "test_rl31_the_recheck_confirms_and_sends_one_narrow_finish_as_the_dead_session",
+        ),
+    ),
+    Mutant(
+        # M5t-b PR1 (P2-2 사례)
+        name="m5tb-sweep-deletes-locked",
+        path="src/remote_ci_monitor/remote_worker.py",
+        old=(
+            '        fd = try_lock(entry / "lock")\n'
+            "        if fd is None:\n"
+            "            continue\n"
+            "        try:\n"
+            "            shutil.rmtree"
+        ),
+        new=(
+            "        fd = os.open(os.devnull, os.O_RDONLY)\n"
+            "        if fd is None:\n"
+            "            continue\n"
+            "        try:\n"
+            "            shutil.rmtree"
+        ),
+        tests=(
+            "tests/test_worker_session_m5tb.py::"
+            "test_rl38_the_sweep_deletes_only_old_and_lockable_folders",
+        ),
+    ),
+    Mutant(
+        # 세션 판정이 펜싱을 보지 않는다 — 이름만 맞으면 펜싱된 옛 프로세스의 요청도 받는다(RL10)
+        name="session-fence-by-name",
+        path="src/remote_ci_monitor/remote_workers.py",
+        old=(
+            "        if row.fenced_at is not None:\n"
+            '            raise _api_error(409, SESSION_FENCED, code="session_fenced")\n'
+            "        self._hear(session_id)\n"
+        ),
+        new=(
+            "        if False:\n"
+            '            raise _api_error(409, SESSION_FENCED, code="session_fenced")\n'
+            "        self._hear(session_id)\n"
+        ),
+        tests=(
+            "tests/test_worker_session_m5tb.py::"
+            "test_rl10_a_second_process_fences_the_first_and_the_first_can_only_confirm",
+            "tests/test_e2e_worker_grace_m5tb.py::"
+            "test_rl10_a_second_process_fences_the_first_which_stops_its_job_and_exits_zero",
+        ),
+    ),
+    Mutant(
+        # 세션 판정에서 이름 대조를 지운다 — 남의 이름의 세션으로 보고할 수 있다(RL11 · RL44)
+        name="session-name-unchecked",
+        path="src/remote_ci_monitor/remote_workers.py",
+        old="        if row.worker_name != token.name:  # mutcheck: session-name-unchecked\n",
+        new="        if False:\n",
+        tests=(
+            "tests/test_worker_session_m5tb.py::test_rl11_unknown_foreign_and_malformed_sessions",
+        ),
+    ),
+    Mutant(
+        # 같은 세션의 재등록이 그 이름의 busy 잡을 닫는다(RL12)
+        name="reregister-closes-own-jobs",
+        path="src/remote_ci_monitor/remote_workers.py",
+        old=(
+            "            row = self.store.register_worker(  # mutcheck: r"
+            "eregister-closes-own-jobs\n"
+        ),
+        new=(
+            # 그 이름의 busy 잡을 닫는다(옛 `mark_lost_for_worker` 는 지웠다)
+            "            for _j in self.store.jobs_of_worker(token.name):\n"
+            '                self.store.finish(_j.id, "lost", now=self.now_fn(), summary="x")\n'
+            "            row = self.store.register_worker(\n"
+        ),
+        tests=(
+            "tests/test_worker_session_m5tb.py::"
+            "test_rl12_reregistering_the_same_session_is_idempotent",
+        ),
+    ),
+    Mutant(
+        # register 가 버전 검사보다 먼저 세션을 연다 — 따라가기 전의 409 가 도는 잡을
+        # 펜싱한다(RL13)
+        name="register-session-before-version",
+        path="src/remote_ci_monitor/remote_workers.py",
+        old=(
+            "        # mutcheck: register-session-before-version\n"
+            "        if version != self.version:\n"
+        ),
+        new=(
+            "        if session is not None and version != self.version:\n"
+            "            self.store.open_session(\n"
+            "                token.name, session, previous=previous, unverified=unverified,\n"
+            "                now=self.now_fn(), pool=pool, lanes=lanes, h"
+            "ost_name=host_name, version=version,\n"
+            "            )\n"
+            "        if version != self.version:\n"
+        ),
+        tests=(
+            "tests/test_worker_session_m5tb.py::"
+            "test_rl13_a_version_mismatch_answers_first_with_no_side_effect",
+        ),
+    ),
+    Mutant(
+        # 첫 등록이 세션 없는(레거시) busy 잡을 닫지 않는다(RL47)
+        name="first-register-keeps-legacy",
+        path="src/remote_ci_monitor/store.py",
+        old=(
+            '                f"SELECT id FROM jobs WHERE worker_name=? AN'
+            'D worker_session_id IS NULL "\n'
+        ),
+        new=(
+            '                f"SELECT id FROM jobs WHERE 0 AND worker_nam'
+            'e=? AND worker_session_id IS NULL "\n'
+        ),
+        tests=(
+            "tests/test_worker_session_m5tb.py::"
+            "test_rl47_the_first_session_closes_legacy_jobs_and_holds_irreversible_ones",
+        ),
+    ),
+    Mutant(
+        # heartbeat 응답에서 closed_jobs 를 뺀다 — 워커가 서버가 닫은 잡을 모른다(RL35 · RL8)
+        name="closed-jobs-omitted",
+        path="src/remote_ci_monitor/remote_workers.py",
+        old=(
+            "            closed = self.store.closed_jobs_of(\n"
+            "                session, known or []\n"
+            "            )  # mutcheck: closed-jobs-omitted\n"
+        ),
+        new="            closed = []\n",
+        tests=(
+            "tests/test_worker_session_m5tb.py::"
+            "test_rl35_heartbeat_reports_this_sessions_closed_jobs_with_had_cancel",
+        ),
+    ),
+    Mutant(
+        # 받아들인 seq 이하인 heartbeat 의 jobs 로도 「없음」을 판정한다(RL50)
+        name="hb-stale-seq-judged",
+        path="src/remote_ci_monitor/remote_workers.py",
+        old="                fresh = seq > accepted  # mutcheck: hb-stale-seq-judged\n",
+        new="                fresh = True\n",
+        tests=(
+            "tests/test_worker_session_m5tb.py::"
+            "test_rl50_stale_or_unsettled_heartbeats_do_not_close_a_running_job",
+            "tests/test_hb_order_m5tb.py::"
+            "test_rl50_a_held_heartbeat_that_lands_after_the_next_one_does_not_close_the_job",
+        ),
+    ),
+    Mutant(
+        # 「없음」 판정에서 claims_settled ≥ claim_seq 조건을 지운다(RL50 · RL9)
+        name="t5-ignores-claims-settled",
+        path="src/remote_ci_monitor/remote_workers.py",
+        old=(
+            "                    and j.claim_seq <= settled  # mutcheck: "
+            "t5-ignores-claims-settled\n"
+        ),
+        new="                    and True\n",
+        tests=(
+            "tests/test_worker_session_m5tb.py::"
+            "test_rl50_stale_or_unsettled_heartbeats_do_not_close_a_running_job",
+        ),
+    ),
+    Mutant(
+        # T5 닫기가 표식 잡의 홀드를 만들지 않는다(RL9 · RL50)
+        name="t5-confirms-irreversible",
+        path="src/remote_ci_monitor/remote_workers.py",
+        old=(
+            "                            # mutcheck: t5-confirms-irreversible\n"
+            '                            hold_cause="worker_restarted_without_job",\n'
+        ),
+        new="                            hold_cause=None,\n",
+        tests=(
+            "tests/test_worker_session_m5tb.py::"
+            "test_rl9_a_lost_claim_answer_closes_after_the_claim_settled_and_holds_if_irreversible",
+        ),
+    ),
+    Mutant(
+        # 취소 미확인 닫기가 현재 · 들리는 세션 조건 없이 그 이름의 모든 잡에 걸린다(RL33)
+        name="cancel-unconfirmed-any-session",
+        path="src/remote_ci_monitor/remote_workers.py",
+        old="                    jobs = self.store.jobs_of_session(current)\n",
+        new=(
+            "                    jobs = [j for j in self.store.busy_remote_jobs("
+            ") if j.worker_name == row.name]\n"
+        ),
+        tests=(
+            "tests/test_worker_selfstop_m5tb.py::"
+            "test_rl33_a_fenced_sessions_cancelling_job_is_not_closed_as_unconfirmed",
+        ),
+    ),
+    Mutant(
+        # 유예 gap 을 단조 시계 대신 벽시계 last_seen_at 으로 잰다(RL27 · RL7)
+        name="grace-wall-clock",
+        path="src/remote_ci_monitor/remote_workers.py",
+        old=(
+            "                if mono - self.heard_at(key) <= grace:  # mutcheck: grace-wall-clock\n"
+            "                    continue\n"
+            "                if budget <= 0:\n"
+            "                    break\n"
+            "                with self._session_lock(key):\n"
+            "                    gap = self.mono_fn() - self.heard_at(key)  #"
+            " type: ignore[attr-defined]\n"
+        ),
+        new=(
+            "                seen = self.store.get_worker(job.worker_name).last_seen_at\n"
+            "                if (now - seen).total_seconds() <= grace:\n"
+            "                    continue\n"
+            "                if budget <= 0:\n"
+            "                    break\n"
+            "                with self._session_lock(key):\n"
+            "                    gap = (now - seen).total_seconds()\n"
+        ),
+        tests=(
+            "tests/test_worker_selfstop_m5tb.py::"
+            "test_rl27_a_wall_clock_jump_does_not_close_a_heard_job",
+        ),
+    ),
+    Mutant(
+        # 유예의 바닥(서버 기동 시각)을 지운다 — 재시작 직후 틱이 원격 잡을 한꺼번에 닫는다(RL7 ·
+        # RL2)
+        name="grace-no-start-floor",
+        path="src/remote_ci_monitor/remote_workers.py",
+        old="        return floor if heard is None else max(heard, floor)\n",
+        new="        return 0.0 if heard is None else heard\n",
+        tests=(
+            "tests/test_worker_lost.py::test_server_restart_keeps_remote_jobs_and_loses_local_ones",
+            "tests/test_worker_selfstop_m5tb.py::"
+            "test_rl4_the_grace_boundary_rechecks_heard_and_closes_exactly_once",
+        ),
+    ),
+    Mutant(
+        # 유예 판정이 잡에 얼린 값 대신 지금 설정값을 읽는다(RL30)
+        name="grace-read-at-judgement",
+        path="src/remote_ci_monitor/remote_workers.py",
+        old="            grace = job.disconnect_grace_seconds or default_grace\n",
+        new="            grace = default_grace\n",
+        tests=(
+            "tests/test_worker_selfstop_m5tb.py::"
+            "test_rl30_the_janitor_closes_by_the_frozen_grace_not_the_current_one",
+        ),
+    ),
+    Mutant(
+        # 유예 만료 닫기가 orphan_unverified 대신 늘 worker_unreachable 이다(RL31 · RL29)
+        name="orphan-unverified-code-dropped",
+        path="src/remote_ci_monitor/remote_workers.py",
+        old=(
+            '                        code = "orphan_unverified"  # mutche'
+            "ck: orphan-unverified-code-dropped\n"
+        ),
+        new='                        code = "worker_unreachable"\n',
+        tests=(
+            "tests/test_worker_selfstop_m5tb.py::"
+            "test_rl31_an_unverified_dead_session_closes_at_grace_as_orphan_unverified",
+        ),
+    ),
+    Mutant(
+        # 세션별 판정 잠금을 전역 잠금 하나로 — 한 세션의 닫기가 다른 세션의 heartbeat 을
+        # 막는다(RL56)
+        name="grace-close-global-lock",
+        path="src/remote_ci_monitor/remote_workers.py",
+        old=(
+            "            lock = self._session_locks.get(key)\n"
+            "            if lock is None:\n"
+            "                lock = self._session_locks[key] = threading.Lock()\n"
+        ),
+        new=(
+            '            lock = self._session_locks.get("*")\n'
+            "            if lock is None:\n"
+            '                lock = self._session_locks["*"] = threading.Lock()\n'
+        ),
+        tests=(
+            "tests/test_worker_selfstop_m5tb.py::"
+            "test_rl56_a_tick_closes_at_most_twenty_and_other_sessions_are_not_blocked",
+        ),
+    ),
+    Mutant(
+        # group_gone 이 거짓이어도 홀드를 푼다(RL44)
+        name="hold-released-without-group-gone",
+        path="src/remote_ci_monitor/remote_workers.py",
+        old="            gone is True  # mutcheck: hold-released-without-group-gone\n",
+        new="            True\n",
+        tests=(
+            "tests/test_worker_session_m5tb.py::"
+            "test_rl44_a_late_finish_with_group_gone_releases_the_hold",
+        ),
+    ),
+    Mutant(
+        # previous_sessions 의 이름 대조 없이 홀드를 푼다 — 남의 이름의 세션을 넘겨도 403 이
+        # 아니다(RL44)
+        name="hold-release-any-name",
+        path="src/remote_ci_monitor/remote_workers.py",
+        old="        if any(n != token.name for n in names.values()):\n",
+        new="        if False:\n",
+        tests=(
+            "tests/test_worker_session_m5tb.py::"
+            "test_rl44_previous_sessions_release_a_hold_and_a_foreign_name_cannot",
+        ),
+    ),
+    Mutant(
+        # 확인 없는 닫힘에 홀드를 만들지 않는다(RL42 · RL31 · RL2)
+        name="hold-not-created",
+        path="src/remote_ci_monitor/store.py",
+        old=(
+            "        if row is None or not self._is_irreversible_row(row)"
+            ":  # mutcheck: hold-not-created\n"
+        ),
+        new="        if True:\n",
+        tests=(
+            "tests/test_irreversible_hold_m5tb.py::"
+            "test_rl42_an_unconfirmed_close_holds_the_group_across_pools_restarts_and_gc",
+        ),
+    ),
+    Mutant(
+        # 오래된 잡 지우기가 열린 홀드의 잡도 지운다(RL42)
+        name="hold-row-deleted-by-gc",
+        path="src/remote_ci_monitor/store.py",
+        old=(
+            "                    # mutcheck: hold-row-deleted-by-gc\n"
+            '                    "AND id NOT IN (SELECT job_id FROM irreversible_holds "\n'
+            '                    "WHERE released_at IS NULL)",\n'
+        ),
+        new='                    "",\n',
+        tests=(
+            "tests/test_irreversible_hold_m5tb.py::"
+            "test_rl42_an_unconfirmed_close_holds_the_group_across_pools_restarts_and_gc",
+        ),
+    ),
+    Mutant(
+        # 홀드의 그룹을 잡 행 대신 지금 프리셋 설정에서 읽는다(RL53)
+        name="hold-group-from-current-preset",
+        path="src/remote_ci_monitor/store.py",
+        old=(
+            '        group, scope = row["concurrency_group"], row["concur'
+            'rency_scope"] or SCOPE_POOL\n'
+        ),
+        new=(
+            "        group, scope = self.irreversible.get(\n"
+            '            row["preset"], (row["concurrency_group"], row["c'
+            'oncurrency_scope"] or SCOPE_POOL)\n'
+            "        )\n"
+        ),
+        tests=(
+            "tests/test_irreversible_hold_m5tb.py::"
+            "test_rl53_hold_group_comes_from_the_job_row_not_the_current_config",
+            "tests/test_irreversible_hold_m5tb.py::"
+            "test_rl53_a_renamed_group_in_the_config_does_not_move_the_hold",
+        ),
+    ),
+    Mutant(
+        # 레거시 잡의 X 를 「프리셋 없음 → 0」으로 — 사라진 프리셋의 잡이 홀드 없이 닫힌다(RL53)
+        name="legacy-hold-open-when-preset-gone",
+        path="src/remote_ci_monitor/store.py",
+        old=(
+            '        return self.known_presets is not None and row["prese'
+            't"] not in self.known_presets\n'
+        ),
+        new="        return False\n",
+        tests=(
+            "tests/test_irreversible_hold_m5tb.py::"
+            "test_rl53_a_legacy_job_holds_when_its_preset_is_irreversible_or_gone",
+        ),
+    ),
+    Mutant(
+        # 그룹 NULL 인 표식 잡의 claim 이 유효 그룹을 적지도 배제에 쓰지도 않는다(RL48)
+        name="irreversible-null-group-unbound",
+        path="src/remote_ci_monitor/store.py",
+        old="        irr = sorted(self.irreversible.items())\n",
+        new="        irr = []\n",
+        tests=(
+            "tests/test_irreversible_hold_m5tb.py::"
+            "test_rl48_a_queued_job_without_group_gets_the_synthetic_group_at_claim",
+            "tests/test_irreversible_hold_m5tb.py::test_rl48_the_other_order_blocks_too",
+        ),
+    ),
+    Mutant(
+        # 그룹 없는 표식 프리셋에 합성 그룹을 만들지 않는다(RL48)
+        name="synthetic-group-missing",
+        path="src/remote_ci_monitor/config.py",
+        old="    if irreversible and not group:  # mutcheck: synthetic-group-missing\n",
+        new="    if False:\n",
+        tests=(
+            "tests/test_irreversible_hold_m5tb.py::"
+            "test_rl48_config_fills_a_synthetic_global_group_for_an_irreversible_preset",
+        ),
+    ),
+    Mutant(
+        # 설정 검증의 하한을 1판의 「worker_timeout_seconds 보다 큼」으로(RL30 · RL34)
+        name="grace-lower-bound-dropped",
+        path="src/remote_ci_monitor/config.py",
+        old=(
+            "    return floor + DISCONNECT_GRACE_MARGIN_SECONDS  # mutche"
+            "ck: grace-lower-bound-dropped\n"
+        ),
+        new="    return s.worker_timeout_seconds + 1\n",
+        tests=(
+            "tests/test_worker_selfstop_m5tb.py::"
+            "test_rl30_the_floor_is_l_plus_35_and_the_floor_itself_passes",
+        ),
+    ),
+    Mutant(
+        # 관찰자 should_cancel 에 closed_by_server 를 되돌린다 — 일반 lost 잡이 409 하나에
+        # 죽는다(RL5)
+        name="closed-by-server-cancels",
+        path="src/remote_ci_monitor/remote_worker.py",
+        old=(
+            "        return self.job_id in self.proc.cancel_requested or "
+            "self.closed_stop.is_set()\n"
+        ),
+        new=(
+            "        return (\n"
+            "            self.job_id in self.proc.cancel_requested\n"
+            "            or self.closed_stop.is_set()\n"
+            "            or self.closed_by_server\n"
+            "        )\n"
+        ),
+        tests=(
+            "tests/test_worker_selfstop_m5tb.py::"
+            "test_rl5_a_409_job_closed_on_a_log_chunk_kills_only_an_irreversible_job",
+        ),
+    ),
+    Mutant(
+        # 409 job_closed(state=lost)에 일반 잡도 죽인다(RL5)
+        name="job-closed-kills-running",
+        path="src/remote_ci_monitor/remote_worker.py",
+        old=(
+            "            if self.irreversible or had_cancel:\n"
+            "                self.closed_stop.set()\n"
+        ),
+        new="            if True:\n                self.closed_stop.set()\n",
+        tests=(
+            "tests/test_worker_selfstop_m5tb.py::"
+            "test_rl5_a_409_job_closed_on_a_log_chunk_kills_only_an_irreversible_job",
+            "tests/test_worker_selfstop_m5tb.py::test_rl35_closed_jobs_follow_the_w4_table",
+        ),
+    ),
+    Mutant(
+        # 워커가 had_cancel 을 무시하고 일반 lost 잡을 계속 돌린다(RL8 · RL35)
+        name="lost-cancel-keeps-running",
+        path="src/remote_ci_monitor/remote_worker.py",
+        old=(
+            "            if self.irreversible or had_cancel:\n"
+            "                self.closed_stop.set()\n"
+        ),
+        new="            if self.irreversible:\n                self.closed_stop.set()\n",
+        tests=("tests/test_worker_selfstop_m5tb.py::test_rl35_closed_jobs_follow_the_w4_table",),
+    ),
+    Mutant(
+        # heartbeat 응답의 closed_jobs 를 워커가 무시한다 — 기록된 finish 를 다시 보낸다(RL35)
+        name="closed-jobs-ignored",
+        path="src/remote_ci_monitor/remote_worker.py",
+        old=(
+            '        self._apply_closed_jobs(out.get("closed_jobs"))  # m'
+            "utcheck: closed-jobs-ignored\n"
+        ),
+        new="        pass\n",
+        tests=(
+            "tests/test_worker_selfstop_m5tb.py::"
+            "test_rl35_a_recorded_finish_drops_the_parked_report_and_is_not_sent_again",
+        ),
+    ),
+    Mutant(
+        # L 을 2판 공식 2H + 15 로(RL34 · RL30)
+        name="lower-bound-one-timeout",
+        path="src/remote_ci_monitor/remote_worker.py",
+        old=(
+            "            t, 2 * h + 3 * HEARTBEAT_DEADLINE_SECONDS + 5\n"
+            "        )  # mutcheck: lower-bound-one-timeout\n"
+        ),
+        new="            t, 2 * h + 15\n        )\n",
+        tests=(
+            "tests/test_worker_selfstop_m5tb.py::"
+            "test_rl34_the_connected_age_floor_is_the_third_edition_formula",
+        ),
+    ),
+    Mutant(
+        # m 에서 요청 시한 항과 여유를 뺀다(1판 공식)(RL34)
+        name="self-stop-ignores-request-timeout",
+        path="src/remote_ci_monitor/remote_worker.py",
+        old=(
+            "        return grace_seconds - (HEARTBEAT_DEADLINE_SECONDS +"
+            " grace_j + SELF_STOP_SLACK_SECONDS)\n"
+        ),
+        new="        return grace_seconds - grace_j\n",
+        tests=("tests/test_worker_selfstop_m5tb.py::test_rl34_grace_j_and_the_threshold",),
+    ),
+    Mutant(
+        # 워커 wgap 을 단조 시계만으로 — 잠에서 깨어난 맥이 멈추지 않는다(RL26)
+        name="self-stop-monotonic-only",
+        path="src/remote_ci_monitor/remote_worker.py",
+        old=(
+            "        wgap = max(wall - ok[0], mono - ok[1])  # mutcheck: self-stop-monotonic-only\n"
+        ),
+        new="        wgap = mono - ok[1]\n",
+        tests=(
+            "tests/test_worker_selfstop_m5tb.py::"
+            "test_rl26_waking_from_sleep_stops_on_the_first_tick_by_the_wall_clock",
+        ),
+    ),
+    Mutant(
+        # 자기 멈춤이 표식 없는 잡에도 걸린다(RL5 · RL26)
+        name="self-stop-all-jobs",
+        path="src/remote_ci_monitor/remote_worker.py",
+        old=(
+            "            if not o.irreversible or o.self_stop.is_set():  "
+            "# mutcheck: self-stop-all-jobs\n"
+        ),
+        new="            if o.self_stop.is_set():\n",
+        tests=("tests/test_worker_selfstop_m5tb.py::test_rl26_a_plain_job_is_never_self_stopped",),
+    ),
+    Mutant(
+        # 감시가 self_stop 대신 취소 깃발을 세운다 — 잡이 cancelled 로 보고된다(RL1 · RL41)
+        name="self-stop-reports-cancelled",
+        path="src/remote_ci_monitor/remote_worker.py",
+        old="                o.self_stop.set()  # mutcheck: self-stop-reports-cancelled\n",
+        new="                o.closed_stop.set()\n",
+        tests=(
+            "tests/test_worker_selfstop_m5tb.py::"
+            "test_rl41_every_lost_path_reports_worker_self_stopped",
+            "tests/test_worker_selfstop_m5tb.py::"
+            "test_rl34_the_watchdog_stops_an_irreversible_job_exactly_at_g_minus_m",
+        ),
+    ),
+    Mutant(
+        # 감시 스레드를 없앤다 — 판정이 매달린 heartbeat 뒤에 묶인다(1판 꼴)(RL34 · RL1)
+        name="self-stop-in-heartbeat-loop",
+        path="src/remote_ci_monitor/remote_worker.py",
+        old="        while not self.stopping.wait(WATCHDOG_TICK_SECONDS):\n",
+        new="        while False:\n",
+        tests=(
+            "tests/test_worker_selfstop_m5tb.py::"
+            "test_rl34_the_watchdog_judges_while_heartbeat_hangs",
+        ),
+    ),
+    Mutant(
+        # heartbeat 전체 기한을 지운다 — 소켓 시한만 남는다(RL34)
+        name="heartbeat-no-deadline",
+        path="src/remote_ci_monitor/remote_worker.py",
+        old=(
+            "        if not done.wait(HEARTBEAT_DEADLINE_SECONDS):  # mut"
+            "check: heartbeat-no-deadline\n"
+        ),
+        new="        if not done.wait(None):\n",
+        tests=(
+            "tests/test_worker_selfstop_m5tb.py::"
+            "test_rl34_a_hanging_heartbeat_is_cut_at_its_deadline_and_a_late_2xx_moves_ok_at",
+        ),
+    ),
+    Mutant(
+        # 늦게 온 heartbeat 응답의 cancel 을 seq 와 상관없이 적용한다(RL50)
+        name="stale-hb-response-applied",
+        path="src/remote_ci_monitor/remote_worker.py",
+        old="            if seq > self._hb_applied:  # mutcheck: stale-hb-response-applied\n",
+        new="            if True:\n",
+        tests=(
+            "tests/test_worker_selfstop_m5tb.py::"
+            "test_rl50_a_late_heartbeat_answer_does_not_undo_a_newer_cancel",
+        ),
+    ),
+    Mutant(
+        # claim 번호를 닫은 뒤 다른 잠금 구간에서 running 을 넣는다(RL50, R20)
+        name="claim-settled-before-running",
+        path="src/remote_ci_monitor/remote_worker.py",
+        old=(
+            "                with self._lock:  # mutcheck: claim-settled-before-running\n"
+            "                    if isinstance(claimed, dict):\n"
+        ),
+        new=(
+            "                with self._lock:\n"
+            "                    self._open_claims.discard(claim_seq)\n"
+            "                with self._lock:\n"
+            "                    if isinstance(claimed, dict):\n"
+        ),
+        tests=(
+            "tests/test_worker_selfstop_m5tb.py::"
+            "test_rl50_the_claimed_job_is_running_in_the_lock_section_that_settles_its_claim",
+        ),
+    ),
+    Mutant(
+        # 홀드에 막힌 대기 잡의 사유가 blocked_by_group 이다(RL45)
+        name="hold-reason-not-needs-action",
+        path="src/remote_ci_monitor/core/queue.py",
+        old="        elif held_by is not None:  # mutcheck: hold-reason-not-needs-action\n",
+        new="        elif False:\n",
+        tests=(
+            "tests/test_worker_session_m5tb.py::"
+            "test_rl45_a_job_waiting_on_a_held_group_needs_action_with_the_hold_as_blocker",
+        ),
+    ),
+    Mutant(
+        # 홀드 사건을 버스에 내지 않는다 — opt-in 규칙이 불리지 않는다(RL54)
+        name="hold-notify-missing",
+        path="src/remote_ci_monitor/server.py",
+        old=(
+            "        # mutcheck: hold-notify-missing\n"
+            '        self.publish(KIND_IRREVERSIBLE_HOLD, {"job_id": int(job_id)})\n'
+        ),
+        new="        pass\n",
+        tests=(
+            "tests/test_hold_notify_m5tb.py::"
+            "test_rl54_the_server_publishes_the_hold_event_after_it_holds",
+        ),
+    ),
+    Mutant(
+        # 기동 스캔이 hold: 행을 잡 끝 알림 행으로 센다(RL54)
+        name="hold-notify-blocks-job-scan",
+        path="src/remote_ci_monitor/store.py",
+        old=(
+            "            \"WHERE notify_name NOT LIKE 'hold:%'\"  # mutchec"
+            "k: hold-notify-blocks-job-scan\n"
+        ),
+        new='            ""\n',
+        tests=(
+            "tests/test_hold_notify_m5tb.py::"
+            "test_rl54_a_hold_row_does_not_hide_the_job_from_the_job_end_scan",
+        ),
+    ),
+    Mutant(
+        # on 을 안 적은 규칙의 기본에 irreversible_hold 를 넣는다(4판 재료 꼴, 6차에서 버림)(RL54)
+        name="hold-notify-default-on",
+        path="src/remote_ci_monitor/config.py",
+        old="        on = frozenset(NOTIFY_DEFAULT_STATES)  # mutcheck: hold-notify-default-on\n",
+        new="        on = frozenset(NOTIFY_DEFAULT_STATES | {NOTIFY_ON_HOLD})\n",
+        tests=(
+            "tests/test_hold_notify_m5tb.py::"
+            "test_rl54_on_accepts_irreversible_hold_and_the_default_leaves_it_out",
+        ),
+    ),
+    Mutant(
+        # notify_env 가 그 잡의 열린 홀드를 보지 않는다 — 홀드를 만든 잡의 잡 끝 알림이
+        # RCM_HOLD=0(RL54)
+        name="job-end-hold-env-missing",
+        path="src/remote_ci_monitor/core/notify.py",
+        old="    held = hold is not None  # mutcheck: job-end-hold-env-missing\n",
+        new="    held = False\n",
+        tests=(
+            "tests/test_hold_notify_m5tb.py::"
+            "test_rl54_the_job_end_notification_of_a_held_job_carries_the_hold",
+        ),
+    ),
+    # ── M5t-b PR1 (P2-5: 계획↔시험 대조가 약하다고 한 행) ──
+    Mutant(
+        # 로그 배치를 러너의 펌프 스레드에서 보낸다 — 분단 중 전송 하나가 시한까지 매달려 펌프가
+        # 멈춘다(로컬 log.txt · 취소 · 자기 멈춤 점검이 멈춤, RL5 에서 찾은 결함)
+        name="log-sent-in-the-pump",
+        path="src/remote_ci_monitor/remote_worker.py",
+        old="            self._send_later()\n",
+        new="            self.flush()\n",
+        tests=(
+            "tests/test_worker_selfstop_m5tb.py::"
+            "test_rl5_a_hanging_log_post_does_not_stall_the_runner_pump",
+        ),
+    ),
+    Mutant(
+        # 유예 닫기가 잠금 안에서 heard 를 다시 보지 않는다 — 판정 뒤에 든 heartbeat 를 무시하고
+        # 닫는다(RL56 · RL4)
+        name="grace-close-no-recheck",
+        path="src/remote_ci_monitor/remote_workers.py",
+        old=(
+            "                    if gap <= grace:\n"
+            "                        continue  # 판정 뒤에 들었다 — 닫지 않는다\n"
+        ),
+        new="                    if False:\n                        continue\n",
+        tests=(
+            "tests/test_worker_selfstop_m5tb.py::"
+            "test_rl56_a_heard_that_rises_between_the_judgement_and_the_lock_keeps_the_job_open",
+        ),
+    ),
+    Mutant(
+        # 유예 닫기가 세션 잠금 밖이다 — 같은 세션의 heartbeat 가 닫기와 줄을 서지 않는다(RL56)
+        name="grace-close-outside-the-session-lock",
+        path="src/remote_ci_monitor/remote_workers.py",
+        old=(
+            "                with self._session_lock(key):\n"
+            "                    gap = self.mono_fn() - self.heard_at(key)  #"
+            " type: ignore[attr-defined]\n"
+        ),
+        new=(
+            "                with threading.Lock():\n"
+            "                    gap = self.mono_fn() - self.heard_at(key)  #"
+            " type: ignore[attr-defined]\n"
+        ),
+        tests=(
+            "tests/test_worker_selfstop_m5tb.py::"
+            "test_rl56_the_same_sessions_heartbeat_waits_for_the_close_and_sees_it",
+        ),
+    ),
+    Mutant(
+        # 취소 미확인 닫기가 홀드를 걸지 않는다 — 들리는 워커가 확인하지 않은 표식 잡의 그룹이
+        # 풀린다(RL8 · 결정 330)
+        name="cancel-unconfirmed-no-hold",
+        path="src/remote_ci_monitor/remote_workers.py",
+        old='                    hold_cause="cancel_unconfirmed",\n',
+        new="                    hold_cause=None,\n",
+        tests=(
+            "tests/test_worker_selfstop_m5tb.py::"
+            "test_rl8_a_live_session_that_never_confirms_an_irreversible_cancel_holds",
+        ),
+    ),
+    Mutant(
+        # 홀드 풀기가 사건 hold(released)를 남기지 않는다(RL44)
+        name="hold-release-no-event",
+        path="src/remote_ci_monitor/store.py",
+        old=(
+            '            {"action": "released", "release_kind": kind, '
+            '"released_by": by, "reason": reason},\n'
+            "            ts,\n"
+            "        )\n"
+            "        return True\n"
+        ),
+        new=(
+            '            {"action": "released", "release_kind": kind, '
+            '"released_by": by, "reason": reason},\n'
+            "            ts,\n"
+            "        ) if False else None\n"
+            "        return True\n"
+        ),
+        tests=(
+            "tests/test_worker_session_m5tb.py::"
+            "test_rl44_hold_release_events_are_one_for_a_b_c_and_zero_for_d",
+        ),
+    ),
+    Mutant(
+        # 조용했던 시간도 취소 미확인 창에 센다 — 분단 중 취소된 표식 잡을 돌아온 첫 heartbeat 가
+        # 워커의 확인을 기다리지 않고 `cancel_unconfirmed` + 홀드로 닫는다(T4 · RL8 (a))
+        name="t4-quiet-time-counted",
+        path="src/remote_ci_monitor/remote_workers.py",
+        old="                if gap > missed:  # mutcheck: t4-quiet-time-counted\n",
+        new="                if False:\n",
+        tests=(
+            "tests/test_worker_selfstop_m5tb.py::"
+            "test_rl8_a_irreversible_cancel_during_the_partition_is_confirmed_inside_the_new_window",
+            "tests/test_worker_selfstop_m5tb.py::"
+            "test_rl8_a_irreversible_cancel_unconfirmed_in_the_new_window_closes_and_holds",
+        ),
+    ),
+    Mutant(
+        # 펜싱된 프로세스가 0 이 아닌 코드로 끝난다 — 감독자가 되살려 새 세션을 되펜싱하는
+        # 핑퐁이 된다(RL10 · 결정 258)
+        name="fenced-exit-nonzero",
+        path="src/remote_ci_monitor/remote_worker.py",
+        old="            return 0  # 펜싱 — 감독자가 되살리지 않는다(결정 258)\n",
+        new="            return 1\n",
+        tests=(
+            "tests/test_worker_session_m5tb.py::"
+            "test_rl10_a_fake_supervisor_does_not_bring_back_a_fenced_process",
+        ),
+    ),
+    Mutant(
+        # 유예를 잡의 세션이 아니라 그 이름의 현재 세션의 들음으로 잰다 — 펜싱된 A 가 확인을
+        # 못 보내면 X 가 살아 있는 B 때문에 영영 닫히지 않는다(RL10)
+        name="grace-heard-of-the-current-session",
+        path="src/remote_ci_monitor/remote_workers.py",
+        old=(
+            "            for job in self.store.busy_remote_jobs():\n"
+            '                key = job.worker_session_id or f"legacy:{job.worker_name}"\n'
+        ),
+        new=(
+            "            for job in self.store.busy_remote_jobs():\n"
+            "                key = self.store.current_session(job.worker_name)"
+            ' or f"legacy:{job.worker_name}"\n'
+        ),
+        tests=(
+            "tests/test_worker_session_m5tb.py::"
+            "test_rl10_an_unconfirmed_fenced_process_keeps_the_job_until_its_last_heard_plus_g",
+        ),
+    ),
+    Mutant(
+        # `[server]` 가 바뀐 reload 를 거절하지 않는다 — 긴 수명 스레드는 옛 G 로 돌고 claim 은
+        # 새 G 를 얼린다(RL30)
+        name="reload-takes-a-changed-server-section",
+        path="src/remote_ci_monitor/server.py",
+        old="            if getattr(fresh, section) != getattr(self.config, section)\n",
+        new="            if False\n",
+        tests=(
+            "tests/test_worker_selfstop_m5tb.py::"
+            "test_rl30_a_reload_that_changes_the_grace_is_refused_whole_and_keeps_the_old_values",
+        ),
+    ),
+    Mutant(
+        # 홀드 판정이 claim 때 얼린 `irreversible` 대신 지금 설정의 표를 본다 — reload 로 표식을
+        # 뗀 프리셋의 도는 잡이 닫힐 때 그룹이 풀린다(RL30 · 결정 257)
+        name="hold-reads-the-reloaded-preset",
+        path="src/remote_ci_monitor/store.py",
+        old=(
+            '        if row["irreversible"] is not None:\n'
+            '            return bool(row["irreversible"])\n'
+        ),
+        new='        if False:\n            return bool(row["irreversible"])\n',
+        tests=(
+            "tests/test_worker_selfstop_m5tb.py::"
+            "test_rl30_irreversible_changed_by_a_reload_while_a_job_runs_reaches_only_the_next_claim",
+        ),
+    ),
+    Mutant(
+        # 워커 grace 가 커도 표식 잡의 grace_J 를 줄이지 않는다 — 문턱 `G − m` 이 L 아래로
+        # 내려간다(RL30 · §4.3)
+        name="irreversible-grace-not-lowered",
+        path="src/remote_ci_monitor/remote_worker.py",
+        old="        grace = max(1, min(conf, cap))\n",
+        new="        grace = conf\n",
+        tests=(
+            "tests/test_worker_selfstop_m5tb.py::"
+            "test_rl30_the_worker_grace_seconds_keeps_its_meaning_and_shrinks_only_for_an_irreversible_job",
+        ),
+    ),
+    Mutant(
+        # 신원을 모르는 죽은 세션을 워커 로그에 남기지 않는다 — 운영자가 왜 그룹이 G 까지
+        # 잡혀 있는지 모른다(RL31)
+        name="unverified-session-not-logged",
+        path="src/remote_ci_monitor/remote_worker.py",
+        old=("            if not dead.verified:\n                self.log(\n"),
+        new=("            if not dead.verified:\n                (lambda m: None)(\n"),
+        tests=(
+            "tests/test_worker_session_m5tb.py::"
+            "test_rl31_unknown_identity_warns_then_the_recheck_stops_the_same_group",
+        ),
+    ),
+    Mutant(
+        # 그룹 없는 표식 프리셋의 합성 그룹을 기동 로그에 남기지 않는다(RL48 · 결정 330)
+        name="synthetic-group-not-logged",
+        path="src/remote_ci_monitor/remote_workers.py",
+        old=("                self._synthetic_said.add(p.name)\n                self.log(\n"),
+        new=(
+            "                self._synthetic_said.add(p.name)\n                (lambda m: None)(\n"
+        ),
+        tests=(
+            "tests/test_irreversible_hold_m5tb.py::"
+            "test_rl48_the_server_logs_one_startup_line_per_synthetic_group",
+        ),
+    ),
+    Mutant(
+        # 합성 그룹 줄을 reload 마다 다시 쓴다 — 프리셋마다 한 번이 아니다(RL48)
+        name="synthetic-group-logged-every-reload",
+        path="src/remote_ci_monitor/remote_workers.py",
+        old="                self._synthetic_said.add(p.name)\n",
+        new="                pass\n",
+        tests=(
+            "tests/test_irreversible_hold_m5tb.py::"
+            "test_rl48_the_server_logs_one_startup_line_per_synthetic_group",
+        ),
+    ),
+    Mutant(
+        # 감독자의 미시작(parent_gone · terminated)이 러너 플래그를 이긴다 — 멈춤 · 취소한 잡이
+        # launch_failed 로 보인다(RL52 (a))
+        name="supervisor-not-started-beats-the-flag",
+        path="src/remote_ci_monitor/runner.py",
+        old=(
+            "    if result.lost or result.cancelled or result.timed_out:\n"
+            "        return None\n"
+            '    return RunnerError("launch_failed", error="SupervisorNotStarted", log=reason)\n'
+        ),
+        new='    return RunnerError("launch_failed", error="SupervisorNotStarted", log=reason)\n',
+        tests=(
+            "tests/test_job_supervisor_m5tb.py::"
+            "test_rl52_a_a_supervisor_that_sees_the_wrong_parent_logs_the_marker_and_the_flag_wins",
+        ),
+    ),
+    Mutant(
+        # 자기 멈춤 문턱이 `G − m` 이 아니라 G 다 — 1판의 「G 뒤에 죽음」, 서버가 먼저 닫을 수
+        # 있다(RL34 (a)(b))
+        name="self-stop-at-g",
+        path="src/remote_ci_monitor/remote_worker.py",
+        old=(
+            "        return grace_seconds - (HEARTBEAT_DEADLINE_SECONDS + grace_j + "
+            "SELF_STOP_SLACK_SECONDS)\n"
+        ),
+        new="        return grace_seconds\n",
+        tests=(
+            "tests/test_worker_selfstop_m5tb.py::"
+            "test_rl34_a_b_the_group_is_gone_before_the_server_may_close",
+        ),
+    ),
+    Mutant(
+        # heartbeat 의 답을 받기 전에 `ok_at` 을 올린다 — 5xx 만 받는 워커가 자기 멈춤을
+        # 하지 않는다(RL34 (d))
+        name="ok-at-before-the-answer",
+        path="src/remote_ci_monitor/remote_worker.py",
+        old=(
+            '                box["out"] = self.client.heartbeat('
+            "jobs, host, seq=seq, claims_settled=settled)\n"
+            "                self.mark_ok(*sent)\n"
+        ),
+        new=(
+            "                self.mark_ok(*sent)\n"
+            '                box["out"] = self.client.heartbeat('
+            "jobs, host, seq=seq, claims_settled=settled)\n"
+        ),
+        tests=(
+            "tests/test_worker_selfstop_m5tb.py::"
+            "test_rl34_d_heartbeats_that_keep_getting_5xx_stop_the_job_at_g_minus_m",
+        ),
+    ),
+    Mutant(
+        # requires 프리셋의 준비 중 멈춤이 `group_gone` 을 싣지 않는다 — 프로세스를 띄운 적
+        # 없는 표식 잡의 그룹이 홀드된다(RL41 (c))
+        name="requires-early-stop-group-unknown",
+        path="src/remote_ci_monitor/runner.py",
+        old=(
+            "                # mutcheck: requires-early-stop-group-unknown\n"
+            "                return RunResult(rc=None, started=at, finished=at, lost=True, "
+            "group_gone=True)\n"
+        ),
+        new="                return RunResult(rc=None, started=at, finished=at, lost=True)\n",
+        tests=(
+            "tests/test_job_supervisor_m5tb.py::"
+            "test_rl41_c_a_preset_with_requires_and_a_flag_while_preparing_starts_no_process",
+        ),
+    ),
+    Mutant(
+        # requires 프리셋의 준비 중 취소가 `group_gone` 을 싣지 않는다 — 명령이 뜨지 않은 표식
+        # 잡의 그룹이 홀드된다(RL41 (c) 취소 갈래). e2e 의 느린 스냅샷 시험도 잡는다(손으로 확인)
+        name="requires-early-cancel-group-unknown",
+        path="src/remote_ci_monitor/runner.py",
+        old=(
+            "                # mutcheck: requires-early-cancel-group-unknown\n"
+            "                return RunResult(rc=None, started=at, finished=at, cancelled=True, "
+            "group_gone=True)\n"
+        ),
+        new="                return RunResult(rc=None, started=at, finished=at, cancelled=True)\n",
+        tests=(
+            "tests/test_job_supervisor_m5tb.py::"
+            "test_rl41_c_a_preset_with_requires_and_a_flag_while_preparing_starts_no_process",
+        ),
+    ),
+    Mutant(
+        # 이어받기 등록이 previous_sessions 의 표식 잡을 닫으며 홀드를 만든다 — 확인인데
+        # 「없음」처럼 다룬다(RL9)
+        name="restart-confirm-holds",
+        path="src/remote_ci_monitor/store.py",
+        old='                    closed.append(int(row["id"]))\n',
+        new=(
+            '                    closed.append(int(row["id"]))\n'
+            '                    self._hold_tx(conn, int(row["id"]), '
+            '"worker_restarted_without_job", ts)\n'
+        ),
+        tests=(
+            "tests/test_worker_session_m5tb.py::"
+            "test_rl9_a_restarted_process_closes_its_dead_sessions_irreversible_job_without_a_hold",
+        ),
+    ),
+    Mutant(
+        # 표에 없는 세션을 그냥 통과시킨다 — log · phase · finish 가 not_registered 대신 403(RL11)
+        name="unknown-session-passes",
+        path="src/remote_ci_monitor/remote_workers.py",
+        old="        row = self.store.get_session(session_id)\n        if row is None:\n",
+        new=(
+            "        row = self.store.get_session(session_id)\n"
+            "        if row is None:\n"
+            "            return\n"
+            "        if row is None:\n"
+        ),
+        tests=(
+            "tests/test_worker_session_m5tb.py::"
+            "test_rl11_an_unknown_session_gets_not_registered_on_log_phase_and_finish",
+        ),
+    ),
+    Mutant(
+        # closed_jobs 가 heartbeat 목록과 상관없이 그 세션의 닫힌 잡을 모두 싣는다(RL35)
+        name="closed-jobs-beyond-the-list",
+        path="src/remote_ci_monitor/store.py",
+        old=(
+            '                f"SELECT id, state, cancel_requested_at FROM jobs WHERE id IN '
+            '({marks}) "\n'
+        ),
+        new=(
+            '                f"SELECT id, state, cancel_requested_at FROM jobs WHERE (1 OR id IN '
+            '({marks})) "\n'
+        ),
+        tests=(
+            "tests/test_worker_session_m5tb.py::"
+            "test_rl35_a_closed_job_missing_from_the_heartbeat_list_is_not_reported",
+        ),
+    ),
+    Mutant(
+        # 늦게 돌아온 heartbeat 응답의 paused 를 seq 와 상관없이 적용한다(RL50)
+        name="stale-hb-paused-applied",
+        path="src/remote_ci_monitor/remote_worker.py",
+        old='                self.paused = bool(out.get("paused"))\n',
+        new='            self.paused = bool(out.get("paused"))\n',
+        tests=(
+            "tests/test_worker_selfstop_m5tb.py::"
+            "test_rl50_a_late_heartbeat_answer_does_not_undo_a_newer_paused",
+        ),
+    ),
+    Mutant(
+        # 감독자가 알린 권한 거부를 러너가 launch_permission_denied 로 읽지 않는다(RL52 b)
+        name="supervisor-permission-denied-unmapped",
+        path="src/remote_ci_monitor/runner.py",
+        old='    if reason == "launch_permission_denied":\n',
+        new="    if False:\n",
+        tests=(
+            "tests/test_job_supervisor_m5tb.py::"
+            "test_rl52_b_a_non_executable_command_under_the_supervisor_has_the_same_code",
+        ),
+    ),
+    # ── M5t-b P3 1라운드 HIGH — 관찰자의 기록 실패가 띄운 프로세스를 버린다 ──
+    Mutant(
+        # 러너가 `spawned` 의 예외를 올린다 — 펌프가 시작하지 않고 잡이 `running` 에 멈춘다
+        name="runner-spawned-error-escapes",
+        path="src/remote_ci_monitor/runner.py",
+        old=(
+            "            except Exception as e:  # noqa: BLE001  # mutcheck: "
+            "runner-spawned-error-escapes\n"
+        ),
+        new=("            except Exception as e:  # noqa: BLE001\n                raise\n"),
+        tests=(
+            "tests/test_job_supervisor_m5tb.py::"
+            "test_rl43_an_observer_failing_right_after_popen_does_not_abandon_the_process",
+        ),
+    ),
+    Mutant(
+        # 관찰자가 `proc.json` 쓰기 실패를 로그 없이 올린다 — 무엇이 빠졌는지 아무 데도 안 남는다
+        name="spawned-record-error-escapes",
+        path="src/remote_ci_monitor/remote_worker.py",
+        old=(
+            "        except OSError as e:  # mutcheck: spawned-record-error-escapes\n"
+            '            self.proc.log(f"#{self.job_id} session folder: {type(e).__name__}")\n'
+        ),
+        new=(
+            "        except OSError as e:  # mutcheck: spawned-record-error-escapes\n"
+            "            raise\n"
+        ),
+        tests=(
+            "tests/test_worker_session_m5tb.py::"
+            "test_rl31_c_a_proc_record_that_cannot_be_written_after_popen_keeps_the_job_watched",
+        ),
+    ),
+    Mutant(
+        # 「띄우는 중」 기록 없이 표식 잡을 띄운다 — 다음 프로세스가 도는 그룹을 CONFIRMED 로 읽는다
+        name="spawning-record-missing-still-spawns",
+        path="src/remote_ci_monitor/remote_worker.py",
+        old="            if self.irreversible:  # mutcheck: spawning-record-missing-still-spawns\n",
+        new="            if False:\n",
+        tests=(
+            "tests/test_worker_session_m5tb.py::"
+            "test_rl31_c_an_irreversible_job_whose_spawning_record_fails_starts_nothing",
+        ),
+    ),
+    Mutant(
+        # 바깥 안전망이 예외를 그대로 올린다 — 레인 루프가 로그만 남기고 잡이 `running` 에 멈춘다
+        name="run-claimed-error-leaves-job-running",
+        path="src/remote_ci_monitor/remote_worker.py",
+        old=(
+            "            if observer.finish_sent:  # mutcheck: "
+            "run-claimed-error-leaves-job-running\n"
+        ),
+        new="            if True:\n",
+        tests=(
+            "tests/test_worker_session_m5tb.py::"
+            "test_rl43_any_observer_error_after_popen_stops_the_job_and_reports_it",
+        ),
+    ),
+    Mutant(
+        # 펌프가 터졌을 때 그룹을 끝내지 않는다 — 명령이 감시 없이 계속 돈다
+        name="runner-abandon-leaves-group",
+        path="src/remote_ci_monitor/runner.py",
+        old="    # mutcheck: runner-abandon-leaves-group\n    signal_group(proc, signal.SIGTERM)\n",
+        new="    # mutcheck: runner-abandon-leaves-group\n    return False\n",
+        tests=(
+            "tests/test_worker_session_m5tb.py::"
+            "test_rl43_any_observer_error_after_popen_stops_the_job_and_reports_it",
+        ),
+    ),
+    # ── M5t-b P3 1라운드 MED — 긴 대기 claim 이 펜싱을 다시 보지 않는다 ──
+    Mutant(
+        # claim 트랜잭션이 세션의 펜싱을 보지 않는다 — 펜싱된 세션의 긴 대기가 새 잡을 집는다
+        name="claim-ignores-fencing",
+        path="src/remote_ci_monitor/store.py",
+        old='if fenced is not None and fenced["fenced_at"] is not None:  # mutcheck: claim-fenced',
+        new="if False:",
+        tests=(
+            "tests/test_worker_session_m5tb.py::"
+            "test_rl10_a_long_poll_claim_fenced_while_it_waits_takes_no_job",
+        ),
+    ),
+    # ── M5t-b P3 1라운드 MED — 알림 없는 홀드 두 길 ──
+    Mutant(
+        # 옛 워커가 잊은 표식 잡의 홀드를 알리지 않는다 — 로그 · 버스 사건 · 알림이 없다
+        name="legacy-hold-silent",
+        path="src/remote_ci_monitor/remote_workers.py",
+        old=(
+            "            if closed and self.store.has_open_hold(job.id):  # mutcheck: "
+            "legacy-hold-silent\n"
+            "                self._hold_created(job.id)\n"
+        ),
+        new="            if False:\n                self._hold_created(job.id)\n",
+        tests=(
+            "tests/test_hold_notify_m5tb.py::"
+            "test_rl54_a_legacy_worker_forgetting_its_irreversible_job_announces_the_hold",
+        ),
+    ),
+    Mutant(
+        # 취소 미확인 닫기의 홀드를 알리지 않는다(heartbeat · janitor 두 길 모두)
+        name="cancel-unconfirmed-hold-silent",
+        path="src/remote_ci_monitor/remote_workers.py",
+        old=(
+            "                    if self.store.has_open_hold(job.id):  # mutcheck: "
+            "cancel-unconfirmed-hold-silent\n"
+        ),
+        new="                    if False:\n",
+        tests=(
+            "tests/test_hold_notify_m5tb.py::test_rl54_a_cancel_unconfirmed_hold_is_announced_once",
+        ),
+    ),
+    # ── M5t-b P3 1라운드 MED — group_gone: false 뒤 잡 폴더 삭제 ──
+    Mutant(
+        # 그룹 소멸을 확인하지 못한 표식 잡의 폴더를 지운다 — 다음 프로세스가 다시 판정할 수 없다
+        name="unconfirmed-group-folder-dropped",
+        path="src/remote_ci_monitor/remote_worker.py",
+        old=(
+            "            self._group_unconfirmed.add(job_id)  # mutcheck: "
+            "unconfirmed-group-folder-dropped"
+        ),
+        new="            pass",
+        tests=(
+            "tests/test_worker_session_m5tb.py::"
+            "test_rl44_a_finish_without_group_gone_keeps_the_folder_for_the_next_process",
+        ),
+    ),
+    # ── M5t-b P3 1라운드 LOW — release-hold 의 5xx ──
+    Mutant(
+        # 서버 오류(5xx)를 거절(2)로 읽는다 — 풀렸는지 모르는데 「고칠 것이 있다」고 말한다
+        name="release-hold-5xx-is-usage",
+        path="src/remote_ci_monitor/cli.py",
+        old=(
+            "        return USAGE_EXIT if 0 < e.status < 500 else EXIT_UNKNOWN  # mutcheck: "
+            "release-hold-5xx"
+        ),
+        new="        return USAGE_EXIT if e.status else EXIT_UNKNOWN",
+        tests=(
+            "tests/test_worker_session_m5tb.py::"
+            "test_rl45_rcm_release_hold_reads_a_server_error_as_unknown",
+            "tests/test_worker_session_m5tb.py::test_rl45_rcm_release_hold_exit_codes",
+        ),
+    ),
+    # ── M5t-b P3 1라운드 LOW — 서버 재시작 뒤 취소 미확인 창 ──
+    Mutant(
+        # 기동 뒤 처음 들린 세션의 창을 새로 재지 않는다 — 돌아온 첫 heartbeat 가 곧바로 닫는다
+        name="restart-not-quiet",
+        path="src/remote_ci_monitor/remote_workers.py",
+        old="                if key not in self._heard:  # mutcheck: restart-not-quiet\n",
+        new="                if False:\n",
+        tests=(
+            "tests/test_worker_selfstop_m5tb.py::"
+            "test_rl7_a_cancel_window_that_ran_out_while_the_server_was_down_starts_again",
+        ),
+    ),
+    Mutant(
+        # 기동 뒤 아직 안 들린 세션의 취소 중 잡을 janitor 의 첫 틱이 닫는다
+        name="restart-unheard-cancel-closed",
+        path="src/remote_ci_monitor/remote_workers.py",
+        old="            if unheard:  # mutcheck: restart-unheard-cancel-closed\n",
+        new="            if False:\n",
+        tests=(
+            "tests/test_worker_selfstop_m5tb.py::"
+            "test_rl7_a_cancel_window_that_ran_out_while_the_server_was_down_starts_again",
+        ),
+    ),
+    # ── M5t-b P3 1라운드 LOW — 못 읽은 홀드를 [] 로 ──
+    Mutant(
+        # `/api/status` 가 홀드를 못 읽고도 「열린 홀드 없음」([])이라고 말한다
+        name="status-holds-unknown-as-empty",
+        path="src/remote_ci_monitor/core/status.py",
+        old="            None  # mutcheck: status-holds-unknown-as-empty\n",
+        new="            []\n",
+        tests=(
+            "tests/test_worker_session_m5tb.py::"
+            "test_rl45_status_says_null_not_empty_when_the_holds_cannot_be_read",
+        ),
+    ),
+    # ── M5t-b P3 1라운드 LOW — 확인과 닫기 사이 janitor ──
+    Mutant(
+        # 확인과 store.finish 사이에 닫힌 잡에 job_closed 없는 409 를 주고 홀드를 풀지 않는다
+        name="finish-race-not-job-closed",
+        path="src/remote_ci_monitor/remote_workers.py",
+        old=(
+            "                raise self._closed_answer(token, current, session, gone)  # mutcheck: "
+            "race-closed\n"
+        ),
+        new='                raise _api_error(409, f"job #{job.id} is {st}", state=st)\n',
+        tests=(
+            "tests/test_worker_session_m5tb.py::"
+            "test_rl44_c_a_finish_racing_the_janitor_close_gets_job_closed_and_releases",
+        ),
+    ),
+    # ── M5t-b P3 1라운드 LOW — 같은 새 세션의 동시 등록 ──
+    Mutant(
+        # 같은 새 세션 id 의 늦은 등록이 PK 충돌로 500 이 된다
+        name="register-race-500",
+        path="src/remote_ci_monitor/remote_workers.py",
+        old=(
+            "            if self.store.get_session(session) is None:  # mutcheck: "
+            "register-race-500\n"
+        ),
+        new="            if True:\n",
+        tests=(
+            "tests/test_worker_session_m5tb.py::"
+            "test_rl12_two_registers_of_one_new_session_racing_both_succeed",
+        ),
+    ),
+    # ── M5t-b P3 1라운드 LOW — 워커의 단조 시계가 러너에 안 닿는다 ──
+    Mutant(
+        # 원격 워커가 run_job 에 제 단조 시계를 넘기지 않는다 — 러너는 제 시계를 쓴다
+        name="runner-own-monotonic-clock",
+        path="src/remote_ci_monitor/remote_worker.py",
+        old="                mono_fn=self.mono_fn,  # mutcheck: runner-own-monotonic-clock\n",
+        new="",
+        tests=(
+            "tests/test_worker_selfstop_m5tb.py::"
+            "test_rl34_f_the_worker_hands_its_monotonic_clock_to_the_runner",
+        ),
+    ),
+    # ── M5t-b P3 2라운드 LOW — 있는데 못 읽는 proc.json ──
+    Mutant(
+        # 깨진 proc.json(JSON 아님 · 객체 아님)을 「띄운 적 없음」으로 읽는다
+        name="orphan-broken-proc-confirmed",
+        path="src/remote_ci_monitor/remote_worker.py",
+        old="    if not isinstance(proc, dict):  # mutcheck: orphan-broken-proc-confirmed\n",
+        new="    if not isinstance(proc, dict):\n        return CONFIRMED\n",
+        tests=(
+            "tests/test_worker_session_m5tb.py::"
+            "test_rl31_a_proc_record_that_exists_but_cannot_be_read_is_unknown",
+        ),
+    ),
+    Mutant(
+        # 읽을 수 없는 proc.json(OSError)을 「띄운 적 없음」으로 읽는다
+        name="orphan-unreadable-proc-confirmed",
+        path="src/remote_ci_monitor/remote_worker.py",
+        old="        return UNKNOWN  # mutcheck: orphan-unreadable-proc-confirmed\n",
+        new="        return CONFIRMED\n",
+        tests=(
+            "tests/test_worker_session_m5tb.py::"
+            "test_rl31_a_proc_record_that_exists_but_cannot_be_read_is_unknown",
+        ),
+    ),
+    # ── M5t-b P3 2라운드 HIGH — 로컬 레인이 러너의 group_gone 을 읽지 않는다 ──
+    Mutant(
+        # 로컬 레인이 그룹이 사라졌다는 확인 없이 표식 잡을 닫고 그룹을 연다(§4.12 확인 표 4행)
+        name="local-lane-group-unchecked",
+        path="src/remote_ci_monitor/worker.py",
+        old=(
+            "        if irreversible and gone is not True:  # mutcheck: "
+            "local-lane-group-unchecked\n"
+        ),
+        new="        if False:\n",
+        tests=(
+            "tests/test_hold_notify_m5tb.py::"
+            "test_rl54_a_local_lane_irreversible_job_holds_unless_its_group_is_gone",
+        ),
+    ),
+    # ── M5t-b P3 2라운드 LOW — 바깥 안전망 · Popen 의 OSError 아닌 실패 · spawned 로그 ──
+    Mutant(
+        # argv 의 NUL(ValueError)이 러너 밖으로 그대로 샌다 — 그룹을 모르는 채로 닫힌다
+        name="popen-error-not-launch-failed",
+        path="src/remote_ci_monitor/runner.py",
+        old=(
+            "        except Exception as e:  # noqa: BLE001  # mutcheck: "
+            "popen-error-not-launch-failed\n"
+        ),
+        new="        except ZeroDivisionError as e:\n",
+        tests=(
+            "tests/test_job_supervisor_m5tb.py::"
+            "test_rl43_a_popen_error_that_is_not_an_oserror_launches_nothing_and_says_so",
+        ),
+    ),
+    Mutant(
+        # 바깥 안전망이 러너가 이미 낸 결과를 버리고 늘 failed 를 보낸다
+        name="safety-net-drops-the-result",
+        path="src/remote_ci_monitor/remote_worker.py",
+        old="            if result is not None:  # mutcheck: safety-net-drops-the-result\n",
+        new="            if False:\n",
+        tests=(
+            "tests/test_worker_session_m5tb.py::"
+            "test_rl43_a_worker_error_after_the_runner_returned_reports_that_result",
+        ),
+    ),
+    Mutant(
+        # 띄우기 전의 예외에도 바깥 안전망이 group_gone 을 싣지 않는다 — 서버가 홀드한다
+        name="safety-net-unlaunched-group-unknown",
+        path="src/remote_ci_monitor/remote_worker.py",
+        old="                group_gone=gone,  # mutcheck: safety-net-unlaunched-group-unknown\n",
+        new='                group_gone=getattr(e, "group_gone", None),\n',
+        tests=(
+            "tests/test_worker_session_m5tb.py::"
+            "test_rl43_a_worker_error_before_anything_was_launched_says_the_group_is_gone",
+        ),
+    ),
+    Mutant(
+        # 러너가 `spawned` 의 예외를 아무 흔적 없이 삼킨다
+        name="spawned-error-not-logged",
+        path="src/remote_ci_monitor/runner.py",
+        old='                _note(log, f"[rcm] observer: spawned: {type(e).__name__}")\n',
+        new="                pass\n",
+        tests=(
+            "tests/test_job_supervisor_m5tb.py::"
+            "test_rl43_a_swallowed_spawned_error_leaves_a_line_in_the_job_log",
+        ),
+    ),
+    # ── M5t-b P3 2라운드 LOW — worker_timeout 보다 짧은 분단의 취소 창 ──
+    Mutant(
+        # 요청을 걸친 침묵이 worker_timeout 보다 짧으면 창을 새로 재지 않는다
+        name="t4-short-quiet-counted",
+        path="src/remote_ci_monitor/remote_workers.py",
+        old=(
+            "            # mutcheck: t4-short-quiet-counted\n"
+            "            spans = began is None or began <= cancel.requested_at\n"
+        ),
+        new="            spans = gap > self.config.server.worker_timeout_seconds\n",
+        tests=(
+            "tests/test_worker_selfstop_m5tb.py::"
+            "test_rl8_a_a_partition_shorter_than_worker_timeout_starts_the_cancel_window_again",
+        ),
+    ),
+    Mutant(
+        # 분단 중(요청 뒤로 못 들은 세션)의 취소 중 잡을 janitor 가 닫는다 — 워커는 취소를 모른다
+        name="t4-unheard-since-cancel-closed",
+        path="src/remote_ci_monitor/remote_workers.py",
+        old=(
+            "        if last_heard <= cancel.requested_at:  # mutcheck: "
+            "t4-unheard-since-cancel-closed\n"
+        ),
+        new="        if False:\n",
+        tests=(
+            "tests/test_worker_selfstop_m5tb.py::"
+            "test_rl8_a_a_partition_shorter_than_worker_timeout_starts_the_cancel_window_again",
+        ),
+    ),
+    # ── M5t-b P3 2라운드 LOW — 두 번째 경합 닫기 자리 · 상태 문서의 빈 절 ──
+    Mutant(
+        # 취소에 진 시작 전 실패의 재시도 직전에 janitor 가 닫으면 409 에 job_closed 가 없다
+        name="race-closed-retry",
+        path="src/remote_ci_monitor/remote_workers.py",
+        old=(
+            "                    # 재시도 직전에 janitor 가 닫았다 — 위와 같은 답 · mutcheck: "
+            "race-closed-retry\n"
+            "                    raise self._closed_answer(token, current, session, gone)\n"
+        ),
+        new='                    raise _api_error(409, f"job #{job.id} is {st}", state=st)\n',
+        tests=(
+            "tests/test_worker_session_m5tb.py::"
+            "test_rl44_c_a_preflight_finish_racing_a_cancel_and_then_the_janitor_gets_job_closed",
+        ),
+    ),
+    Mutant(
+        # 큐 절이 실패해 null 인 풀에서 /api/status 가 500 이 된다
+        name="status-null-queue-500",
+        path="src/remote_ci_monitor/server.py",
+        old='            for row in [*(pool.get("queue") or []), *(pool.get("recent") or [])]:\n',
+        new='            for row in [*pool.get("queue"), *(pool.get("recent") or [])]:\n',
+        tests=(
+            "tests/test_worker_session_m5tb.py::"
+            "test_rl45_status_says_null_not_empty_when_the_holds_cannot_be_read",
+        ),
+    ),
+    # ── M5t-b P3 3라운드 LOW — 로컬 레인의 바깥 처리기 · 닫기 경합 · 홀드 배선 ──
+    Mutant(
+        # 러너가 결과를 낸 뒤 레인이 터지면 그 결과와 group_gone 을 버리고 실패 · 홀드로 닫는다
+        name="local-safety-net-drops-the-result",
+        path="src/remote_ci_monitor/worker.py",
+        old=(
+            "                    if result is not None:  # mutcheck: "
+            "local-safety-net-drops-the-result\n"
+        ),
+        new="                    if False:\n",
+        tests=(
+            "tests/test_hold_notify_m5tb.py::"
+            "test_rl54_a_local_lane_error_after_the_runner_returned_keeps_that_result",
+        ),
+    ),
+    Mutant(
+        # 바깥 처리기가 홀드 판단을 버린다 — 그룹이 남았을 수 있는 표식 잡이 그룹을 연다
+        name="local-safety-net-hold-dropped",
+        path="src/remote_ci_monitor/worker.py",
+        old=(
+            "                        hold_cause=cause,  # mutcheck: local-safety-net-hold-dropped\n"
+        ),
+        new="                        hold_cause=None,\n",
+        tests=(
+            "tests/test_hold_notify_m5tb.py::"
+            "test_rl54_a_local_lane_irreversible_job_holds_unless_its_group_is_gone",
+        ),
+    ),
+    Mutant(
+        # 띄운 뒤의 RunnerError 닫기가 취소에 지면 홀드 판단 없이 cancelled 로 닫는다
+        name="local-fail-race-hold-dropped",
+        path="src/remote_ci_monitor/worker.py",
+        old=(
+            "            # mutcheck: local-fail-race-hold-dropped\n"
+            "            self._close_cancelled_before_start(job, hold_cause=hold_cause)\n"
+        ),
+        new="            self._close_cancelled_before_start(job, hold_cause=None)\n",
+        tests=(
+            "tests/test_hold_notify_m5tb.py::"
+            "test_rl54_a_local_lane_close_that_loses_to_a_cancel_keeps_the_hold_decision",
+        ),
+    ),
+    Mutant(
+        # 로컬 레인이 「띄우는 중」을 모른다 — 띄운 뒤의 예외도 「띄운 적 없음」(확인됨)으로 읽는다
+        name="local-launch-not-marked",
+        path="src/remote_ci_monitor/worker.py",
+        old="        self.worker._launched = True  # mutcheck: local-launch-not-marked\n",
+        new="        pass\n",
+        tests=(
+            "tests/test_hold_notify_m5tb.py::"
+            "test_rl54_a_local_lane_irreversible_job_holds_unless_its_group_is_gone",
+        ),
+    ),
+    Mutant(
+        # 서버가 로컬 레인에 홀드 알림을 넘기지 않는다 — 로컬 레인의 홀드가 알림 없이 남는다
+        name="local-lanes-hold-unannounced",
+        path="src/remote_ci_monitor/server.py",
+        old="            on_hold=self._hold_created,\n",
+        new="            on_hold=None,\n",
+        tests=(
+            "tests/test_hold_notify_m5tb.py::"
+            "test_rl54_the_server_hands_its_hold_announcer_to_the_local_lanes",
+            "tests/test_hold_notify_m5tb.py::"
+            "test_rl54_a_local_lane_irreversible_job_holds_unless_its_group_is_gone",
+        ),
+    ),
+    Mutant(
+        # 홀드 판단 자리에 상수 None — 정적 잠금이 이것을 판단으로 세면 판단을 건너뛴 닫기가 숨는다
+        name="hold-decision-constant-none",
+        path="src/remote_ci_monitor/worker.py",
+        old=(
+            '                job, "preset_missing", hold_cause=self._hold_cause(job, gone), '
+            "preset=job.preset\n"
+        ),
+        new='                job, "preset_missing", hold_cause=None, preset=job.preset\n',
+        tests=(
+            "tests/test_hold_notify_m5tb.py::"
+            "test_rl54_every_finish_outside_the_store_decides_the_hold",
+        ),
+    ),
+    Mutant(
+        # 「다시 들림」 기록을 열린 취소와 상관없이 지운다 — 창의 시작이 사라져 일찍 닫힌다
+        name="resumed-pruned-past-request",
+        path="src/remote_ci_monitor/remote_workers.py",
+        old=(
+            "                floor = min(floor, job.cancel.requested_at)  # mutcheck: "
+            "resumed-pruned-past-request\n"
+        ),
+        new="                floor = floor\n",
+        tests=(
+            "tests/test_worker_selfstop_m5tb.py::"
+            "test_rl8_a_many_short_silences_after_the_cancel_do_not_drop_where_its_window_began",
+        ),
+    ),
+    Mutant(
+        # janitor 한 틱이 끝까지 가야만 알린다 — 중간에 터지면 이미 커밋한 홀드의 알림이 빠진다
+        name="janitor-announce-only-on-success",
+        path="src/remote_ci_monitor/remote_workers.py",
+        old=(
+            "        finally:\n"
+            "            # 알림 · 발행 · 로그는 잠금을 놓은 뒤에(§4.2). 틱이 중간에 예외로 끊겨도"
+        ),
+        new=(
+            "        except Exception:\n"
+            "            raise\n"
+            "        else:\n"
+            "            # 알림 · 발행 · 로그는 잠금을 놓은 뒤에(§4.2). 틱이 중간에 예외로 끊겨도"
+        ),
+        tests=(
+            "tests/test_hold_notify_m5tb.py::"
+            "test_rl54_a_janitor_tick_that_breaks_after_a_commit_still_announces_that_hold",
+        ),
+    ),
+    Mutant(
+        # T5 닫기 한 무리가 끝까지 가야만 알린다 — 중간에 터지면 커밋한 홀드의 알림이 빠진다
+        name="t5-announce-only-on-success",
+        path="src/remote_ci_monitor/remote_workers.py",
+        old=("        finally:\n            # 알림 · 발행은 잠금을 놓은 뒤에(§4.2). 중간에 터져도"),
+        new=(
+            "        except Exception:\n"
+            "            raise\n"
+            "        else:\n"
+            "            # 알림 · 발행은 잠금을 놓은 뒤에(§4.2). 중간에 터져도"
+        ),
+        tests=(
+            "tests/test_hold_notify_m5tb.py::"
+            "test_rl54_a_heartbeat_that_breaks_after_a_commit_still_announces_that_hold",
+        ),
+    ),
+    Mutant(
+        # 홀드 알림 하나의 오류가 그 틱의 나머지 알림 · 발행 · 깨우기를 막는다
+        name="hold-announce-error-escapes",
+        path="src/remote_ci_monitor/remote_workers.py",
+        old=(
+            "        except Exception as e:  # noqa: BLE001  # mutcheck: "
+            "hold-announce-error-escapes\n"
+        ),
+        new="        except ZeroDivisionError as e:\n",
+        tests=(
+            "tests/test_hold_notify_m5tb.py::"
+            "test_rl54_a_failing_hold_announcement_does_not_stop_the_rest_of_the_tick",
+        ),
+    ),
+    Mutant(
+        # claim 이 커밋한 뒤 잡을 읽지 못하면 집힌 id 를 잃는다 — 잡이 running 으로 남는다
+        name="claim-id-lost",
+        path="src/remote_ci_monitor/store.py",
+        old=(
+            "            e.claimed_job_id = job_id  # type: ignore[attr-defined]  # mutcheck: "
+            "claim-id-lost\n"
+        ),
+        new="            pass\n",
+        tests=(
+            "tests/test_hold_notify_m5tb.py::"
+            "test_rl54_a_local_claim_that_commits_and_then_cannot_read_the_job_closes_it_unheld",
+        ),
+    ),
+    Mutant(
+        # 레인이 예외에 실린 집힌 잡 id 를 보지 않는다 — 잡이 running 으로 남는다
+        name="unread-claim-left-running",
+        path="src/remote_ci_monitor/worker.py",
+        old="                if claimed is not None:  # mutcheck: unread-claim-left-running\n",
+        new="                if False:\n",
+        tests=(
+            "tests/test_hold_notify_m5tb.py::"
+            "test_rl54_a_local_claim_that_commits_and_then_cannot_read_the_job_closes_it_unheld",
+        ),
+    ),
+    # ── M5t-b P6 엣지 감사 GAP ──
+    Mutant(
+        # GAP1 등록하지 못한 시작이 제 폴더를 남긴다 — 재시작 루프가 죽은 세션을 쌓는다
+        name="failed-start-keeps-its-folder",
+        path="src/remote_ci_monitor/remote_worker.py",
+        old=(
+            "            shutil.rmtree(own, ignore_errors=True)  # mutcheck: "
+            "failed-start-keeps-its-folder\n"
+        ),
+        new="            pass\n",
+        tests=(
+            "tests/test_worker_session_m5tb.py::"
+            "test_gap1_seventy_failed_starts_leave_no_folder_and_the_next_register_succeeds",
+        ),
+    ),
+    Mutant(
+        # GAP1 등록 목록에 상한이 없다 — 65개째부터 서버가 400 이고 워커는 종료 2 를 되풀이한다
+        name="session-list-uncapped",
+        path="src/remote_ci_monitor/remote_worker.py",
+        old='"previous_sessions": self.previous_sessions[:SESSION_LIST_MAX],\n',
+        new='"previous_sessions": list(self.previous_sessions),\n',
+        tests=(
+            "tests/test_worker_session_m5tb.py::"
+            "test_gap1_more_than_64_dead_sessions_go_oldest_first_and_the_rest_wait_on_disk",
+        ),
+    ),
+    Mutant(
+        # GAP1 등록이 받은 확인된 죽은 세션의 폴더를 남긴다 — 다음 시작마다 다시 싣는다
+        name="reported-dead-folder-kept",
+        path="src/remote_ci_monitor/remote_worker.py",
+        old=(
+            "                shutil.rmtree(dead.path, ignore_errors=True)  # mutcheck: "
+            "reported-dead-folder-kept\n"
+        ),
+        new="                pass\n",
+        tests=(
+            "tests/test_worker_session_m5tb.py::"
+            "test_gap1_more_than_64_dead_sessions_go_oldest_first_and_the_rest_wait_on_disk",
+        ),
+    ),
+    Mutant(
+        # GAP2 펜싱된 세션의 성공 · 실패 finish 를 결과 그대로 보낸다 — 409 로 거절되고 잡은 G 뒤
+        # worker_unreachable 로 닫혀 그룹이 홀드된다
+        name="fenced-finish-keeps-its-outcome",
+        path="src/remote_ci_monitor/remote_worker.py",
+        old=(
+            "                fenced = self.fenced.is_set()  # mutcheck: "
+            "fenced-finish-keeps-its-outcome\n"
+        ),
+        new="                fenced = False\n",
+        tests=(
+            "tests/test_worker_session_m5tb.py::"
+            "test_gap2_a_fenced_sessions_natural_end_goes_as_the_narrow_confirm",
+        ),
+    ),
+    Mutant(
+        # GAP3 후보 길이 도는 잡의 저장된 그룹만 본다 — 표식 전에 claim 된 그룹 NULL 잡과 겹친다
+        name="busy-group-raw",
+        path="src/remote_ci_monitor/store.py",
+        old='AND b.eg = c.eg AND ("  # mutcheck: busy-group-raw\n',
+        new='AND b.concurrency_group = c.eg AND ("\n',
+        tests=(
+            "tests/test_irreversible_hold_m5tb.py::"
+            "test_gap3_a_job_running_before_the_mark_blocks_the_synthetic_group",
+        ),
+    ),
+    Mutant(
+        # GAP3 옛 풀 길도 같다
+        name="busy-group-raw-pool",
+        path="src/remote_ci_monitor/store.py",
+        old='AND b.eg = c.eg "  # mutcheck: busy-group-raw-pool\n',
+        new='AND b.concurrency_group = c.eg "\n',
+        tests=(
+            "tests/test_irreversible_hold_m5tb.py::"
+            "test_gap3_a_job_running_before_the_mark_blocks_the_synthetic_group",
+        ),
+    ),
+    Mutant(
+        # GAP4 표식 프리셋의 [retry] 를 받는다 — 재시도가 명령을 두 번 돌린다
+        name="irreversible-retry-accepted",
+        path="src/remote_ci_monitor/config.py",
+        old="    if irreversible and retry is not None:  # mutcheck: irreversible-retry-accepted\n",
+        new="    if False:\n",
+        tests=(
+            "tests/test_irreversible_hold_m5tb.py::"
+            "test_gap4_an_irreversible_preset_cannot_have_retry",
+        ),
+    ),
+    Mutant(
+        # GAP5 열린 홀드가 있는 워커를 잊는다 — 세션 행이 지워져 돌아온 워커가 홀드를 못 푼다
+        name="forget-held-worker",
+        path="src/remote_ci_monitor/store.py",
+        old='WHERE h.released_at IS NULL "  # mutcheck: forget-held-worker\n',
+        new='WHERE 0 "\n',
+        tests=(
+            "tests/test_irreversible_hold_m5tb.py::"
+            "test_gap5_a_worker_with_an_open_hold_is_not_forgotten",
+        ),
+    ),
+    Mutant(
+        # GAP6 산출물 PUT 이 바이트를 받은 뒤 세션을 다시 보지 않는다 — 펜싱된 세션의 묶음이 남는다
+        name="artifact-stream-not-rechecked",
+        path="src/remote_ci_monitor/remote_workers.py",
+        old=(
+            "            self._owned_active(token, job_id, session)  # mutcheck: "
+            "artifact-stream-not-rechecked\n"
+        ),
+        new="            pass\n",
+        tests=(
+            "tests/test_worker_session_m5tb.py::"
+            "test_gap6_an_artifact_upload_fenced_while_it_streams_publishes_nothing",
+        ),
+    ),
+    Mutant(
+        # GAP7 세션 id 를 `match` 로 본다 — `<32 hex>\n` 이 지나간다
+        name="session-re-tail",
+        path="src/remote_ci_monitor/remote_workers.py",
+        old="_SESSION_RE.fullmatch(raw):  # mutcheck: session-re-tail\n",
+        new="_SESSION_RE.match(raw):\n",
+        tests=(
+            "tests/test_worker_session_m5tb.py::"
+            "test_gap7_a_session_id_with_a_trailing_newline_is_400",
+        ),
+    ),
+    Mutant(
+        # GAP7 등록 목록의 세션 id 도 같다
+        name="session-list-tail",
+        path="src/remote_ci_monitor/remote_workers.py",
+        old="_SESSION_RE.fullmatch(x):  # mutcheck: list-tail\n",
+        new="_SESSION_RE.match(x):\n",
+        tests=(
+            "tests/test_worker_session_m5tb.py::"
+            "test_gap7_a_session_id_with_a_trailing_newline_is_400",
+        ),
+    ),
+    Mutant(
+        # GAP8 워커가 죽었다고 넘긴 세션도 「대신한 살아 있던 프로세스」로 센다 — 재시작마다 거짓 줄
+        name="replaced-counts-listed",
+        path="src/remote_ci_monitor/remote_workers.py",
+        old="                if sid not in listed  # mutcheck: replaced-counts-listed\n",
+        new="                if True\n",
+        tests=(
+            "tests/test_worker_session_m5tb.py::"
+            "test_gap8_register_says_how_many_live_processes_it_replaced",
+        ),
+    ),
+    Mutant(
+        # GAP8 둘째 프로세스가 서비스 워커를 대신했다고 말하지 않는다
+        name="replaced-service-silent",
+        path="src/remote_ci_monitor/remote_worker.py",
+        old="                self.log(  # mutcheck: replaced-service-silent\n",
+        new="                (lambda m: None)(  # 변이\n",
+        tests=(
+            "tests/test_worker_session_m5tb.py::"
+            "test_gap8_the_worker_logs_one_line_when_it_replaced_a_live_process",
+        ),
+    ),
+    Mutant(
+        # P6-2 #1 표식 전에 반복 정책을 얼린 잡이 표식 뒤 claim 되면 75 에서 다시 돈다 — 명령 두 번.
+        # 이 변이가 대신한 local-retried-race-hold-dropped 는 이 고침 뒤 동등 변이다(표식 잡은
+        # `retried` 로 가지 않아 그 자리의 hold_cause 가 언제나 None)
+        name="irreversible-job-retried",
+        path="src/remote_ci_monitor/core/model.py",
+        old="            and self.irreversible is not True  # mutcheck: irreversible-job-retried\n",
+        new="",
+        tests=(
+            "tests/test_worker_session_m5tb.py::"
+            "test_p62_1_a_remote_job_with_a_retry_frozen_before_the_mark_is_not_retried",
+            "tests/test_hold_notify_m5tb.py::"
+            "test_p62_1_a_local_job_with_a_retry_frozen_before_the_mark_is_not_retried",
+        ),
+    ),
+    Mutant(
+        # P6-2 #2 재시작한 서버가 아직 안 들린 세션을 「조용했다」(0)로 단정한다 — 모름이 아니다
+        name="replaced-unknown-as-zero",
+        path="src/remote_ci_monitor/remote_workers.py",
+        old=(
+            "        if recent and len(heard) < len(others):"
+            "  # mutcheck: replaced-unknown-as-zero\n"
+        ),
+        new="        if False:\n",
+        tests=(
+            "tests/test_worker_session_m5tb.py::"
+            "test_p62_2_fenced_sessions_is_null_while_a_restarted_server_cannot_know",
+        ),
+    ),
+    Mutant(
+        # P6-2 #2 서버가 모른다(null)고 답해도 워커가 아무 말도 하지 않는다
+        name="replaced-unknown-silent",
+        path="src/remote_ci_monitor/remote_worker.py",
+        old="                self.log(  # mutcheck: replaced-unknown-silent\n",
+        new="                (lambda m: None)(  # 변이\n",
+        tests=(
+            "tests/test_worker_session_m5tb.py::"
+            "test_p62_2_the_worker_says_it_cannot_tell_when_fenced_sessions_is_null",
+        ),
+    ),
+    Mutant(
+        # P6-2 #3 보내지 못한 finish 의 잡 폴더를 멈추는 중에 지운다 — 다음 프로세스의 확인이 없다
+        name="unsent-finish-folder-dropped",
+        path="src/remote_ci_monitor/remote_worker.py",
+        old="            if gave_up:  # mutcheck: unsent-finish-folder-dropped\n",
+        new="            if False:\n",
+        tests=(
+            "tests/test_worker_session_m5tb.py::"
+            "test_p62_3_a_narrow_confirm_that_cannot_be_sent_is_retried_and_keeps_the_job_folder",
+            "tests/test_worker_session_m5tb.py::"
+            "test_p63_1_an_unsent_finish_while_stopping_keeps_the_job_folder_and_parks_nothing",
+        ),
+    ),
+    Mutant(
+        # P6-2 #3 409 뒤의 좁은 확인을 `keep` 없이 보낸다 — 못 보낸 것을 몰라 폴더를 지운다
+        name="narrow-confirm-without-keep",
+        path="src/remote_ci_monitor/remote_worker.py",
+        old='                self.report(call, f"#{job_id} finish", keep=keep, job_id=job_id)\n',
+        new='                self.report(call, f"#{job_id} finish", job_id=job_id)\n',
+        tests=(
+            "tests/test_worker_session_m5tb.py::"
+            "test_p62_3_a_narrow_confirm_that_cannot_be_sent_is_retried_and_keeps_the_job_folder",
+        ),
+    ),
+    Mutant(
+        # P6-3 #2 반복하지 않는 표식 잡의 잡 문서가 얼린 반복 상한을 그대로 보인다
+        name="irreversible-retry-limit-shown",
+        path="src/remote_ci_monitor/core/status.py",
+        old=(
+            "            and job.irreversible is not True"
+            "  # mutcheck: irreversible-retry-limit-shown\n"
+        ),
+        new="",
+        tests=(
+            "tests/test_irreversible_hold_m5tb.py::"
+            "test_p63_2_a_job_claimed_as_irreversible_shows_no_retry_limit",
         ),
     ),
 )

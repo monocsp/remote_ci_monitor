@@ -1,7 +1,8 @@
 """저장소(M5b-2) — 스키마 v5(`tokens.kind` · `jobs.worker_name` · `workers`) · 4→5 마이그레이션 ·
 `add_token(kind=)` · `verify_token`/`list_tokens` 의 kind · `register_worker`/`touch_worker`/
 `get_worker`/`list_workers` · `claim(..., worker_name=)` + `LaneBusy` · `jobs_of_worker` ·
-`mark_lost_for_worker` · `recover_on_start` 는 로컬 잡만.
+`recover_on_start` 는 로컬 잡만. M5b-2 의 `mark_lost_for_worker` 는 M5t-b 가 지웠다(쓰는 곳이
+없었고 홀드를 알릴 호출자가 없었다) — 원격 잡은 janitor 가 잡마다 `finish` 로 닫는다.
 명세는 docs/m5b2-workplan.md §1(토큰) · §2(등록) · §3 「서버 재시작」 · §6 「모델」·「저장소」.
 구현 전이라 빨간 것이 정상이다.
 
@@ -34,7 +35,6 @@ from remote_ci_monitor.core.model import (
     Job,
     Requester,
     Source,
-    Transition,
     WorkerInfo,
 )
 from remote_ci_monitor.core.queue import join_key
@@ -513,7 +513,7 @@ def test_lane_busy_is_per_worker_so_local_and_remote_lane_numbers_never_collide(
     assert store.get_job(b.id).state == RUNNING and store.get_job(b.id).lane == 1
 
 
-# ── jobs_of_worker · mark_lost_for_worker (§3 · §4 · §6) ─────────────────────
+# ── jobs_of_worker (§3 · §6) ──────────────────────────────────────────────────
 
 
 def test_jobs_of_worker_lists_running_and_cancelling_jobs_of_that_worker_only(store):
@@ -541,46 +541,13 @@ def test_jobs_of_worker_lists_running_and_cancelling_jobs_of_that_worker_only(st
     assert [j.id for j in store.jobs_of_worker("build-02")] == [b.id]
 
 
-def test_mark_lost_for_worker_closes_only_that_workers_active_jobs(store):
-    """§4 · §6: `mark_lost_for_worker(name, now, summary)` 는 그 워커의 running·cancelling 잡을
-    lost 로 닫고(summary · finished_at · 전이 이벤트) id 목록을 돌려준다. 다른 워커·로컬·queued
-    잡은 그대로. 두 번째 호출·모르는 워커는 []. 레인이 비었으니 그 워커는 다시 claim 할 수 있다."""
-    register(store, "build-02", pool=LINUX, lanes=2)
-    register(store, "build-03", pool=LINUX, lanes=1, now=at(0))
-    a = remote_running(store, "build-02", lane=1, tree="a", t=1)
-    b = remote_running(store, "build-02", lane=2, tree="b", t=2)
-    d = remote_running(store, "build-03", lane=1, tree="d", t=3)
-    local = enqueue(store, tree="l", now=at(4))
-    assert store.claim(1, at(5)).id == local.id
-    queued = enqueue(store, tree="q", pool=LINUX, now=at(6))
-    assert store.request_cancel(b.id, "alice-laptop", at(7), 10) == CANCELLING
-    summary = "worker build-02 unreachable for 61s"
-    assert store.mark_lost_for_worker("build-02", at(100), summary) == [a.id, b.id]
-    for jid in (a.id, b.id):
-        j = store.get_job(jid)
-        assert j.state == LOST and j.summary == summary and j.finished_at == at(100)
-        assert j.lane is None and j.phase is None and j.worker_name == "build-02"
-        assert j.transitions[-1] == Transition(LOST, at(100))
-        assert j.is_terminal
-    assert [t.state for t in store.get_job(b.id).transitions] == [QUEUED, RUNNING, CANCELLING, LOST]
-    assert store.get_job(d.id).state == RUNNING and store.get_job(d.id).worker_name == "build-03"
-    assert store.get_job(local.id).state == RUNNING and store.get_job(local.id).lane == 1
-    assert store.get_job(queued.id).state == QUEUED
-    assert store.jobs_of_worker("build-02") == []
-    assert store.mark_lost_for_worker("build-02", at(101), summary) == []
-    assert store.mark_lost_for_worker("ghost", at(102), summary) == []
-    assert store.get_job(a.id).finished_at == at(100)  # 다시 불러도 안 바뀐다
-    assert [j.id for j in store.list_recent(5)] == [b.id, a.id]
-    again = store.claim(1, at(103), pool=LINUX, worker_name="build-02")
-    assert again.id == queued.id and again.lane == 1
-
-
 # ── recover_on_start 는 로컬 잡만 (§3 「서버 재시작」 · 리뷰 must-fix) ─────────
 
 
 def test_recover_on_start_marks_only_local_jobs_lost_and_keeps_remote_ones(tmp_path):
     """§3: 서버 재시작은 `worker_name IS NULL` 인 running·cancelling 만 lost 로. 원격 워커의 잡과
-    `workers.last_seen_at` 은 한 글자도 안 바뀌고, timeout 뒤 `mark_lost_for_worker` 가 닫는다."""
+    `workers.last_seen_at` 은 한 글자도 안 바뀐다. 그 잡은 유예 뒤 janitor 가 잡마다 `finish` 로
+    닫는다(M5t-b — 옛 `mark_lost_for_worker` 를 대신한다)."""
     path = tmp_path / "rcm.db"
     s = Store(path)
     register(s, "build-02", pool=LINUX, lanes=2)
@@ -609,7 +576,15 @@ def test_recover_on_start_marks_only_local_jobs_lost_and_keeps_remote_ones(tmp_p
     assert [j.id for j in s2.jobs_of_worker("build-02")] == [remote_run.id, remote_can.id]
     assert s2.recover_on_start(at(61)) == ([], [])  # 두 번째 시작은 정리할 게 없다
     summary = "worker build-02 unreachable for 61s"
-    assert s2.mark_lost_for_worker("build-02", at(120), summary) == [remote_run.id, remote_can.id]
+    for jid in (remote_run.id, remote_can.id):  # janitor 의 닫기(`mark_lost_workers`)와 같은 호출
+        assert s2.finish(
+            jid,
+            LOST,
+            now=at(120),
+            summary=summary,
+            only_from=(RUNNING, CANCELLING),
+            hold_cause="worker_unreachable",
+        )
     assert s2.get_job(remote_run.id).state == LOST and s2.get_job(remote_can.id).state == LOST
     assert s2.get_job(remote_run.id).summary == summary
     s2.close()

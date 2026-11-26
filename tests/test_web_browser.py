@@ -792,7 +792,16 @@ def test_remote_worker_sample_is_a_host_card_and_recent_has_no_pool_host_header(
         srv.tokens["build-02"] = srv.store.add_token(
             "build-02", admin=False, now=datetime.now(UTC), kind="worker"
         )
-        reg = {"pool": "linux", "lanes": 1, "host_name": "build-02.local", "version": __version__}
+        # 워커 프로토콜 2(M5t-b 결정 262): 세션 id 를 싣고 등록하고, heartbeat 는 그 세션 · 순번 ·
+        # 끝난 claim 수를 싣는다. 잡이 없으니 claim 은 0 번이다.
+        session = "b" * 32
+        reg = {
+            "pool": "linux",
+            "lanes": 1,
+            "host_name": "build-02.local",
+            "version": __version__,
+            "worker_session_id": session,
+        }
         status, body = srv.req("POST", "/worker/register", token="build-02", json_body=reg)
         assert status == 200, body
         # 워커 표본에도 `disk` — 디스크 막대는 두 카드 모두에, 「rcm 데이터 …」 줄은 서버 자신의
@@ -802,7 +811,12 @@ def test_remote_worker_sample_is_a_host_card_and_recent_has_no_pool_host_header(
             "POST",
             "/worker/heartbeat",
             token="build-02",
-            json_body={"host_sample": worker_sample},
+            json_body={
+                "host_sample": worker_sample,
+                "worker_session_id": session,
+                "seq": 1,
+                "claims_settled": 0,
+            },
         )
         assert status == 200, body
 

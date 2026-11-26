@@ -21,17 +21,25 @@
 
 from __future__ import annotations
 
+import copy
 import dataclasses
+import fcntl
+import hashlib
+import json
 import os
 import random
+import re
 import secrets
 import shutil
+import signal
 import socket
+import subprocess
 import sys
 import threading
 import time
 from collections.abc import Callable
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any
 
 from remote_ci_monitor import __version__, follow
@@ -41,11 +49,13 @@ from remote_ci_monitor.config import WorkerConfig
 from remote_ci_monitor.core import artifacts as art
 from remote_ci_monitor.core.model import (
     CANCELLED,
+    EXHAUSTED,
     FAILED,
     LOST,
     MODE_GIT_REF,
     MODE_TREE,
     PHASE_MATERIALIZING,
+    RETRIED,
     SUCCEEDED,
     TIMED_OUT,
     Job,
@@ -90,6 +100,27 @@ REREGISTER_REPORT_WAIT_SECONDS = 10.0
 #: 드레인 중인 레인이 claim 없이 한 번 기다리는 시간(§14 B질문8). 드레인이 취소되면 다시 claim 한다
 DRAIN_WAIT_SECONDS = 1.0
 DRAINING = "draining: no new claims, restarting when running jobs finish"
+#: 서버가 이 워커 프로토콜 판을 받아야 등록한다(M5t-b 결정 270)
+WORKER_PROTOCOL = 2
+#: 프로토콜 불일치의 종료 코드 — 감독자가 되살린다(결정 258). 펜싱은 0(되살리지 않는다)
+EXIT_PROTOCOL = 3
+PROTOCOL_OLD_SERVER = (
+    "the server speaks worker protocol 1 — upgrade rcm on the server (this worker needs protocol 2)"
+)
+FENCED = "replaced by a newer worker process with the same token — stopping"
+# ── M5t-b 자기 멈춤(§4.3 · 결정 320 · 333 · 335) ──
+#: 감시 스레드의 틱. heartbeat 루프와 따로 돈다 — 잠에서 깬 첫 틱이 판정한다(RL26)
+WATCHDOG_TICK_SECONDS = 1
+#: heartbeat 요청 하나의 전체 기한 T_req. config 의 같은 이름과 같아야 한다(시험이 잠근다)
+HEARTBEAT_DEADLINE_SECONDS = 15
+#: 동시에 매달린 heartbeat 도우미의 상한 — 넘으면 그 회차를 보내지 않고 실패로 센다
+HEARTBEAT_INFLIGHT_MAX = 4
+#: m = T_req + grace_J + 이 여유(결정 320). 기본 grace 10 이면 m = 35 = config 의 하한 여유
+SELF_STOP_SLACK_SECONDS = 10
+#: W4 표 첫 행 — 이 세션의 finish 가 서버에 이미 기록된 끝 상태(2xx 만 잃었다)
+FINISH_RECORDED = frozenset({SUCCEEDED, FAILED, TIMED_OUT, RETRIED, EXHAUSTED})
+#: W4 표 마지막 행 — 원격 claim 된 잡이 될 수 없는 상태(서버 버그 신호)
+_NOT_CLAIMED_STATES = frozenset({"expired", "scheduled", "queued", "uploading"})
 
 
 def _utcnow() -> datetime:
@@ -127,16 +158,40 @@ def _fmt_seconds(seconds: float) -> str:
 
 
 class _RemoteObserver:
-    """실행기 관찰자 — phase 는 즉시, 로그는 1초/256 KB 배치로 서버에. 마커는 서버가 파싱한다."""
+    """실행기 관찰자 — phase 는 즉시, 로그는 1초/256 KB 배치로 서버에. 마커는 서버가 파싱한다.
 
-    def __init__(self, proc: RemoteWorker, job_id: int):
+    멈춤의 길은 이름으로 나뉜다(M5t-b 결정 334). 자기 멈춤 `self_stop` 은 `should_stop` → `lost`
+    + `worker_self_stopped` 이고, 서버가 닫은 잡의 멈춤 `closed_stop`(W4 표)은 `should_cancel`
+    길이다. `closed_by_server` 는 로그 전송만 멈춘다 — 일반 `lost` 잡은 그 409 로 죽지 않는다."""
+
+    def __init__(
+        self,
+        proc: RemoteWorker,
+        job_id: int,
+        *,
+        irreversible: bool = False,
+        grace_seconds: int | None = None,
+        grace_j: int = 10,
+    ):
         self.proc = proc
         self.job_id = job_id
         self._buf = bytearray()
         self._last_flush = time.monotonic()
         self._lock = threading.Lock()
         self._pending_failures = 0
-        self.closed_by_server = False  # 409: 서버가 이미 닫았다(lost 판정 등)
+        self._sender: threading.Thread | None = None  # 지금 배치를 보내는 스레드(많아야 하나)
+        self.closed_by_server = False  # 409: 서버가 이미 닫았다(lost 판정 등) — 로그만 멈춘다
+        self.irreversible = irreversible
+        self.grace_seconds = grace_seconds  # claim 에 얼린 G_J(결정 257)
+        self.grace_j = grace_j  # 러너의 SIGTERM→SIGKILL(표식 잡은 상한, §4.3)
+        self.self_stop = threading.Event()  # 한 방향 — 되돌리지 않는다
+        self.self_stop_seconds = 0
+        self.closed_stop = threading.Event()
+        self.closed_state: str | None = None  # 서버가 알린 끝 상태(W4)
+        self.finish_sent = False  # `_finish` 를 거쳤다(보냈거나 못 보낸 보고로 남겼다)
+        # 바깥 안전망(`run_claimed`)이 읽는다: 러너가 Popen 직전까지 갔나, 결과를 냈나
+        self.launching = False
+        self.result: Any = None
 
     def phase(self, phase: str) -> None:
         self.proc.report(
@@ -151,7 +206,20 @@ class _RemoteObserver:
                 or time.monotonic() - self._last_flush >= LOG_FLUSH_SECONDS
             )
         if due:
-            self.flush()
+            self._send_later()
+
+    def _send_later(self) -> None:
+        """배치 전송을 따로 한 스레드에서 한다. 펌프 스레드(러너)가 부르는 `output()` 은
+        네트워크를 기다리지 않는다 — 분단 중 전송 하나는 요청 시한(60초 이상)까지 매달리고,
+        그동안 펌프가 멈추면 워커 로컬 `log.txt` 가 자라지 않고 취소 · 시간초과 · 자기 멈춤
+        점검도 멈춘다(RL5). 보내는 스레드는 한 번에 하나라 배치의 순서가 그대로다."""
+        with self._lock:
+            if self._sender is not None and self._sender.is_alive():
+                return  # 앞 배치가 아직 매달려 있다 — 남은 바이트는 다음 배치 · 끝의 전송이 싣는다
+            self._sender = threading.Thread(
+                target=self.flush, name=f"rcm-log-{self.job_id}", daemon=True
+            )
+            self._sender.start()
 
     def flush(self) -> None:
         """로그 배치를 한 번만 보낸다 — 펌프(취소·정지 감지)를 재시도로 막지 않는다. 서버에 못
@@ -163,12 +231,14 @@ class _RemoteObserver:
             chunk = bytes(self._buf)
             self._buf.clear()
             self._last_flush = time.monotonic()
+        sent = self.proc._sent_at()
         try:
             self.proc.client.log(self.job_id, chunk)
         except ClientError as e:
             if e.status == 409:
                 self.proc.log(f"#{self.job_id} log: server says {e.message}")
                 self.closed_by_server = True
+                self.proc._closed_by_409(self.job_id, e)
                 return
             if e.status and e.status != 503:
                 self.proc.log(f"#{self.job_id} log: {e.message}")
@@ -181,30 +251,326 @@ class _RemoteObserver:
             if self._pending_failures in (1, 10) or self._pending_failures % 60 == 0:
                 self.proc.log(f"#{self.job_id} log: {e.message} — keeping {len(self._buf)} bytes")
             return
+        self.proc.mark_ok(*sent)
         self._pending_failures = 0
 
     def final_flush(self) -> None:
-        """종료 직전 — 남은 로그는 재시도까지 해서 보낸다(그 뒤 finish 가 간다)."""
+        """종료 직전 — 남은 로그는 재시도까지 해서 보낸다(그 뒤 finish 가 간다). 매달린 배치
+        전송이 있으면 그것이 끝나기를 먼저 기다린다 — 바이트의 순서를 지킨다."""
+        with self._lock:
+            sender = self._sender
+        if sender is not None:
+            sender.join()
         self.flush()
         with self._lock:
             chunk = bytes(self._buf)
             self._buf.clear()
         if chunk and not self.closed_by_server:
             ok = self.proc.report(
-                lambda: self.proc.client.log(self.job_id, chunk), f"#{self.job_id} log"
+                lambda: self.proc.client.log(self.job_id, chunk),
+                f"#{self.job_id} log",
+                job_id=self.job_id,
             )
             if ok is None:
                 self.closed_by_server = True
 
     def should_cancel(self) -> bool:
-        return self.job_id in self.proc.cancel_requested or self.closed_by_server
+        # mutcheck: closed-by-server-cancels
+        return self.job_id in self.proc.cancel_requested or self.closed_stop.is_set()
 
     def should_stop(self) -> bool:
-        return self.proc.stopping.is_set()
+        return self.proc.stopping.is_set() or self.self_stop.is_set()
+
+    def spawning(self) -> None:
+        """Popen 직전 확인을 지났다 — `proc.json` 에 「띄우는 중」(결정 333).
+
+        이 기록이 없으면 다음 프로세스는 「띄운 적 없음」(CONFIRMED)으로 읽는다. 그래서 표식 잡은
+        기록하지 못하면 띄우지 않는다 — 도는 그룹을 사라졌다고 판정받는 것보다 안 띄우는 것이
+        안전하다. 일반 잡은 홀드가 없으니 로그 한 줄 뒤 띄운다(P3 1라운드 HIGH)."""
+        self.launching = True
+        try:
+            self.proc._write_proc(self.job_id, None)
+        except OSError as e:
+            self.proc.log(f"#{self.job_id} session folder: {type(e).__name__}")
+            if self.irreversible:  # mutcheck: spawning-record-missing-still-spawns
+                raise RunnerError(
+                    "launch_failed",
+                    error=type(e).__name__,
+                    log=f"cannot record the process in the worker session folder: {e.strerror}",
+                ) from e
+
+    def spawned(self, pid: int) -> None:
+        """띄운 뒤 `{pgid, start}`. 실패해도 잡은 멈추지 않는다 — 「띄우는 중」 기록이 남아 다음
+        프로세스는 그 그룹을 모름(UNKNOWN)으로 읽는다."""
+        try:
+            self.proc._write_proc(self.job_id, pid)
+        except OSError as e:  # mutcheck: spawned-record-error-escapes
+            self.proc.log(f"#{self.job_id} session folder: {type(e).__name__}")
+
+    def server_closed(self, state: str, had_cancel: bool) -> None:
+        """W4 표(§4.1.2, V2-6). 서버 상태는 이미 정해졌고 워커의 finish 는 확인으로만 쓰인다."""
+        self.closed_state = state
+        self.closed_by_server = True
+        if state in FINISH_RECORDED or state == CANCELLED:
+            self.closed_stop.set()  # 아직 돌면 멈춘다
+        elif state == LOST:
+            # 표식 잡 · 취소 요청이 있던 잡만 멈춘다. 일반 잡은 계속 돈다(결정 253 · 322)
+            # mutcheck: job-closed-kills-running · lost-cancel-keeps-running
+            if self.irreversible or had_cancel:
+                self.closed_stop.set()
+
+
+# ── 워커 세션 폴더 · 고아 정리(M5t-b §4.4 · 결정 268 · 325 · 327 · 333) ─────────────────────────
+#
+# `<data>/worker-sessions/<S>/` — `lock`(살아 있는 동안 flock), `owner.json`(주인), `ok_at.json`,
+# `jobs/<id>/claim.json` · `proc.json`. 죽은 세션 D 의 폴더를 잠글 수 있으면 D 는 죽었다(F43).
+
+SESSIONS_DIR = "worker-sessions"
+#: 등록 본문의 `previous_sessions` · `unverified_sessions` 한 목록에 싣는 최대 수 — 서버의
+#: `_session_list` 상한과 같다. 넘는 죽은 세션은 오래된 것부터 싣고 나머지는 다음 시작에 싣는다
+SESSION_LIST_MAX = 64
+#: 리눅스 프로세스 표 — 시험이 가짜 폴더로 바꾼다
+PROC_ROOT = Path("/proc")
+#: `LC_ALL=C TZ=UTC ps -o lstart=` 의 모양(F71). 앞뒤 공백을 지운 뒤 맞아야 쓴다
+LSTART_RE = re.compile(
+    r"^(Mon|Tue|Wed|Thu|Fri|Sat|Sun) (Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec) "
+    r"[ 0-9][0-9] [0-9]{2}:[0-9]{2}:[0-9]{2} [0-9]{4}$"
+)
+CONFIRMED = "confirmed"  # 그룹이 없다(띄운 적 없음 · 거둠 · 다른 프로세스)
+UNKNOWN = "unknown"  # 신원을 확인할 수 없다 — 신호를 보내지 않는다
+
+
+def linux_start(pid: int, proc_root: Path | None = None) -> str | None:
+    """`/proc/<pid>/stat` 의 22번째 칸(starttime). 이름에 괄호 · 공백이 들 수 있어 마지막 `)` 뒤에서
+    센다(F59) — 그 뒤 첫 칸이 3번째(state)다."""
+    root = PROC_ROOT if proc_root is None else proc_root
+    try:
+        raw = (root / str(pid) / "stat").read_text(encoding="ascii", errors="replace")
+    except OSError:
+        return None
+    fields = raw[raw.rfind(")") + 1 :].split()
+    if len(fields) < 20 or not fields[19].isdigit():
+        return None
+    return f"linux:{fields[19]}"
+
+
+def ps_start(pid: int) -> str | None:
+    """`ps -o lstart=` 를 `LC_ALL=C TZ=UTC` 로 읽는다. 서비스와 손으로 띄운 셸이 같은 문자열을
+    쓴다(F71)."""
+    env = dict(os.environ, LC_ALL="C", TZ="UTC")  # mutcheck: ps-lstart-locale
+    try:
+        out = subprocess.run(
+            ["ps", "-o", "lstart=", "-p", str(pid)],
+            capture_output=True,
+            text=True,
+            env=env,
+            timeout=5,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    value = out.stdout.strip()
+    if out.returncode != 0 or not LSTART_RE.match(value):
+        return None
+    return f"ps:{value}"
+
+
+def process_start(pid: int) -> str | None:
+    """프로세스 신원 — 리눅스는 `/proc`, 그 밖은 `ps`. 못 읽으면 None(「모름」으로 간다)."""
+    if (PROC_ROOT / "self" / "stat").exists():
+        return linux_start(pid)
+    return ps_start(pid)
+
+
+def _start_valid(value: Any) -> bool:
+    if not isinstance(value, str):
+        return False
+    if value.startswith("linux:"):
+        return value[6:].isdigit()
+    return value.startswith("ps:") and bool(LSTART_RE.match(value[3:]))
+
+
+def _pid_alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+def _group_alive(pgid: int) -> bool:
+    try:
+        os.killpg(pgid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+def _write_json(path: Path, data: dict[str, Any]) -> None:
+    """임시 파일에 쓴 뒤 rename — 읽는 쪽이 반쯤 쓴 파일을 보지 않는다."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(f".{path.name}.{secrets.token_hex(4)}")
+    tmp.write_text(json.dumps(data, sort_keys=True), encoding="utf-8")
+    os.replace(tmp, path)
+
+
+def _read_json(path: Path) -> dict[str, Any] | None:
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def owner_of(config: WorkerConfig, token_name: str) -> dict[str, str]:
+    """`owner.json` — 설정의 `server`(auto 면 `auto`)와 광고 이름, 토큰 이름. 토큰 값은 적지 않는다
+    (결정 325). 해석한 주소로 해시하면 auto 가 주소를 바꿀 때 제 폴더를 남의 것으로 본다."""
+    server = "auto" if getattr(config, "discovered_server", False) else config.server
+    key = f"{server.strip().rstrip('/')}\n{config.server_name}"
+    return {"server_sha256": hashlib.sha256(key.encode()).hexdigest(), "token_name": token_name}
+
+
+def try_lock(path: Path) -> int | None:
+    """`LOCK_EX | LOCK_NB` 로 잠가 본다. 잠그면 fd, 누가 쥐고 있거나 판정할 수 없으면 None."""
+    try:
+        fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o600)
+    except OSError:
+        return None
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        # EWOULDBLOCK 은 살아 있는 세션이다. 그 밖의 OSError(네트워크 파일 시스템 등)는 판정할 수
+        # 없다. 둘 다 건너뛴다
+        os.close(fd)
+        return None
+    return fd
+
+
+def judge_orphan(job_dir: Path, grace_seconds: float, log: Callable[[str], None]) -> str:
+    """죽은 세션의 잡 하나를 판정한다(§4.4 step 6). 같은 그룹일 때만 신호를 보낸다."""
+    try:
+        text = (job_dir / "proc.json").read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return CONFIRMED  # Popen 직전 확인 전에 죽었다 — 띄운 적 없음(결정 333)
+    except OSError as e:
+        # 있는데 못 읽는다 — 띄웠는지 모른다. 없음(띄운 적 없음)과 섞으면 도는 그룹이 사라졌다고
+        # 판정받는다(P3 2라운드 LOW)
+        log(f"orphan #{job_dir.name}: cannot read proc.json ({type(e).__name__}) — not touching it")
+        return UNKNOWN  # mutcheck: orphan-unreadable-proc-confirmed
+    try:
+        proc = json.loads(text)
+    except ValueError:
+        proc = None
+    if not isinstance(proc, dict):  # mutcheck: orphan-broken-proc-confirmed
+        log(f"orphan #{job_dir.name}: proc.json is not a record — not touching it")
+        return UNKNOWN
+    pgid = proc.get("pgid")
+    if not isinstance(pgid, int) or isinstance(pgid, bool) or pgid <= 1:
+        return UNKNOWN  # 띄우는 순간 죽었을 수 있다
+    recorded = proc.get("start")
+    if not _pid_alive(pgid):
+        if _group_alive(pgid):
+            log(f"orphan #{job_dir.name}: leader gone but its group is alive — not touching it")
+            return UNKNOWN  # 리더만 죽고 멤버가 산다(F59 · W13)
+        return CONFIRMED
+    now = process_start(pgid)
+    if not (_start_valid(recorded) and _start_valid(now)):
+        log(f"orphan #{job_dir.name}: cannot verify process {pgid} — not touching it")
+        return UNKNOWN
+    if recorded != now:  # mutcheck: orphan-kill-no-lstart
+        return CONFIRMED  # pid 가 재사용됐다 — 원래 그룹은 없다. 손대지 않는다
+    try:
+        os.killpg(pgid, signal.SIGTERM)
+    except ProcessLookupError:
+        return CONFIRMED
+    except PermissionError:
+        return UNKNOWN
+    deadline = time.monotonic() + grace_seconds
+    while _group_alive(pgid) and time.monotonic() < deadline:
+        time.sleep(0.05)
+    if _group_alive(pgid):
+        try:
+            os.killpg(pgid, signal.SIGKILL)
+        except (ProcessLookupError, PermissionError):
+            pass
+    gone_by = time.monotonic() + 2
+    while _group_alive(pgid) and time.monotonic() < gone_by:
+        time.sleep(0.05)
+    alive = _group_alive(pgid)
+    log(
+        f"orphan #{job_dir.name}: stopped process group {pgid}"
+        + (" (still there)" if alive else "")
+    )
+    return UNKNOWN if alive else CONFIRMED
+
+
+@dataclasses.dataclass
+class DeadSession:
+    """잠근 죽은 세션 D — 잡마다 판정을 담는다."""
+
+    session_id: str
+    path: Path
+    fd: int
+    verdicts: dict[int, str]
+
+    @property
+    def verified(self) -> bool:
+        return all(v == CONFIRMED for v in self.verdicts.values())
+
+    def ok_at(self) -> float:
+        """D 의 마지막 2xx 보낸 시각(벽). `ok_at.json` 이 없으면 `lock` 의 mtime(§4.4 step 9)."""
+        data = _read_json(self.path / "ok_at.json") or {}
+        wall = data.get("wall")
+        if isinstance(wall, str):
+            try:
+                return datetime.fromisoformat(wall.replace("Z", "+00:00")).timestamp()
+            except ValueError:
+                pass
+        try:
+            return (self.path / "lock").stat().st_mtime
+        except OSError:
+            return time.time()
+
+    def claim(self, job_id: int) -> dict[str, Any]:
+        return _read_json(self.path / "jobs" / str(job_id) / "claim.json") or {}
+
+
+def sweep_sessions(root: Path, keep_days: int = WORKSPACE_KEEP_DAYS) -> None:
+    """시작 청소(F41 · 결정 325): 잠긴 폴더는 건너뛰고, 주인이 다른(없는) 폴더는 7일 지났고 잠글 수
+    있을 때만 지운다. 제 폴더도 7일 지나고 잠글 수 있으면 지운다(큐는 24시간 창을 이미 넘었다)."""
+    base = root / SESSIONS_DIR
+    if not base.is_dir():
+        return
+    cutoff = time.time() - keep_days * 86400
+    for entry in base.iterdir():
+        try:
+            if not entry.is_dir() or entry.stat().st_mtime >= cutoff:
+                continue
+        except OSError:
+            continue
+        fd = try_lock(entry / "lock")
+        if fd is None:
+            continue
+        try:
+            shutil.rmtree(entry, ignore_errors=True)
+        finally:
+            os.close(fd)
+
+
+class _HeartbeatSkipped(Exception):
+    """매달린 heartbeat 가 상한이라 이 회차를 보내지 않았다 — 실패로 셌다."""
 
 
 def _iso(at: datetime) -> str:
     return at.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _iso_exact(epoch: float) -> str:
+    return datetime.fromtimestamp(epoch, UTC).isoformat()
 
 
 def _policy_from_claim(claimed: dict[str, Any]) -> art.ArtifactPolicy | None:
@@ -260,6 +626,7 @@ class RemoteWorker:
         *,
         client: WorkerClient | None = None,
         now_fn: Callable[[], datetime] = _utcnow,
+        mono_fn: Callable[[], float] = time.monotonic,
         rand_fn: Callable[[], float] = random.random,  # 지터 — 테스트가 주입한다
         log: Callable[[str], None] | None = None,
         environ: dict[str, str] | None = None,
@@ -272,8 +639,9 @@ class RemoteWorker:
         # DHCP 로 서버 주소가 바뀐 경우 — auto 일 때만 cmd_worker 가 넘긴다(M5n §9)
         self.rediscover = rediscover
         self._conn_failures = 0
-        self.client = client or WorkerClient(config.server, config.token)
+        self._client = client or WorkerClient(config.server, config.token)
         self.now_fn = now_fn
+        self.mono_fn = mono_fn  # 자기 멈춤의 단조 시계(M5t-b §4.1.3) — 시험이 벽과 따로 민다
         self.rand_fn = rand_fn
         self.log = log or (lambda msg: print(f"[rcm worker] {msg}", file=sys.stderr, flush=True))
         self.environ = environ
@@ -320,26 +688,407 @@ class RemoteWorker:
         self._hb_unregistered = 0
         # 재실행 시각은 프로세스가 시작할 때 한 번 읽는다(§14 B질문9)
         self.restarted_at = follow.restarted_at(os.environ, self._epoch())
+        # ── M5t-b 워커 세션(결정 260 · 339-a) ──
+        # 프로세스마다 하나. 모든 레인이 같은 값을 쓰고 M5q exec 뒤에는 새 이미지가 새 세션이다
+        self.session_id = secrets.token_hex(16)
+        self._bind_session(self._client)
+        self.fenced = threading.Event()  # 409 `session_fenced` 를 받았다 — 종료 0(결정 258)
+        # claim 순번과 「끝난 claim 까지」 — heartbeat 의 「없음」 판정이 순서에 기대지 않게 한다
+        self._claim_seq = 0
+        self._open_claims: set[int] = set()
+        self._hb_seq = 0
+        self._hb_applied = 0  # 응답의 cancel · paused 를 적용한 마지막 heartbeat 의 seq
+        # ── M5t-b 자기 멈춤(§4.3) ──
+        # 도는 잡의 관찰자 — 감시 스레드 · 닫힌 잡 통보(W4)가 찾아간다
+        self._observers: dict[int, _RemoteObserver] = {}
+        # ok_at: 2xx 를 받은 요청을 **보낸** 시각의 최댓값(벽 epoch, 단조). 2xx 전에는 None
+        self._ok_at: tuple[float, float] | None = None
+        self._ok_lock = threading.Lock()
+        self._hb_inflight = 0
+        self._hb_skipped = 0
+        # 세션 폴더(§4.4) — `prepare_sessions` 가 만든다. 없으면(시험 · 등록 전) 아무것도 안 쓴다
+        self.session_dir: Path | None = None
+        self._session_fd: int | None = None
+        self._ok_written = 0.0
+        self.previous_sessions: list[str] = []
+        self.unverified_sessions: list[str] = []
+        self.dead_sessions: list[DeadSession] = []
+        self._rechecks: list[threading.Timer] = []
+        # 그룹이 사라졌음을 확인하지 못하고 끝난 표식 잡 — 그 폴더(`proc.json`)는 다음 프로세스가
+        # 다시 판정하도록 남긴다(서버는 그 잡에 홀드를 건다)
+        self._group_unconfirmed: set[int] = set()
+
+    @property
+    def client(self) -> Any:
+        return self._client
+
+    @client.setter
+    def client(self, client: Any) -> None:
+        # 서버를 다시 찾아 클라이언트를 바꿔도 세션은 이 프로세스의 것 그대로다
+        self._client = client
+        self._bind_session(client)
+
+    def _bind_session(self, client: Any) -> None:
+        try:
+            client.session_id = self.session_id
+        except AttributeError:  # 시험의 가짜 클라이언트(slots 등)
+            pass
+
+    def claims_settled(self) -> int:
+        """`self._lock` 안에서 부른다. 열린 claim 이 있으면 `min(열린 것) − 1`, 없으면 마지막
+        번호다."""
+        if self._open_claims:
+            return min(self._open_claims) - 1
+        return self._claim_seq
+
+    def _on_fenced(self, what: str) -> None:
+        """409 `session_fenced`(W5) — 같은 토큰의 새 프로세스가 이 세션을 펜싱했다. 모든 레인을
+        멈추고(잡은 좁은 확인 finish 로 닫는다) 종료 0 으로 끝낸다. 감독자는 0 을 되살리지 않으므로
+        펜싱 핑퐁이 없다(결정 255 · 258)."""
+        if not self.fenced.is_set():
+            self.fenced.set()
+            self.log(f"{what}: {FENCED}")
+        self.exit_code = 0
+        self.stopping.set()
+
+    @staticmethod
+    def _is_fenced(e: ClientError) -> bool:
+        return e.status == 409 and e.body.get("code") == "session_fenced"
 
     def _epoch(self) -> float:
         return self.now_fn().timestamp()
 
+    # ── 세션 폴더 · 고아 정리 (M5t-b §4.4) ─────────────────────────────────
+
+    def _token_name(self) -> str:
+        """`GET /api/whoami` 의 `name`(F64). 연결 실패는 등록처럼 다시, 401 · 403 은 종료 2."""
+        whoami = getattr(self.client, "whoami", None)
+        if whoami is None:
+            return ""
+        while True:
+            try:
+                out = whoami() or {}
+            except ClientError as e:
+                if e.status in (401, 403):
+                    raise WorkerExit(2, f"{e.message} — set RCM_WORKER_TOKEN") from e
+                if e.status:
+                    raise WorkerExit(2, e.message) from e
+                self.log(f"whoami: {e.message} — retrying in {int(REGISTER_RETRY_SECONDS)}s")
+                if self.stopping.wait(REGISTER_RETRY_SECONDS):
+                    raise WorkerExit(0, "stopped before registering") from e
+                continue
+            name = out.get("name")
+            return name if isinstance(name, str) else ""
+
+    def prepare_sessions(self) -> None:
+        """프로토콜 확인 뒤 · 등록 전(§4.4 step 3~6 · 8 · 9). 제 폴더를 만들어 잠그고, 같은 주인의
+        죽은 세션 D 를 잠가 고아를 판정한다. 등록은 `previous_sessions` · `unverified_sessions` 를
+        싣는다."""
+        owner = owner_of(self.config, self._token_name())
+        base = self.config.data_path / SESSIONS_DIR
+        own = base / self.session_id
+        own.mkdir(parents=True, exist_ok=True)
+        fd = try_lock(own / "lock")
+        if fd is None:
+            raise WorkerExit(2, f"cannot lock the worker session folder {own}")
+        self._session_fd = fd
+        _write_json(own / "owner.json", owner)
+        self.session_dir = own
+        for entry in sorted(base.iterdir()):
+            if entry == own or not entry.is_dir() or not re.fullmatch(r"[0-9a-f]{32}", entry.name):
+                continue
+            if _read_json(entry / "owner.json") != owner:  # mutcheck: adopt-foreign-session
+                continue  # 남의 폴더 · 주인 없는 폴더는 잠가 보지도 않는다(W9 · 결정 325)
+            dfd = try_lock(entry / "lock")
+            if dfd is None:
+                continue  # 살아 있는 세션이거나 판정할 수 없다
+            verdicts: dict[int, str] = {}
+            jobs = entry / "jobs"
+            for job_dir in sorted(jobs.iterdir()) if jobs.is_dir() else ():
+                if job_dir.name.isdigit():
+                    verdicts[int(job_dir.name)] = judge_orphan(
+                        job_dir, float(self.config.grace_seconds), self.log
+                    )
+            dead = DeadSession(entry.name, entry, dfd, verdicts)
+            self.dead_sessions.append(dead)
+            if not dead.verified:
+                self.log(
+                    f"dead session {dead.session_id[:8]}: process identity unknown — keeping its"
+                    " group held, checking again later"
+                )
+        # 오래된 것부터(P6 GAP1) — 서버의 목록 상한을 넘으면 앞의 것만 싣고 나머지는 다음 시작에.
+        # 확인된 D 의 잠금은 등록이 받을 때까지 쥔다 — 받으면 그 폴더를 지운다(`_settle_reported`)
+        for dead in sorted(self.dead_sessions, key=lambda d: (d.ok_at(), d.session_id)):
+            if dead.verified:
+                self.previous_sessions.append(dead.session_id)
+            else:
+                self.unverified_sessions.append(dead.session_id)
+
+    def _drop_own_session(self) -> None:
+        """등록하지 못한 시작의 제 폴더를 지운다(P6 GAP1). 잡을 받은 적이 없어 다음 프로세스가
+        판정할 것이 없다 — 남기면 재시작 루프마다 잡 없는 죽은 세션이 하나씩 쌓여 등록 목록 상한을
+        넘는다."""
+        own, fd = self.session_dir, self._session_fd
+        self.session_dir, self._session_fd = None, None
+        if own is not None:
+            shutil.rmtree(own, ignore_errors=True)  # mutcheck: failed-start-keeps-its-folder
+        if fd is not None:
+            os.close(fd)
+
+    def _settle_reported(self, previous: list[str]) -> None:
+        """등록이 받은 죽은 세션 정리(P6 GAP1). 확인된 D 는 서버가 그 busy 잡을 닫고 홀드를 풀고
+        펜싱했다 — 다시 보고할 것이 없으니 잠금을 쥔 채 폴더를 지운다. 「모름」 D 는 재확인
+        (step 9)이 쓰므로 남긴다. 싣지 못한 확인된 D 는 잠금만 놓고 다음 시작에 싣는다."""
+        sent = set(previous)
+        for dead in self.dead_sessions:
+            if not dead.verified:
+                continue
+            if dead.session_id in sent:
+                shutil.rmtree(dead.path, ignore_errors=True)  # mutcheck: reported-dead-folder-kept
+            if dead.fd >= 0:
+                os.close(dead.fd)
+                dead.fd = -1
+
+    def schedule_rechecks(self) -> None:
+        """「모름」 잡이 있는 D 마다 `D.ok_at + G_J − m_J` 에 다시 본다(step 9). 지났으면 바로 한
+        번 본다."""
+        for dead in self.dead_sessions:
+            for job_id, verdict in dead.verdicts.items():
+                if verdict != UNKNOWN:
+                    continue
+                claim = dead.claim(job_id)
+                grace = claim.get("disconnect_grace_seconds")
+                if not isinstance(grace, int) or isinstance(grace, bool):
+                    from remote_ci_monitor.config import DISCONNECT_GRACE_MARGIN_SECONDS
+
+                    grace = self.connected_age_floor() + DISCONNECT_GRACE_MARGIN_SECONDS
+                grace_j = self._grace_for(job_id, claim.get("irreversible") is True, grace)
+                when = dead.ok_at() + self.self_stop_threshold(grace, grace_j)
+                delay = max(0.0, when - self._epoch())
+                t = threading.Timer(delay, self.recheck, args=(dead, job_id))
+                t.daemon = True
+                t.name = f"rcm-worker-recheck-{job_id}"
+                self._rechecks.append(t)
+                t.start()
+
+    def recheck(self, dead: DeadSession, job_id: int) -> str:
+        """D 의 「모름」 잡을 다시 판정한다. 확인되면 D 의 id 로 좁은 확인 finish 를 한 번 보낸다 —
+        D 는 등록이 펜싱했으므로 이것이 D 에 허용되는 단 하나의 요청이다(§4.2)."""
+        verdict = judge_orphan(
+            dead.path / "jobs" / str(job_id), float(self.config.grace_seconds), self.log
+        )
+        if verdict != CONFIRMED:
+            self.log(f"dead session {dead.session_id[:8]} job #{job_id}: still unknown")
+            return verdict
+        client = copy.copy(self.client)
+        try:
+            client.session_id = dead.session_id
+            client.finish(
+                job_id,
+                LOST,
+                None,
+                None,
+                summary_code="worker_replaced",
+                summary_args={},
+                group_gone=True,
+            )
+            self.log(f"dead session {dead.session_id[:8]} job #{job_id}: confirmed gone")
+        except ClientError as e:
+            self.log(f"dead session {dead.session_id[:8]} job #{job_id}: {e.message}")
+        return verdict
+
+    def _job_dir(self, job_id: int) -> Path | None:
+        return None if self.session_dir is None else self.session_dir / "jobs" / str(job_id)
+
+    def _write_claim(self, job_id: int, irreversible: bool, grace: int | None) -> None:
+        d = self._job_dir(job_id)
+        if d is not None:
+            data = {"irreversible": irreversible, "disconnect_grace_seconds": grace}
+            _write_json(d / "claim.json", data)
+
+    def _write_proc(self, job_id: int, pid: int | None) -> None:
+        """`proc.json` 두 번 쓰기(결정 333): 띄우기 직전 `{pgid: null}`, 띄운 뒤 `{pgid, start}`."""
+        d = self._job_dir(job_id)
+        if d is None:
+            return
+        start = process_start(pid) if pid is not None else None
+        _write_json(d / "proc.json", {"pgid": pid, "start": start})
+
+    def _forget_job_dir(self, job_id: int) -> None:
+        if job_id in self._group_unconfirmed:
+            return  # 다음 프로세스가 `proc.json` 으로 그룹을 다시 판정해 홀드를 푼다
+        d = self._job_dir(job_id)
+        if d is not None:
+            shutil.rmtree(d, ignore_errors=True)
+
+    # ── 자기 멈춤 (M5t-b §4.3 · 결정 320 · 335) ────────────────────────────
+
+    def _sent_at(self) -> tuple[float, float]:
+        """요청을 보내는 지금 — 2xx 가 오면 이 값이 `ok_at` 후보다(응답 시각이 아니다, F55)."""
+        return self.now_fn().timestamp(), self.mono_fn()
+
+    def mark_ok(self, wall: float, mono: float) -> None:
+        """2xx 를 받은 요청의 보낸 시각으로 `ok_at` 을 올린다. 벽 · 단조 각각 최댓값이다. 세션
+        폴더의 `ok_at.json` 은 H 마다 많아야 한 번 덮어쓴다(다음 프로세스가 D 를 다시 볼 때
+        쓴다)."""
+        with self._ok_lock:
+            if self._ok_at is None:
+                self._ok_at = (wall, mono)
+            else:
+                self._ok_at = (max(self._ok_at[0], wall), max(self._ok_at[1], mono))
+            best = self._ok_at[0]
+            due = self.session_dir is not None and mono - self._ok_written >= self.heartbeat_seconds
+            if due:
+                self._ok_written = mono
+        if due and self.session_dir is not None:
+            try:
+                _write_json(self.session_dir / "ok_at.json", {"wall": _iso_exact(best)})
+            except OSError as e:
+                self.log(f"session folder: {type(e).__name__}")
+
+    def ok_at(self) -> tuple[float, float] | None:
+        with self._ok_lock:
+            return self._ok_at
+
+    def connected_age_floor(self) -> int:
+        """L = max(T, 2H + 3·T_req + 5)(결정 335) — 연결된 워커의 `ok_at` 나이 상한(§4.1.5)."""
+        t, h = self.timeout_seconds, self.heartbeat_seconds
+        return max(
+            t, 2 * h + 3 * HEARTBEAT_DEADLINE_SECONDS + 5
+        )  # mutcheck: lower-bound-one-timeout
+
+    @staticmethod
+    def self_stop_threshold(grace_seconds: int, grace_j: int) -> int:
+        """문턱 G_J − m_J, m_J = T_req + grace_J + 여유(결정 320)."""
+        # mutcheck: self-stop-ignores-request-timeout
+        return grace_seconds - (HEARTBEAT_DEADLINE_SECONDS + grace_j + SELF_STOP_SLACK_SECONDS)
+
+    def _grace_for(self, job_id: int, irreversible: bool, grace_seconds: int | None) -> int:
+        """러너의 `grace_J`. 표식 잡이면 `G_J − L − T_req − 여유` 로 자른다(§4.3). 기본 grace 10 은
+        설정 검증(`G ≥ L + 35`) 덕에 줄지 않는다. 줄였으면 한 줄 남긴다."""
+        conf = int(self.config.grace_seconds)
+        if not irreversible or grace_seconds is None:
+            return conf
+        cap = grace_seconds - self.connected_age_floor() - HEARTBEAT_DEADLINE_SECONDS
+        cap -= SELF_STOP_SLACK_SECONDS
+        grace = max(1, min(conf, cap))
+        if grace != conf:
+            self.log(
+                f"#{job_id}: grace_seconds {conf} lowered to {grace} for this job"
+                " — fits disconnect_grace_seconds"
+            )
+        return grace
+
+    def _job_grace(self, observer: _RemoteObserver) -> int:
+        if observer.grace_seconds is not None:
+            return int(observer.grace_seconds)
+        # 얼린 G 가 없다(서버 버그) — 서버가 받을 수 있는 가장 짧은 G 로 본다. 일찍 멈추는 쪽이다
+        from remote_ci_monitor.config import DISCONNECT_GRACE_MARGIN_SECONDS
+
+        return self.connected_age_floor() + DISCONNECT_GRACE_MARGIN_SECONDS
+
+    def watchdog_tick(self) -> None:
+        """감시 한 틱(W3). 표식 잡마다 `wgap ≥ G_J − m_J` 면 그 관찰자의 `self_stop` 을 세운다.
+        `wgap` 은 벽과 단조 가운데 큰 쪽이다 — 잠든 시간을 안 세는 단조 · 뒤로 가는 벽 어느 쪽이든
+        하나는 실제 경과 이상이다(RL26)."""
+        ok = self.ok_at()
+        if ok is None:
+            return
+        wall, mono = self._sent_at()
+        wgap = max(wall - ok[0], mono - ok[1])  # mutcheck: self-stop-monotonic-only
+        with self._lock:
+            observers = list(self._observers.values())
+        for o in observers:
+            if not o.irreversible or o.self_stop.is_set():  # mutcheck: self-stop-all-jobs
+                continue
+            if wgap >= self.self_stop_threshold(self._job_grace(o), o.grace_j):
+                o.self_stop_seconds = int(wgap)
+                o.self_stop.set()  # mutcheck: self-stop-reports-cancelled
+                self.log(
+                    f"#{o.job_id}: no answer from the server for {int(wgap)}s"
+                    " — stopping this irreversible job before the server gives it up"
+                )
+
+    def _watchdog_loop(self) -> None:
+        while not self.stopping.wait(WATCHDOG_TICK_SECONDS):
+            try:
+                self.watchdog_tick()
+            except Exception as e:  # noqa: BLE001 — 감시가 죽으면 표식 잡이 멈추지 못한다
+                self.log(f"watchdog: {type(e).__name__}")
+
+    def start_watchdog(self) -> threading.Thread:
+        t = threading.Thread(target=self._watchdog_loop, name="rcm-worker-watchdog", daemon=True)
+        t.start()
+        return t
+
+    # ── 서버가 닫은 잡(W4) ──────────────────────────────────────────────────
+
+    def _closed_by_409(self, job_id: int, e: ClientError) -> None:
+        state = e.body.get("state")
+        if e.body.get("code") == "job_closed" and isinstance(state, str):
+            self._job_closed(job_id, state, had_cancel=False)
+
+    def _job_closed(self, job_id: int, state: str, *, had_cancel: bool) -> None:
+        """서버가 알린 끝 상태(heartbeat `closed_jobs` · 보고의 409 `job_closed`)를 W4 표로."""
+        if state not in FINISH_RECORDED and state not in (CANCELLED, LOST):
+            how = "a claimed job cannot be" if state in _NOT_CLAIMED_STATES else "unknown state"
+            self.log(f"#{job_id}: server reports {state} ({how}) — ignoring")
+            return
+        with self._lock:
+            observer = self._observers.get(job_id)
+            parked = job_id in self._unreported
+        if observer is not None:
+            observer.server_closed(state, had_cancel)
+        if state in FINISH_RECORDED and parked:
+            # 이 세션의 finish 가 기록됐고 2xx 만 잃었다 — 큐 항목을 전달됨으로 지운다
+            self.log(f"#{job_id} finish: the server already has it ({state})")
+            self._unpark(job_id)
+
+    def _apply_closed_jobs(self, closed: Any) -> None:
+        if not isinstance(closed, list):
+            return
+        for item in closed:
+            if not isinstance(item, dict):
+                continue
+            jid, state = item.get("id"), item.get("state")
+            if isinstance(jid, int) and not isinstance(jid, bool) and isinstance(state, str):
+                self._job_closed(jid, state, had_cancel=item.get("had_cancel") is True)
+
+    def _stop_summary(self, observer: Any) -> tuple[str | None, str | None, dict[str, Any] | None]:
+        """러너의 `lost`(곧 `should_stop`) 보고 — 자기 멈춤이면 `worker_self_stopped`(결정 334)."""
+        stop = getattr(observer, "self_stop", None)
+        if stop is not None and stop.is_set():
+            return outcome_summary("worker_self_stopped", seconds=observer.self_stop_seconds)
+        return STOP_SUMMARY, None, None
+
     # ── 보고 (재시도) ────────────────────────────────────────────────────────
 
     def report(
-        self, call: Callable[[], Any], what: str, *, keep: Callable[[], bool] | None = None
+        self,
+        call: Callable[[], Any],
+        what: str,
+        *,
+        keep: Callable[[], bool] | None = None,
+        job_id: int | None = None,
     ) -> Any:
         """서버에 보고. 연결 오류는 1·2·4초 재시도, 409(잡이 이미 닫힘)는 None, 다른 4xx 는 로그.
         반환: 응답(성공) · None(409) · False(포기). `keep` 은 연결 오류 · 503 으로 재시도가 다
         실패했을 때만 부른다. 참을 돌려주면 부른 쪽이 미뤄 뒀다 다시 보고한다는 뜻이라 「giving up」
         대신 그렇게 쓴다."""
         for i, delay in enumerate((*REPORT_RETRIES, None)):
+            sent = self._sent_at()
             try:
                 out = call()
+                self.mark_ok(*sent)
                 return {} if out is None else out
             except ClientError as e:
+                if self._is_fenced(e):
+                    self._on_fenced(what)
+                    return None
                 if e.status == 409:
                     self.log(f"{what}: server says {e.message}")
+                    if job_id is not None:
+                        self._closed_by_409(job_id, e)
                     return None
                 if e.status and e.status != 503:
                     self.log(f"{what}: {e.message}")
@@ -355,17 +1104,65 @@ class RemoteWorker:
 
     # ── 등록 · heartbeat ─────────────────────────────────────────────────────
 
-    def register(self) -> dict[str, Any]:
+    def check_protocol(self) -> None:
+        """등록 **전에** 서버의 워커 프로토콜을 본다(M5t-b T13 · 결정 270). 서버에는 GET 만 보낸다.
+
+        `/worker/spec` 이 `worker_protocol ≥ 2` 면 진행한다. 키가 없거나 404 면 서버 버전을 본다 —
+        다르면 오늘의 등록 길로 가서 따라가거나(M5q) 종료 2 로 끝난다(서버의 버전 409 는 어떤
+        부작용보다 먼저다). 같으면 등록 · claim 없이 종료 3 이다(감독자가 되살린다)."""
         while True:
             try:
+                try:
+                    spec = self.client.spec()
+                except ClientError as e:
+                    if e.status != 404:
+                        raise
+                    spec = {}
+                proto = spec.get("worker_protocol") if isinstance(spec, dict) else None
+                if isinstance(proto, int) and not isinstance(proto, bool) and proto >= 2:
+                    return
+                version = (self.client.health() or {}).get("version")
+            except ClientError as e:
+                if e.status == 403:
+                    raise WorkerExit(
+                        2, f"{e.message} (rcm token add NAME --worker on the server)"
+                    ) from e
+                if e.status == 401:
+                    raise WorkerExit(2, f"{e.message} — set RCM_WORKER_TOKEN") from e
+                if e.status:
+                    raise WorkerExit(2, e.message) from e
+                self._connection_failed()
+                self.log(f"register: {e.message} — retrying in {int(REGISTER_RETRY_SECONDS)}s")
+                if self.stopping.wait(REGISTER_RETRY_SECONDS):
+                    raise WorkerExit(0, "stopped before registering") from e
+                continue
+            if version == __version__:
+                raise WorkerExit(EXIT_PROTOCOL, PROTOCOL_OLD_SERVER)
+            return  # 버전이 다르다 — 등록이 버전 409 를 받고 따라가거나 종료 2
+
+    def register(self) -> dict[str, Any]:
+        while True:
+            sent = self._sent_at()
+            try:
+                sessions: dict[str, list[str]] = {}
+                if self.previous_sessions or self.unverified_sessions:
+                    sessions = {  # mutcheck: session-list-uncapped
+                        "previous_sessions": self.previous_sessions[:SESSION_LIST_MAX],
+                        "unverified_sessions": self.unverified_sessions[:SESSION_LIST_MAX],
+                    }
                 out = self.client.register(
                     pool=self.config.pool,
                     lanes=self.config.lanes,
                     host_name=self.name,
                     version=__version__,
                     host=self.host_facts(),
+                    **sessions,
                 )
             except ClientError as e:
+                if self._is_fenced(e):
+                    raise WorkerExit(0, FENCED) from e
+                if e.status == 409 and e.body.get("code") == "protocol_required":
+                    raise WorkerExit(EXIT_PROTOCOL, e.message) from e
                 if e.status == 403:
                     raise WorkerExit(
                         2, f"{e.message} (rcm token add NAME --worker on the server)"
@@ -382,10 +1179,29 @@ class RemoteWorker:
                     raise WorkerExit(0, "stopped before registering") from e
                 continue
             self._conn_failures = 0
+            self.mark_ok(*sent)
+            # 첫 등록만 싣는다 — 받은 확인된 D 의 폴더는 지운다(P6 GAP1)
+            self._settle_reported(sessions.get("previous_sessions", []))
+            self.previous_sessions, self.unverified_sessions = [], []
             self.heartbeat_seconds = int(out.get("heartbeat_seconds") or 5)
             self.claim_wait_seconds = int(out.get("claim_wait_seconds") or 20)
             self.timeout_seconds = int(out.get("worker_timeout_seconds") or 60)
             self.name = str(out.get("name") or self.name)
+            replaced = out.get("fenced_sessions")
+            if "fenced_sessions" in out and replaced is None:
+                # 재시작한 서버가 아직 모른다(P6-2 #2) — 대신했다고 단정하지 않고 모른다고 쓴다
+                self.log(  # mutcheck: replaced-unknown-silent
+                    "the server restarted recently and cannot tell whether this replaced another"
+                    f" process of worker {self.name} — if a service worker with this token was"
+                    " running, it has stopped and will not start again by itself"
+                )
+            if isinstance(replaced, int) and not isinstance(replaced, bool) and replaced > 0:
+                # 펜싱된 프로세스는 종료 0 이라 서비스면 다시 뜨지 않는다(명세 §9, P6 GAP8)
+                noun = "process" if replaced == 1 else "processes"
+                self.log(  # mutcheck: replaced-service-silent
+                    f"replaced {replaced} other {noun} of worker {self.name} — a service worker"
+                    " with this token has stopped and will not start again by itself"
+                )
             # 등록은 서버가 이 워커의 보고를 지우는 일이다(M5n §19-5). 등록 응답의 세대를 제 것으로
             # 삼으면 다음 heartbeat 이 「세대 같음」으로 보여 주기(기본 10분)까지 다시 재지 않는다 —
             # 그동안 any-capable 잡을 못 받는다. 아직 이 세대로 보고하지 않았다고 둔다
@@ -430,11 +1246,20 @@ class RemoteWorker:
         return doc
 
     def heartbeat_once(self) -> bool:
+        # 순번 · 목록 · 「끝난 claim 까지」는 한 잠금 구간에서 함께 찍는다(결정 339-a, R20)
         with self._lock:
+            self._hb_seq += 1
+            seq = self._hb_seq
             jobs = sorted(self.running)
+            settled = self.claims_settled()
         try:
-            out = self.client.heartbeat(jobs, self._host_sample())
+            out = self._heartbeat_call(jobs, seq, settled)
+        except _HeartbeatSkipped:
+            return False
         except ClientError as e:
+            if self._is_fenced(e):
+                self._on_fenced("heartbeat")
+                return False
             if e.status == 409:
                 # 서버에 워커 행이 없다(DB 를 되돌렸거나 잊었다) — 닿고 있으니 「못 닿음」이 아니다.
                 # 연결 실패 줄과 같은 간격으로 쓴다(§14 B질문12)
@@ -457,13 +1282,21 @@ class RemoteWorker:
         self._hb_failures = 0
         self._hb_unregistered = 0
         self._conn_failures = 0
+        timeout = out.get("timeout_seconds")
+        if isinstance(timeout, int) and not isinstance(timeout, bool) and timeout > 0:
+            self.timeout_seconds = timeout  # L 의 T(F62)
+        # 서버가 닫은 잡을 먼저 안다(W4) — 이미 기록된 finish 를 다시 보내지 않게
+        self._apply_closed_jobs(out.get("closed_jobs"))  # mutcheck: closed-jobs-ignored
         # 서버가 돌아왔다 — 못 한 보고를 드레인보다 먼저 한다
         self._retry_unreported()
         self._heard_server_version(out)
         cancel = out.get("cancel") or []
         with self._lock:
-            self.cancel_requested = {int(j) for j in cancel if isinstance(j, int)}
-            self.paused = bool(out.get("paused"))
+            # 늦게 온 응답이 새 취소를 지우지 않게 — 이미 적용한 것보다 큰 seq 의 응답만(결정 339-a)
+            if seq > self._hb_applied:  # mutcheck: stale-hb-response-applied
+                self._hb_applied = seq
+                self.cancel_requested = {int(j) for j in cancel if isinstance(j, int)}
+                self.paused = bool(out.get("paused"))
         gen = out.get("generation")
         due = time.monotonic() - self._last_measured >= self.probe_interval_seconds
         # 세대를 안 보내는 서버(M5n 이전)에는 보고하지 않는다
@@ -476,6 +1309,47 @@ class RemoteWorker:
                 target=self._measure_quietly, name="rcm-worker-measure", daemon=True
             ).start()
         return True
+
+    def _heartbeat_call(self, jobs: list[int], seq: int, settled: int) -> dict[str, Any]:
+        """heartbeat 하나를 도우미 스레드에서 보내고 `HEARTBEAT_DEADLINE_SECONDS` 까지만 기다린다
+        (결정 335). 넘으면 그 회차를 실패로 센다. 늦게 온 2xx 는 보낸 시각으로 `ok_at` 만 올린다 —
+        응답의 취소 · 멈춤은 seq 가 막는다. 매달린 도우미가 `HEARTBEAT_INFLIGHT_MAX` 면 보내지
+        않는다."""
+        with self._ok_lock:
+            if self._hb_inflight >= HEARTBEAT_INFLIGHT_MAX:
+                self._hb_skipped += 1
+                n = self._hb_skipped
+                hung = True
+            else:
+                self._hb_inflight += 1
+                hung = False
+        if hung:
+            self._hb_failures += 1
+            if n in (1, 12) or n % 60 == 0:
+                self.log(f"heartbeat: {HEARTBEAT_INFLIGHT_MAX} requests in flight — skipping one")
+            raise _HeartbeatSkipped
+        sent = self._sent_at()
+        box: dict[str, Any] = {}
+        done = threading.Event()
+        host = self._host_sample()
+
+        def call() -> None:
+            try:
+                box["out"] = self.client.heartbeat(jobs, host, seq=seq, claims_settled=settled)
+                self.mark_ok(*sent)
+            except BaseException as e:  # noqa: BLE001 — 부른 쪽이 다시 올린다
+                box["err"] = e
+            finally:
+                with self._ok_lock:
+                    self._hb_inflight -= 1
+                done.set()
+
+        threading.Thread(target=call, name="rcm-worker-heartbeat-call", daemon=True).start()
+        if not done.wait(HEARTBEAT_DEADLINE_SECONDS):  # mutcheck: heartbeat-no-deadline
+            raise ClientError(0, f"no answer in {HEARTBEAT_DEADLINE_SECONDS}s")
+        if "err" in box:
+            raise box["err"]
+        return box.get("out") or {}
 
     # ── 드레인 (M5q §3.3 · §14.9) ───────────────────────────────────────────
 
@@ -593,6 +1467,7 @@ class RemoteWorker:
         with self._lock:
             self._unreported.pop(job_id, None)
             self.running.pop(job_id, None)
+        self._forget_job_dir(job_id)
 
     def _try_report(self, job_id: int, call: Callable[[], Any]) -> bool:
         """한 번 보고한다. 끝났으면(보고됐거나 서버가 받지 않는 보고) 참, 다시 시도할 만하면
@@ -793,9 +1668,19 @@ class RemoteWorker:
                     break
                 continue
             asked_at = time.monotonic()
+            with self._lock:
+                self._claim_seq += 1
+                claim_seq = self._claim_seq
+                self._open_claims.add(claim_seq)
+            claimed = None
+            sent = self._sent_at()
             try:
-                claimed = self.client.claim(lane, self.claim_wait_seconds)
+                claimed = self.client.claim(lane, self.claim_wait_seconds, claim_seq=claim_seq)
+                self.mark_ok(*sent)  # 잡 J 의 첫 ok_at 은 J 를 돌려준 claim 을 보낸 시각이다
             except ClientError as e:
+                if self._is_fenced(e):
+                    self._on_fenced(f"lane {lane}")
+                    break
                 if e.status == 409 and "not registered" in e.message:
                     self.log(f"lane {lane}: {e.message} — registering again")
                     # 재등록은 이 워커의 도는 잡을 lost 로 닫는다 — 못 한 보고를 먼저 한다. 다른
@@ -825,6 +1710,15 @@ class RemoteWorker:
                 self.log(f"lane {lane}: claim: {e.message}")
                 self.stopping.wait(self._backoff(RETRY_WAIT_SECONDS))
                 continue
+            finally:
+                # 응답 · 204 · 오류 · 시한 어느 경우든 이 claim 은 끝났다. 잡을 받았으면 `running`
+                # 에 넣는 것과 같은 잠금 구간이다(R20) — 그 사이의 heartbeat 이 「없음」을 세지 않게
+                with self._lock:  # mutcheck: claim-settled-before-running
+                    if isinstance(claimed, dict):
+                        job_id = (claimed.get("job") or {}).get("id")
+                        if isinstance(job_id, int):
+                            self.running[job_id] = lane
+                    self._open_claims.discard(claim_seq)
             if claimed is None:
                 # 서버가 기다리지 않고 204 를 줬다(wait 0 · long-poll 슬롯 소진) — 뜨거운 루프 금지
                 if time.monotonic() - asked_at < CLAIM_MIN_INTERVAL:
@@ -856,6 +1750,9 @@ class RemoteWorker:
         )
         requester = job.get("requester") or {}
         data = self.config.data_path
+        irreversible = job.get("irreversible") is True
+        frozen = job.get("disconnect_grace_seconds")
+        grace = frozen if isinstance(frozen, int) and not isinstance(frozen, bool) else None
         spec = RunSpec(
             job_id=job_id,
             preset_name=str(job.get("preset") or preset.get("name") or ""),
@@ -869,7 +1766,9 @@ class RemoteWorker:
             source=source,
             workspace=data / "workspaces" / str(job_id),
             log_path=data / "jobs" / str(job_id) / "log.txt",
-            grace_seconds=self.config.grace_seconds,
+            grace_seconds=self._grace_for(job_id, irreversible, grace),
+            irreversible=irreversible,
+            disconnect_grace_seconds=grace,
         )
         model = Job(
             id=job_id,
@@ -933,7 +1832,76 @@ class RemoteWorker:
         with self._lock:
             self.running[job.id] = lane
         self.log(f"lane {lane}: claimed #{job.id} {job.preset}")
-        observer = _RemoteObserver(self, job.id)
+        observer = _RemoteObserver(
+            self,
+            job.id,
+            irreversible=spec.irreversible,
+            grace_seconds=spec.disconnect_grace_seconds,
+            grace_j=spec.grace_seconds,
+        )
+        with self._lock:
+            self._observers[job.id] = observer
+        try:
+            self._run_claimed(lane, claimed, spec, job, observer)
+        except Exception as e:  # noqa: BLE001 — 예외가 레인 루프로 새면 잡이 `running` 에 멈춘다
+            if observer.finish_sent:  # mutcheck: run-claimed-error-leaves-job-running
+                raise
+            self.log(f"lane {lane}: #{job.id} worker error: {type(e).__name__}")
+            try:
+                observer.final_flush()
+            except Exception:  # noqa: BLE001
+                pass
+            result = observer.result
+            if result is not None:  # mutcheck: safety-net-drops-the-result
+                # 러너는 이미 결과를 냈다 — 그 결과와 그 `group_gone` 을 보낸다(P3 2라운드 LOW).
+                # 버리면 끝난 잡이 실패로 남고 확인된 그룹도 홀드된다. 산출물은 없다
+                outcome, summary, code, args = self._result_outcome(spec, observer, result)
+                self._finish(
+                    job.id,
+                    outcome,
+                    result.rc,
+                    summary,
+                    observer,
+                    finished=result,
+                    summary_code=code,
+                    summary_args=args,
+                    group_gone=getattr(result, "group_gone", None),
+                )
+                self._cleanup(spec, failed=outcome != SUCCEEDED)
+                return
+            # 띄우기 전이면 그룹은 없다. 띄운 뒤면 러너가 그룹을 끝내고 확인한 값이 실린다. 모르면
+            # 싣지 않는다 — 서버는 표식 잡이면 홀드로 읽는다
+            gone = getattr(e, "group_gone", None) if observer.launching else True
+            self._finish(
+                job.id,
+                FAILED,
+                None,
+                f"worker error: {type(e).__name__}",
+                observer,
+                group_gone=gone,  # mutcheck: safety-net-unlaunched-group-unknown
+            )
+            self._cleanup(spec, failed=True)
+
+    def _result_outcome(
+        self, spec: RunSpec, observer: Any, result: Any
+    ) -> tuple[str, str | None, str | None, dict[str, Any] | None]:
+        """러너의 결과 → (outcome, summary, summary_code, summary_args)."""
+        if result.lost:
+            summary, code, args = self._stop_summary(observer)
+            return LOST, summary, code, args
+        if result.cancelled:
+            return CANCELLED, None, None, None
+        if result.timed_out:
+            return TIMED_OUT, format_limit(spec.timeout_seconds), None, None
+        return (SUCCEEDED if result.rc == 0 else FAILED), None, None, None
+
+    def _run_claimed(
+        self, lane: int, claimed: dict[str, Any], spec: RunSpec, job: Job, observer: Any
+    ) -> None:
+        try:
+            self._write_claim(job.id, spec.irreversible, spec.disconnect_grace_seconds)
+        except OSError as e:
+            self.log(f"#{job.id} session folder: {type(e).__name__}")
         started = time.monotonic()
         outcome = FAILED
         rc: int | None = None
@@ -951,16 +1919,28 @@ class RemoteWorker:
                 now_fn=self.now_fn,
                 environ=self.environ,
                 materialize=lambda s: self._materialize(s, job),
+                mono_fn=self.mono_fn,  # mutcheck: runner-own-monotonic-clock
             )
+            observer.result = result
         except RequiredToolMissing as e:
             observer.final_flush()
             skipped = CollectResult(state=art.SKIPPED, reason_code="not_run")
             if observer.should_stop() or observer.should_cancel():
                 # 검사와 보고 사이에 종료·취소가 왔다 — 그게 이긴다(M5l S4). 프로세스는 없었다.
                 outcome = LOST if observer.should_stop() else CANCELLED
-                summary = STOP_SUMMARY if outcome == LOST else None
+                summary, code, args = (
+                    self._stop_summary(observer) if outcome == LOST else (None, None, None)
+                )
                 self._finish(
-                    job.id, outcome, None, summary, observer, artifacts=_disposition(skipped)
+                    job.id,
+                    outcome,
+                    None,
+                    summary,
+                    observer,
+                    artifacts=_disposition(skipped),
+                    summary_code=code,
+                    summary_args=args,
+                    group_gone=True,  # 프로세스를 띄운 적이 없다
                 )
                 self.log(f"lane {lane}: #{job.id} {outcome} before start")
                 self._cleanup(spec, failed=True)
@@ -977,6 +1957,7 @@ class RemoteWorker:
                 artifacts=_disposition(skipped),
                 summary_code=code,
                 summary_args=args,
+                group_gone=True,
             )
             self.log(f"lane {lane}: #{job.id} failed — {summary}")
             self._cleanup(spec, failed=True)
@@ -994,9 +1975,19 @@ class RemoteWorker:
                 # 준비 중에 종료·취소가 왔다 — 그게 이긴다(M5l S4). 프로세스는 없었고, 취소가
                 # 준비를 끊지 못했다는 이유로 사용자가 멈춘 잡이 실패로 남으면 안 된다.
                 outcome = LOST if observer.should_stop() else CANCELLED
-                summary = STOP_SUMMARY if outcome == LOST else None
+                summary, code, args = (
+                    self._stop_summary(observer) if outcome == LOST else (None, None, None)
+                )
                 self._finish(
-                    job.id, outcome, None, summary, observer, artifacts=_disposition(skipped)
+                    job.id,
+                    outcome,
+                    None,
+                    summary,
+                    observer,
+                    artifacts=_disposition(skipped),
+                    summary_code=code,
+                    summary_args=args,
+                    group_gone=getattr(e, "group_gone", None) is not False,
                 )
                 self.log(f"lane {lane}: #{job.id} {outcome} before start")
                 self._cleanup(spec, failed=True)
@@ -1014,26 +2005,28 @@ class RemoteWorker:
                 artifacts=_disposition(skipped),
                 summary_code=code,
                 summary_args=args,
+                # 감독자가 떴다면 그룹 소멸은 S7 이 정했다(표지를 읽지 않는다, 결정 339-c (3))
+                group_gone=getattr(e, "group_gone", None) is not False,
             )
             self.log(f"lane {lane}: #{job.id} failed — {summary}")
             self._cleanup(spec, failed=True)
             return
         observer.final_flush()
         rc = result.rc
-        if result.lost:
-            outcome, summary = LOST, STOP_SUMMARY
-        elif result.cancelled:
-            outcome = CANCELLED
-        elif result.timed_out:
-            outcome, summary = TIMED_OUT, format_limit(spec.timeout_seconds)
-        elif rc == 0:
-            outcome = SUCCEEDED
-        else:
-            outcome = FAILED
+        outcome, summary, code, args = self._result_outcome(spec, observer, result)
         # 워크스페이스를 지우기 전에 모으고, `self.running` 에서 빠지기 전에 올린다(§5)
         bundle = self._collect_artifacts(job.id, claimed, spec, result)
         self._finish(
-            job.id, outcome, rc, summary, observer, artifacts=_disposition(bundle), finished=result
+            job.id,
+            outcome,
+            rc,
+            summary,
+            observer,
+            artifacts=_disposition(bundle),
+            finished=result,
+            summary_code=code,
+            summary_args=args,
+            group_gone=getattr(result, "group_gone", None),
         )
         self.log(f"lane {lane}: #{job.id} {outcome} in {_fmt_seconds(time.monotonic() - started)}")
         self._cleanup(spec, failed=outcome != SUCCEEDED)
@@ -1081,16 +2074,33 @@ class RemoteWorker:
         finished: Any = None,
         summary_code: str | None = None,
         summary_args: dict[str, Any] | None = None,
+        group_gone: bool | None = None,
     ) -> None:
         """완료를 보고하고 **그 뒤에** heartbeat 목록에서 뺀다(§5).
 
         먼저 빼면 그사이의 heartbeat 에 잡이 안 실려 서버가 `lost` 로 닫는다 — 수집·업로드가
         길어질수록 그 창이 넓어진다.
+
+        `group_gone` 은 그 잡의 프로세스 그룹이 사라졌다는 확인이다(M5t-b 결정 330). 프로세스를
+        띄운 적이 없으면 참이다. 모르면 싣지 않는다 — 서버는 표식 잡이면 홀드로 읽는다.
+        펜싱된 프로세스(W5)의 finish 는 결과가 무엇이든(성공 · 실패 · lost) 좁은 확인(`lost` +
+        `worker_replaced` + `group_gone`)으로 보낸다(결정 261, P6 GAP2) — 서버는 펜싱된 세션의
+        결과를 기록하지 않지만 확인은 받는다. 이 finish 의 409 로 펜싱을 처음 알았으면 좁은 확인을
+        한 번 더 보낸다.
         """
+        if observer is not None:
+            observer.finish_sent = True  # 바깥 안전망(`run_claimed`)이 두 번 보내지 않게
         with self._lock:
             self.cancel_requested.discard(job_id)
-        if not getattr(observer, "closed_by_server", False):
+            self._observers.pop(job_id, None)  # 프로세스는 끝났다 — 감시할 것이 없다
+        if getattr(observer, "irreversible", False) and group_gone is not True:
+            self._group_unconfirmed.add(job_id)  # mutcheck: unconfirmed-group-folder-dropped
+        # 서버가 이 세션의 finish 를 이미 기록했다고 알렸으면(W4 표 첫 행) 다시 보내지 않는다.
+        # 서버가 닫은 다른 끝 상태(lost · cancelled)에는 보낸다 — 확인 · 홀드 풀기로 쓰인다
+        if getattr(observer, "closed_state", None) not in FINISH_RECORDED:
             extra: dict[str, Any] = {}
+            if group_gone is not None:
+                extra["group_gone"] = group_gone
             if artifacts is not None:
                 extra["artifacts"] = artifacts
             if finished is not None and getattr(finished, "finished", None) is not None:
@@ -1099,20 +2109,44 @@ class RemoteWorker:
             if summary_code is not None:
                 extra["summary_code"] = summary_code
                 extra["summary_args"] = dict(summary_args or {})
-            call = lambda: self.client.finish(job_id, outcome, rc, summary, **extra)  # noqa: E731
+            narrow: dict[str, Any] = {"summary_code": "worker_replaced", "summary_args": {}}
+            if group_gone is not None:
+                narrow["group_gone"] = group_gone
+            sent_narrow: list[bool] = []
+
+            def call() -> Any:
+                # 부를 때마다 본다 — 미뤄 둔 보고(`_park_unreported`)도 그 사이의 펜싱을 따른다
+                fenced = self.fenced.is_set()  # mutcheck: fenced-finish-keeps-its-outcome
+                sent_narrow[:] = [fenced]
+                if fenced:
+                    return self.client.finish(job_id, LOST, None, None, **narrow)
+                return self.client.finish(job_id, outcome, rc, summary, **extra)
+
             gave_up: list[bool] = []
 
             def keep() -> bool:
                 gave_up.append(True)
                 return not self.stopping.is_set()
 
-            self.report(call, f"#{job_id} finish", keep=keep)
+            self.report(call, f"#{job_id} finish", keep=keep, job_id=job_id)
+            if self.fenced.is_set() and sent_narrow == [False]:
+                # 이 finish 의 409 `session_fenced` 로 처음 알았다 — 결과 대신 확인을 보낸다.
+                # 다른 보고처럼 `keep` 으로 보낸다(P6-2 #3) — 판정은 이 확인의 결과로 한다
+                gave_up.clear()
+                self.report(call, f"#{job_id} finish", keep=keep, job_id=job_id)
             if gave_up and not self.stopping.is_set():
                 # 서버를 갈아 끼우는 몇 초일 수 있다 — 버리지 않고 나중에 다시 보고한다
                 self._park_unreported(job_id, call)
                 return
+            if gave_up:  # mutcheck: unsent-finish-folder-dropped
+                # 멈추는 중이라 미룰 곳이 없다(펜싱도 멈춤이다). 폴더를 남긴다 — 다음 프로세스가
+                # 이 세션을 죽은 세션으로 판정해 확인을 보낸다(P6-2 #3). 지우면 확인이 사라진다
+                with self._lock:
+                    self.running.pop(job_id, None)
+                return
         with self._lock:
             self.running.pop(job_id, None)
+        self._forget_job_dir(job_id)  # 보고가 끝났다 — 다음 프로세스가 판정할 것이 없다
 
     def _cleanup(self, spec: RunSpec, *, failed: bool) -> None:
         keep = failed and self.config.keep_workspace_on_failure
@@ -1145,7 +2179,18 @@ class RemoteWorker:
         """블로킹. 등록 → 스레드 → 정지까지. 종료 코드."""
         self.config.data_path.mkdir(parents=True, exist_ok=True)
         self._sweep_workspaces()
-        out = self.register()
+        sweep_sessions(self.config.data_path)
+        # 등록 전에 프로토콜을 본다 — 옛 서버면 등록 · claim 없이 종료 3(M5t-b T13). 세션 폴더는 그
+        # 뒤에 만든다 — 재시작 루프가 빈 폴더를 쌓지 않게(V2-12)
+        self.check_protocol()
+        self.prepare_sessions()
+        try:
+            out = self.register()
+        except BaseException:
+            # 등록하지 못한 시작(종료 2 · 3 · 0 · 따라가기)은 폴더를 남기지 않는다(P6 GAP1)
+            self._drop_own_session()
+            raise
+        self.schedule_rechecks()
         self.log(
             f"rcm worker {self.name} · pool {out.get('pool')} · lanes {out.get('lanes')} · "
             f"server {self.client.server} · heartbeat {self.heartbeat_seconds}s"
@@ -1164,6 +2209,7 @@ class RemoteWorker:
         self.heartbeat_once()
         hb = threading.Thread(target=self._heartbeat_loop, name="rcm-worker-heartbeat", daemon=True)
         hb.start()
+        dog = self.start_watchdog()
         self._threads = [
             threading.Thread(
                 target=self._lane_loop, args=(lane,), name=f"rcm-worker-lane-{lane}", daemon=True
@@ -1185,9 +2231,21 @@ class RemoteWorker:
             for t in self._threads:
                 t.join(timeout=self.config.grace_seconds + 10)
             hb.join(timeout=2)
+            dog.join(timeout=2)
             if self.restart_for is None:
                 self.log("stopped")  # 드레인 끝이면 `cmd_worker` 가 재실행 줄을 쓴다
+        if self.fenced.is_set():
+            return 0  # 펜싱 — 감독자가 되살리지 않는다(결정 258)
         return self.exit_code
 
 
-__all__ = ["DRAIN_REPORT_SECONDS", "RemoteWorker", "WorkerExit", "WorkerFollow", "STOP_SUMMARY"]
+__all__ = [
+    "DRAIN_REPORT_SECONDS",
+    "RemoteWorker",
+    "WorkerExit",
+    "WorkerFollow",
+    "STOP_SUMMARY",
+    "judge_orphan",
+    "linux_start",
+    "ps_start",
+]

@@ -7,6 +7,69 @@ of a key bumps that number and is listed here.
 
 ## [Unreleased]
 
+### Breaking changes
+- **Worker protocol 2: upgrade the server and every `rcm worker` together.** Each worker process
+  now opens a session when it registers, numbers its claims and heartbeats, and the server checks
+  that session on every `/worker/*` request. The server checks the version first, so an older
+  worker follows the server's version and upgrades itself, or stops with exit 2 and its service
+  starts it again; pin nothing across this release. A new worker that meets an older server of
+  the same version string stops before it registers
+  (`the server speaks worker protocol 1 — upgrade rcm on the server (this worker needs protocol 2)`,
+  exit 3). During the upgrade a protocol 1 worker can still finish a job it claimed before; a
+  finish without `group_gone` (the confirmation that the job's processes are gone) holds the
+  group of an `irreversible` preset until `rcm release-hold`.
+  ([#284](https://github.com/monocsp/remote_ci_monitor/pull/284))
+- **Database v26.** The server migrates on its first start (worker sessions, the values a job's
+  claim freezes, and the new group-hold table). An older rcm refuses the migrated database.
+  ([#284](https://github.com/monocsp/remote_ci_monitor/pull/284))
+
+### Changed
+- **A remote job outlives a short loss of contact.** A worker the server has not heard for
+  `worker_timeout_seconds` still shows `down`, but its running jobs keep running and become
+  `lost` only after `[server] disconnect_grace_seconds` (default 600, at least
+  `max(worker_timeout_seconds, 2 × worker_heartbeat_seconds + 50) + 35`). Time the server was
+  stopped does not count. A second worker process with the same token replaces the first, which
+  stops its jobs, reports them `lost` (`worker_replaced`) and exits 0; a claim of the first
+  process that is still waiting then answers 409 `session_fenced` and takes no job.
+  ([#284](https://github.com/monocsp/remote_ci_monitor/pull/284))
+
+### Added
+- **`irreversible = true` for presets whose work must not run twice at once.** The worker stops
+  such a job itself before the grace runs out (`worker_self_stopped`), the command runs under a
+  supervisor that ends its process group when the worker is killed, and a close without a
+  confirmation that the processes are gone holds the job's concurrency group (a preset without a
+  group gets `irreversible:<name>`, global). A worker that cannot write the job's session folder
+  before the start does not start the command (`launch_failed`). Waiting jobs of a held group show
+  reason `needs_action` with `action.code = "irreversible_hold"`; `/api/status` and `/api/health`
+  list open holds in `irreversible_holds` (when the server could not read them,
+  `irreversible_holds` is `null`, not an empty list), and `GET /jobs/N` carries `hold`.
+  ([#284](https://github.com/monocsp/remote_ci_monitor/pull/284))
+- **A worker says when it replaced a running one.** The register answer carries
+  `fenced_sessions`, the number of live processes of the same worker that this registration
+  replaced, and the new process logs `replaced N other process(es) of worker NAME — a service
+  worker with this token has stopped and will not start again by itself`: start that service again
+  with `launchctl kickstart -k` or `systemctl --user restart`. A server that restarted less than
+  `worker_timeout_seconds` ago answers `fenced_sessions: null` when it cannot tell, and the worker
+  says so.
+  ([#284](https://github.com/monocsp/remote_ci_monitor/pull/284))
+- **An `irreversible` preset cannot also have `[presets.retry]`.** A retry runs the command
+  again, so the server refuses to load that combination
+  (`irreversible presets cannot have [retry]`). A job submitted with a retry before the mark is
+  never retried once it is claimed as irreversible: its retry exit code ends it `failed`.
+  ([#284](https://github.com/monocsp/remote_ci_monitor/pull/284))
+- **`rcm release-hold N [--reason TEXT] [--json]`** releases a group hold after an admin checked
+  the machine (exit 0 released, 1 no open hold, 2 refused, 3 unreachable or a server error).
+  ([#284](https://github.com/monocsp/remote_ci_monitor/pull/284))
+- **Hold notifications.** Every notification carries `RCM_EVENT`, `RCM_HOLD`, `RCM_HOLD_GROUP` and
+  `RCM_HOLD_NOTE` (and `event` · `hold` in a webhook body); a `[[notify]]` rule with
+  `on = ["irreversible_hold"]` is called once for each new hold. The default `on` is unchanged.
+  ([#284](https://github.com/monocsp/remote_ci_monitor/pull/284))
+
+### Fixed
+- **`/api/status` no longer answers 500 when its queue section fails.** That section is `null`
+  and the rest of the document is served, as for the other sections.
+  ([#284](https://github.com/monocsp/remote_ci_monitor/pull/284))
+
 ## [0.11.1] - 2026-11-26
 
 ### Added

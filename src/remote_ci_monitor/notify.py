@@ -28,15 +28,28 @@ from typing import Any
 from remote_ci_monitor.config import ServerConfig, server_base_url
 from remote_ci_monitor.core.model import Action, Job, LocalMachine
 from remote_ci_monitor.core.notify import (
+    EVENT_IRREVERSIBLE_HOLD,
+    EVENT_JOB_FINISHED,
+    HOLD_ROW_PREFIX,
     NotifyRule,
     failure_lines,
+    hold_body,
+    hold_env,
+    hold_rules_for,
     notify_env,
     rules_for,
     sanitize_text,
     shelf_url,
 )
-from remote_ci_monitor.core.status import recent_json
-from remote_ci_monitor.events import KIND_JOB_FINISHED, KIND_LAG, KIND_RESET, EventBus
+from remote_ci_monitor.core.queue import hold_note
+from remote_ci_monitor.core.status import iso, recent_json
+from remote_ci_monitor.events import (
+    KIND_IRREVERSIBLE_HOLD,
+    KIND_JOB_FINISHED,
+    KIND_LAG,
+    KIND_RESET,
+    EventBus,
+)
 from remote_ci_monitor.store import Store
 
 POLL_SECONDS = 1.0
@@ -140,20 +153,24 @@ class Notifier:
         failures: Sequence[str] = (),
         failures_truncated: bool = False,
         shelf_link: str = "",
+        hold: dict[str, Any] | None = None,
+        event: str = EVENT_JOB_FINISHED,
     ) -> bool:
         # 프리셋과 같은 통과 변수(PATH · HOME · LANG) 위에 RCM_* — 없으면 `date` 조차 못 찾는
         # 훅 스크립트가 exit 1 로 끝난다(실배치에서 발견). 사용자 문자열은 RCM_* 뿐이다.
         env = {k: os.environ[k] for k in NOTIFY_ENV_PASSTHROUGH if k in os.environ}
-        env.update(
-            notify_env(
-                row,
-                rule.name,
-                failures=failures,
-                failures_truncated=failures_truncated,
-                shelf_url=shelf_link,
-            )
-        )
+        kw: dict[str, Any] = {
+            "failures": failures,
+            "failures_truncated": failures_truncated,
+            "shelf_url": shelf_link,
+        }
+        if event == EVENT_IRREVERSIBLE_HOLD and hold is not None:
+            env.update(hold_env(row, rule.name, hold, **kw))
+        else:
+            env.update(notify_env(row, rule.name, hold=hold, **kw))
         tag = f"notify {rule.name} #{row.get('id')}"
+        if event == EVENT_IRREVERSIBLE_HOLD:
+            tag = f"notify {rule.name} hold #{row.get('id')}"
         if rule.argv:
             try:
                 proc = self.run(
@@ -181,13 +198,26 @@ class Notifier:
         if rule.url:
             # 실패 이름은 잡 행 **밖**에 둔다 — `GET /jobs/<id>` 의 `failures[]`(판정이 붙은 객체
             # 목록)와 같은 키로 다른 모양을 싣지 않는다(M5o 결정 119)
+            job_id = int(row.get("id") or 0)
             payload: dict[str, Any] = {
                 "notify": rule.name,
+                # 그룹 홀드(M5t-b 결정 339-e): 사건 이름과 `hold {held, group, note}` 는 늘 있다
+                "event": event,
                 "job": row,
+                "hold": hold_body(hold, job_id),
                 "failures": failure_lines(failures),
                 "failure_count": len(failures),
                 "failures_truncated": bool(failures_truncated),
             }
+            if event == EVENT_IRREVERSIBLE_HOLD and hold is not None:
+                # opt-in 홀드 알림만 뒤 다섯 칸을 더 싣는다(§4.12)
+                payload["hold"].update(
+                    scope=hold.get("scope"),
+                    cause=hold.get("cause"),
+                    worker=hold.get("worker"),
+                    since=iso(hold.get("created_at")),
+                    release_command=f"rcm release-hold {job_id}",
+                )
             # 보관함 링크(M5p 결정 144)는 맨 위 키 — keep 이 아니거나 확정 실패면 키가 없다(§15.6)
             if shelf_link:
                 payload["shelf_url"] = shelf_link
@@ -226,12 +256,14 @@ class Notifier:
         # 잡이 찍은 순서의 대장(M5o 결정 119). 성공 · 취소 잡은 행이 없다
         failures = self.store.failure_names(job.id)
         link = self._shelf_link(job)
+        # 그 잡의 열린 홀드는 여기서 **한 번** 읽는다 — env 와 URL 본문이 같은 읽기를 쓴다(339-e)
+        hold = self._open_hold(job.id)
         count = 0
         for rule in matched:
             now = self.now_fn()
             if not self.store.claim_notification(job.id, rule.name, now):
                 continue  # 이미 보냈거나 보내는 중 — 이벤트 중복
-            ok = self._run_rule(rule, row, failures, job.fail_truncated, link)
+            ok = self._run_rule(rule, row, failures, job.fail_truncated, link, hold=hold)
             self.store.mark_notification(job.id, rule.name, delivered=ok, now=self.now_fn())
             with self._lock:
                 if ok:
@@ -240,6 +272,57 @@ class Notifier:
                     self.failures += 1
             count += 1
         return count
+
+    def deliver_hold(self, job_id: int) -> int:
+        """열린 홀드 하나를 `on` 에 `irreversible_hold` 를 적은 규칙에 한 번씩 알린다(§4.12).
+
+        중복 막기 행은 `(job_id, "hold:" + 규칙 이름)` 이다. 이미 풀린 홀드는 알리지 않는다 — 사람이
+        풀었거나 워커가 확인한 것이고 사건과 감사 이력으로 남는다. 실행한 규칙 수를 돌려준다."""
+        job = self.store.get_job(job_id)
+        if job is None:
+            return 0
+        matched = hold_rules_for(job.preset, self.rules)
+        if not matched:
+            return 0
+        hold = self._open_hold(job_id)
+        if hold is None:
+            return 0
+        row = recent_json(
+            job, base_url=self.base_url, action=self._action(job), local=self._local()
+        )
+        row["summary"] = sanitize_text(row.get("summary"))
+        count = 0
+        for rule in matched:
+            name = HOLD_ROW_PREFIX + rule.name
+            if not self.store.claim_notification(job_id, name, self.now_fn()):
+                continue
+            ok = self._run_rule(rule, row, hold=hold, event=EVENT_IRREVERSIBLE_HOLD)
+            self.store.mark_notification(job_id, name, delivered=ok, now=self.now_fn())
+            with self._lock:
+                if ok:
+                    self.delivered += 1
+                else:
+                    self.failures += 1
+            count += 1
+        return count
+
+    def _open_hold(self, job_id: int) -> dict[str, Any] | None:
+        """그 잡의 **열린** 홀드(`store.hold_of` 에 워커 이름을 더한 것). 없으면 None.
+
+        못 읽으면 None 이고 서버 로그에 남긴다 — 알림은 홀드 때문에 멈추지 않는다. 홀드 자체는
+        DB 에 있고 대기열 · 상태가 따로 보인다."""
+        try:
+            hold = self.store.hold_of(job_id)
+            if hold is None or hold.get("released_at") is not None:
+                return None
+            worker = next(
+                (h.get("worker") for h in self.store.open_holds() if h["job_id"] == job_id),
+                None,
+            )
+        except Exception as e:  # noqa: BLE001
+            self.log(f"notify: hold of #{job_id}: {type(e).__name__}")
+            return None
+        return {**hold, "worker": worker, "note": hold_note(job_id)}
 
     def _local(self) -> LocalMachine | None:
         """이 서버 머신. 못 읽으면 None — 머신 이름 때문에 알림을 멈추지 않는다(빈 RCM_MACHINE)."""
@@ -290,6 +373,10 @@ class Notifier:
         n = 0
         for job in self.store.list_unnotified_finished(since):
             n += self.deliver(job)
+        # 홀드 알림(M5t-b §4.12) — 보존 기간 안의 열린 홀드 가운데 그 규칙의 `hold:` 행이 없는 것
+        if any(EVENT_IRREVERSIBLE_HOLD in r.on for r in self.rules):
+            for job_id in self.store.open_hold_jobs(since):
+                n += self.deliver_hold(job_id)
         return n
 
     # ── 스레드 ──────────────────────────────────────────────────────────────
@@ -317,12 +404,15 @@ class Notifier:
                     # 구독 큐가 넘쳐 job_finished 를 잃었을 수 있다 — 행이 없는 종료 잡을 다시
                     self._safe_scan("notify rescan")
                     continue
-                if ev.kind != KIND_JOB_FINISHED:
+                if ev.kind not in (KIND_JOB_FINISHED, KIND_IRREVERSIBLE_HOLD):
                     continue
                 job_id = ev.data.get("job_id")
                 if not isinstance(job_id, int):
                     continue
                 try:
+                    if ev.kind == KIND_IRREVERSIBLE_HOLD:
+                        self.deliver_hold(job_id)
+                        continue
                     job = self.store.get_job(job_id)
                     if job is not None and job.is_terminal:
                         self.deliver(job)
