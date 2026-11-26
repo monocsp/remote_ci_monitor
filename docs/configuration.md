@@ -1511,9 +1511,10 @@ heartbeat keeps listing the job until then. A draining worker (one that follows 
 version) waits at most 60 s for a job's queue, then restarts anyway; the sender keeps sending
 until the restart and the new process sends the rest before it registers. If the drain is
 cancelled first, the lane still waits for that queue before it claims again. If a sender stops
-without delivering everything while the worker keeps running (an unexpected error), the job stays
-listed and its lane takes no job until the worker restarts; the next process sends the queue from
-disk.
+without delivering everything while the worker keeps running (the server asks for a newer worker
+protocol, or an error outside a report step), the job stays listed and its lane takes no job until
+the worker restarts; the next process sends the queue from disk. The worker syncs `outbox.json`
+to disk, the file and its folder, every time it saves it, so an OS crash does not leave it empty.
 
 The server writes each piece at the length it has committed and answers with the new offset. A
 piece it already has is ignored, a piece ahead of it gets `409 log_gap` and the worker resends
@@ -1521,7 +1522,9 @@ from `expected_offset`, so a dropped answer or a retry never doubles or skips a 
 (`rcm logs`, the web log view, the status and job tails) see only committed bytes. The server
 masks the preset's release secrets in every piece, also a value split across two pieces when a
 piece ends in the middle of a line: the part already committed stays as it was and the rest
-becomes `****`, so the whole value never reaches `log.txt`.
+becomes `****`, so the whole value never reaches `log.txt`. The worker cuts a line only when it is
+longer than 4 MiB; a job's own output never gets there, because the runner breaks output without
+a line end every 64 KiB. If a secret straddles such a cut, its first part stays in `log.txt`.
 
 | when | what the worker does |
 |---|---|
@@ -1530,15 +1533,30 @@ becomes `****`, so the whole value never reaches `log.txt`.
 | the job ended and the server cannot be reached | keeps the order and resends from the confirmed offset when the server is back |
 | `stream.log` cannot be read, or is shorter than what was written | retries with backoff and logs `#N report: cannot read the spooled log — retrying` once; 300 s after the job ended it sends the finish first and the job's `log_complete` is `false` (`#N report: spooled log still unreadable 300s after the job ended — sending the finish first, the log stays incomplete`) |
 | 24 hours after the job ended | sends the finish without the rest of the log; a finish that still cannot go is dropped with a log line (`#N report: finish not delivered in 24h — dropping the report`) |
+| the bundle file in the queue is gone or cannot be read | logs `#N artifacts: cannot read the bundle (<error>) — the finish reports upload_failed` and sends the finish; the bundle is `failed` (`upload_failed`) |
+| a report step fails with an unexpected error (a bug, a local fault) | retries with backoff and logs `#N <step>: unexpected <Error> — retrying` once; 300 s after the job ended it sends the finish first (`#N report: still failing with an unexpected error 300s after the job ended — sending the finish first`) |
+| `outbox.json` cannot be saved (a full disk) | keeps the report in memory and keeps sending; logs `#N report: cannot save outbox.json (<error>) — the report is only in memory; a restart before it is sent loses it` once |
+
+An answer with a 2xx status whose body is not JSON counts as a server error (HTTP 502): the
+worker sends the same item again.
 
 A worker restarted on the same data folder with the same token and server sends what its last
 process left, with that process's session, before it registers; a server that keeps answering
 with errors for 300 s makes it register anyway
 (`dead session <id> queue not delivered after 300s of server errors — registering; job #N will close as restarted-without-job`).
 Time without a connection does not count toward the 300 s; time the spooled log cannot be read
-does. A finish that arrives after the server
+does, and so does time lost to an unexpected error. A job folder whose `outbox.json` is missing,
+empty or not JSON while its `stream.log` is there cannot be sent: the worker logs
+`dead session <id> job #N: outbox unreadable (<why>) — the job will close as restarted-without-job; spool kept in <folder>`
+and moves the spool to `<data_dir>/worker-sessions/unreadable-<session>-<id>/`, which the
+start-up clean-up removes after 7 days. A finish that arrives after the server
 already closed the job as `lost` does not change the job: the job document and `rcm wait --json`
 show it as `late_result` (`outcome`, `exit_code`, `finished_at`, `received_at`, `log_complete`).
+A resent copy of the finish that closed the job is not a late result: a worker that reported the
+job `lost` itself (`worker_self_stopped`, `snapshot_unreachable`) and missed the answer gets
+`409 job_closed` with nothing recorded. The worker logs what the server answered:
+`#N late result recorded`, `#N late result not recorded — the server keeps the result it already has`,
+and `#N hold released` when the group hold of an `irreversible` job was released.
 `log_complete` on a job is `true` when the server received every byte the job produced, `false`
 when bytes are missing, and `null` when it does not know (an older worker, or a job closed by the
 grace). A progress line that never ends (`\r` without a newline) reaches the live tail in 64 KiB

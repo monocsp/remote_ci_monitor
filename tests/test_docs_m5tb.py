@@ -351,3 +351,38 @@ def test_every_pr2_changelog_entry_links_its_pr():
         found = [e for e in entries if e.startswith(f"- {head}")]
         assert len(found) == 1, head
         assert PR2_LINK in flat(found[0]), head
+
+
+def test_p6_1_the_report_queue_section_says_the_masking_limit_and_the_new_lines():
+    """# P6-1 G1 · G2 · G3 · G4 · G5 · G6 못 읽는 outbox 의 줄과 격리 폴더, 저장 실패의 줄, 없는
+    번들 · 예상 못 한 오류, 4 MiB 넘는 한 줄에 걸친 비밀의 앞부분, 늦은 결과의 워커 줄."""
+    from remote_ci_monitor import remote_worker as rw
+    from remote_ci_monitor import runner
+
+    body = flat(section(CONFIGURATION, "The worker's log and its report queue"))
+    assert rw.LOG_PIECE_MAX_BYTES == 4 * 1024 * 1024 and runner.MAX_LINE_BYTES == 64 * 1024
+    assert (
+        "The worker cuts a line only when it is longer than 4 MiB; a job's own output never gets"
+        " there, because the runner breaks output without a line end every 64 KiB. If a secret"
+        " straddles such a cut, its first part stays in `log.txt`."
+    ) in body
+    assert (
+        "`dead session <id> job #N: outbox unreadable (<why>) — the job will close as"
+        " restarted-without-job; spool kept in <folder>`"
+    ) in body
+    assert "`<data_dir>/worker-sessions/unreadable-<session>-<id>/`" in body
+    assert (
+        "`#N report: cannot save outbox.json (<error>) — the report is only in memory; a restart"
+        " before it is sent loses it`"
+    ) in body
+    assert (
+        "`#N artifacts: cannot read the bundle (<error>) — the finish reports upload_failed`"
+    ) in body
+    assert "`#N <step>: unexpected <Error> — retrying`" in body
+    assert (
+        "`#N report: still failing with an unexpected error 300s after the job ended — sending"
+        " the finish first`"
+    ) in body
+    assert "A resent copy of the finish that closed the job is not a late result" in body
+    assert "`#N late result recorded`" in body and "`#N hold released`" in body
+    assert "`#N late result not recorded — the server keeps the result it already has`" in body

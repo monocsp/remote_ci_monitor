@@ -1691,3 +1691,39 @@ def test_p6_1_g6_the_worker_reads_late_result_recorded_and_hold_released(srv, tm
     not_recorded = [x for x in w.logs if x.startswith(f"#{jid} late result not recorded — ")]
     assert len(not_recorded) == 1, w.logs
     assert len(late_events(srv, jid)) == 1
+
+
+def test_p6_1_g5_runner_output_never_makes_the_worker_cut_a_line(tmp_path, fast):
+    """# P6-1 G5 서버는 조각마다 가리고, 두 조각에 걸친 비밀은 이미 커밋된 앞부분을 못 고친다.
+    워커가 줄 가운데서 자르는 것은 4 MiB(`LOG_PIECE_MAX_BYTES`)를 넘는 한 줄뿐이다. 러너는 줄 끝
+    없는 출력을 64 KiB(`MAX_LINE_BYTES`)마다 끊어 흘리므로 러너가 낸 줄은 많아야
+    `MAX_LINE_BYTES + READ_CHUNK` 이다 — 한 조각(256 KiB) 안이다. 진짜 러너의 출력을 진짜 보내는
+    스레드에 넣어, 도는 잡의 조각이 모두 줄 끝에서 끝나는지 본다."""
+    from remote_ci_monitor import runner
+    from test_runner import FileMaterializer, RecordingObserver, make_spec
+    from test_runner import run as run_runner
+    from test_runner import sh as shell
+
+    longest = runner.MAX_LINE_BYTES + runner.READ_CHUNK
+    assert longest + 1 <= rw.LOG_BATCH_BYTES < rw.LOG_PIECE_MAX_BYTES
+    obs = RecordingObserver()
+    payload = b"s" * (rw.LOG_BATCH_BYTES + 3 * runner.MAX_LINE_BYTES + 5)
+    spec = make_spec(tmp_path, shell("cat big.txt; echo; echo done"))
+    result = run_runner(spec, obs, materialize=FileMaterializer({"big.txt": payload}, observer=obs))
+    assert result.rc == 0
+    out = obs.out
+    assert out.replace(b"\n", b"") == payload + b"done"
+    lines = out.split(b"\n")[:-1]
+    assert max(len(x) for x in lines) <= longest, sorted({len(x) for x in lines})
+    clock = WClock()
+    fake = FakeServer(clock)
+    w, ob, s = live_sender(tmp_path, fake, clock)
+    ob.append(out)
+    s.start()
+    try:
+        assert wait_for(lambda: ob.acked == len(out), 10), ob.acked
+    finally:
+        s.halt.set()
+    pieces = [c[4] for c in fake.calls if c[0] == "log"]
+    assert ob.finish is None and all(p.endswith(b"\n") for p in pieces), [len(p) for p in pieces]
+    assert all(len(p) <= rw.LOG_BATCH_BYTES for p in pieces), [len(p) for p in pieces]

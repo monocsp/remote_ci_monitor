@@ -7713,6 +7713,19 @@ MUTANTS = (
             "test_p6_1_g6_the_worker_reads_late_result_recorded_and_hold_released",
         ),
     ),
+    Mutant(
+        # 러너가 줄 끝 없는 긴 출력을 끊지 않는다 — 워커가 줄 가운데서 자른다(P6-1 G5)
+        name="runner-long-line-never-cut",
+        path="src/remote_ci_monitor/runner.py",
+        old="            if len(buf) > MAX_LINE_BYTES:  # 개행 없는 긴 출력은 잘라서 흘린다\n",
+        new="            if False:\n",
+        tests=(
+            "tests/test_worker_outbox_m5tb.py::"
+            "test_p6_1_g5_runner_output_never_makes_the_worker_cut_a_line",
+            "tests/test_runner.py::"
+            "test_a_line_longer_than_max_line_bytes_is_delivered_without_waiting_for_eof",
+        ),
+    ),
 )
 
 
