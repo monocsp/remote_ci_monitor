@@ -45,7 +45,7 @@ from pathlib import Path
 from typing import Any
 
 from remote_ci_monitor import __version__, follow
-from remote_ci_monitor.client import ClientError, WorkerClient
+from remote_ci_monitor.client import WORKER_REQUEST_TIMEOUT_SECONDS, ClientError, WorkerClient
 from remote_ci_monitor.collect import CollectResult, collect
 from remote_ci_monitor.config import WorkerConfig
 from remote_ci_monitor.core import artifacts as art
@@ -176,6 +176,10 @@ DEAD_SESSION_WAIT_SECONDS = 300
 #: 잡마다 보내는 스레드의 백오프(§4.5) — 1초에서 두 배씩 30초까지. 도는 잡에는 횟수 상한이 없다
 BACKOFF_START_SECONDS = 1.0
 BACKOFF_MAX_SECONDS = 30.0
+#: D 의 등록 대기가 상한(`DEAD_SESSION_WAIT_SECONDS`)에 닿은 뒤 빚진 finish(`owes_finish`)를
+#: 기다리는 상한 — 그때 날아가던 요청 하나 · 백오프 한 번 · finish 요청 하나(batch-8). 실제
+#: 시간으로 잰다. 벽시계가 뒤로 가면 끝난 지 300초가 늦게 오니 이것이 대기를 끝낸다
+OWED_FINISH_WAIT_SECONDS = BACKOFF_MAX_SECONDS + 2 * WORKER_REQUEST_TIMEOUT_SECONDS
 #: 멈추는 중(신호 · 펜싱)이면 보내는 스레드가 이만큼 더 해 보고 나머지는 디스크에 남긴다 — 다음
 #: 프로세스가 죽은 세션의 큐로 보낸다(§4.4 의 7). 옛 `REPORT_RETRIES` 의 합(1 + 2 + 4)과 같다
 STOP_REPORT_SECONDS = 7.0
@@ -495,6 +499,7 @@ class _JobSender:
         if not blocked:
             # 막힌 것이 phase 뿐이다. 5xx(서버에 닿았다)나 예상 못 한 예외(다시 해도 같다)면 300초
             # 뒤 finish 를 먼저 보내고 phase 는 버린다. 연결 실패면 finish 도 못 가니 순서를 지킨다
+            # mutcheck: phase-local-error-holds-finish
             if not (self.last_5xx or self.local_error) or age < FINISH_HOLD_SECONDS:
                 return False
             if not self._phase_first_said:
@@ -540,9 +545,9 @@ class _JobSender:
         if ob.phase is not None and not self.fenced.is_set():
             parts.append("the phase")
         pending = ob.pending()
-        if not ob.log_stopped and pending > 0:
+        if not ob.log_stopped and pending > 0:  # mutcheck: left-log-unsaid
             parts.append(f"the last {pending} bytes of the log (log_complete is false)")
-        if self._art_due():
+        if self._art_due():  # mutcheck: left-bundle-unsaid
             parts.append("the bundle (upload_failed)")
         if parts in ([], ["the phase"]):
             return  # phase 만 남았으면 phase 의 줄(`phase still not delivered ...`)이 말한다
@@ -791,9 +796,14 @@ class _JobSender:
         오류다(batch-7). 그러면 끝난 지 300초 뒤 finish 가 먼저 간다(`_finish_first`). D 의 등록
         대기 상한이 그 전에 이 큐를 멈추면 물러서 있던 보내는 스레드는 finish 를 한 번도 못 보내고,
         잡은 restarted-without-job 으로 닫혀 끝난 잡의 결과를 잃는다. 잡이 끝난 직후 다시 뜬
-        프로세스면 두 300초가 거의 같이 온다. 연결 실패면 finish 도 갈 수 없으니 기다리지 않는다."""
+        프로세스면 두 300초가 거의 같이 온다. 연결 실패면 finish 도 갈 수 없으니 기다리지 않는다.
+        등록은 이것을 `OWED_FINISH_WAIT_SECONDS` 까지만 기다린다."""
         ob = self.ob
         if ob.finish is None or ob.ended_at is None or ob.done or self.fenced.is_set():
+            return False
+        # 벽시계가 뒤로 가 `ended_at` 이 미래면 나이가 음수라 finish 가 먼저 가지 않는다 — 시계가
+        # 따라잡을 때까지 등록을 묶지 않는다(batch-8 #1)
+        if self.proc._epoch() < ob.ended_at:  # mutcheck: future-end-owes-finish
             return False
         return not self.finish_tried and self.answered
 
@@ -1967,6 +1977,7 @@ class RemoteWorker:
         answered = 0.0
         local = False  # 센 시간에 로컬 오류가 섞였다
         cut: set[int] = set()  # 상한에 닿아 멈춘 큐
+        capped_at: float | None = None  # 상한에 처음 닿은 때(실제 시간)
         last = self._epoch()
         while any(s.alive() for s in senders):
             if self.stopping.wait(0.05):
@@ -1983,6 +1994,12 @@ class RemoteWorker:
             last = now
             if answered >= DEAD_SESSION_WAIT_SECONDS:  # mutcheck: dead-session-wait-forever
                 why = "server errors or local errors" if local else "server errors"
+                # 빚진 finish 를 기다리는 데도 고정된 상한이 있다. 보내는 쪽의 백오프와 요청 시한이
+                # 실제 시간이라 실제 시간으로 잰다 — 벽시계는 뒤로 갈 수 있다(batch-8 #1)
+                if capped_at is None:
+                    capped_at = time.monotonic()
+                waited = time.monotonic() - capped_at
+                late = waited >= OWED_FINISH_WAIT_SECONDS  # mutcheck: owed-finish-waits-forever
                 owed = False
                 for s in senders:
                     if id(s) in cut:
@@ -1990,8 +2007,9 @@ class RemoteWorker:
                     # 한 번도 가 보지 않은 끝난 잡의 finish 는 먼저 한 번 가 보게 둔다 — 끝난 지
                     # 300초 뒤 먼저 가니 기다림은 벽시계로 정해져 있다(batch-7 #2)
                     if s.alive() and s.owes_finish():  # mutcheck: untried-finish-cut-off
-                        owed = True
-                        continue
+                        if not late:
+                            owed = True
+                            continue
                     if s.alive() and not s.ob.done:
                         assert s.dead is not None
                         self.log(

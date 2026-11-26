@@ -56,6 +56,9 @@ SSE_IDLE_TIMEOUT_SECONDS = 30.0
 SSE_TICK_SECONDS = 5.0
 REFETCH_MIN_SECONDS = 1.0
 SSE_WAKE_KINDS = frozenset({"hello", "job_changed", "job_finished", "marker", "reset", "lag"})
+#: 워커 클라이언트 요청 하나의 소켓 시한(`WorkerClient` 의 기본값). 워커의 등록 대기가 빚진
+#: finish 를 기다리는 상한이 이 값으로 정해진다(remote_worker `OWED_FINISH_WAIT_SECONDS`)
+WORKER_REQUEST_TIMEOUT_SECONDS = 15.0
 
 
 @dataclass(frozen=True)
@@ -91,7 +94,7 @@ class WorkerClient:
     `Client` 와 같은 `_request` 규칙: Bearer 토큰 · JSON 오류 본문의 `error` → `ClientError`.
     """
 
-    def __init__(self, server: str, token: str, *, timeout: float = 15.0):
+    def __init__(self, server: str, token: str, *, timeout: float = WORKER_REQUEST_TIMEOUT_SECONDS):
         self._inner = Client(server, token, timeout=timeout)
         self.server = self._inner.server
         self.token = token

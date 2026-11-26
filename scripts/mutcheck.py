@@ -7905,6 +7905,80 @@ MUTANTS = (
             "test_b7_3_a_finish_sent_first_says_what_it_leaves_behind",
         ),
     ),
+    # ── M5t-b PR2 · batch-8 ──
+    Mutant(
+        # 벽시계가 뒤로 가 `ended_at` 이 미래인 잡을 빚진 finish 로 본다 — 등록이 시계가 따라잡을
+        # 때까지 기다린다(batch-8 #1)
+        name="future-end-owes-finish",
+        path="src/remote_ci_monitor/remote_worker.py",
+        old="        if self.proc._epoch() < ob.ended_at:  # mutcheck: future-end-owes-finish\n",
+        new="        if False:\n",
+        tests=(
+            "tests/test_worker_outbox_m5tb.py::"
+            "test_b8_1_a_registration_does_not_wait_on_a_finish_whose_end_is_ahead_of_the_clock",
+        ),
+    ),
+    Mutant(
+        # 빚진 finish 를 기다리는 데 상한이 없다 — 끝난 지 300초가 오지 않으면 등록이 끝없이
+        # 기다린다(batch-8 #1)
+        name="owed-finish-waits-forever",
+        path="src/remote_ci_monitor/remote_worker.py",
+        old=(
+            "                late = waited >= OWED_FINISH_WAIT_SECONDS"
+            "  # mutcheck: owed-finish-waits-forever\n"
+        ),
+        new="                late = False\n",
+        tests=(
+            "tests/test_worker_outbox_m5tb.py::"
+            "test_b8_1_b_the_wait_for_an_owed_finish_has_a_fixed_cap",
+        ),
+    ),
+    Mutant(
+        # phase 만 막힌 끝난 잡에서 로컬 오류를 보지 않는다 — finish 가 먼저 가지 않아 D 의 잡이
+        # restarted-without-job 으로 닫힌다(batch-8 #2)
+        name="phase-local-error-holds-finish",
+        path="src/remote_ci_monitor/remote_worker.py",
+        old=(
+            "            # mutcheck: phase-local-error-holds-finish\n"
+            "            if not (self.last_5xx or self.local_error) or age < FINISH_HOLD_SECONDS:\n"
+        ),
+        new="            if not self.last_5xx or age < FINISH_HOLD_SECONDS:\n",
+        tests=(
+            "tests/test_worker_outbox_m5tb.py::"
+            "test_b6_3_a_dead_queue_whose_phase_fails_locally_still_sends_the_finish_first",
+        ),
+    ),
+    Mutant(
+        # finish 가 먼저 가며 남긴 로그 꼬리의 크기와 `log_complete` 를 말하지 않는다(batch-8 #3)
+        name="left-log-unsaid",
+        path="src/remote_ci_monitor/remote_worker.py",
+        old=(
+            "        if not ob.log_stopped and pending > 0:  # mutcheck: left-log-unsaid\n"
+            '            parts.append(f"the last {pending} bytes of the log'
+            ' (log_complete is false)")\n'
+        ),
+        new=(
+            '        if not ob.log_stopped and pending > 0:\n            parts.append("the log")\n'
+        ),
+        tests=(
+            "tests/test_worker_outbox_m5tb.py::"
+            "test_b8_3_a_finish_sent_first_behind_the_log_names_only_the_log",
+        ),
+    ),
+    Mutant(
+        # finish 가 먼저 가며 남긴 묶음의 처분(`upload_failed`)을 말하지 않는다(batch-8 #3)
+        name="left-bundle-unsaid",
+        path="src/remote_ci_monitor/remote_worker.py",
+        old=(
+            "        if self._art_due():  # mutcheck: left-bundle-unsaid\n"
+            '            parts.append("the bundle (upload_failed)")\n'
+        ),
+        new=('        if self._art_due():\n            parts.append("the bundle")\n'),
+        tests=(
+            "tests/test_worker_outbox_m5tb.py::"
+            "test_b8_3_b_finish_sent_first_behind_the_bundle_names_only_the_bundle",
+        ),
+    ),
 )
 
 
