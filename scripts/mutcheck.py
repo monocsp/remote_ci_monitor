@@ -6861,6 +6861,66 @@ MUTANTS = (
             "test_p63_2_a_job_claimed_as_irreversible_shows_no_retry_limit",
         ),
     ),
+    # ── M5t-b PR3: 끊긴 워커 · 그룹 홀드의 사람용 화면(docs/m5tb-workplan.md §4.8) ─────────
+    Mutant(
+        # down 워커의 도는 잡에 오늘의 사유(running · stuck …)를 준다(RL28, §7.4)
+        name="unreachable-reason-dropped",
+        path="src/remote_ci_monitor/core/queue.py",
+        old="    if unreachable:  # mutcheck: unreachable-reason-dropped\n",
+        new="    if False:\n",
+        tests=(
+            "tests/test_queue_unreachable_m5tb.py::"
+            "test_rl28_a_running_job_on_a_down_worker_is_worker_unreachable_grace_without_an_eta",
+            "tests/test_queue_unreachable_m5tb.py::"
+            "test_rl28_unreachable_comes_before_cancelling_stuck_and_needs_action",
+        ),
+    ),
+    Mutant(
+        # `rcm wait` 가 홀드를 원문 코드(`irreversible_hold`)로 말한다(RL45)
+        name="hold-wait-line-raw-code",
+        path="src/remote_ci_monitor/cli.py",
+        old="    held = held_group(action, blocked_by)\n",
+        new="    held = None\n",
+        tests=(
+            "tests/test_hold_display_m5tb.py::"
+            "test_rl45_rcm_wait_says_in_words_that_the_group_is_held",
+        ),
+    ),
+    Mutant(
+        # `rcm check` 가 홀드 경고 줄을 내지 않는다(RL45)
+        name="hold-check-row-missing",
+        path="src/remote_ci_monitor/cli.py",
+        old="            rows.extend(_hold_rows(health_body))\n",
+        new="",
+        tests=(
+            "tests/test_hold_display_m5tb.py::"
+            "test_rl45_rcm_check_warns_once_per_hold_and_keeps_its_exit_code",
+        ),
+    ),
+    Mutant(
+        # `rcm doctor` 가 다른 머신의 홀드까지 이 머신의 할 일로 보인다(RL45)
+        name="doctor-holds-not-this-machine",
+        path="src/remote_ci_monitor/doctor.py",
+        old='            self.holds = [h for h in health.holds if h["worker"] == me.name]\n',
+        new="            self.holds = list(health.holds)\n",
+        tests=(
+            "tests/test_hold_display_m5tb.py::"
+            "test_rl45_doctor_json_has_the_key_and_lists_only_this_machines_holds",
+        ),
+    ),
+    Mutant(
+        # 불완전한 로그를 사람용 줄로 말하지 않는다(RL20)
+        name="log-incomplete-line-dropped",
+        path="src/remote_ci_monitor/core/render_text.py",
+        old='    if job.get("log_complete") is not False:\n',
+        new="    if True:\n",
+        tests=(
+            "tests/test_queue_unreachable_m5tb.py::"
+            "test_rl20_rcm_wait_says_the_log_is_incomplete_when_the_job_says_false",
+            "tests/test_queue_unreachable_m5tb.py::"
+            "test_rl20_rcm_logs_ends_with_a_line_on_stderr_when_the_log_is_incomplete",
+        ),
+    ),
 )
 
 
