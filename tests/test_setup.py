@@ -1712,10 +1712,18 @@ def test_b9_systemd_failed_means_the_unit_is_there(tmp_path, monkeypatch):
 # 시스템 자리(`setup.SYSTEM_SERVICE_PLACES`)도 임시 폴더로 바꿔 끼운다.
 
 
-@pytest.fixture
+#: 진짜 시스템 자리 — 시험 하나만 읽는다(읽기만, batch 10 M6)
+REAL_SYSTEM_SERVICE_PLACES = setup.SYSTEM_SERVICE_PLACES
+
+
+@pytest.fixture(autouse=True)
 def no_system_places(tmp_path, monkeypatch):
+    """모든 시험에서 setup 의 스캔이 진짜 시스템 자리(`/Library/Launch*` · `/etc/systemd`)와 진짜
+    계정 홈(passwd)을 읽지 않게 임시 폴더로 바꿔 끼운다(batch 10 M6) — CI 맥미니에는 rcm 서비스가
+    있다. 환경 변수로 바꾸는 길은 setup 에 없다(운영 우회가 된다)."""
     places = tuple(tmp_path / "sys" / name for name in ("LaunchAgents", "LaunchDaemons", "system"))
     monkeypatch.setattr(setup, "SYSTEM_SERVICE_PLACES", places)
+    monkeypatch.setattr(setup, "account_home", lambda: tmp_path / "account-home")
     return places
 
 
@@ -1724,6 +1732,10 @@ def prod(home, tmp_path, no_system_places):
     """임시 HOME 의 가짜 운영 서버: LaunchAgents 의 표준 라벨 plist 가 venv 의 rcm 을
     `serve --config ~/.config/rcm/server.toml` 로 띄우고, 그 venv 는 체크아웃을 editable 로
     설치했고, 설정의 data_dir 은 따로 있다."""
+    return _production(home, tmp_path)
+
+
+def _production(home: Path, tmp_path: Path) -> dict[str, Path]:
     checkout = tmp_path / "svc" / "remote_ci_monitor-service"
     (checkout / "src").mkdir(parents=True)
     venv = tmp_path / "svc" / "venv"
@@ -1997,3 +2009,41 @@ def test_b9_352_core_refusal_is_pure():
     assert core.production_refusal([svc], {}, **forced) is None
     broken = core.RcmService(name="b", file=Path("/s/b.plist"), problem="cannot read it")
     assert "/s/b.plist" in (core.production_refusal([broken], {}, **ask) or "")
+
+
+# ── P6 재확인(batch 10) ──
+
+
+@pytest.mark.parametrize("manager", ["launchd", "systemd"])
+def test_b10_h3_the_scan_reads_the_account_home_not_only_home(cfg, home, tmp_path, manager):
+    # batch 10 H3(v1-3): `HOME=/tmp/x rcm setup --config <진짜 홈>/.config/rcm/server.toml --force
+    # all` 은 `$HOME` 만 믿는 스캔을 지나 진짜 홈의 운영 설정을 덮었다. 스캔은 `$HOME` 과 passwd 의
+    # 홈을 둘 다 본다(시험은 passwd 의 홈 `setup.account_home` 을 임시 폴더로 바꿔 끼운다)
+    real = setup.account_home()
+    found = _production(real, tmp_path)
+    if manager == "systemd":
+        # 실제 홈 아래의 기본 XDG 자리(`~/.config/systemd/user`) — `$XDG_CONFIG_HOME` 은 다른 곳이다
+        found["plist"].unlink()
+        unit = real / ".config" / "systemd" / "user" / "rcm-server.service"
+        unit.parent.mkdir(parents=True)
+        unit.write_text(
+            f"[Service]\nExecStart={found['venv'] / 'bin' / 'rcm'} serve --config "
+            f"{found['config']}\n"
+        )
+    assert real != home and os.environ["HOME"] == str(home)
+    before = found["config"].read_bytes()
+    argv = coordinator_args(tmp_path / "data", "--config", str(found["config"]), "--force", "all")
+    fake = Fake(platform="darwin" if manager == "launchd" else "linux")
+    assert go(fake, *argv) == 1, fake.text
+    assert "config — refusing" in fake.err.getvalue(), fake.text
+    assert found["config"].read_bytes() == before
+    names = {svc.name for svc in setup.scan_services()}
+    assert names == {SERVER_LABEL if manager == "launchd" else "rcm-server"}, names
+
+
+def test_b10_m6_the_real_system_places_are_read_without_error(home, monkeypatch):
+    # batch 10 M6: 진짜 시스템 자리를 읽는 시험은 이것 하나다 — 읽기만 하고 결과는 단언하지 않는다.
+    # 사용자 자리는 임시 폴더다(HOME · passwd 홈)
+    monkeypatch.setattr(setup, "SYSTEM_SERVICE_PLACES", REAL_SYSTEM_SERVICE_PLACES)
+    found = setup.scan_services(environ={})
+    assert isinstance(found, list)

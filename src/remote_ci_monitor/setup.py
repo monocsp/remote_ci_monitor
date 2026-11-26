@@ -218,6 +218,17 @@ _DATA_DIRS = {
 }
 
 
+def account_home() -> Path | None:
+    """이 사용자의 passwd 홈 — `$HOME` 이 다른 곳을 가리켜도 그 계정의 서비스가 있는 자리다
+    (batch 10 H3). passwd 를 읽지 못하면 None. 시험이 바꿔 끼운다."""
+    try:
+        import pwd
+
+        return Path(pwd.getpwuid(os.getuid()).pw_dir)
+    except (ImportError, KeyError, OSError):
+        return None
+
+
 def real_path(path: Path) -> Path:
     """심볼릭 링크를 푼 경로 — 있는 조상까지 `realpath` 로 풀고 없는 꼬리는 그대로 붙인다."""
     head = Path(os.path.abspath(path))

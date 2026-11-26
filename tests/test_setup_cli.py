@@ -41,6 +41,37 @@ def _free_port() -> int:
     return port
 
 
+#: 시험의 setup 이 보는 시스템 자리 — 진짜 `/Library/Launch*` · `/etc/systemd` 대신(batch 10 M6)
+SYSTEM_PLACE_NAMES = ("LaunchAgents", "LaunchDaemons", "system")
+
+
+def _site(tmp_path: Path) -> Path:
+    """다른 프로세스의 setup 이 진짜 시스템 자리와 passwd 의 홈을 읽지 않게 하는
+    `sitecustomize.py` 가 든 폴더 — `PYTHONPATH` 에 둔다(batch 10 M6). setup 에는 환경 변수로 스캔
+    자리를 바꾸는 길이 없다(운영 우회가 된다)."""
+    site = tmp_path / "site"
+    site.mkdir(exist_ok=True)
+    places = ", ".join(f"Path({str(tmp_path / 'sys' / n)!r})" for n in SYSTEM_PLACE_NAMES)
+    (site / "sitecustomize.py").write_text(
+        "from pathlib import Path\n"
+        "from remote_ci_monitor import setup as _setup\n"
+        f"_setup.SYSTEM_SERVICE_PLACES = ({places},)\n"
+        f"_setup.account_home = lambda: Path({str(tmp_path / 'account-home')!r})\n",
+        encoding="utf-8",
+    )
+    return site
+
+
+@pytest.fixture(autouse=True)
+def _no_system_places(tmp_path, monkeypatch):
+    """이 프로세스에서 도는 setup(첫 실행 질문)도 같다."""
+    from remote_ci_monitor import setup
+
+    places = tuple(tmp_path / "sys" / n for n in SYSTEM_PLACE_NAMES)
+    monkeypatch.setattr(setup, "SYSTEM_SERVICE_PLACES", places)
+    monkeypatch.setattr(setup, "account_home", lambda: tmp_path / "account-home")
+
+
 def _env(tmp_path: Path) -> tuple[dict[str, str], Path]:
     stubs, log = tmp_path / "stubs", tmp_path / "manager-calls.log"
     stubs.mkdir()
@@ -59,6 +90,7 @@ def _env(tmp_path: Path) -> tuple[dict[str, str], Path]:
         XDG_CACHE_HOME=str(tmp_path / "cache"),
         PATH=f"{stubs}:/usr/bin:/bin:/usr/sbin:/sbin",
         RCM_TOKEN="tok-" + "K4v" * 6,
+        PYTHONPATH=str(_site(tmp_path)),
     )
     return env, log
 
@@ -499,3 +531,18 @@ def test_tr3_tr1_bare_rcm_asks_in_a_real_terminal_and_not_without_one(tmp_path):
     )
     assert done.returncode == 2
     assert QUESTION not in done.stderr and "usage" in done.stderr
+
+
+def test_b10_m6_a_subprocess_setup_scans_the_swapped_system_places(tmp_path):
+    # batch 10 M6: 다른 프로세스의 setup 은 sitecustomize 가 바꿔 끼운 시스템 자리를 본다 — 그
+    # 자리의 읽지 못하는 rcm 서비스가 setup 을 멈춘다(진짜 `/Library/LaunchDaemons` 는 읽지 않는다)
+    env, _ = _env(tmp_path)
+    daemons = tmp_path / "sys" / "LaunchDaemons"
+    daemons.mkdir(parents=True)
+    plist = daemons / "com.remote-ci-monitor.server.plist"
+    plist.write_bytes(b"<plist><dict><key>Label")
+    args = ["--role", "coordinator-worker", "--bind", "127.0.0.1", "--port", str(_free_port())]
+    args += ["--data-dir", str(tmp_path / "d"), "--label", LABEL, "--no-advertise", "--yes"]
+    done = _setup(tmp_path, env, *args)
+    assert done.returncode == 1, done.stderr
+    assert str(plist) in done.stderr and "refusing" in done.stderr, done.stderr
