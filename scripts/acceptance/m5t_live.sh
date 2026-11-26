@@ -211,7 +211,7 @@ check_plist() { # check_plist <file> <label> <config> <test home> <rcm> <base> <
 
 # doctor --json 이 늘 내는 키 — src/remote_ci_monitor/doctor.py 의 document() 사전 그대로다(모르는 값은
 # 키를 빼지 않고 null). tests/test_acceptance_m5t_live.py 가 그 사전과 견준다
-DOCTOR_KEYS="doctor_version role measured_in host server service shell rcm_requirements presets probes remote_machines summary problems undecided warnings exit"
+DOCTOR_KEYS="doctor_version role measured_in host server service shell rcm_requirements presets probes remote_machines summary problems undecided warnings exit irreversible_holds"
 
 # TD24: doctor 의 사람용 표와 --json 이 행마다 같은 판정인가, 측정 PATH 를 적었는가, 두 실행의
 # 종료 코드가 문서의 exit 와 같은가. doctor 가 늘 내는 키가 빠지거나 요구 · 프리셋 절이 비면
