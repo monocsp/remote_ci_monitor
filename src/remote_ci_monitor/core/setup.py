@@ -537,8 +537,12 @@ def replace_commands(manager: str, *, staged: Path, installed: Path, label: str)
 
 
 #: 제거 줄 바로 앞에 찍는 줄 — 그 줄이 내리기의 실패와 상관없이 설치 파일을 지운다는 것
-#: (batch 10 L2). 빈 틀 — 아직 찍지 않는다
-REMOVE_NOTE = ""
+#: (batch 10 L2). 제거 줄 자체는 셸에 그대로 붙일 수 있게 둔다(zsh 는 대화형에서 `#` 를 주석으로
+#: 읽지 않는다)
+REMOVE_NOTE = (
+    "the line below deletes the installed service file even when the unload fails — if the "
+    "service is still running, stop it first"
+)
 
 
 def remove_line(

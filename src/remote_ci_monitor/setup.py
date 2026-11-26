@@ -1337,6 +1337,8 @@ def _report(plan: Plan, world: World) -> None:
         staged=plan.service,
         preloaded=plan.preloaded,
     )
+    if plan.manager is not None and plan.installed is not None and plan.service is not None:
+        err.write(f"{core.REMOVE_NOTE}\n")
     err.write(f"{removal}\n")
     doctor = core.doctor_command(
         plan.role, rcm=plan.rcm, config=plan.doctor_config, service_file=plan.doctor_service

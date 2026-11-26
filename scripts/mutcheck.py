@@ -3988,6 +3988,17 @@ MUTANTS = (
         ),
     ),
     Mutant(
+        # 제거 줄이 내리기의 실패와 상관없이 설치 파일을 지운다는 안내가 없다(batch 10 L2)
+        name="setup-remove-note-dropped",
+        path="src/remote_ci_monitor/setup.py",
+        old='        err.write(f"{core.REMOVE_NOTE}\\n")\n',
+        new="        pass\n",
+        tests=(
+            "tests/test_setup.py::"
+            "test_b10_l2_the_remove_line_says_it_deletes_even_when_the_unload_fails",
+        ),
+    ),
+    Mutant(
         # 읽지 못한 rcm 같은 파일을 rcm 이 아닌 것으로 본다(결정 352, 닫는 쪽)
         name="setup-scan-unreadable-rcm-skipped",
         path="src/remote_ci_monitor/setup.py",
