@@ -191,7 +191,7 @@ of a key bumps that number and is listed here.
   id, `gui/501`, instead of `gui/$(id -u)`. The usage guide's test install runs its job from a small empty folder, keeps
   its commands in one terminal and says which commands still show the running install; its first
   job step tells the short `rcm run` line from the `rcm wait` end line and how to see a
-  `--notify` notification.
+  `--notify` notification. ([#277](https://github.com/monocsp/remote_ci_monitor/pull/277))
 - **`rcm init worker --service-file` writes a systemd unit whose paths hold a space, `%` or `$`
   the way systemd reads them**, quoted, `%%` and `$$`, and refuses a path with a line break or
   another control character with exit 2 instead of writing a broken unit.
