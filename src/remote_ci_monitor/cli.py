@@ -111,6 +111,7 @@ from remote_ci_monitor.core.render_text import (
     fmt_duration,
     held_group,
     hold_check_text,
+    hold_owner_line,
     late_result_line,
     log_incomplete_line,
     lost_line,
@@ -1490,6 +1491,8 @@ def _wait(
         # 키가 없는 문서(옛 서버 · PR2 전)에는 아무 줄도 없다
         for said in (
             lost_line(job, job_id=job_id),
+            # 이 잡이 그룹을 막았으면 그 사실과 푸는 명령(P6-1 G9)
+            hold_owner_line(job, job_id=job_id),  # mutcheck: hold-owner-line-dropped
             late_result_line(job, job_id=job_id),
             log_incomplete_line(job, job_id=job_id),
         ):

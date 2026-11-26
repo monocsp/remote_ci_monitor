@@ -7299,6 +7299,21 @@ MUTANTS = (
         tests=("tests/web/unreachable_m5tb.test.js",),
         runner="node",
     ),
+    Mutant(
+        # 그룹을 막은 잡의 `rcm wait` 이 lost 와 3 만 보이고 홀드와 푸는 명령을 말하지 않는다
+        # (P6-1 G9)
+        name="hold-owner-line-dropped",
+        path="src/remote_ci_monitor/cli.py",
+        old=(
+            "            hold_owner_line(job, job_id=job_id),"
+            "  # mutcheck: hold-owner-line-dropped\n"
+        ),
+        new="",
+        tests=(
+            "tests/test_hold_display_m5tb.py::"
+            "test_g9_rl45_rcm_wait_on_the_job_that_holds_its_group_says_so",
+        ),
+    ),
 )
 
 

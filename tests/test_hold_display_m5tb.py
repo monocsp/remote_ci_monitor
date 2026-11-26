@@ -597,3 +597,58 @@ def test_g7_rl45_a_hold_without_a_readable_worker_is_unknown_not_local(value):
     assert hold_check_text(holds[0]) is None
     web = web_not_moving(holds)
     assert (web["kind"], web["why"]) == ("unknown", "holds"), web
+
+
+# ── P6-1 G9: 홀드를 만든 잡의 rcm wait 이 그 홀드를 말한다 ─────────────────────────────
+
+
+def lost_holder(hold: Any) -> dict[str, Any]:
+    return {
+        **queued(False),
+        "state": "lost",
+        "exit_code": None,
+        "reason": None,
+        "position": None,
+        "concurrency_group": "irreversible:ship",
+        "summary_code": "worker_unreachable",
+        "summary_args": {"name": "mbp", "seconds": 660},
+        "hold": hold,
+    }
+
+
+OPEN_HOLD = {
+    "cause": "worker_unreachable",
+    "created_at": "2026-11-27T08:50:00Z",
+    "released_at": None,
+    "release_kind": None,
+    "released_by": None,
+    "release_reason": None,
+    "history": [],
+}
+OWNER_LINE = (
+    f"#{JOB} group irreversible:ship is held — check the machine for a leftover process, then "
+    f"ask an admin to run rcm release-hold {JOB}"
+)
+
+
+def test_g9_rl45_rcm_wait_on_the_job_that_holds_its_group_says_so(fake, capsys):
+    """# RL45 P6-1 G9: 홀드를 만든 잡(#N, lost)의 `rcm wait` 은 lost 와 종료 3 만 보였다 — 그룹이
+    막혔다는 것과 `rcm release-hold N` 은 대기 잡 · 웹 · check · doctor 에만 나왔다. 잡 문서에
+    열린 `hold` 가 있으면 끝에 한 줄. 종료 코드는 그대로 3 이다."""
+    fake.docs = [lost_holder(OPEN_HOLD)]
+    code, _out, err = cli_run(capsys, ["wait", "--job", str(JOB), "--poll"])
+    assert code == 3, err
+    assert OWNER_LINE in err.splitlines(), err
+    no_raw_code(OWNER_LINE)
+
+
+@pytest.mark.parametrize(
+    "hold",
+    [None, {**OPEN_HOLD, "released_at": "2026-11-27T09:10:00Z", "release_kind": "manual"}, "x"],
+    ids=["no-hold", "released", "unreadable"],
+)
+def test_g9_rl45_no_hold_line_without_an_open_hold(fake, capsys, hold):
+    fake.docs = [lost_holder(hold)]
+    code, _out, err = cli_run(capsys, ["wait", "--job", str(JOB), "--poll"])
+    assert code == 3, err
+    assert "is held" not in err, err

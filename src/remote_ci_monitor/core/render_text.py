@@ -849,6 +849,26 @@ def hold_check_text(hold: Any) -> str | None:
     )
 
 
+def hold_owner_line(job: Mapping[str, Any], *, job_id: int) -> str | None:
+    """이 잡이 만든 그룹 홀드가 아직 열려 있으면 `rcm wait` 끝의 한 줄(M5t-b §4.8, P6-1 G9).
+
+    잡 문서의 `hold` 는 PR1 의 것이다 — 풀렸거나(`released_at`) 없거나 읽을 수 없으면 말하지
+    않는다. 그룹 이름은 잡 문서의 `concurrency_group` 이고, 모르면 지어내지 않는다."""
+    hold = job.get("hold")
+    if not isinstance(hold, dict) or hold.get("released_at") is not None:
+        return None
+    group = (
+        clean_line(job["concurrency_group"])
+        if isinstance(job.get("concurrency_group"), str)
+        else ""
+    )
+    what = f"group {group} is held" if group else "its group is held"
+    return (
+        f"#{job_id} {what} — check the machine for a leftover process, then ask an admin to run "
+        f"rcm release-hold {job_id}"
+    )
+
+
 def log_incomplete_line(job: Mapping[str, Any], *, job_id: int) -> str | None:
     """`log_complete` 가 **거짓**일 때만 한 줄(M5t-b §4.6 · RL20).
 
