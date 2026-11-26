@@ -4644,6 +4644,21 @@ MUTANTS = (
             "test_pr274_a_crash_inside_the_net_is_a_deny_from_the_hook",
         ),
     ),
+    Mutant(
+        # 시험 설치의 setup 이 기본 자리의 worker.toml(운영 설치의 것)을 「이 머신에 이미 있다」고
+        # 제 것처럼 말한다(온보딩 시험 OB1)
+        name="ob1-setup-worker-toml-of-another-install-as-own",
+        path="src/remote_ci_monitor/setup.py",
+        old=(
+            "    if worker.is_file() and core.place_key(real_path(worker.parent), "
+            "fold_case=fold) != here:\n"
+        ),
+        new="    if False:\n",
+        tests=(
+            "tests/test_onboarding_findings.py::"
+            "test_ob1_a_worker_toml_outside_this_configs_folder_is_another_installs",
+        ),
+    ),
 )
 
 

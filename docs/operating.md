@@ -256,7 +256,9 @@ loaded before setup ran, the line adds that it may not be one setup wrote.
   the shelf and the machine list, and a LAN address also the advice to reserve it in your router.
   `127.0.0.1` gets a warning that no other machine can connect.
 - A `coordinator-worker` on a machine that already has `worker.toml` gets a warning: the two run
-  two sets of lanes on one host.
+  two sets of lanes on one host. When `--config` puts this config outside the folder that
+  `worker.toml` is in (a test install next to a running one), the warning names that file as
+  another rcm install's, separate from this config.
 - A flag the role does not use (`--lanes` for a coordinator, `--pool` or `--server` for a
   coordinator, `--advertise` for a client) gets one warning line naming them.
 - When setup cannot tell whether the port is free, or whether a service with the label is already
