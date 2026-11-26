@@ -244,12 +244,15 @@ def real_path(path: Path) -> Path:
 def scan_homes() -> list[Path]:
     """스캔이 사용자 자리를 찾는 홈 — `$HOME` 과 passwd 의 홈(`account_home`) 둘 다다. 다르면 둘
     다 본다: `HOME=/tmp/x rcm setup --config <진짜 홈>/…` 가 `$HOME` 만 보는 스캔을 지났다(batch
-    10 H3)."""
-    homes = [Path.home()]
+    10 H3). passwd 에서 그 홈을 찾지 못하면 `$HOME` 만 믿지 않고 거절한다(batch 11 L3) — 그 홈
+    아래의 운영 서비스를 볼 수 없다."""
     account = account_home()
-    if account is not None:
-        homes.append(account)
-    return homes
+    if account is None:
+        raise SetupFailed(
+            f"cannot find this account's home — refusing (nothing was written); uid {os.getuid()} "
+            "has no home in the user database, so setup cannot look for the rcm services under it"
+        )
+    return [Path.home(), account]
 
 
 def service_places(
