@@ -1743,13 +1743,15 @@
       return (a.worker ? "워커 " + withJosa(a.worker, "와/과") : "워커와") +
         " 연락이 끊김 · 유예 시간 안에 돌아오면 이어서 진행";
     },
+    // 그룹 이름은 서버가 보낸 글자라 읽는 소리를 모를 수 있다(`irreversible:ship가`) — 이름 바로 뒤에
+    // 조사를 붙이지 않는 문장으로 쓴다(P3 r1). 조사는 소리가 정해진 잡 번호 뒤에만 붙인다
     "reason.held_group": function (a) {
-      return "그룹 " + withJosa(a.group, "이/가") + " #" + a.id + " 때문에 막혀 있음 — 머신을 확인한 뒤 rcm release-hold " + a.id;
+      return "그룹 " + a.group + " — " + withJosa("#" + a.id, "이/가") + " 막고 있음 · 머신을 확인한 뒤 rcm release-hold " + a.id;
     },
     "hold.needs_look": function (a) {
       var where = a.worker || "서버의 로컬 레인";
       var look = a.worker || "서버";
-      return "그룹 " + withJosa(a.group, "이/가") + " 막혀 있음: 작업 #" + a.id + "(" + a.preset + ")" + josa(String(a.id), "이/가") + " " +
+      return "그룹 " + a.group + " 막힘: 작업 #" + a.id + "(" + a.preset + ")" + josa(String(a.id), "이/가") + " " +
         where + "에서 멈춤 확인 없이 닫힘. " + look + "에 남은 프로세스가 있는지 확인한 뒤 rcm release-hold " +
         withJosa(String(a.id), "을/를") + " 실행하세요.";
     },

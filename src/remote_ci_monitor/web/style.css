@@ -1037,6 +1037,8 @@ table.gh td.sha { font: 12px var(--mono); white-space: nowrap; }
 .chip.remote { border-color: var(--bad); color: var(--bad); cursor: default; }
 .chip.same, .chip.unknown { cursor: default; }
 .chip.same { border-color: var(--ok); color: var(--ok); }
+/* 그룹 홀드 칩(M5t-b §4.8) — 누를 것이 없다. 전문은 title 로 */
+.chip.hold { cursor: default; }
 /* ── 바텀시트 — 진행 · 남은 것 · 심사 제출 (워크플랜 §4.2 · 기획 R8~R12) ──────────────
    본문의 마지막 자식이고 `position: sticky` 로 화면 아래에 붙어 있다. 위 테두리 색이 곧 형편이다
    (파랑 진행 · 황토 사람 차례/확인 · 보라 모름 · 빨강 실패 · 초록 준비됨·제출됨 · 회색 만료).

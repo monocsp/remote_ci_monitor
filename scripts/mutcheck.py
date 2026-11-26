@@ -7010,6 +7010,15 @@ MUTANTS = (
             "test_rl45_doctor_text_says_unknown_on_a_coordinator_worker",
         ),
     ),
+    Mutant(
+        # 한국어 홀드 문장이 그룹 이름 바로 뒤에 조사를 다시 붙인다 — 「irreversible:ship가」(P3 r1)
+        name="hold-group-name-takes-particle",
+        path="src/remote_ci_monitor/web/i18n.js",
+        old='      return "그룹 " + a.group + " 막힘: 작업 #" + a.id',
+        new='      return "그룹 " + withJosa(a.group, "이/가") + " 막혀 있음: 작업 #" + a.id',
+        tests=("tests/web/unreachable_m5tb.test.js",),
+        runner="node",
+    ),
 )
 
 

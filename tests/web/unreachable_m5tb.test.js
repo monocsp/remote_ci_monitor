@@ -105,10 +105,10 @@ describe("RL45 — 그룹 홀드의 사람용 화면", () => {
     const r = rcm.notMoving(status([], { irreversible_holds: [HOLD_A, HOLD_B] }), null, "ko");
     assert.equal(r.lines.length, 2, JSON.stringify(r));
     assert.equal(r.lines[0].text,
-      "그룹 irreversible:ship가 막혀 있음: 작업 #812(ship)가 build-02에서 멈춤 확인 없이 닫힘. "
+      "그룹 irreversible:ship 막힘: 작업 #812(ship)가 build-02에서 멈춤 확인 없이 닫힘. "
       + "build-02에 남은 프로세스가 있는지 확인한 뒤 rcm release-hold 812를 실행하세요.");
     assert.equal(r.lines[1].text,
-      "그룹 devices가 막혀 있음: 작업 #815(deploy)가 서버의 로컬 레인에서 멈춤 확인 없이 닫힘. "
+      "그룹 devices 막힘: 작업 #815(deploy)가 서버의 로컬 레인에서 멈춤 확인 없이 닫힘. "
       + "서버에 남은 프로세스가 있는지 확인한 뒤 rcm release-hold 815를 실행하세요.");
     r.lines.forEach((l) => noCode(l.text));
   });
@@ -125,8 +125,18 @@ describe("RL45 — 그룹 홀드의 사람용 화면", () => {
     assert.equal(en.actionable, true);
     noCode(en.text);
     const ko = rcm.reasonText(row, NOW, status([row]), "ko");
-    assert.equal(ko.text, "사람이 할 일 · 그룹 irreversible:ship가 #812 때문에 막혀 있음 — 머신을 확인한 뒤 rcm release-hold 812");
+    assert.equal(ko.text, "사람이 할 일 · 그룹 irreversible:ship — #812가 막고 있음 · 머신을 확인한 뒤 rcm release-hold 812");
     noCode(ko.text);
+  });
+  test("한국어 홀드 문장은 그룹 이름 바로 뒤에 조사를 붙이지 않는다(P3 r1 — 「ship가」)", () => {
+    ["ship", "release", "build:ios", "devices", "그룹명"].forEach((g) => {
+      const hold = Object.assign({}, HOLD_A, { group: g });
+      const line = rcm.notMoving(status([], { irreversible_holds: [hold] }), null, "ko").lines[0].text;
+      assert.ok(line.indexOf("그룹 " + g + " ") === 0, line);
+      const row = waiting(821, { blocked_by: { job_id: 812, group: g, remaining_seconds: null } });
+      const text = rcm.reasonText(row, NOW, status([row]), "ko").text;
+      assert.ok(text.indexOf("그룹 " + g + " — ") !== -1, text);
+    });
   });
   test("잡이 직접 찍은 표식(다른 code)은 오늘 그대로다", () => {
     const row = running(822, { reason: "needs_action", action: { code: "login", note: "Sign in", at: GEN } });
@@ -292,5 +302,15 @@ describe("한국어 조사 — 라틴 낱말 끝의 「모음 + r」는 받침�
   test("rl28 reason — 유예 중인 잡의 한국어 사유에 「mac2-worker와」", () => {
     const r = rcm.reasonText(running(901, { ran_on: "mac2-worker" }), NOW, status([]), "ko");
     assert.equal(r.text, "워커 mac2-worker와 연락이 끊김 · 유예 시간 안에 돌아오면 이어서 진행");
+  });
+});
+
+describe("RL45 — 홀드 칩의 모양(P3 r1)", () => {
+  test("홀드 칩은 누를 것이 없다 — 기본 `.chip` 의 cursor:pointer 를 default 로", () => {
+    const fs = require("node:fs");
+    const path = require("node:path");
+    const css = fs.readFileSync(
+      path.join(__dirname, "..", "..", "src", "remote_ci_monitor", "web", "style.css"), "utf8");
+    assert.match(css, /\.chip\.hold\s*\{[^}]*cursor:\s*default/);
   });
 });
