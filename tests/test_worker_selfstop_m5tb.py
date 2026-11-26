@@ -425,6 +425,7 @@ class FakeClient:
         self.log_error: ClientError | None = None
         self.finish_error: ClientError | None = None
         self.session_id = ""
+        self.phases: list[str] = []  # 받은 phase(2xx) — `start_job` 이 센다
 
     def heartbeat(self, jobs, host=None, *, seq=None, claims_settled=None):
         self.hb_calls += 1
@@ -433,6 +434,7 @@ class FakeClient:
         return dict(self.hb_out)
 
     def phase(self, job_id, phase):
+        self.phases.append(phase)
         return {}
 
     def log(self, job_id, chunk, offset=None):
@@ -517,10 +519,17 @@ def start_job(w, monkeypatch, job: dict[str, Any]):
     # M5t-b PR2: 준비 phase 는 그 잡의 보내는 스레드가 보내고, 그 2xx 도 보낸 시각으로 `ok_at` 을
     # 올린다(결정 320). 시험이 시계를 민 뒤에 보내면 새 `ok_at` 이 감시의 판정을 지운다 — rcm-ci
     # #4345 의 test_rl34_the_watchdog_judges_while_heartbeat_hangs 가 40번에 5~8번 그랬다
-    # (batch-5). 시계를 밀기 전에 phase 가 갔는지 본다
+    # (batch-5). 시계를 밀기 전에 phase 가 갔는지 본다. 큐가 비었는지만 보면 phase 가 아예
+    # 들어오지 않은 잡에서도 바로 지나간다 — 가짜 서버가 받은 phase 를 센다(batch-7 #4). 시계를
+    # 민 뒤에 `_sent_at()` 을 부를 보내기는 없다: 가짜 러너는 출력이 없고(로그 0) finish 는
+    # `release` 뒤다
+    fake = w.client
     deadline = time.monotonic() + 5
-    while runner.observer.outbox.phase is not None and time.monotonic() < deadline:
+    while time.monotonic() < deadline and not (
+        fake.phases and runner.observer.outbox.phase is None
+    ):
         time.sleep(0.005)
+    assert fake.phases == [rw.PHASE_MATERIALIZING], "the job's phase was never sent"
     assert runner.observer.outbox.phase is None, "the job's phase was not sent"
     return runner, t
 
