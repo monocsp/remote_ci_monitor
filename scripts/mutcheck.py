@@ -6921,6 +6921,27 @@ MUTANTS = (
             "test_rl20_rcm_logs_ends_with_a_line_on_stderr_when_the_log_is_incomplete",
         ),
     ),
+    Mutant(
+        # 끊긴 워커 띠가 M5t-b 전의 「결과를 잃는다」로 돌아간다(RL28, 유예 동안 잡은 이어 간다)
+        name="unreachable-banner-old-sentence",
+        path="src/remote_ci_monitor/web/i18n.js",
+        old=(
+            '" workers unreachable — their jobs go on if back within the grace period,'
+            ' else end as lost";'
+        ),
+        new='" workers unreachable — the results of their running jobs are lost";',
+        tests=("tests/web/unreachable_m5tb.test.js",),
+        runner="node",
+    ),
+    Mutant(
+        # 라틴 낱말 끝 「모음 + r」의 예외를 뺀다 — 「워커 mac2-worker과」가 돌아온다
+        name="josa-vowel-r-exception-dropped",
+        path="src/remote_ci_monitor/web/i18n.js",
+        old='        if (low === "r" && latinWordEndsInVowelR(s, i)) return "none";',
+        new="",
+        tests=("tests/web/unreachable_m5tb.test.js",),
+        runner="node",
+    ),
 )
 
 
