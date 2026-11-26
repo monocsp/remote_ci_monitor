@@ -345,6 +345,22 @@ def test_rl11_unknown_foreign_and_malformed_sessions(srv):
     assert status == 400 and set(body) == {"error"}
 
 
+@pytest.mark.parametrize("key", ["worker_session_id", "previous_sessions", "unverified_sessions"])
+def test_gap7_a_session_id_with_a_trailing_newline_is_400(srv, key):
+    """# GAP7 세션 id 는 32자 소문자 hex **전부**다. `$` 는 끝 줄바꿈 앞에서도 맞으므로
+    `<32 hex>\\n` 이 지나갔다 — 같은 세션의 다른 문자열이 표에 들어갈 수 있었다. 400 이고 본문
+    키는 error 하나, 세션 행은 생기지 않는다."""
+    bent = secrets.token_hex(16) + "\n"
+    body: dict[str, Any] = {"pool": "default", "lanes": 1, "version": __version__}
+    body["worker_session_id"] = bent if key == "worker_session_id" else secrets.token_hex(16)
+    if key != "worker_session_id":
+        body[key] = [bent]
+    status, answer = srv.req("POST", "/worker/register", token="build-02", json_body=body)
+    assert (status, set(answer)) == (400, {"error"}), answer
+    count = srv.store._conn().execute("SELECT COUNT(*) FROM worker_sessions").fetchone()[0]
+    assert count == 0
+
+
 def test_rl11_two_processes_registering_at_once_leave_exactly_one_current_session(srv):
     sids = [secrets.token_hex(16) for _ in range(6)]
     out: list[int] = []

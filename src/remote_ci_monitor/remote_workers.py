@@ -98,6 +98,7 @@ SESSION_FENCED = "this worker process was replaced by a newer one with the same 
 SESSION_FOREIGN = "session belongs to another worker"
 #: 본문이 없는 워커 라우트(log · tree · artifacts)의 세션 헤더(§4.10)
 SESSION_HEADER = "X-RCM-Worker-Session"
+#: 세션 id 의 모양 — `fullmatch` 로만 쓴다. `$` 는 끝 줄바꿈 앞에서도 맞는다(P6 GAP7)
 _SESSION_RE = re.compile(r"^[0-9a-f]{32}$")
 #: heartbeat `seq` · `claims_settled` · claim `claim_seq` 의 상한(JSON 정수가 잃지 않는 범위)
 MAX_SEQ = 2**53 - 1
@@ -394,7 +395,7 @@ class RemoteWorkersMixin:
         """세션 id 의 모양(32자 소문자 hex). 없으면 None — 레거시(옛 워커)다. 모양이 틀리면 400."""
         if raw is None:
             return None
-        if not isinstance(raw, str) or not _SESSION_RE.match(raw):
+        if not isinstance(raw, str) or not _SESSION_RE.fullmatch(raw):  # mutcheck: session-re-tail
             raise _api_error(400, f"{where} must be 32 lowercase hex characters")
         return raw
 
@@ -405,7 +406,7 @@ class RemoteWorkersMixin:
             raise _api_error(400, f"{key} must be a list of session ids")
         out: list[str] = []
         for x in raw:
-            if not isinstance(x, str) or not _SESSION_RE.match(x):
+            if not isinstance(x, str) or not _SESSION_RE.fullmatch(x):  # mutcheck: list-tail
                 raise _api_error(400, f"{key} must be a list of session ids")
             out.append(x)
         return out

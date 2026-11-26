@@ -6759,6 +6759,28 @@ MUTANTS = (
             "test_gap6_an_artifact_upload_fenced_while_it_streams_publishes_nothing",
         ),
     ),
+    Mutant(
+        # GAP7 세션 id 를 `match` 로 본다 — `<32 hex>\n` 이 지나간다
+        name="session-re-tail",
+        path="src/remote_ci_monitor/remote_workers.py",
+        old="_SESSION_RE.fullmatch(raw):  # mutcheck: session-re-tail\n",
+        new="_SESSION_RE.match(raw):\n",
+        tests=(
+            "tests/test_worker_session_m5tb.py::"
+            "test_gap7_a_session_id_with_a_trailing_newline_is_400",
+        ),
+    ),
+    Mutant(
+        # GAP7 등록 목록의 세션 id 도 같다
+        name="session-list-tail",
+        path="src/remote_ci_monitor/remote_workers.py",
+        old="_SESSION_RE.fullmatch(x):  # mutcheck: list-tail\n",
+        new="_SESSION_RE.match(x):\n",
+        tests=(
+            "tests/test_worker_session_m5tb.py::"
+            "test_gap7_a_session_id_with_a_trailing_newline_is_400",
+        ),
+    ),
 )
 
 
