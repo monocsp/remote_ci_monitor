@@ -60,6 +60,20 @@ of a key bumps that number and is listed here.
 - **`rcm release-hold N [--reason TEXT] [--json]`** releases a group hold after an admin checked
   the machine (exit 0 released, 1 no open hold, 2 refused, 3 unreachable or a server error).
   ([#284](https://github.com/monocsp/remote_ci_monitor/pull/284))
+- **A job whose worker is out of reach says so in words.** While the disconnect grace runs, its
+  reason is `worker_unreachable_grace` (listed right after `worker_down`, ETA `—`): the web and
+  `rcm top` say `lost contact with <worker> — the job goes on if the worker is back within the
+  grace period`, and `rcm wait` prints one line when contact is lost and one when the worker is
+  back, and keeps waiting. A `lost` job's `rcm wait` adds its reason as one line
+  (`#N lost: worker build-02 unreachable for 660s`), a late report from the worker as
+  `#N late result: succeeded (exit 0) — not counted as this job's result`, and an incomplete log
+  as one line in `rcm wait`, at the end of `rcm logs N` and in the web log view's header.
+- **Group holds are shown to people.** The web's «Needs a look» lists every open hold (even with
+  no job waiting) and the held job's row carries a `group held` chip; `rcm wait` and `rcm top`
+  name the group and the job to release instead of the code; `rcm check` prints one
+  `irreversible hold` warning per hold (the exit code does not change); `rcm doctor` on a worker
+  or coordinator-worker prints a `needs action` line for each hold of a job that ran there and
+  adds `irreversible_holds` to `--json` (`doctor_version` stays 1).
 - **Hold notifications.** Every notification carries `RCM_EVENT`, `RCM_HOLD`, `RCM_HOLD_GROUP` and
   `RCM_HOLD_NOTE` (and `event` · `hold` in a webhook body); a `[[notify]]` rule with
   `on = ["irreversible_hold"]` is called once for each new hold. The default `on` is unchanged.

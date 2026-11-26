@@ -1174,6 +1174,42 @@ Point `RCM_VENV` at the virtual environment that holds `rcm` when it is not the 
 and set `RCM_TOKEN` on a server with `read_auth = "basic"`. `pipx` users run
 `pipx install --force "$tmp"/*.whl` in place of the `pip install` line.
 
+## When a worker cannot be reached
+
+A remote job keeps running while the server waits the
+[disconnect grace](configuration.md#a-lost-connection-disconnect_grace_seconds) for its worker.
+The worker shows `down`, and the job is still `running`, with reason `worker_unreachable_grace`
+in `/api/status`. Its finish time is unknown, so its ETA is `—`. People see it in words, never
+the code:
+
+| where | what it says |
+|---|---|
+| web queue and «Needs a look» | `lost contact with build-02 — the job goes on if the worker is back within the grace period`, listed right after `worker down` |
+| `rcm top` | the same sentence on the job's reason line, `eta —` |
+| `rcm wait` (stderr) | `#812 lost contact with worker build-02 — the job goes on if the worker is back within the grace period` once, and `#812 worker build-02 is back — the job goes on` if it returns |
+
+`rcm wait` does not end during the grace: it ends with the job's own result when the worker comes
+back, or with exit 3 when the grace runs out, or at its own `--timeout` with exit 3. A job that
+ends without its worker is `lost` (exit 3, no step) and its `summary_code` says why. `rcm wait`
+prints that reason as one line, for example `#812 lost: worker build-02 unreachable for 660s`,
+and the web shows the same sentence in both languages:
+
+| `summary_code` | what happened |
+|---|---|
+| `worker_unreachable` | the grace ran out before the worker came back |
+| `worker_self_stopped` | an `irreversible` job: the worker stopped it itself before the grace ran out |
+| `worker_replaced` | a second worker process with the same token replaced this one |
+| `worker_restarted_without_job` | the worker restarted and did not have the job |
+| `orphan_unverified` | an `irreversible` job whose process rcm could not confirm gone: the job may still be running on that machine, check it |
+
+A worker that comes back after its job was closed still reports how the job ended. `rcm wait`
+shows that report as one line, `#812 late result: succeeded (exit 0) — not counted as this job's
+result`; the job stays `lost` and the exit code stays 3. When the worker could not keep all of a
+job's log, `rcm wait` and the end of `rcm logs N` (on stderr) say
+`#812 log incomplete — the worker could not keep all of it; rcm logs 812 shows what arrived`, and
+the web log view adds `log incomplete` to its header line. Neither line appears for a server that
+does not send `late_result` or `log_complete`.
+
 ## When a group is held: `rcm release-hold`
 
 A job of an [`irreversible`](configuration.md#jobs-that-must-not-run-twice-irreversible) preset
@@ -1182,6 +1218,21 @@ Nothing of that group starts until the hold is released, and the hold does not e
 not know whether the command is still running on that machine. You see it as reason
 `needs_action` (`irreversible_hold`) on the waiting jobs and in `irreversible_holds` of
 `/api/status` and `/api/health`; the job's page (`GET /jobs/N`) has its `hold`.
+
+People see a hold in words, without the code:
+
+| where | what it shows |
+|---|---|
+| web «Needs a look» | one entry per hold, even when no job waits on that group: `Group irreversible:ship is held: job #812 (ship) on build-02 closed without a stop confirmation. Check build-02 for a leftover process, then run rcm release-hold 812.` The held job's row in Recent carries a `group held` chip |
+| `rcm wait --job N` (stderr) | `#821 needs action · group irreversible:ship is held by job #812 — check that machine for a leftover process, then ask an admin to run rcm release-hold 812`; with `--return-on-action` it ends with exit 4 |
+| `rcm top` | the waiting job's reason line: `needs action · group irreversible:ship is held by #812 — rcm release-hold 812 after checking the machine` |
+| `rcm check` | one `warn  irreversible hold` row per hold; a hold is a warning, never a FAIL, so the exit code does not change |
+| `rcm doctor` (roles `worker` and `coordinator-worker`) | a `needs action` line for each hold of a job that ran on this machine: `a job that ran here was closed without a stop confirmation — check for a leftover process, then ask an admin to run rcm release-hold N`; `--json` lists them in `irreversible_holds` (`null` when unknown). The exit code rules do not change |
+
+A job of the server's own local lane has no worker: the web and `rcm check` say «the server's
+local lane» and «check the server». When the server could not read its holds
+(`irreversible_holds: null`), the web says `unknown — group holds unavailable` instead of «nothing
+to look at», and `rcm check` prints one warning row saying so.
 
 Look at the machine first. On the worker named in the hold, `ps -g <pgid>` lists what is left of
 the job's process group (the job's last log line and `rcm logs N` tell you how far it got). When

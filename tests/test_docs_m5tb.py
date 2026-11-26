@@ -284,3 +284,64 @@ def test_p63_3_the_irreversible_section_says_a_late_cancel_keeps_the_failed_clos
     body = flat(section(CONFIGURATION, IRREVERSIBLE))
     assert "A cancel that has not stopped the command yet does not change that" in body
     assert "the job ends `failed`, as any job that does not retry does" in body
+
+
+# ── PR3: 사람용 화면(§4.8) ─────────────────────────────────────────────────────
+
+UNREACHABLE = "When a worker cannot be reached"
+HELD = "When a group is held: `rcm release-hold`"
+
+
+def test_rl28_operating_quotes_the_unreachable_lines_rcm_prints():
+    """# RL28 문서의 줄이 `rcm top` · `rcm wait` 이 실제로 찍는 줄과 같다."""
+    from remote_ci_monitor.core.render_text import unreachable_text
+
+    body = flat(section(OPERATING, UNREACHABLE))
+    assert "`worker_unreachable_grace`" in body and "its ETA is `—`" in body
+    assert unreachable_text("build-02") in body
+    assert f"#812 {unreachable_text('worker build-02')}" in body
+    assert "#812 worker build-02 is back — the job goes on" in body
+
+
+def test_rl29_operating_names_the_five_lost_endings_and_the_late_result_line():
+    """# RL29 다섯 끝의 `summary_code` 와 늦은 결과 · 불완전한 로그 줄."""
+    from remote_ci_monitor.core.render_text import (
+        late_result_line,
+        log_incomplete_line,
+        lost_line,
+    )
+
+    body = flat(section(OPERATING, UNREACHABLE))
+    for code in (
+        "worker_unreachable",
+        "worker_self_stopped",
+        "worker_replaced",
+        "worker_restarted_without_job",
+        "orphan_unverified",
+    ):
+        assert f"`{code}`" in body, code
+    lost = {
+        "state": "lost",
+        "summary_code": "worker_unreachable",
+        "summary_args": {"name": "build-02", "seconds": 660},
+    }
+    assert lost_line(lost, job_id=812) in body
+    late = {"late_result": {"outcome": "succeeded", "exit_code": 0}}
+    assert late_result_line(late, job_id=812) in body
+    assert log_incomplete_line({"log_complete": False}, job_id=812) in body
+
+
+def test_rl45_operating_says_where_a_hold_shows_and_quotes_the_lines():
+    """# RL45 웹 · `rcm wait` · `rcm top` · `rcm check` · `rcm doctor` 의 홀드 줄."""
+    from remote_ci_monitor.cli import HOLD_ROW, action_line
+    from remote_ci_monitor.core.doctor import hold_line
+
+    body = flat(section(OPERATING, HELD))
+    action = {"code": "irreversible_hold", "note": "group held — run rcm release-hold 812"}
+    blocked = {"job_id": 812, "group": "irreversible:ship"}
+    assert action_line(821, action, blocked) in body
+    assert flat(f"`warn  {HOLD_ROW}`") in body
+    doctor = hold_line({"job_id": 812, "preset": "ship", "group": "irreversible:ship"})
+    assert doctor.split(": ", 1)[1].replace("812", "N") in body
+    assert "`group held` chip" in body and "exit 4" in body
+    assert "`unknown — group holds unavailable`" in body
