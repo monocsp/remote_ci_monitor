@@ -3956,6 +3956,15 @@ MUTANTS = (
         ),
     ),
     Mutant(
+        # `EnvironmentFile=` · 펼치지 않은 지정자 · 읽지 못한 줄이 있는 rcm 유닛을 그대로 믿는다
+        # (batch 10 M3)
+        name="setup-scan-unfollowed-lines-trusted",
+        path="src/remote_ci_monitor/setup.py",
+        old="    skipped = [*sf.unfollowed, *sf.unreadable_lines]\n",
+        new="    skipped = []\n",
+        tests=("tests/test_setup.py::test_b10_m3_a_unit_with_lines_setup_does_not_follow_closes",),
+    ),
+    Mutant(
         # 읽지 못한 rcm 같은 파일을 rcm 이 아닌 것으로 본다(결정 352, 닫는 쪽)
         name="setup-scan-unreadable-rcm-skipped",
         path="src/remote_ci_monitor/setup.py",
