@@ -127,15 +127,25 @@ On a machine that already runs rcm as a service, `rcm setup` refuses to write th
 config file, service file or label, and anything inside its `data_dir`, venv or checkout. It stops
 with exit 1 (`this is <label>'s config — refusing`), and no flag overrides that. A test or
 throwaway install gets its own port, label, config and data folder, does not advertise itself on
-the network, and runs in a terminal instead of as a service. Clear `RCM_*` from your shell first,
-so nothing points at the running install:
+the network, and runs in a terminal instead of as a service. Do not run the lines setup prints under
+`next —` (the service install): the test server runs in a terminal with `rcm serve`, and a service
+loaded into launchd or enabled in systemd starts again at every login.
+
+Clear `RCM_*` from your shell first, so nothing points at the running install: `unset` the names
+rcm reads, then `env | grep '^RCM_'` must print nothing (unset any name it still shows, such as an
+`RCM_SERVER_PORT` override). Do the same in the terminal that runs `rcm serve`. The token goes into
+a file of mode 600 and from there into the shell, so it never stands on a command line or in the
+shell history:
 
 ```sh
+unset RCM_CONFIG RCM_SERVER RCM_TOKEN RCM_LABEL RCM_WORKER_TOKEN RCM_CLIENT_VERSION
+env | grep '^RCM_'                             # prints nothing
 rcm setup --role coordinator-worker --bind 127.0.0.1 --port 8790 --no-advertise --label com.example.rcm-test --config ~/rcm-test/server.toml --data-dir ~/rcm-test/data --yes
 rcm serve --config ~/rcm-test/server.toml      # in a terminal of its own; Ctrl-C stops it
-rcm token --config ~/rcm-test/server.toml add test
-RCM_SERVER=http://127.0.0.1:8790 RCM_TOKEN=<the token> rcm check --config ~/rcm-test/server.toml
-RCM_SERVER=http://127.0.0.1:8790 RCM_TOKEN=<the token> rcm run ok
+rcm token --config ~/rcm-test/server.toml add test > ~/rcm-test/token && chmod 600 ~/rcm-test/token
+export RCM_TOKEN="$(cat ~/rcm-test/token)"
+RCM_SERVER=http://127.0.0.1:8790 rcm check --config ~/rcm-test/server.toml
+RCM_SERVER=http://127.0.0.1:8790 rcm run ok
 ```
 
 Never give a test build the running install's `--config` or `--data-dir`: any rcm that opens a
@@ -163,6 +173,11 @@ pipx install git+https://github.com/monocsp/remote_ci_monitor
 ```
 
 ## 2. The build machine
+
+**If this machine already runs rcm as a service, do not run these commands.** They use the default
+`~/.config/rcm/server.toml` and data folder, and an rcm other than the service's migrates the
+database it opens. Follow
+[a test install next to one that runs](#a-test-install-next-to-one-that-runs) instead.
 
 Three commands: write a config, make a token, start the server.
 

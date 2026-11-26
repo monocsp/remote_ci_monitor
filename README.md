@@ -91,8 +91,9 @@ service, and the first line under `tokens —` makes the token.
 
 ```sh
 rcm setup --role coordinator-worker --bind 127.0.0.1 --yes   # server.toml and a service file
+# run the lines it printed under `next —` (the service), then the first line under `tokens —` (the token)
 rcm setup --role client --server http://127.0.0.1:8787 --yes
-export RCM_TOKEN=<the token>
+export RCM_TOKEN=<the token>                                 # the one that tokens line printed
 rcm doctor --role coordinator-worker && rcm check
 rcm run ok                                                   # exit 0 and one JSON line
 ```
@@ -102,6 +103,12 @@ and undo and uninstall are in the usage guide's
 [Getting started](docs/usage.md#getting-started-pick-a-role-and-set-it-up).
 
 ## Build machine (3 commands)
+
+**If this machine already runs rcm as a service, do not run these commands.** They use the default
+`~/.config/rcm/server.toml` and data folder, and an rcm other than the service's migrates the
+database it opens. Follow
+[a test install next to one that runs](docs/usage.md#a-test-install-next-to-one-that-runs)
+instead.
 
 Without `rcm setup` and without a service, in one terminal:
 

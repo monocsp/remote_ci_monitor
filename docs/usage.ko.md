@@ -127,15 +127,24 @@ rcm 이 이미 서비스로 도는 머신에서 `rcm setup` 은 그 서비스의
 않는다. 그 서비스의 `data_dir`, venv, 체크아웃 안에도 쓰지 않는다. 그런 대상이면
 `this is <label>'s config — refusing` 처럼 말하고 종료 1 로 멈추며, 이 거절을 넘기는 플래그는
 없다. 시험용이나 잠깐 쓸 설치는 포트 · 라벨 · 설정 · 데이터 폴더를 따로 두고, 네트워크에 자기를
-알리지 않고, 서비스 대신 터미널에서 띄운다. 먼저 셸의 `RCM_*` 를 지워서 도는 설치를 가리키는
-값이 없게 한다.
+알리지 않고, 서비스 대신 터미널에서 띄운다. setup 이 `next —` 아래에 찍는 줄(서비스 설치)은
+돌리지 않는다. 시험 서버는 터미널의 `rcm serve` 로 돌린다. launchd 에 들이거나 systemd 에서 켠
+서비스는 로그인할 때마다 다시 뜬다.
+
+먼저 셸의 `RCM_*` 를 지워서 도는 설치를 가리키는 값이 없게 한다. rcm 이 읽는 이름을 `unset` 으로
+지운 뒤 `env | grep '^RCM_'` 이 아무것도 찍지 않아야 한다. 그래도 찍히는 이름이 있으면(예를 들어
+`RCM_SERVER_PORT` 덮어쓰기) 그것도 지운다. `rcm serve` 를 띄울 터미널에서도 똑같이 한다. 토큰은
+모드 600 파일에 받은 다음 그 파일에서 셸로 읽는다. 그래서 토큰이 명령 줄이나 셸 기록에 남지 않는다.
 
 ```sh
+unset RCM_CONFIG RCM_SERVER RCM_TOKEN RCM_LABEL RCM_WORKER_TOKEN RCM_CLIENT_VERSION
+env | grep '^RCM_'                             # 아무것도 찍지 않는다
 rcm setup --role coordinator-worker --bind 127.0.0.1 --port 8790 --no-advertise --label com.example.rcm-test --config ~/rcm-test/server.toml --data-dir ~/rcm-test/data --yes
 rcm serve --config ~/rcm-test/server.toml      # 따로 연 터미널에서. Ctrl-C 로 멈춘다
-rcm token --config ~/rcm-test/server.toml add test
-RCM_SERVER=http://127.0.0.1:8790 RCM_TOKEN=<그 토큰> rcm check --config ~/rcm-test/server.toml
-RCM_SERVER=http://127.0.0.1:8790 RCM_TOKEN=<그 토큰> rcm run ok
+rcm token --config ~/rcm-test/server.toml add test > ~/rcm-test/token && chmod 600 ~/rcm-test/token
+export RCM_TOKEN="$(cat ~/rcm-test/token)"
+RCM_SERVER=http://127.0.0.1:8790 rcm check --config ~/rcm-test/server.toml
+RCM_SERVER=http://127.0.0.1:8790 rcm run ok
 ```
 
 시험 빌드에 도는 설치의 `--config` 나 `--data-dir` 을 주지 않는다. DB 를 여는 rcm 은 그 DB 를 자기
@@ -163,6 +172,10 @@ pipx install git+https://github.com/monocsp/remote_ci_monitor
 ```
 
 ## 2. 빌드 머신
+
+**이 머신에서 rcm 이 이미 서비스로 돈다면 이 명령을 돌리지 않는다.** 이 명령은 기본
+`~/.config/rcm/server.toml` 과 기본 데이터 폴더를 쓰고, 서비스가 아닌 rcm 은 여는 DB 를 자기
+판으로 마이그레이션한다. 대신 [도는 설치 옆의 시험 설치](#도는-설치-옆의-시험-설치)를 따른다.
 
 명령 셋이면 된다. 설정을 만들고, 토큰을 발급하고, 서버를 켠다.
 

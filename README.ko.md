@@ -86,8 +86,9 @@ rcm 을 쓰는 머신에는 저마다 역할이 있다. `rcm setup` 이 역할 �
 
 ```sh
 rcm setup --role coordinator-worker --bind 127.0.0.1 --yes   # server.toml 과 서비스 파일
+# 위 setup 이 `next —` 아래에 찍은 줄(서비스)을 돌리고, `tokens —` 아래의 첫 줄(토큰)을 돌린다
 rcm setup --role client --server http://127.0.0.1:8787 --yes
-export RCM_TOKEN=<그 토큰>
+export RCM_TOKEN=<그 토큰>                                   # tokens 줄이 찍은 토큰
 rcm doctor --role coordinator-worker && rcm check
 rcm run ok                                                   # 종료 0 과 JSON 한 줄
 ```
@@ -97,6 +98,11 @@ rcm run ok                                                   # 종료 0 과 JSON
 있다.
 
 ## Build machine (3 commands)
+
+**이 머신에서 rcm 이 이미 서비스로 돈다면 이 명령을 돌리지 않는다.** 이 명령은 기본
+`~/.config/rcm/server.toml` 과 기본 데이터 폴더를 쓰고, 서비스가 아닌 rcm 은 여는 DB 를 자기
+판으로 마이그레이션한다. 대신
+[도는 설치 옆의 시험 설치](docs/usage.ko.md#도는-설치-옆의-시험-설치)를 따른다.
 
 `rcm setup` 도 서비스도 없이 터미널 하나에서 하는 길이다.
 
