@@ -41,11 +41,13 @@ from remote_ci_monitor.config import WorkerConfig
 from remote_ci_monitor.core import artifacts as art
 from remote_ci_monitor.core.model import (
     CANCELLED,
+    EXHAUSTED,
     FAILED,
     LOST,
     MODE_GIT_REF,
     MODE_TREE,
     PHASE_MATERIALIZING,
+    RETRIED,
     SUCCEEDED,
     TIMED_OUT,
     Job,
@@ -98,6 +100,19 @@ PROTOCOL_OLD_SERVER = (
     "the server speaks worker protocol 1 — upgrade rcm on the server (this worker needs protocol 2)"
 )
 FENCED = "replaced by a newer worker process with the same token — stopping"
+# ── M5t-b 자기 멈춤(§4.3 · 결정 320 · 333 · 335) ──
+#: 감시 스레드의 틱. heartbeat 루프와 따로 돈다 — 잠에서 깬 첫 틱이 판정한다(RL26)
+WATCHDOG_TICK_SECONDS = 1
+#: heartbeat 요청 하나의 전체 기한 T_req. config 의 같은 이름과 같아야 한다(시험이 잠근다)
+HEARTBEAT_DEADLINE_SECONDS = 15
+#: 동시에 매달린 heartbeat 도우미의 상한 — 넘으면 그 회차를 보내지 않고 실패로 센다
+HEARTBEAT_INFLIGHT_MAX = 4
+#: m = T_req + grace_J + 이 여유(결정 320). 기본 grace 10 이면 m = 35 = config 의 하한 여유
+SELF_STOP_SLACK_SECONDS = 10
+#: W4 표 첫 행 — 이 세션의 finish 가 서버에 이미 기록된 끝 상태(2xx 만 잃었다)
+FINISH_RECORDED = frozenset({SUCCEEDED, FAILED, TIMED_OUT, RETRIED, EXHAUSTED})
+#: W4 표 마지막 행 — 원격 claim 된 잡이 될 수 없는 상태(서버 버그 신호)
+_NOT_CLAIMED_STATES = frozenset({"expired", "scheduled", "queued", "uploading"})
 
 
 def _utcnow() -> datetime:
@@ -135,16 +150,35 @@ def _fmt_seconds(seconds: float) -> str:
 
 
 class _RemoteObserver:
-    """실행기 관찰자 — phase 는 즉시, 로그는 1초/256 KB 배치로 서버에. 마커는 서버가 파싱한다."""
+    """실행기 관찰자 — phase 는 즉시, 로그는 1초/256 KB 배치로 서버에. 마커는 서버가 파싱한다.
 
-    def __init__(self, proc: RemoteWorker, job_id: int):
+    멈춤의 길은 이름으로 나뉜다(M5t-b 결정 334). 자기 멈춤 `self_stop` 은 `should_stop` → `lost`
+    + `worker_self_stopped` 이고, 서버가 닫은 잡의 멈춤 `closed_stop`(W4 표)은 `should_cancel`
+    길이다. `closed_by_server` 는 로그 전송만 멈춘다 — 일반 `lost` 잡은 그 409 로 죽지 않는다."""
+
+    def __init__(
+        self,
+        proc: RemoteWorker,
+        job_id: int,
+        *,
+        irreversible: bool = False,
+        grace_seconds: int | None = None,
+        grace_j: int = 10,
+    ):
         self.proc = proc
         self.job_id = job_id
         self._buf = bytearray()
         self._last_flush = time.monotonic()
         self._lock = threading.Lock()
         self._pending_failures = 0
-        self.closed_by_server = False  # 409: 서버가 이미 닫았다(lost 판정 등)
+        self.closed_by_server = False  # 409: 서버가 이미 닫았다(lost 판정 등) — 로그만 멈춘다
+        self.irreversible = irreversible
+        self.grace_seconds = grace_seconds  # claim 에 얼린 G_J(결정 257)
+        self.grace_j = grace_j  # 러너의 SIGTERM→SIGKILL(표식 잡은 상한, §4.3)
+        self.self_stop = threading.Event()  # 한 방향 — 되돌리지 않는다
+        self.self_stop_seconds = 0
+        self.closed_stop = threading.Event()
+        self.closed_state: str | None = None  # 서버가 알린 끝 상태(W4)
 
     def phase(self, phase: str) -> None:
         self.proc.report(
@@ -171,12 +205,14 @@ class _RemoteObserver:
             chunk = bytes(self._buf)
             self._buf.clear()
             self._last_flush = time.monotonic()
+        sent = self.proc._sent_at()
         try:
             self.proc.client.log(self.job_id, chunk)
         except ClientError as e:
             if e.status == 409:
                 self.proc.log(f"#{self.job_id} log: server says {e.message}")
                 self.closed_by_server = True
+                self.proc._closed_by_409(self.job_id, e)
                 return
             if e.status and e.status != 503:
                 self.proc.log(f"#{self.job_id} log: {e.message}")
@@ -189,6 +225,7 @@ class _RemoteObserver:
             if self._pending_failures in (1, 10) or self._pending_failures % 60 == 0:
                 self.proc.log(f"#{self.job_id} log: {e.message} — keeping {len(self._buf)} bytes")
             return
+        self.proc.mark_ok(*sent)
         self._pending_failures = 0
 
     def final_flush(self) -> None:
@@ -199,16 +236,35 @@ class _RemoteObserver:
             self._buf.clear()
         if chunk and not self.closed_by_server:
             ok = self.proc.report(
-                lambda: self.proc.client.log(self.job_id, chunk), f"#{self.job_id} log"
+                lambda: self.proc.client.log(self.job_id, chunk),
+                f"#{self.job_id} log",
+                job_id=self.job_id,
             )
             if ok is None:
                 self.closed_by_server = True
 
     def should_cancel(self) -> bool:
-        return self.job_id in self.proc.cancel_requested or self.closed_by_server
+        # mutcheck: closed-by-server-cancels
+        return self.job_id in self.proc.cancel_requested or self.closed_stop.is_set()
 
     def should_stop(self) -> bool:
-        return self.proc.stopping.is_set()
+        return self.proc.stopping.is_set() or self.self_stop.is_set()
+
+    def server_closed(self, state: str, had_cancel: bool) -> None:
+        """W4 표(§4.1.2, V2-6). 서버 상태는 이미 정해졌고 워커의 finish 는 확인으로만 쓰인다."""
+        self.closed_state = state
+        self.closed_by_server = True
+        if state in FINISH_RECORDED or state == CANCELLED:
+            self.closed_stop.set()  # 아직 돌면 멈춘다
+        elif state == LOST:
+            # 표식 잡 · 취소 요청이 있던 잡만 멈춘다. 일반 잡은 계속 돈다(결정 253 · 322)
+            # mutcheck: job-closed-kills-running · lost-cancel-keeps-running
+            if self.irreversible or had_cancel:
+                self.closed_stop.set()
+
+
+class _HeartbeatSkipped(Exception):
+    """매달린 heartbeat 가 상한이라 이 회차를 보내지 않았다 — 실패로 셌다."""
 
 
 def _iso(at: datetime) -> str:
@@ -268,6 +324,7 @@ class RemoteWorker:
         *,
         client: WorkerClient | None = None,
         now_fn: Callable[[], datetime] = _utcnow,
+        mono_fn: Callable[[], float] = time.monotonic,
         rand_fn: Callable[[], float] = random.random,  # 지터 — 테스트가 주입한다
         log: Callable[[str], None] | None = None,
         environ: dict[str, str] | None = None,
@@ -282,6 +339,7 @@ class RemoteWorker:
         self._conn_failures = 0
         self._client = client or WorkerClient(config.server, config.token)
         self.now_fn = now_fn
+        self.mono_fn = mono_fn  # 자기 멈춤의 단조 시계(M5t-b §4.1.3) — 시험이 벽과 따로 민다
         self.rand_fn = rand_fn
         self.log = log or (lambda msg: print(f"[rcm worker] {msg}", file=sys.stderr, flush=True))
         self.environ = environ
@@ -338,6 +396,14 @@ class RemoteWorker:
         self._open_claims: set[int] = set()
         self._hb_seq = 0
         self._hb_applied = 0  # 응답의 cancel · paused 를 적용한 마지막 heartbeat 의 seq
+        # ── M5t-b 자기 멈춤(§4.3) ──
+        # 도는 잡의 관찰자 — 감시 스레드 · 닫힌 잡 통보(W4)가 찾아간다
+        self._observers: dict[int, _RemoteObserver] = {}
+        # ok_at: 2xx 를 받은 요청을 **보낸** 시각의 최댓값(벽 epoch, 단조). 2xx 전에는 None
+        self._ok_at: tuple[float, float] | None = None
+        self._ok_lock = threading.Lock()
+        self._hb_inflight = 0
+        self._hb_skipped = 0
 
     @property
     def client(self) -> Any:
@@ -379,18 +445,154 @@ class RemoteWorker:
     def _epoch(self) -> float:
         return self.now_fn().timestamp()
 
+    # ── 자기 멈춤 (M5t-b §4.3 · 결정 320 · 335) ────────────────────────────
+
+    def _sent_at(self) -> tuple[float, float]:
+        """요청을 보내는 지금 — 2xx 가 오면 이 값이 `ok_at` 후보다(응답 시각이 아니다, F55)."""
+        return self.now_fn().timestamp(), self.mono_fn()
+
+    def mark_ok(self, wall: float, mono: float) -> None:
+        """2xx 를 받은 요청의 보낸 시각으로 `ok_at` 을 올린다. 벽 · 단조 각각 최댓값이다."""
+        with self._ok_lock:
+            if self._ok_at is None:
+                self._ok_at = (wall, mono)
+            else:
+                self._ok_at = (max(self._ok_at[0], wall), max(self._ok_at[1], mono))
+
+    def ok_at(self) -> tuple[float, float] | None:
+        with self._ok_lock:
+            return self._ok_at
+
+    def connected_age_floor(self) -> int:
+        """L = max(T, 2H + 3·T_req + 5)(결정 335) — 연결된 워커의 `ok_at` 나이 상한(§4.1.5)."""
+        t, h = self.timeout_seconds, self.heartbeat_seconds
+        return max(
+            t, 2 * h + 3 * HEARTBEAT_DEADLINE_SECONDS + 5
+        )  # mutcheck: lower-bound-one-timeout
+
+    @staticmethod
+    def self_stop_threshold(grace_seconds: int, grace_j: int) -> int:
+        """문턱 G_J − m_J, m_J = T_req + grace_J + 여유(결정 320)."""
+        # mutcheck: self-stop-ignores-request-timeout
+        return grace_seconds - (HEARTBEAT_DEADLINE_SECONDS + grace_j + SELF_STOP_SLACK_SECONDS)
+
+    def _grace_for(self, job_id: int, irreversible: bool, grace_seconds: int | None) -> int:
+        """러너의 `grace_J`. 표식 잡이면 `G_J − L − T_req − 여유` 로 자른다(§4.3). 기본 grace 10 은
+        설정 검증(`G ≥ L + 35`) 덕에 줄지 않는다. 줄였으면 한 줄 남긴다."""
+        conf = int(self.config.grace_seconds)
+        if not irreversible or grace_seconds is None:
+            return conf
+        cap = grace_seconds - self.connected_age_floor() - HEARTBEAT_DEADLINE_SECONDS
+        cap -= SELF_STOP_SLACK_SECONDS
+        grace = max(1, min(conf, cap))
+        if grace != conf:
+            self.log(
+                f"#{job_id}: grace_seconds {conf} lowered to {grace} for this job"
+                " — fits disconnect_grace_seconds"
+            )
+        return grace
+
+    def _job_grace(self, observer: _RemoteObserver) -> int:
+        if observer.grace_seconds is not None:
+            return int(observer.grace_seconds)
+        # 얼린 G 가 없다(서버 버그) — 서버가 받을 수 있는 가장 짧은 G 로 본다. 일찍 멈추는 쪽이다
+        from remote_ci_monitor.config import DISCONNECT_GRACE_MARGIN_SECONDS
+
+        return self.connected_age_floor() + DISCONNECT_GRACE_MARGIN_SECONDS
+
+    def watchdog_tick(self) -> None:
+        """감시 한 틱(W3). 표식 잡마다 `wgap ≥ G_J − m_J` 면 그 관찰자의 `self_stop` 을 세운다.
+        `wgap` 은 벽과 단조 가운데 큰 쪽이다 — 잠든 시간을 안 세는 단조 · 뒤로 가는 벽 어느 쪽이든
+        하나는 실제 경과 이상이다(RL26)."""
+        ok = self.ok_at()
+        if ok is None:
+            return
+        wall, mono = self._sent_at()
+        wgap = max(wall - ok[0], mono - ok[1])  # mutcheck: self-stop-monotonic-only
+        with self._lock:
+            observers = list(self._observers.values())
+        for o in observers:
+            if not o.irreversible or o.self_stop.is_set():  # mutcheck: self-stop-all-jobs
+                continue
+            if wgap >= self.self_stop_threshold(self._job_grace(o), o.grace_j):
+                o.self_stop_seconds = int(wgap)
+                o.self_stop.set()  # mutcheck: self-stop-reports-cancelled
+                self.log(
+                    f"#{o.job_id}: no answer from the server for {int(wgap)}s"
+                    " — stopping this irreversible job before the server gives it up"
+                )
+
+    def _watchdog_loop(self) -> None:
+        while not self.stopping.wait(WATCHDOG_TICK_SECONDS):
+            try:
+                self.watchdog_tick()
+            except Exception as e:  # noqa: BLE001 — 감시가 죽으면 표식 잡이 멈추지 못한다
+                self.log(f"watchdog: {type(e).__name__}")
+
+    def start_watchdog(self) -> threading.Thread:
+        t = threading.Thread(target=self._watchdog_loop, name="rcm-worker-watchdog", daemon=True)
+        t.start()
+        return t
+
+    # ── 서버가 닫은 잡(W4) ──────────────────────────────────────────────────
+
+    def _closed_by_409(self, job_id: int, e: ClientError) -> None:
+        state = e.body.get("state")
+        if e.body.get("code") == "job_closed" and isinstance(state, str):
+            self._job_closed(job_id, state, had_cancel=False)
+
+    def _job_closed(self, job_id: int, state: str, *, had_cancel: bool) -> None:
+        """서버가 알린 끝 상태(heartbeat `closed_jobs` · 보고의 409 `job_closed`)를 W4 표로."""
+        if state not in FINISH_RECORDED and state not in (CANCELLED, LOST):
+            how = "a claimed job cannot be" if state in _NOT_CLAIMED_STATES else "unknown state"
+            self.log(f"#{job_id}: server reports {state} ({how}) — ignoring")
+            return
+        with self._lock:
+            observer = self._observers.get(job_id)
+            parked = job_id in self._unreported
+        if observer is not None:
+            observer.server_closed(state, had_cancel)
+        if state in FINISH_RECORDED and parked:
+            # 이 세션의 finish 가 기록됐고 2xx 만 잃었다 — 큐 항목을 전달됨으로 지운다
+            self.log(f"#{job_id} finish: the server already has it ({state})")
+            self._unpark(job_id)
+
+    def _apply_closed_jobs(self, closed: Any) -> None:
+        if not isinstance(closed, list):
+            return
+        for item in closed:
+            if not isinstance(item, dict):
+                continue
+            jid, state = item.get("id"), item.get("state")
+            if isinstance(jid, int) and not isinstance(jid, bool) and isinstance(state, str):
+                self._job_closed(jid, state, had_cancel=item.get("had_cancel") is True)
+
+    def _stop_summary(self, observer: Any) -> tuple[str | None, str | None, dict[str, Any] | None]:
+        """러너의 `lost`(곧 `should_stop`) 보고 — 자기 멈춤이면 `worker_self_stopped`(결정 334)."""
+        stop = getattr(observer, "self_stop", None)
+        if stop is not None and stop.is_set():
+            return outcome_summary("worker_self_stopped", seconds=observer.self_stop_seconds)
+        return STOP_SUMMARY, None, None
+
     # ── 보고 (재시도) ────────────────────────────────────────────────────────
 
     def report(
-        self, call: Callable[[], Any], what: str, *, keep: Callable[[], bool] | None = None
+        self,
+        call: Callable[[], Any],
+        what: str,
+        *,
+        keep: Callable[[], bool] | None = None,
+        job_id: int | None = None,
     ) -> Any:
         """서버에 보고. 연결 오류는 1·2·4초 재시도, 409(잡이 이미 닫힘)는 None, 다른 4xx 는 로그.
         반환: 응답(성공) · None(409) · False(포기). `keep` 은 연결 오류 · 503 으로 재시도가 다
         실패했을 때만 부른다. 참을 돌려주면 부른 쪽이 미뤄 뒀다 다시 보고한다는 뜻이라 「giving up」
         대신 그렇게 쓴다."""
         for i, delay in enumerate((*REPORT_RETRIES, None)):
+            sent = self._sent_at()
             try:
                 out = call()
+                self.mark_ok(*sent)
                 return {} if out is None else out
             except ClientError as e:
                 if self._is_fenced(e):
@@ -398,6 +600,8 @@ class RemoteWorker:
                     return None
                 if e.status == 409:
                     self.log(f"{what}: server says {e.message}")
+                    if job_id is not None:
+                        self._closed_by_409(job_id, e)
                     return None
                 if e.status and e.status != 503:
                     self.log(f"{what}: {e.message}")
@@ -451,6 +655,7 @@ class RemoteWorker:
 
     def register(self) -> dict[str, Any]:
         while True:
+            sent = self._sent_at()
             try:
                 out = self.client.register(
                     pool=self.config.pool,
@@ -480,6 +685,7 @@ class RemoteWorker:
                     raise WorkerExit(0, "stopped before registering") from e
                 continue
             self._conn_failures = 0
+            self.mark_ok(*sent)
             self.heartbeat_seconds = int(out.get("heartbeat_seconds") or 5)
             self.claim_wait_seconds = int(out.get("claim_wait_seconds") or 20)
             self.timeout_seconds = int(out.get("worker_timeout_seconds") or 60)
@@ -535,7 +741,9 @@ class RemoteWorker:
             jobs = sorted(self.running)
             settled = self.claims_settled()
         try:
-            out = self.client.heartbeat(jobs, self._host_sample(), seq=seq, claims_settled=settled)
+            out = self._heartbeat_call(jobs, seq, settled)
+        except _HeartbeatSkipped:
+            return False
         except ClientError as e:
             if self._is_fenced(e):
                 self._on_fenced("heartbeat")
@@ -562,6 +770,11 @@ class RemoteWorker:
         self._hb_failures = 0
         self._hb_unregistered = 0
         self._conn_failures = 0
+        timeout = out.get("timeout_seconds")
+        if isinstance(timeout, int) and not isinstance(timeout, bool) and timeout > 0:
+            self.timeout_seconds = timeout  # L 의 T(F62)
+        # 서버가 닫은 잡을 먼저 안다(W4) — 이미 기록된 finish 를 다시 보내지 않게
+        self._apply_closed_jobs(out.get("closed_jobs"))  # mutcheck: closed-jobs-ignored
         # 서버가 돌아왔다 — 못 한 보고를 드레인보다 먼저 한다
         self._retry_unreported()
         self._heard_server_version(out)
@@ -584,6 +797,47 @@ class RemoteWorker:
                 target=self._measure_quietly, name="rcm-worker-measure", daemon=True
             ).start()
         return True
+
+    def _heartbeat_call(self, jobs: list[int], seq: int, settled: int) -> dict[str, Any]:
+        """heartbeat 하나를 도우미 스레드에서 보내고 `HEARTBEAT_DEADLINE_SECONDS` 까지만 기다린다
+        (결정 335). 넘으면 그 회차를 실패로 센다. 늦게 온 2xx 는 보낸 시각으로 `ok_at` 만 올린다 —
+        응답의 취소 · 멈춤은 seq 가 막는다. 매달린 도우미가 `HEARTBEAT_INFLIGHT_MAX` 면 보내지
+        않는다."""
+        with self._ok_lock:
+            if self._hb_inflight >= HEARTBEAT_INFLIGHT_MAX:
+                self._hb_skipped += 1
+                n = self._hb_skipped
+                hung = True
+            else:
+                self._hb_inflight += 1
+                hung = False
+        if hung:
+            self._hb_failures += 1
+            if n in (1, 12) or n % 60 == 0:
+                self.log(f"heartbeat: {HEARTBEAT_INFLIGHT_MAX} requests in flight — skipping one")
+            raise _HeartbeatSkipped
+        sent = self._sent_at()
+        box: dict[str, Any] = {}
+        done = threading.Event()
+        host = self._host_sample()
+
+        def call() -> None:
+            try:
+                box["out"] = self.client.heartbeat(jobs, host, seq=seq, claims_settled=settled)
+                self.mark_ok(*sent)
+            except BaseException as e:  # noqa: BLE001 — 부른 쪽이 다시 올린다
+                box["err"] = e
+            finally:
+                with self._ok_lock:
+                    self._hb_inflight -= 1
+                done.set()
+
+        threading.Thread(target=call, name="rcm-worker-heartbeat-call", daemon=True).start()
+        if not done.wait(HEARTBEAT_DEADLINE_SECONDS):  # mutcheck: heartbeat-no-deadline
+            raise ClientError(0, f"no answer in {HEARTBEAT_DEADLINE_SECONDS}s")
+        if "err" in box:
+            raise box["err"]
+        return box.get("out") or {}
 
     # ── 드레인 (M5q §3.3 · §14.9) ───────────────────────────────────────────
 
@@ -906,8 +1160,10 @@ class RemoteWorker:
                 claim_seq = self._claim_seq
                 self._open_claims.add(claim_seq)
             claimed = None
+            sent = self._sent_at()
             try:
                 claimed = self.client.claim(lane, self.claim_wait_seconds, claim_seq=claim_seq)
+                self.mark_ok(*sent)  # 잡 J 의 첫 ok_at 은 J 를 돌려준 claim 을 보낸 시각이다
             except ClientError as e:
                 if self._is_fenced(e):
                     self._on_fenced(f"lane {lane}")
@@ -981,6 +1237,9 @@ class RemoteWorker:
         )
         requester = job.get("requester") or {}
         data = self.config.data_path
+        irreversible = job.get("irreversible") is True
+        frozen = job.get("disconnect_grace_seconds")
+        grace = frozen if isinstance(frozen, int) and not isinstance(frozen, bool) else None
         spec = RunSpec(
             job_id=job_id,
             preset_name=str(job.get("preset") or preset.get("name") or ""),
@@ -994,7 +1253,9 @@ class RemoteWorker:
             source=source,
             workspace=data / "workspaces" / str(job_id),
             log_path=data / "jobs" / str(job_id) / "log.txt",
-            grace_seconds=self.config.grace_seconds,
+            grace_seconds=self._grace_for(job_id, irreversible, grace),
+            irreversible=irreversible,
+            disconnect_grace_seconds=grace,
         )
         model = Job(
             id=job_id,
@@ -1058,7 +1319,15 @@ class RemoteWorker:
         with self._lock:
             self.running[job.id] = lane
         self.log(f"lane {lane}: claimed #{job.id} {job.preset}")
-        observer = _RemoteObserver(self, job.id)
+        observer = _RemoteObserver(
+            self,
+            job.id,
+            irreversible=spec.irreversible,
+            grace_seconds=spec.disconnect_grace_seconds,
+            grace_j=spec.grace_seconds,
+        )
+        with self._lock:
+            self._observers[job.id] = observer
         started = time.monotonic()
         outcome = FAILED
         rc: int | None = None
@@ -1083,7 +1352,9 @@ class RemoteWorker:
             if observer.should_stop() or observer.should_cancel():
                 # 검사와 보고 사이에 종료·취소가 왔다 — 그게 이긴다(M5l S4). 프로세스는 없었다.
                 outcome = LOST if observer.should_stop() else CANCELLED
-                summary = STOP_SUMMARY if outcome == LOST else None
+                summary, code, args = (
+                    self._stop_summary(observer) if outcome == LOST else (None, None, None)
+                )
                 self._finish(
                     job.id,
                     outcome,
@@ -1091,6 +1362,8 @@ class RemoteWorker:
                     summary,
                     observer,
                     artifacts=_disposition(skipped),
+                    summary_code=code,
+                    summary_args=args,
                     group_gone=True,  # 프로세스를 띄운 적이 없다
                 )
                 self.log(f"lane {lane}: #{job.id} {outcome} before start")
@@ -1126,7 +1399,9 @@ class RemoteWorker:
                 # 준비 중에 종료·취소가 왔다 — 그게 이긴다(M5l S4). 프로세스는 없었고, 취소가
                 # 준비를 끊지 못했다는 이유로 사용자가 멈춘 잡이 실패로 남으면 안 된다.
                 outcome = LOST if observer.should_stop() else CANCELLED
-                summary = STOP_SUMMARY if outcome == LOST else None
+                summary, code, args = (
+                    self._stop_summary(observer) if outcome == LOST else (None, None, None)
+                )
                 self._finish(
                     job.id,
                     outcome,
@@ -1134,6 +1409,8 @@ class RemoteWorker:
                     summary,
                     observer,
                     artifacts=_disposition(skipped),
+                    summary_code=code,
+                    summary_args=args,
                     group_gone=True,
                 )
                 self.log(f"lane {lane}: #{job.id} {outcome} before start")
@@ -1159,8 +1436,11 @@ class RemoteWorker:
             return
         observer.final_flush()
         rc = result.rc
+        code: str | None = None
+        args: dict[str, Any] | None = None
         if result.lost:
-            outcome, summary = LOST, STOP_SUMMARY
+            outcome = LOST
+            summary, code, args = self._stop_summary(observer)
         elif result.cancelled:
             outcome = CANCELLED
         elif result.timed_out:
@@ -1172,7 +1452,15 @@ class RemoteWorker:
         # 워크스페이스를 지우기 전에 모으고, `self.running` 에서 빠지기 전에 올린다(§5)
         bundle = self._collect_artifacts(job.id, claimed, spec, result)
         self._finish(
-            job.id, outcome, rc, summary, observer, artifacts=_disposition(bundle), finished=result
+            job.id,
+            outcome,
+            rc,
+            summary,
+            observer,
+            artifacts=_disposition(bundle),
+            finished=result,
+            summary_code=code,
+            summary_args=args,
         )
         self.log(f"lane {lane}: #{job.id} {outcome} in {_fmt_seconds(time.monotonic() - started)}")
         self._cleanup(spec, failed=outcome != SUCCEEDED)
@@ -1233,9 +1521,12 @@ class RemoteWorker:
         """
         with self._lock:
             self.cancel_requested.discard(job_id)
+            self._observers.pop(job_id, None)  # 프로세스는 끝났다 — 감시할 것이 없다
         if outcome == LOST and self.fenced.is_set():
             summary, summary_code, summary_args = None, "worker_replaced", {}
-        if not getattr(observer, "closed_by_server", False):
+        # 서버가 이 세션의 finish 를 이미 기록했다고 알렸으면(W4 표 첫 행) 다시 보내지 않는다.
+        # 서버가 닫은 다른 끝 상태(lost · cancelled)에는 보낸다 — 확인 · 홀드 풀기로 쓰인다
+        if getattr(observer, "closed_state", None) not in FINISH_RECORDED:
             extra: dict[str, Any] = {}
             if group_gone is not None:
                 extra["group_gone"] = group_gone
@@ -1254,7 +1545,7 @@ class RemoteWorker:
                 gave_up.append(True)
                 return not self.stopping.is_set()
 
-            self.report(call, f"#{job_id} finish", keep=keep)
+            self.report(call, f"#{job_id} finish", keep=keep, job_id=job_id)
             if gave_up and not self.stopping.is_set():
                 # 서버를 갈아 끼우는 몇 초일 수 있다 — 버리지 않고 나중에 다시 보고한다
                 self._park_unreported(job_id, call)
@@ -1314,6 +1605,7 @@ class RemoteWorker:
         self.heartbeat_once()
         hb = threading.Thread(target=self._heartbeat_loop, name="rcm-worker-heartbeat", daemon=True)
         hb.start()
+        dog = self.start_watchdog()
         self._threads = [
             threading.Thread(
                 target=self._lane_loop, args=(lane,), name=f"rcm-worker-lane-{lane}", daemon=True
@@ -1335,6 +1627,7 @@ class RemoteWorker:
             for t in self._threads:
                 t.join(timeout=self.config.grace_seconds + 10)
             hb.join(timeout=2)
+            dog.join(timeout=2)
             if self.restart_for is None:
                 self.log("stopped")  # 드레인 끝이면 `cmd_worker` 가 재실행 줄을 쓴다
         if self.fenced.is_set():

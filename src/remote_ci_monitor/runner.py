@@ -126,6 +126,10 @@ class RunSpec:
     #: stdout 을 로그 파일과 관찰자에게 주기 **전에** 거치는 마스킹(릴리스 비밀 → `****`).
     #: None 이면 그대로. 줄 단위 배치에 적용되므로 한 값이 줄을 넘지 않는 한 조각이 안 남는다.
     mask: Callable[[bytes], bytes] | None = None
+    #: claim 이 얼린 표식(M5t-b 결정 257 · 331). 참이면 감독자 아래에서 돌고 끝에 그룹을 거둔다
+    irreversible: bool = False
+    #: claim 이 얼린 끊김 유예 G_J(원격 잡만). 로컬 잡은 None
+    disconnect_grace_seconds: int | None = None
 
 
 # ── macOS Command Line Tools shim (M5t-a 결정 246) ─────────────────────────────
