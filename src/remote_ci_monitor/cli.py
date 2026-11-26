@@ -9,6 +9,21 @@ Ctrl-C 는 detach — 잡은 계속 돌고 `rcm wait --job ID` / `rcm cancel ID`
 
 from __future__ import annotations
 
+import sys
+
+# 네이티브 Windows 는 범위 밖이다(PLAN.md 「범위 밖」, README 「Windows is out of scope」). 아래
+# import 가 `submissions` 의 `fcntl` 에서 traceback 으로 죽기 전에 WSL 로 가라는 한 줄과 사용
+# 오류(2)로 멈춘다(WW1, 2026-11-26 격리 검사). 콘솔 스크립트는 이 모듈을 import 하며 시작한다.
+# 문장은 `if` 안에 둔다: 대입문이 import 앞에 있으면 E402 다. 같은 글이 아래 `NATIVE_WINDOWS_HINT`
+# 이고, tests/test_windows_wsl_hints.py 가 둘이 같은지 본다.
+if sys.platform == "win32":
+    sys.stderr.write(
+        "rcm: native Windows is not supported — install and run rcm inside WSL "
+        "(see docs/usage.md «Windows (WSL)»)\n"
+    )
+    sys.stderr.flush()
+    raise SystemExit(2)
+
 import argparse
 import dataclasses
 import hashlib
@@ -113,6 +128,12 @@ from remote_ci_monitor.mdns import discover
 from remote_ci_monitor.release_secrets import secrets_dir
 
 USAGE_EXIT = 2
+#: 네이티브 Windows 에서 맨 위의 `if` 가 찍는 줄과 같은 글 — 문서 잠금
+#: (tests/test_docs_windows_wsl.py)이 읽는다
+NATIVE_WINDOWS_HINT = (
+    "rcm: native Windows is not supported — install and run rcm inside WSL "
+    "(see docs/usage.md «Windows (WSL)»)"
+)
 #: 「사람이 할 일」 표식에서 돌아왔다 — 잡은 계속 돈다(M5s 결정 234). `rcm wait
 #: --return-on-action` 을 줄 때만 나온다. 실패도 「모른다」도 아니다.
 EXIT_ACTION = 4

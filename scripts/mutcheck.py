@@ -6,6 +6,8 @@
 못 찾으면 그 자체로 실패다(코드가 바뀌어 감시가 풀린 것).
 
 변이 목록(개수는 `MUTANTS` 가 정본이다 — 문서의 숫자는 머지마다 썩는다):
+  WW (Windows · WSL 안내) — `ww1-native-windows-not-refused`: 네이티브 Windows 에서 traceback
+     으로 죽음 (`cli.py`, `tests/test_windows_wsl_hints.py`)
   M5t-a PR7 — `m5t-live-port-check-takes-8787` · `m5t-live-plist-home-unchecked`: 실기 하네스의
      bootstrap 전 검사가 운영 포트를 받음 · plist 의 HOME 을 안 봄
      (`scripts/acceptance/m5t_live.sh`, `docs/m5t-workplan.md` §7 · TR16);
@@ -4748,6 +4750,18 @@ MUTANTS = (
             "tests/test_onboarding_findings.py::"
             "test_ob3_setup_prints_the_numeric_uid_not_a_command_substitution",
             "tests/test_onboarding_findings.py::test_ob3_core_commands_take_the_uid_they_are_given",
+        ),
+    ),
+    Mutant(
+        # 네이티브 Windows 를 알아보지 못한다 — `rcm version` 부터 `submissions` 의 `import fcntl`
+        # 에서 traceback 으로 죽는다(WW1, 2026-11-26 격리 검사)
+        name="ww1-native-windows-not-refused",
+        path="src/remote_ci_monitor/cli.py",
+        old='if sys.platform == "win32":\n    sys.stderr.write(\n',
+        new='if sys.platform == "win32-never":\n    sys.stderr.write(\n',
+        tests=(
+            "tests/test_windows_wsl_hints.py::"
+            "test_ww1_native_windows_says_one_line_and_exits_2_without_a_traceback",
         ),
     ),
     Mutant(
