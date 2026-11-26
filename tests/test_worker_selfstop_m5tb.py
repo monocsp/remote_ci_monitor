@@ -876,9 +876,7 @@ def test_rl8_a_cancel_during_the_partition_reaches_the_worker_inside_g_and_ends_
     걸리지 않는다), G 안에 돌아온 첫 heartbeat 응답의 `cancel` 이 그 잡을 싣는다. 끝 상태는
     `cancelled`(종료 2)이고 `lost` 가 아니다. 홀드 0.
 
-    표식 프리셋의 (a) 는 여기서 단언하지 않는다 — P2-5 notes 의 질문: 돌아온 첫 heartbeat 가 이미
-    지난 `kill_at + 2H` 로 그 잡을 `cancel_unconfirmed` 로 닫아 홀드를 건다(워커의 확인을 기다리지
-    않는다)."""
+    표식 프리셋의 (a) 는 아래 `test_rl8_a_irreversible_…` 둘이다(조용했던 시간은 세지 않는다)."""
     srv.registered("build-02")
     a = srv.queued_job()
     assert srv.claimed("build-02", 1) == a
@@ -927,6 +925,71 @@ def test_rl8_a_live_session_that_never_confirms_an_irreversible_cancel_holds(srv
     status, body = srv.finish("build-02", a, "succeeded", exit_code=0)
     assert status == 409 and body["code"] == "job_closed"
     assert srv.store.get_job(a).state == CANCELLED
+
+
+def _quiet_cancel(srv: WorkerServer, preset: str) -> int:
+    """분단 중(조용한 세션) 취소를 받고 `kill_at + 2H` 보다 오래 조용히 둔다."""
+    srv.registered("build-02")
+    a = srv.queued_job(preset=preset)
+    assert srv.claimed("build-02", 1) == a
+    srv.clock.advance(QUIET)  # 분단 — 조용함
+    assert srv.cancel(a)[1]["state"] == "cancelling"
+    srv.clock.advance(60)  # 옛 `kill_at + 2H` 가 조용한 동안 지났다
+    assert srv.app.mark_lost_workers(srv.clock.now) == []
+    return a
+
+
+def _confirm_cancel(srv: WorkerServer, jid: int) -> tuple[int, dict[str, Any]]:
+    return srv.req(
+        "POST",
+        f"/worker/jobs/{jid}/finish",
+        token="build-02",
+        json_body={"outcome": "cancelled", "exit_code": -15, "group_gone": True},
+    )
+
+
+def test_rl8_a_irreversible_cancel_during_the_partition_is_confirmed_inside_the_new_window(srv):
+    """(a) 표식 프리셋 — T4 의 「조용해지면 `kill_at` 규칙 멈춤」은 조용했던 시간을 세지 않는다는
+    뜻이다(P2-6 메인 세션 답). 돌아온 첫 heartbeat 는 그 잡을 닫지 않고 `cancel` 로 전한다. 워커가
+    다시 들린 때부터 잰 `kill_at + 2H` 창 안에 멈춤을 확인하면 `cancelled`(종료 2) · 홀드 0."""
+    a = _quiet_cancel(srv, "ship")
+    status, body = srv.heartbeat("build-02", jobs=[a])  # G 안에 복귀
+    assert status == 200 and body["cancel"] == [a]
+    assert srv.store.get_job(a).state == CANCELLING  # 조용했던 시간으로 바로 닫지 않는다
+    srv.clock.advance(5)
+    assert srv.heartbeat("build-02", jobs=[a])[0] == 200
+    assert srv.app.mark_lost_workers(srv.clock.now) == []
+    assert srv.store.get_job(a).state == CANCELLING
+    status, body = _confirm_cancel(srv, a)
+    assert status == 200, body
+    j = srv.store.get_job(a)
+    assert j.state == CANCELLED and j.summary_code != "cancel_unconfirmed"
+    assert holds(srv) == []
+
+
+@pytest.mark.parametrize("by", ["heartbeat", "janitor"])
+def test_rl8_a_irreversible_cancel_unconfirmed_in_the_new_window_closes_and_holds(srv, by):
+    """돌아온 세션이 새 창(다시 들린 때 + (`kill_at` − 요청) + 2H) 안에 확인하지 않으면 그때
+    `cancel_unconfirmed` + 홀드 — 창 전에는 닫지 않는다."""
+    a = _quiet_cancel(srv, "ship")
+    j = srv.store.get_job(a)
+    window = (j.cancel.kill_at - j.cancel.requested_at).total_seconds() + 2 * 5  # H = 5
+    steps = int(window // 5)
+    assert steps * 5 == window and steps >= 2
+    assert srv.heartbeat("build-02", jobs=[a])[0] == 200  # 다시 들림 — 창이 여기서 시작
+    for _ in range(steps - 1):
+        srv.clock.advance(5)
+        assert srv.heartbeat("build-02", jobs=[a])[0] == 200
+        assert srv.app.mark_lost_workers(srv.clock.now) == []
+        assert srv.store.get_job(a).state == CANCELLING
+    srv.clock.advance(5)
+    if by == "heartbeat":
+        assert srv.heartbeat("build-02", jobs=[a])[0] == 200
+    else:
+        srv.app.mark_lost_workers(srv.clock.now)
+    j = srv.store.get_job(a)
+    assert j.state == CANCELLED and j.summary_code == "cancel_unconfirmed"
+    assert [(h["job_id"], h["cause"]) for h in holds(srv)] == [(a, "cancel_unconfirmed")]
 
 
 def _race_at_the_boundary(s: WorkerServer, jid: int) -> dict[str, Any]:

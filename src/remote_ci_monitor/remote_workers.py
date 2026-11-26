@@ -317,6 +317,9 @@ class RemoteWorkersMixin:
         self._heard_lock = threading.Lock()
         self._heard: dict[str, float] = {}
         self._hb_seq: dict[str, int] = {}
+        # 조용했다가(`worker_timeout` 넘게) 다시 들린 벽시계 시각 — 취소 미확인 창은 조용했던 시간을
+        # 세지 않고 이때부터 새로 잰다(T4)
+        self._resumed: dict[str, datetime] = {}
         self._session_locks: dict[str, threading.Lock] = {}
         self._synthetic_said: set[str] = set()  # 합성 그룹 로그는 프리셋마다 한 번(결정 330)
 
@@ -352,8 +355,12 @@ class RemoteWorkersMixin:
     def _hear(self, key: str) -> None:
         """서버가 그 세션(또는 레거시 이름)의 인증된 요청을 들었다 — 세션별 잠금 안에서 올린다."""
         now = self.mono_fn()  # type: ignore[attr-defined]
+        quiet = self.config.server.worker_timeout_seconds
         with self._session_lock(key):
+            last = self.heard_at(key)
             with self._heard_lock:
+                if now - last > quiet:  # mutcheck: t4-quiet-time-counted
+                    self._resumed[key] = self.now_fn()
                 self._heard[key] = max(self._heard.get(key, now), now)
 
     def heard_at(self, key: str) -> float:
@@ -423,6 +430,7 @@ class RemoteWorkersMixin:
         with self._heard_lock:
             for sid in session_ids:
                 self._hb_seq.pop(sid, None)
+                self._resumed.pop(sid, None)
 
     # ── 인증 ────────────────────────────────────────────────────────────────
 
@@ -1375,16 +1383,33 @@ class RemoteWorkersMixin:
             self.wake.set()
         return [j for j in active if j.id not in set(closed)]
 
+    def _cancel_deadline(self, job: Job) -> datetime | None:
+        """취소 미확인 닫기의 기준 `kill_at`. 취소 요청 뒤 그 세션이 조용했다가 다시 들렸으면 창을
+        다시 들린 때부터 새로 잰다 — `다시 들린 때 + (kill_at − 요청)`(T4 「조용해지면 `kill_at`
+        규칙 멈춤」: 조용했던 시간은 세지 않는다). 돌아온 첫 heartbeat 가 그 잡을 닫지 않고
+        `cancel` 을 전해, 워커가 멈춤을 확인할 시간을 받는다."""
+        cancel = job.cancel
+        if cancel is None or cancel.kill_at is None:
+            return None
+        key = job.worker_session_id or f"legacy:{job.worker_name}"
+        with self._heard_lock:
+            resumed = self._resumed.get(key)
+        if resumed is None or resumed <= cancel.requested_at:
+            return cancel.kill_at
+        return max(cancel.kill_at, resumed + (cancel.kill_at - cancel.requested_at))
+
     def _close_unconfirmed_cancels(self, jobs: list[Job], now: datetime) -> None:
-        """살아 있는 워커가 취소를 확인하지 않으면 `kill_at + 2 × heartbeat` 뒤 서버가 닫는다."""
+        """살아 있는 워커가 취소를 확인하지 않으면 `kill_at + 2 × heartbeat` 뒤 서버가 닫는다.
+        `kill_at` 은 `_cancel_deadline` 이 조용했던 시간만큼 민다."""
         # 순환 import 를 피한다(위 finish 의 `outcome_for` 와 같다)
         from remote_ci_monitor.worker import cancel_outcome
 
         slack = timedelta(seconds=2 * self.config.server.worker_heartbeat_seconds)
         for job in jobs:
-            if job.state != CANCELLING or job.cancel is None or job.cancel.kill_at is None:
+            if job.state != CANCELLING:
                 continue
-            if now >= job.cancel.kill_at + slack:
+            deadline = self._cancel_deadline(job)
+            if deadline is not None and now >= deadline + slack:
                 # 새 잡에 밀려난 잡은 그 표시를 지킨다(M5o) — N 을 기억하는 자리가 요약뿐이다
                 text, code, args = cancel_outcome(job)
                 closing = (
@@ -1506,6 +1531,7 @@ class RemoteWorkersMixin:
                 for key in drop:
                     self._heard.pop(key, None)
                     self._hb_seq.pop(key, None)
+                    self._resumed.pop(key, None)
                     self._session_locks.pop(key, None)
 
 

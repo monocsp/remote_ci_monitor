@@ -5826,6 +5826,20 @@ MUTANTS = (
             "test_rl44_hold_release_events_are_one_for_a_b_c_and_zero_for_d",
         ),
     ),
+    Mutant(
+        # 조용했던 시간도 취소 미확인 창에 센다 — 분단 중 취소된 표식 잡을 돌아온 첫 heartbeat 가
+        # 워커의 확인을 기다리지 않고 `cancel_unconfirmed` + 홀드로 닫는다(T4 · RL8 (a))
+        name="t4-quiet-time-counted",
+        path="src/remote_ci_monitor/remote_workers.py",
+        old="                if now - last > quiet:  # mutcheck: t4-quiet-time-counted\n",
+        new="                if False:\n",
+        tests=(
+            "tests/test_worker_selfstop_m5tb.py::"
+            "test_rl8_a_irreversible_cancel_during_the_partition_is_confirmed_inside_the_new_window",
+            "tests/test_worker_selfstop_m5tb.py::"
+            "test_rl8_a_irreversible_cancel_unconfirmed_in_the_new_window_closes_and_holds",
+        ),
+    ),
 )
 
 
