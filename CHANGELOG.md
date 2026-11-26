@@ -15,7 +15,9 @@ of a key bumps that number and is listed here.
   starts it again; pin nothing across this release. A new worker that meets an older server of
   the same version string stops before it registers
   (`the server speaks worker protocol 1 — upgrade rcm on the server (this worker needs protocol 2)`,
-  exit 3).
+  exit 3). During the upgrade a protocol 1 worker can still finish a job it claimed before; a
+  finish without `group_gone` (the confirmation that the job's processes are gone) holds the
+  group of an `irreversible` preset until `rcm release-hold`.
   ([#284](https://github.com/monocsp/remote_ci_monitor/pull/284))
 - **Database v26.** The server migrates on its first start (worker sessions, the values a job's
   claim freezes, and the new group-hold table). An older rcm refuses the migrated database.
@@ -27,7 +29,8 @@ of a key bumps that number and is listed here.
   `lost` only after `[server] disconnect_grace_seconds` (default 600, at least
   `max(worker_timeout_seconds, 2 × worker_heartbeat_seconds + 50) + 35`). Time the server was
   stopped does not count. A second worker process with the same token replaces the first, which
-  stops its jobs, reports them `lost` (`worker_replaced`) and exits 0.
+  stops its jobs, reports them `lost` (`worker_replaced`) and exits 0; a claim of the first
+  process that is still waiting then answers 409 `session_fenced` and takes no job.
   ([#284](https://github.com/monocsp/remote_ci_monitor/pull/284))
 
 ### Added
@@ -35,9 +38,11 @@ of a key bumps that number and is listed here.
   such a job itself before the grace runs out (`worker_self_stopped`), the command runs under a
   supervisor that ends its process group when the worker is killed, and a close without a
   confirmation that the processes are gone holds the job's concurrency group (a preset without a
-  group gets `irreversible:<name>`, global). Waiting jobs of a held group show reason
-  `needs_action` with `action.code = "irreversible_hold"`; `/api/status` and `/api/health` list
-  open holds in `irreversible_holds`, and `GET /jobs/N` carries `hold`.
+  group gets `irreversible:<name>`, global). A worker that cannot write the job's session folder
+  before the start does not start the command (`launch_failed`). Waiting jobs of a held group show
+  reason `needs_action` with `action.code = "irreversible_hold"`; `/api/status` and `/api/health`
+  list open holds in `irreversible_holds` (when the server could not read them,
+  `irreversible_holds` is `null`, not an empty list), and `GET /jobs/N` carries `hold`.
   ([#284](https://github.com/monocsp/remote_ci_monitor/pull/284))
 - **`rcm release-hold N [--reason TEXT] [--json]`** releases a group hold after an admin checked
   the machine (exit 0 released, 1 no open hold, 2 refused, 3 unreachable or a server error).
@@ -45,6 +50,11 @@ of a key bumps that number and is listed here.
 - **Hold notifications.** Every notification carries `RCM_EVENT`, `RCM_HOLD`, `RCM_HOLD_GROUP` and
   `RCM_HOLD_NOTE` (and `event` · `hold` in a webhook body); a `[[notify]]` rule with
   `on = ["irreversible_hold"]` is called once for each new hold. The default `on` is unchanged.
+  ([#284](https://github.com/monocsp/remote_ci_monitor/pull/284))
+
+### Fixed
+- **`/api/status` no longer answers 500 when its queue section fails.** That section is `null`
+  and the rest of the document is served, as for the other sections.
   ([#284](https://github.com/monocsp/remote_ci_monitor/pull/284))
 
 ## [0.11.1] - 2026-11-26

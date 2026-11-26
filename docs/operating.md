@@ -668,6 +668,14 @@ the next command fetches the server's client, and a running worker finishes its 
 again on the new version. `RCM_CLIENT_VERSION`, `~/.config/rcm/client-version` or `--no-follow`
 keeps one where it is ([keeping clients on the server's version](#keeping-clients-on-the-servers-version)).
 
+Upgrading to worker protocol 2 (database v26): a worker of protocol 1 that already claimed a job
+before the upgrade can still finish it. Its finish carries no `group_gone`, the confirmation that
+the job's processes are gone, so a job of an
+[`irreversible`](configuration.md#jobs-that-must-not-run-twice-irreversible) preset closed that
+way holds its concurrency group until you check the machine and run
+[`rcm release-hold`](#when-a-group-is-held-rcm-release-hold). Upgrade the workers right after
+the server.
+
 A copy you make yourself, with the server running, must use SQLite's own backup — `cp` misses
 the write-ahead log:
 

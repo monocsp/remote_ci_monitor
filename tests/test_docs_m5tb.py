@@ -110,7 +110,38 @@ def test_every_hold_env_key_of_a_notification_is_documented():
 
 # ── README 두 언어의 명령 표(P2-4 · §4.12) ───────────────────────────────────
 
+
 #: 명령 표에 둘 `rcm release-hold` 행의 첫 칸 — 표의 다른 admin 명령처럼 잡 번호는 `N`
+def _unreleased() -> str:
+    text = (ROOT / "CHANGELOG.md").read_text()
+    start = text.index("## [Unreleased]")
+    return text[start : text.index("\n## [", start + 1)]
+
+
+def test_the_changelog_names_what_a_user_sees_change_in_this_release():
+    """P3 2라운드 LOW: 사용자에게 보이는 바뀜이 CHANGELOG `[Unreleased]` 에 있다 — 표식 잡의 세션
+    폴더 기록 실패(`launch_failed`), 긴 대기 claim 의 409 `session_fenced`, 못 읽은 홀드의 `null`,
+    업그레이드 때 프로토콜 1 워커의 finish 와 홀드, 그리고 `### Fixed` 의 `/api/status` 500."""
+    from remote_ci_monitor.remote_worker import WORKER_PROTOCOL
+
+    unreleased = _unreleased()
+    text = flat(unreleased)
+    assert "`launch_failed`" in text and "session folder" in text
+    assert "`session_fenced`" in text and "409" in text
+    assert "`irreversible_holds` is `null`" in text
+    assert f"protocol {WORKER_PROTOCOL - 1} worker" in text and "without `group_gone`" in text
+    fixed = flat(section(unreleased, "Fixed"))
+    assert "`/api/status`" in fixed and "500" in fixed
+
+
+def test_operating_says_what_an_upgrade_does_to_a_job_an_old_worker_claimed():
+    """업그레이드 절이 프로토콜 1 워커가 이미 claim 한 잡의 끝을 말한다 — 끝낼 수 있지만
+    `group_gone` 이 없는 finish 는 표식 프리셋의 그룹을 홀드한다(P3 2라운드 LOW)."""
+    text = flat(section(OPERATING, "Upgrade"))
+    assert "already claimed" in text and "`group_gone`" in text
+    assert "[`rcm release-hold`](#when-a-group-is-held-rcm-release-hold)" in text
+
+
 RELEASE_HOLD_CELL = "`rcm release-hold N [--reason TEXT] [--json]`"
 #: 그 행이 가리키는 절 — docs/operating.md 의 「When a group is held: `rcm release-hold`」
 RELEASE_HOLD_LINK = "docs/operating.md#when-a-group-is-held-rcm-release-hold"
