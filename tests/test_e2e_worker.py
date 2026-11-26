@@ -56,6 +56,8 @@ CLIENT = "laptop"  # 클라이언트 토큰 이름 — 취소 요약 `cancelled 
 POOL = "linux"
 GRACE = 2  # [server] grace_seconds
 WORKER_TIMEOUT = 10  # [server] worker_timeout_seconds (하한)
+#: [server] disconnect_grace_seconds — 하한 max(10, 2 + 45 + 5) + 35 = 87 위(M5t-b §7.5 · 정리 3)
+GRACE = 90
 HEARTBEAT = 1  # [server] worker_heartbeat_seconds
 CLAIM_WAIT = 2  # [server] worker_claim_wait_seconds
 REPORT_WINDOW = 1 + 2 + 4  # remote_worker.REPORT_RETRIES — finish 보고를 다시 보내는 창
@@ -88,6 +90,7 @@ snapshot_cache = true
 worker_timeout_seconds = 10
 worker_heartbeat_seconds = 1
 worker_claim_wait_seconds = 2
+disconnect_grace_seconds = 90
 
 [[presets]]
 name = "lin"
@@ -782,11 +785,12 @@ def test_killed_worker_leaves_the_job_lost_after_the_timeout_and_a_new_worker_ta
     t0 = time.monotonic()
     os.kill(worker.proc.pid, signal.SIGKILL)  # 워커만 — 잡(sleep)은 고아로 남는다(진짜 크래시처럼)
     assert worker.wait_exit(5) == -signal.SIGKILL
-    fin = stack.wait_terminal(jid, timeout=20)
+    # M5t-b(§7.3): timeout 에는 레인만 down 이고 잡은 끊김 유예 G 뒤에 lost 다
+    fin = stack.wait_terminal(jid, timeout=GRACE + 20)
     took = time.monotonic() - t0
     assert fin["state"] == "lost", fin
     assert re.fullmatch(rf"worker {WORKER} unreachable for \d+s", fin["summary"]), fin["summary"]
-    assert WORKER_TIMEOUT - 2 <= took <= 20, took  # timeout 전에는 lost 가 아니다
+    assert GRACE - 2 <= took <= GRACE + 20, took  # 유예 전에는 lost 가 아니다
     doc = stack.status()
     assert [(w["display_name"], w["state"]) for w in remote_lanes(doc)] == [(LANE, "down")]
     assert pool_of(doc, POOL)["lanes"] == 0

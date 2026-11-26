@@ -1620,7 +1620,7 @@ def test_partial_log_line_is_dropped_when_the_job_is_closed_as_lost(srv):
     assert jid not in srv.app._log_partial
     jid2 = running_job(srv)
     assert srv.log("build-02", jid2, b"partial")[0] == 200
-    srv.clock.advance(TIMEOUT + 1)
+    srv.clock.advance(600 + 1)  # M5t-b: timeout 이 아니라 끊김 유예(기본 600) 뒤에 닫힌다
     assert srv.app.mark_lost_workers(srv.clock()) == [jid2]
     assert jid2 not in srv.app._log_partial
 

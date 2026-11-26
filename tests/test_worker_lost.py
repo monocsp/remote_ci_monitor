@@ -203,6 +203,7 @@ def test_server_restart_keeps_remote_jobs_and_loses_local_ones(srv):
     """§3(리뷰 반영): `recover_on_start` 는 **로컬 잡만**(`worker_name IS NULL`) lost 로 만든다.
     원격 워커의 running 잡은 그대로 running 이고 레인 상태도 DB 로 다시 계산된다(busy). M5t-b
     (결정 266 · 2차 Q-C): 유예는 서버 기동 시각부터 다시 센다 — 꺼져 있던 동안은 세지 않는다."""
+    # RL7 — 기동 바닥(단위). e2e 의 서버 정지 · 재기동은 tests/test_e2e_worker.py 가 본다
     remote = srv.queued_job()
     local = srv.queued_job(token="bob")
     srv.registered("build-02")

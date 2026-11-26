@@ -94,6 +94,9 @@ SESSION_HEADER = "X-RCM-Worker-Session"
 _SESSION_RE = re.compile(r"^[0-9a-f]{32}$")
 #: heartbeat `seq` · `claims_settled` · claim `claim_seq` 의 상한(JSON 정수가 잃지 않는 범위)
 MAX_SEQ = 2**53 - 1
+#: janitor 한 틱에 유예로 닫는 잡의 상한(결정 339-g). 늦게 닫는 것은 안전한 쪽이라 판단이고 재지
+#: 않았다 — 서버 재시작 뒤 한꺼번에 넘어도 다른 janitor 일을 막지 않는다
+GRACE_CLOSES_PER_TICK = 20
 
 
 def _api_error(status: int, message: str, **extra: Any) -> Exception:
@@ -1413,29 +1416,106 @@ class RemoteWorkersMixin:
     # ── down · lost 판정 (janitor 루프) ─────────────────────────────────────
 
     def mark_lost_workers(self, now: datetime) -> list[int]:
-        """heartbeat 이 끊긴 워커의 활성 잡을 lost 로. 살아 있는 워커의 미확인 취소도 닫는다."""
+        """janitor(5초) — 끊김 유예 판정(M5t-b §4.3)과 살아 있는 세션의 취소 미확인 닫기.
+
+        레인 down(벽시계 `last_seen_at`, F1)은 잡을 닫지 않는다. 잡은 그 세션을 서버가 마지막으로
+        들은 단조 시각(바닥 = 기동)에서 claim 때 얼린 유예 G 가 지나야 `lost`(`worker_unreachable`,
+        인자 `seconds` = 단조 경과)다. 후보마다 그 세션의 잠금 안에서 `heard` 를 다시 보고 아직
+        넘었으면 조건부로 닫는다(RL4). 표식 잡은 같은 트랜잭션에서 그룹 홀드다(결정 330). 한 틱에
+        많아야 `GRACE_CLOSES_PER_TICK` 개, 닫기가 DB 바쁨이면 이 틱을 멈춘다(결정 339-g)."""
         lost: list[int] = []
+        held: list[int] = []
+        mono = self.mono_fn()  # type: ignore[attr-defined]
+        timeout = self.config.server.worker_timeout_seconds
         for row in self._workers():
-            if self.worker_alive(row, now):
-                self._close_unconfirmed_cancels(self.store.jobs_of_worker(row.name), now)
+            if not self.worker_alive(row, now):
+                with self._remote_lock:
+                    self._worker_samples.pop(row.name, None)
                 continue
-            gone = int((now - row.last_seen_at).total_seconds())
-            text, code, args = outcome.summary("worker_unreachable", name=row.name, seconds=gone)
-            ids = self.store.mark_lost_for_worker(
-                row.name, now, text, summary_code=code, summary_args=args
-            )
-            if ids:
-                self.log(f"worker {row.name} unreachable for {gone}s: lost={ids}")
-                self._drop_log_partial(ids)
-                for job_id in ids:
-                    self._publish_job(None, job_id)
-                lost.extend(ids)
-            with self._remote_lock:
-                self._worker_samples.pop(row.name, None)
+            # 취소 미확인 닫기는 그 이름의 **현재 · 들리는** 세션의 잡에만(결정 266 · RL33). 펜싱된
+            # 세션의 취소 중 잡을 살아 있는 새 세션 때문에 닫으면 그룹 자리가 풀린다
+            current = self.store.current_session(row.name)
+            if current is None:  # mutcheck: cancel-unconfirmed-any-session
+                continue
+            if mono - self.heard_at(current) > timeout:
+                continue
+            with self._session_lock(current):
+                self._close_unconfirmed_cancels(self.store.jobs_of_session(current), now)
+        default_grace = disconnect_grace(self.config.server)
+        budget = GRACE_CLOSES_PER_TICK
+        for job in self.store.busy_remote_jobs():
+            key = job.worker_session_id or f"legacy:{job.worker_name}"
+            grace = job.disconnect_grace_seconds or default_grace
+            if mono - self.heard_at(key) <= grace:  # mutcheck: grace-wall-clock
+                continue
+            if budget <= 0:
+                break
+            with self._session_lock(key):
+                gap = self.mono_fn() - self.heard_at(key)  # type: ignore[attr-defined]
+                if gap <= grace:
+                    continue  # 판정 뒤에 들었다 — 닫지 않는다
+                code = "worker_unreachable"
+                if job.worker_session_id is not None and job.irreversible:
+                    srow = self.store.get_session(job.worker_session_id)
+                    if srow is not None and srow.orphan_unverified:
+                        # 다음 프로세스가 고아를 확인하지 못했다고 알렸다 — 「그 머신에서 아직 돌 수
+                        # 있다」를 말한다(결정 327). 그룹은 홀드다(결정 330)
+                        code = "orphan_unverified"  # mutcheck: orphan-unverified-code-dropped
+                text, code, args = outcome.summary(code, name=job.worker_name, seconds=int(gap))
+                try:
+                    closed = self.store.finish(
+                        job.id,
+                        LOST,
+                        now=now,
+                        summary=text,
+                        summary_code=code,
+                        summary_args=args,
+                        only_from=BUSY_STATES,
+                        hold_cause=code,
+                    )
+                except sqlite3.OperationalError as e:
+                    if not _is_busy_error(e):
+                        raise
+                    break  # 바쁘다 — 다음 틱에 다시 한다. 늦게 닫는 것은 안전한 쪽이다
+            budget -= 1
+            if closed:
+                lost.append(job.id)
+                if job.irreversible is not False and self.store.has_open_hold(job.id):
+                    held.append(job.id)
+        # 알림 · 발행 · 로그는 잠금을 놓은 뒤에(§4.2)
         if lost:
+            self.log(f"disconnect grace over: lost={lost}")
+            self._drop_log_partial(lost)
+            for job_id in lost:
+                self._publish_job(None, job_id)
+            for job_id in held:
+                self._hold_created(job_id)
             self._publish_server()
             self.wake.set()
+        self._forget_closed_sessions()
         return lost
+
+    def _forget_closed_sessions(self) -> None:
+        """펜싱된 세션의 busy 잡이 모두 닫히면 그 세션의 메모리 값을 지운다(§4.2). 그 전에는
+        남긴다 — janitor 가 `heard + G` 로 그 잡들을 닫아야 한다. 레거시 키는 레거시 busy 잡이 없을
+        때 지운다."""
+        with self._heard_lock:
+            keys = list(self._heard)
+        drop: list[str] = []
+        for key in keys:
+            if key.startswith("legacy:"):
+                if not self.store.has_legacy_busy(key.removeprefix("legacy:")):
+                    drop.append(key)
+                continue
+            row = self.store.get_session(key)
+            if row is None or (row.fenced_at is not None and not self.store.jobs_of_session(key)):
+                drop.append(key)
+        if drop:
+            with self._heard_lock:
+                for key in drop:
+                    self._heard.pop(key, None)
+                    self._hb_seq.pop(key, None)
+                    self._session_locks.pop(key, None)
 
 
 __all__ = [

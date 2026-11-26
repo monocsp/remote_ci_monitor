@@ -531,12 +531,15 @@ class App(RemoteWorkersMixin, CapabilitiesMixin, ShelfAppMixin):
         now_fn: Callable[[], datetime] = _utcnow,
         version: str = __version__,
         debug: bool = False,
-        mono_fn: Callable[[], float] = time.monotonic,
+        mono_fn: Callable[[], float] | None = None,
     ):
         self.config = config
         self.store = store
         self.now_fn = now_fn
-        # 단조 시계(M5t-b 결정 266) — 끊김 유예는 벽시계가 아니라 이것으로 잰다. 바닥은 기동 시각
+        # 단조 시계(M5t-b 결정 266) — 끊김 유예는 벽시계가 아니라 이것으로 잰다. 바닥은 기동 시각.
+        # 주입 시계만 받은 곳(시험)에서는 그 시계를 따른다 — 시간을 미는 시험이 유예도 민다
+        if mono_fn is None:
+            mono_fn = time.monotonic if now_fn is _utcnow else (lambda: now_fn().timestamp())
         self.mono_fn = mono_fn
         self.started_mono = mono_fn()
         self.version = version

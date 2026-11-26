@@ -148,7 +148,7 @@ def test_a_lost_check_is_not_submitted_again_automatically(srv):
     srv.reported("build-02")
     [jid] = sweep(srv)
     assert srv.claimed("build-02") == jid
-    srv.clock.advance(61)
+    srv.clock.advance(601)  # M5t-b: 잡은 timeout 이 아니라 끊김 유예(기본 600) 뒤에 닫힌다
     assert jid in srv.app.mark_lost_workers(srv.clock.now)
     assert srv.heartbeat("build-02")[0] == 200  # 다시 살아났다
     assert sweep(srv) == []
@@ -164,7 +164,7 @@ def test_a_lost_automatic_check_makes_the_waiting_job_ask_for_a_person(srv):
     [jid] = sweep(srv)
     assert srv.row(qa)["reason"] == "check_pending"  # 기다리는 중 — 스스로 풀린다
     assert srv.claimed("build-02") == jid
-    srv.clock.advance(61)
+    srv.clock.advance(601)  # M5t-b: 잡은 timeout 이 아니라 끊김 유예(기본 600) 뒤에 닫힌다
     assert jid in srv.app.mark_lost_workers(srv.clock.now)
     assert srv.heartbeat("build-02")[0] == 200
     assert sweep(srv) == []

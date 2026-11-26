@@ -4990,6 +4990,27 @@ class Store:
             (session_id, *sorted(BUSY_STATES)),
         )
 
+    def busy_remote_jobs(self) -> list[Job]:
+        """원격 워커가 claim 해서 아직 busy 인 잡 전부(id 순) — janitor 의 유예 판정 후보."""
+        busy = ",".join("?" * len(BUSY_STATES))
+        return self._jobs(
+            f"SELECT * FROM jobs WHERE worker_name IS NOT NULL AND state IN ({busy}) ORDER BY id",
+            tuple(sorted(BUSY_STATES)),
+        )
+
+    def current_session(self, name: str) -> str | None:
+        """그 이름의 현재 세션(펜싱되지 않은 행). 등록 트랜잭션이 많아야 하나로 지킨다."""
+        row = (
+            self._conn()
+            .execute(
+                "SELECT id FROM worker_sessions WHERE worker_name=? AND fenced_at IS NULL "
+                "ORDER BY registered_at DESC LIMIT 1",
+                (name,),
+            )
+            .fetchone()
+        )
+        return row["id"] if row else None
+
     def legacy_jobs_of_worker(self, name: str) -> list[Job]:
         """그 이름의 세션 NULL busy 잡(레거시, T11)."""
         busy = ",".join("?" * len(BUSY_STATES))

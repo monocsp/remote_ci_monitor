@@ -322,7 +322,7 @@ def die_at(srv, tmp_path: Path, monkeypatch, method: str, preset: str = "linkeep
     t.start()
     t.join(timeout=60)
     wait_until(lambda: not t.is_alive() or w.stopping.is_set(), what="worker died")
-    srv.clock.advance(300)
+    srv.clock.advance(601)  # M5t-b: 잡은 timeout 이 아니라 끊김 유예(기본 600) 뒤에 닫힌다
     srv.app.mark_lost_workers(srv.clock.now)
     wait_until(lambda: srv.store.get_job(jid).state == "lost", what="job lost")
     return jid

@@ -137,7 +137,7 @@ def test_a_lost_human_check_keeps_the_machine_open(srv):
     status, body = srv.req("POST", "/machines/build-02/recheck", token="admin", json_body={})
     again = int(body["jobs"][0]["job_id"])
     assert srv.claimed("build-02") == again
-    srv.clock.advance(61)
+    srv.clock.advance(601)  # M5t-b: 잡은 timeout 이 아니라 끊김 유예(기본 600) 뒤에 닫힌다
     assert again in srv.app.mark_lost_workers(srv.clock.now)
     srv.reported("build-02")
     got = srv.machines()["build-02"]["presets"]["scenario"]
