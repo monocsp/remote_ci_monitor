@@ -3328,29 +3328,50 @@ MUTANTS = (
     ),
     # ── M5t-a PR4 P3 5라운드 · P6 (batch 7) — guard 의 남은 길과 변이 없던 규칙 ──
     Mutant(
-        # xargs · parallel 이 rcm 에 인자를 넘기는 꼴을 그물이 보지 않는다 — `… | xargs rcm` 이
-        # 낱말 setup 없이 setup 에 닿는다(P3 5라운드 v1-1)
+        # 인자를 넘기는 런처(xargs · parallel · find -exec · fd -x …) 낱말을 그물이 보지 않는다 —
+        # `… | xargs rcm` 이 낱말 setup 없이 setup 에 닿는다(P3 5라운드 v1-1, P6 재확인 1)
         name="guard-setup-xargs-feeder-allowed",
         path="tools/guard_production.py",
-        old="        if at_command and _name(word) in _FEEDERS and _fed_rcm(tokens, index):\n",
-        new="        if False:\n",
+        old="    if names & _FEEDERS or _FEEDER_FLAGS.intersection(words):\n",
+        new="    if False:\n",
         tests=(
             "tests/test_guard_production_setup.py::"
-            "test_g1_rcm_fed_its_arguments_by_xargs_or_parallel_is_denied",
+            "test_b8_1_a_launcher_word_anywhere_with_an_rcm_word_is_denied",
         ),
     ),
     Mutant(
-        # pty 런처 아래 하위 명령 없는 rcm 을 그물이 보지 않는다 — `script -q /dev/null rcm` 의 첫
-        # 실행 질문이 setup 을 돌린다(P3 5라운드 v1-2)
+        # 터미널을 주는 런처(script · unbuffer · expect · tmux …) 낱말을 그물이 보지 않는다 —
+        # `script -q /dev/null rcm` 의 첫 실행 질문이 setup 을 돌린다(P3 5라운드 v1-2, P6 재확인 1)
         name="guard-setup-pty-bare-rcm-allowed",
         path="tools/guard_production.py",
-        old=(
-            "        if at_command and _name(word) in _PTY_LAUNCHERS and "
-            "_bare_rcm_on_a_pty(tokens, index):\n"
-        ),
-        new="        if False:\n",
+        old="    if names & _PTY_LAUNCHERS:\n",
+        new="    if False:\n",
         tests=(
-            "tests/test_guard_production_setup.py::test_g2_bare_rcm_under_a_pty_launcher_is_denied",
+            "tests/test_guard_production_setup.py::"
+            "test_b8_1_a_launcher_word_anywhere_with_an_rcm_word_is_denied",
+        ),
+    ),
+    Mutant(
+        # 펼쳐 rcm 이 되는 글롭(`r?m`)을 rcm 낱말로 보지 않는다 — 리다이렉션이 앞에 붙어 명령 자리
+        # 규칙이 못 보는 `<f xargs ./.venv/bin/r?m` 이 지나간다(P6 재확인 1)
+        name="guard-launcher-glob-rcm-missed",
+        path="tools/guard_production.py",
+        old='    if any(c in name for c in "*?[") and any(\n',
+        new="    if False and any(\n",
+        tests=(
+            "tests/test_guard_production_setup.py::"
+            "test_b8_1_a_launcher_word_anywhere_with_an_rcm_word_is_denied",
+        ),
+    ),
+    Mutant(
+        # 셸이 바꾸는 글자(리다이렉션 `<` 포함)가 든 낱말을 모두 rcm 으로 본다 — rcm 이 없는
+        # `xargs python3 x.py < /tmp/a` 를 막는다(과잉 차단, P6 재확인 1 · v2-5)
+        name="guard-launcher-any-shaped-word-counts",
+        path="tools/guard_production.py",
+        old='    if "$" in token or "`" in token:\n',
+        new="    if any(c in _SHAPING for c in token):\n",
+        tests=(
+            "tests/test_guard_production_setup.py::test_b8_1_a_launcher_without_an_rcm_word_passes",
         ),
     ),
     Mutant(

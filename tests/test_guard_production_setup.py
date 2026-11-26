@@ -857,14 +857,13 @@ def test_g1_rcm_fed_its_arguments_by_xargs_or_parallel_is_denied(command):
 @pytest.mark.parametrize(
     "command",
     [
-        "git ls-files | xargs grep -n rcm",
-        "cat /tmp/a | xargs -n 1 echo rcm",
         "find . -name '*.py' | xargs ./.venv/bin/ruff check",
         "xargs rm -f < /tmp/list",
     ],
 )
 def test_g1_xargs_that_runs_something_else_passes(command):
-    # 과잉 차단의 경계: xargs 가 rcm 이 아닌 명령을 돌리면(rcm 은 그 명령의 인자) 조용하다
+    # 과잉 차단의 경계: xargs 가 rcm 이 아닌 명령을 돌리고 글에 rcm 낱말이 없으면 조용하다. rcm 이
+    # 그 명령의 인자인 칸(`xargs grep -n rcm`)은 batch 8 부터 막는다 — test_b8_1_an_rcm_word_…
     assert judge(command, environ=TEST_XDG) is None, command
     # 운영 설치가 없는 컴퓨터에서는 그물도 없다
     assert judge("xargs rcm < /tmp/a", prod=guard.Production()) is None
@@ -899,16 +898,13 @@ def test_g2_bare_rcm_under_a_pty_launcher_is_denied(command):
 @pytest.mark.parametrize(
     "command",
     [
-        "script -q /dev/null rcm status",
-        "unbuffer rcm wait --job 5 --timeout 60",
-        "script -c 'rcm status' /tmp/log",
-        "expect -c 'spawn rcm status; interact'",
         "script -q /tmp/log ls",
         "rcm",
     ],
 )
 def test_g2_rcm_with_a_subcommand_or_without_a_pty_passes(command):
-    # 하위 명령이 글자 그대로 있거나 pty 런처가 없으면(이 세션의 Bash 는 터미널이 아니다) 조용하다
+    # pty 런처가 없거나(이 세션의 Bash 는 터미널이 아니다) rcm 낱말이 없으면 조용하다. 하위 명령이
+    # 있는 rcm 을 pty 런처 아래 부르는 칸은 batch 8 부터 막는다 — test_b8_1_an_rcm_word_…
     assert judge(command, environ=TEST_XDG) is None, command
 
 
@@ -1028,3 +1024,84 @@ def test_g6_a_tilde_past_the_start_of_a_prefix_value_is_not_the_plain_shape(pref
 def test_g6_an_earlier_value_of_a_repeated_flag_is_judged_too(flags):
     # argparse 는 마지막 값을 쓰지만 훅은 앞의 값도 본다(막는 쪽) — 앞에 운영 값이 있으면 막는다
     assert denied(f"{SERVER} {flags}", environ=TEST_XDG), flags
+
+
+# ── P6 재확인(batch 8) 1: 런처의 그물은 낱말 자리에 기대지 않는다 ──
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "<f xargs rcm",
+        "< /tmp/args.txt xargs rcm",
+        "2>/dev/null xargs rcm < /tmp/args.txt",
+        "2>&1 parallel rcm ::: a b",
+        ">/dev/null script -q /dev/null rcm",
+        "2>/dev/null unbuffer rcm",
+        ">/tmp/log expect -c 'spawn rcm; interact'",
+        r"find /tmp/a -name x -exec rcm {} \;",
+        "find /tmp/a -execdir /abs/bin/rcm {} +",
+        r"find /tmp/a -ok rcm {} \;",
+        "fd x /tmp/a -x rcm",
+        "fd x /tmp/a -X rcm",
+        "fdfind x /tmp/a --exec rcm",
+        "ls /tmp/a | entr rcm",
+        "rush rcm < /tmp/args.txt",
+        "xe rcm < /tmp/args.txt",
+        "tmux new-session -d rcm",
+        "screen -dm rcm",
+        "ssh -t localhost rcm",
+        "ssh -tt localhost /abs/bin/rcm",
+        "ssh -o RequestTTY=force localhost rcm",
+        "python3 -c 'import pty; pty.spawn([\"rcm\"])'",
+        "python3 -c 'import pexpect; pexpect.spawn(\"rcm\").interact()'",
+        "<f xargs $R",
+        "<f xargs ./.venv/bin/r?m",
+        "<f xargs ./.venv/bin/{r,x}cm",
+    ],
+)
+def test_b8_1_a_launcher_word_anywhere_with_an_rcm_word_is_denied(command):
+    # P6 재확인 1 HIGH: 앞에 붙은 리다이렉션(`<f` · `2>/dev/null` · `>/dev/null`)이 런처를 명령
+    # 자리에서 밀어내도 그물이 본다 — 런처 낱말과 rcm 같은 낱말이 글 어디에든 있으면 막는다
+    verdict = judge(command, environ=TEST_XDG)
+    assert verdict is not None and verdict.decision == "deny", command
+    assert PLAIN_MESSAGE in verdict.reason, command
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "xargs sh -c 'echo hi' _ < /tmp/a",
+        "xargs python3 x.py < /tmp/a",
+        "2>/dev/null xargs grep -n foo < /tmp/a",
+        "find . -name '*.py' -exec ./.venv/bin/ruff check {} +",
+        "find . -name '*.py' | xargs ./.venv/bin/ruff check",
+        "fd -e py -x wc -l",
+        "ssh host ls",
+        "ssh host rcm status",
+        "script -q /tmp/log ls",
+        "tmux ls",
+        "python3 -c 'import pty'",
+    ],
+)
+def test_b8_1_a_launcher_without_an_rcm_word_passes(command):
+    # 과잉 차단의 경계(v2-5): rcm 같은 낱말이 없으면(또는 pty 를 주지 않는 ssh 면) 조용하다
+    assert judge(command, environ=TEST_XDG) is None, command
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "git ls-files | xargs grep -n rcm",
+        "cat /tmp/a | xargs -n 1 echo rcm",
+        "script -q /dev/null rcm status",
+        "unbuffer rcm wait --job 5 --timeout 60",
+        "script -c 'rcm status' /tmp/log",
+        "expect -c 'spawn rcm status; interact'",
+    ],
+)
+def test_b8_1_an_rcm_word_beside_a_launcher_is_denied_wherever_it_stands(command):
+    # 자리를 보지 않으므로 rcm 이 다른 명령의 인자거나 하위 명령이 있어도 막는다(받아들인 과잉
+    # 차단 — batch 7 의 G1 · G2 통과 칸이었다). 운영 설치가 없는 컴퓨터에서는 그물도 없다
+    assert denied(command, environ=TEST_XDG), command
+    assert judge(command, prod=guard.Production()) is None, command

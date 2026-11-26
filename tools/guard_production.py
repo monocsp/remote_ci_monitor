@@ -47,6 +47,7 @@ setup 호출, 세션 환경의 변수를 모르는 감싸기 뒤에서 명령으
 
 from __future__ import annotations
 
+import fnmatch
 import functools
 import importlib
 import json
@@ -947,28 +948,24 @@ _LAUNCHERS = WRAPPERS | frozenset(
         "expect", "socat", "parallel",
     }
 )  # fmt: skip
-#: 받은 줄(stdin · 파일 · `:::`)을 다른 명령의 인자로 붙여 실행하는 런처 — 그 인자는 명령 글에
-#: 없다(P3 5라운드 v1-1)
-_FEEDERS = frozenset({"xargs", "parallel"})
-#: 값을 다음 낱말로 받는 xargs 플래그(GNU · BSD). 글자를 붙여 쓴 꼴(`-n1` · `--max-args=1`)은
-#: 낱말 하나다. 모르는 플래그가 나오면 어디까지가 값인지 모르므로 뒤의 낱말을 모두 본다
-_XARGS_VALUE_FLAGS = frozenset(
-    {
-        "-a", "-d", "-E", "-I", "-J", "-L", "-n", "-P", "-R", "-S", "-s", "--arg-file",
-        "--delimiter", "--max-args", "--max-procs", "--max-chars", "--process-slot-var",
-    }
-)  # fmt: skip
-_XARGS_FLAGS = frozenset(
-    {
-        "-0", "-o", "-p", "-r", "-t", "-x", "--null", "--no-run-if-empty", "--verbose",
-        "--interactive", "--exit", "--open-tty", "--show-limits",
-    }
-)  # fmt: skip
+#: 받은 줄(stdin · 파일 · `:::` · 찾은 파일)을 다른 명령의 인자로 붙여 실행하는 런처 — 그 인자는
+#: 명령 글에 없다(P3 5라운드 v1-1). 이름(basename)으로 본다
+_FEEDERS = frozenset({"xargs", "gxargs", "parallel", "entr", "rush", "xe"})
+#: 그 낱말이 있으면 명령을 실행하는 플래그 — find 의 `-exec` 무리와 fd 의 긴 꼴
+_FEEDER_FLAGS = frozenset({"-exec", "-execdir", "-ok", "-okdir", "--exec", "--exec-batch"})
+#: fd 의 짧은 실행 플래그(`-x` · `-X`) — 흔한 글자라 fd · fdfind 낱말이 같이 있을 때만 본다
+_FD = frozenset({"fd", "fdfind"})
 #: 명령에 가상 터미널을 주는 런처 — 그 아래 하위 명령 없는 `rcm` 은 첫 실행 질문을 띄우고
 #: 예면 setup 을 돌린다(P3 5라운드 v1-2)
-_PTY_LAUNCHERS = frozenset({"script", "unbuffer", "expect", "socat"})
-#: 하위 명령 낱말의 모양
-_SUBCOMMAND = re.compile(r"[a-z][a-z0-9-]*")
+_PTY_LAUNCHERS = frozenset({"script", "unbuffer", "expect", "socat", "tmux", "screen"})
+#: ssh 가 터미널을 주는 플래그: `-t` · `-tt` 와 그 글자를 묶은 꼴(`-qt`). `RequestTTY` 는 따로 본다
+_SSH_TTY = re.compile(r"-[A-Za-z]*t[A-Za-z]*")
+#: python 이 터미널을 여는 낱말(`import pty` · `pty.spawn` · `os.openpty` · `pexpect`)
+_PYTHON_PTY = re.compile(r"\b(?:pty|openpty|forkpty|pexpect)\b")
+#: 낱말 앞의 리다이렉션 연산자(`<` · `2>` · `>>` · `&>` · `2>&`) — 그 뒤는 파일 이름이다
+_REDIRECTION = re.compile(r"^(?:\d*|&)?[<>]+&?")
+#: 글롭이 펼쳐져 될 수 있는 이 도구의 이름
+_TOOL_NAMES = ("rcm", "remote-ci-monitor", "remote_ci_monitor")
 
 
 def _letters(text: str) -> str:
@@ -1009,12 +1006,20 @@ def _setup_net(command: str) -> bool:
 
     따옴표는 하위 명령을 숨기지 못한다 — 따옴표를 벗긴 글자(`_letters`)에 setup 이 그대로
     보이므로 (a) 가 잡는다. 그래서 (b) 는 따옴표가 아니라 셸이 글자를 바꾸는 것(`_SHAPING`)만
-    본다. 글에 rcm 낱말이 있으면 변수 낱말은 어디서든 rcm 일 수 있다(`R=rcm; nice $R …`)."""
+    본다. 글에 rcm 낱말이 있으면 변수 낱말은 어디서든 rcm 일 수 있다(`R=rcm; nice $R …`).
+
+    (c) 런처 낱말(인자를 넘기는 `_launches`, 터미널을 주는 `_gives_a_terminal`)과 rcm 일 수 있는
+    낱말(`_could_be_rcm`)이 글 어디에든 함께 있어도 참이다. 자리는 보지 않는다 — 앞에 붙은
+    리다이렉션(`<f xargs rcm`)이 런처를 명령 자리에서 밀어냈다(P6 재확인 1)."""
     text = command.replace("\\\n", "")
     letters = _letters(text)
     names_rcm = bool(_RCM_WORD.search(letters))
     can_call = names_rcm
     tokens = _ROUGH_TOKEN.findall(text)
+    words = [_letters(token) for token in tokens if token not in _BREAKS]
+    launcher = _launches(words) or _gives_a_terminal(words, letters)
+    if launcher and any(_could_be_rcm(token) for token in tokens):  # 자리를 보지 않는다
+        return True
     position = True  # 다음 낱말이 명령 자리다
     wrapped = False  # 감싸기 뒤 — 변수 낱말은 모두 명령 자리일 수 있다
     for index, token in enumerate(tokens):
@@ -1037,95 +1042,51 @@ def _setup_net(command: str) -> bool:
             can_call = True
             if _shaped_after(tokens, index):
                 return True
-        if at_command and _name(word) in _FEEDERS and _fed_rcm(tokens, index):
-            return True
-        if at_command and _name(word) in _PTY_LAUNCHERS and _bare_rcm_on_a_pty(tokens, index):
-            return True
         if at_command and _name(word) in _LAUNCHERS:
             wrapped = True
         position = False
     return can_call and bool(_SETUP_WORD.search(letters))
 
 
-def _rcm_ish(word: str) -> bool:
-    """rcm 낱말이거나 셸이 만드는 낱말(변수 · 글롭)."""
-    return bool(_RCM_WORD.search(word)) or _shaped(word)
+def _launches(words: list[str]) -> bool:
+    """명령 글 어디에든 받은 인자로 명령을 실행하는 런처 낱말이 있나(xargs · parallel · entr ·
+    rush · xe, find 의 `-exec` 무리, fd 의 `-x` · `-X` · `--exec`). 자리는 보지 않는다 — 앞에
+    붙은 리다이렉션(`<f xargs …`)이 런처를 명령 자리에서 밀어내도 낱말은 남는다(P6 재확인 1)."""
+    names = {_name(word) for word in words}
+    if names & _FEEDERS or _FEEDER_FLAGS.intersection(words):
+        return True
+    return bool(names & _FD) and bool({"-x", "-X"}.intersection(words))
 
 
-def _fed_rcm(tokens: list[str], index: int) -> bool:
-    """`tokens[index]`(xargs · parallel)가 돌릴 명령이 rcm 일 수 있나 — 그러면 rcm 의 인자를
-    stdin · 파일 · 파이프가 준다(P3 5라운드 v1-1). parallel 은 플래그가 많아 뒤의 낱말 어디든
-    rcm 이면 참이다. xargs 는 플래그를 건너뛴 첫 낱말이 그 명령이다. 그 명령이 감싸기 · 셸 ·
-    python 이면(`xargs sh -c 'rcm …'`) 뒤의 낱말 어디든 rcm 이면 참이다. `xargs grep rcm` 처럼
-    rcm 이 다른 명령의 인자면 거짓이다."""
-    words: list[str] = []
-    for token in tokens[index + 1 :]:
-        if token in _BREAKS:
-            break
-        words.append(_letters(token))
-    if _name(_letters(tokens[index])) == "parallel":
-        return any(_rcm_ish(word) for word in words)
-    i = 0
-    while i < len(words):
-        word = words[i]
-        if word == "--":
-            i += 1
-            break
-        if not word.startswith("-") or word == "-":
-            break
-        if word in _XARGS_VALUE_FLAGS:
-            i += 2
-        elif word in _XARGS_FLAGS or "=" in word or word[:2] in _XARGS_VALUE_FLAGS:
-            i += 1
-        elif word[:2] in ("-e", "-i", "-l") or word.startswith(("--eof", "--replace", "--max-l")):
-            i += 1  # 값을 붙여서만 받는 플래그
-        else:
-            return any(_rcm_ish(rest) for rest in words[i + 1 :])  # 모르는 플래그
-    command = words[i:]
-    for position, word in enumerate(command):
-        if _ASSIGNMENT.match(word):
-            continue
-        head = _name(word)
-        if head in _LAUNCHERS or head.startswith("python"):
-            return any(_rcm_ish(rest) for rest in command[position + 1 :])
-        return _rcm_ish(word)
-    return False
+def _gives_a_terminal(words: list[str], letters: str) -> bool:
+    """명령 글 어디에든 가상 터미널을 주는 런처 낱말이 있나(script · unbuffer · expect · socat ·
+    tmux · screen, `ssh -t`, python 의 pty · pexpect). 자리는 보지 않는다(P6 재확인 1)."""
+    names = {_name(word) for word in words}
+    if names & _PTY_LAUNCHERS:
+        return True
+    if "ssh" in names and (
+        any(_SSH_TTY.fullmatch(word) for word in words) or "requesttty" in letters.lower()
+    ):
+        return True
+    return any(name.startswith("python") for name in names) and bool(_PYTHON_PTY.search(letters))
 
 
-def _bare_rcm_on_a_pty(tokens: list[str], index: int) -> bool:
-    """`tokens[index]`(script · unbuffer · expect · socat) 뒤에 하위 명령 없는 rcm 이 있나
-    (P3 5라운드 v1-2). 따옴표 안의 `;` 도 명령의 끝으로 보고(`expect -c 'spawn rcm; …'`), rcm
-    낱말에 다른 글자가 붙으면(`EXEC:rcm,pty`) 하위 명령이 없는 것으로 본다. `script -c` 의 명령은
-    낱말 하나라 rcm 과 하위 명령이 같은 따옴표 안에 있어야 한다(`script -c rcm status` 의
-    `status` 는 기록 파일이다)."""
-    one_word = _name(_letters(tokens[index])) == "script" and any(
-        _letters(token) in ("-c", "--command") or _letters(token).startswith("--command=")
-        for token in tokens[index + 1 :]
-    )
-    for spot in range(index + 1, len(tokens)):
-        token = tokens[spot]
-        letters = _letters(token)
-        for found in _RCM_WORD.finditer(letters):
-            rest = letters[found.end() :]
-            if rest not in ("", ".cli"):
-                return True
-            if one_word and (token.count("'") + token.count('"')) % 2 == 0:
-                return True
-            if not _has_subcommand(tokens, spot):
-                return True
-    return False
-
-
-def _has_subcommand(tokens: list[str], index: int) -> bool:
-    """`tokens[index]`(rcm) 다음에 글자 그대로의 하위 명령 낱말이 오나. 플래그는 건너뛴다."""
-    for token in tokens[index + 1 :]:
-        if token in _BREAKS:
-            return False
-        word = _letters(token)
-        if word.startswith("-"):
-            continue
-        return bool(_SUBCOMMAND.fullmatch(word))
-    return False
+def _could_be_rcm(token: str) -> bool:
+    """이 낱말이 rcm 일 수 있나 — rcm 낱말이거나, 셸이 펼치는 변수 · 명령 치환(`$` · 백틱),
+    펼쳐 rcm 이 될 수 있는 글롭(`r?m` · `*`)이나 중괄호 펼치기(`{r,x}cm`). 앞의 리다이렉션
+    연산자는 떼고 본다 — `2>/dev/null` · `<f` 는 rcm 이 아니다. `*.py` · find 의 `{}` 도 아니다."""
+    if "$" in token or "`" in token:
+        return True
+    word = _letters(token)
+    if _RCM_WORD.search(word):
+        return True
+    word = _REDIRECTION.sub("", word)
+    name = word.rstrip("/").rsplit("/", 1)[-1].lower()
+    if any(c in name for c in "*?[") and any(
+        fnmatch.fnmatchcase(tool, name) for tool in _TOOL_NAMES
+    ):
+        return True
+    return "{" in word and ("," in word or ".." in word)
 
 
 #: 허용 모양에 있으면 안 되는 글자: 셸 메타 문자(`;` `&` `|` `$` 백틱 `(` `)` `{` `}` `<` `>`),

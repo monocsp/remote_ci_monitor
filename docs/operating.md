@@ -656,10 +656,15 @@ command naming rcm (or with a variable where the command goes) that holds the wo
 anywhere, or where the word after rcm is something the shell builds (`${S}tup`, `` `…` ``,
 `s{e,}tup`) — is refused with "run `rcm setup` as one plain command: no ; & | $ ` ( ) < > or
 backslash, absolute or ~ paths only". So are `cd /x && rcm setup …`, `env rcm setup …`, a
-command line setup would reject, and a failure of the hook itself. So is `xargs` or `parallel`
-running rcm (`… | xargs rcm`, `xargs -a FILE rcm`), whose arguments come from input the hook
-cannot read, and `rcm` with no subcommand under a launcher that gives it a terminal (`script`,
-`unbuffer`, `expect`, `socat … pty`), where the first-run question would start setup. Text that
+command line setup would reject, and a failure of the hook itself. So is any command that holds
+both a word that could be rcm (`rcm`, a path ending in `/rcm`, `remote_ci_monitor`, a `$`
+variable, a glob such as `r?m`) and, anywhere in it, a launcher that feeds arguments (`xargs`,
+`parallel`, `find … -exec`, `fd -x`, `entr`, `rush`, `xe`), whose arguments come from input the
+hook cannot read, or one that gives a terminal (`script`, `unbuffer`, `expect`, `socat`, `tmux`,
+`screen`, `ssh -t`, Python's `pty`), where the first-run question would start setup. The hook
+does not look at where the words stand — `<f xargs rcm` and `2>/dev/null xargs rcm` are refused
+like `xargs rcm` — so `git ls-files | xargs grep -n rcm` is refused too; search text with a tool
+that is not a launcher. Text that
 only mentions it, such as `git commit -m "… rcm setup …"`, is refused too: put the text in a file
 (`git commit -F <file>`, `gh pr create --title "$(cat <file>)"`).
 
