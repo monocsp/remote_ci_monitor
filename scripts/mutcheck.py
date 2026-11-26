@@ -534,14 +534,9 @@ MUTANTS = (
         tests=("tests/test_reload_dry_run.py",),
     ),
     # ── heartbeat 이 방금 넘긴 잡을 봐준다(2026-11-18, CI e2e 의 거짓 lost) ──
-    Mutant(
-        # 봐주기가 없다 — claim 직전에 찍힌 heartbeat 목록이 방금 넘긴 잡을 lost 로 닫는다
-        name="heartbeat-spare-removed",
-        path="src/remote_ci_monitor/remote_workers.py",
-        old="if j.id not in set(known) and j.id not in spared]",
-        new="if j.id not in set(known)]",
-        tests=("tests/test_worker_api.py",),
-    ),
+    # (옛 `heartbeat-spare-removed` 도 지웠다 — 봐줄 잡을 적던 집합에 쓰는 줄이 없어 늘 비어
+    # 있었다. 그 규칙은 `t5-ignores-claims-settled` · `hb-stale-seq-judged` ·
+    # `claim-settled-before-running` 이 감시한다)
     # (옛 `heartbeat-spare-claim-outside-lock` 은 지웠다 — 워커 프로토콜 2 에서 레거시 claim 이
     # 없어져 잠금 밖 claim 이 생길 코드가 없다. 그 규칙은 claim 트랜잭션이 얼리는 `claim_seq` 와
     # T5 판정이 지키고 `t5-ignores-claims-settled` · `hb-stale-seq-judged` ·

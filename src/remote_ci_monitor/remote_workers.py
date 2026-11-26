@@ -310,12 +310,6 @@ class RemoteWorkersMixin:
         self._worker_samples: dict[str, HostSample] = {}
         self._log_partial: dict[int, bytes] = {}
         self._remote_lock = threading.Lock()
-        # 워커마다 「직전 heartbeat 뒤에 넘긴 잡」. heartbeat 의 `jobs` 는 워커가 HTTP 호출 **전에**
-        # 찍은 목록이라 그 사이 커밋된 claim 이 빠져 있을 수 있다 — 이 잡들은 한 번 봐준다.
-        # claim 커밋 + 기록, heartbeat 의 조회 + 꺼내기를 같은 락으로 묶어야 둘 사이에 끼는
-        # heartbeat 이 없다(커밋만 보이고 기록은 안 보이면 다시 lost 다)
-        self._fresh_claims: dict[str, set[int]] = {}
-        self._fresh_claims_lock = threading.Lock()
         # M5t-b(결정 328 · 339-a · 339-g): 세션마다 서버가 마지막으로 들은 단조 시각 `heard` 와
         # 받아들인 heartbeat `seq`. 메모리에만 두고 바닥은 기동 단조 시각이다(결정 266). 레거시
         # 요청은 `legacy:<이름>` 키를 쓴다. 판정 잠금은 세션마다 하나(`_session_locks`)이고
@@ -609,8 +603,6 @@ class RemoteWorkersMixin:
         )
         self._forget_session_memory(opened.fenced)
         self._hear(session)
-        with self._fresh_claims_lock:
-            self._fresh_claims.pop(token.name, None)  # 레거시 잡은 위에서 닫혔다
         for job_id in opened.closed:
             self._publish_job(None, job_id)
         if opened.closed:
@@ -1301,14 +1293,12 @@ class RemoteWorkersMixin:
     def _legacy_forgotten(
         self, token: TokenInfo, known: list[int] | None, now: datetime
     ) -> list[Job]:
-        """옛 워커의 「잊힌 잡」 — 그 이름의 레거시 잡에만, 오늘의 `_fresh_claims` 규칙 그대로(T11).
+        """옛 워커의 「잊힌 잡」 — 그 이름의 레거시 잡에만(T11).
         옛 워커는 heartbeat 을 한 스레드에서 차례로 보낸다."""
-        with self._fresh_claims_lock:
-            active = self.store.legacy_jobs_of_worker(token.name)
-            spared = self._fresh_claims.pop(token.name, set())
+        active = self.store.legacy_jobs_of_worker(token.name)
         if known is None:
             return active
-        forgotten = [j for j in active if j.id not in set(known) and j.id not in spared]
+        forgotten = [j for j in active if j.id not in set(known)]
         for job in forgotten:
             text, code, args = outcome.summary("worker_restarted_without_job", name=token.name)
             self.store.finish(
