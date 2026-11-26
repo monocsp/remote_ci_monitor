@@ -602,6 +602,29 @@ def _local_lane_run(
         "retry": {"on_exit": 75, "interval_seconds": 60, "max_attempts": 3},
     }
     preset = sh("ship", "echo ship", irreversible=True, **(retry if retrying else {}))
+    if retrying:
+        # 설정 로드는 표식 프리셋의 `[retry]` 를 거절한다(P6 GAP4). 그래도 표식을 달기 전에
+        # `[retry]` 로 제출된 잡은 반복 정책을 얼린 채 남고 표식 뒤에 claim 되면 표식 잡이다 —
+        # 그 잡의 상태를 로더를 비켜 만든다(제출 때 반복을 얼리고 claim 때 표식을 얼린다)
+        import dataclasses
+
+        import test_worker_api
+
+        real_parse = test_worker_api.parse_preset
+
+        def marked_after_submit(raw: dict[str, Any]) -> Any:
+            if raw.get("name") != "ship":
+                return real_parse(raw)
+            plain = real_parse({k: v for k, v in raw.items() if k != "irreversible"})
+            return dataclasses.replace(
+                plain,
+                irreversible=True,
+                concurrency_group="irreversible:ship",
+                concurrency_scope="global",
+                group_synthetic=True,
+            )
+
+        monkeypatch.setattr(test_worker_api, "parse_preset", marked_after_submit)
     # 서버가 제 레인을 띄운다(`App.start`) — 홀드 알림을 넘기는 배선까지 본다
     srv = WorkerServer(tmp_path, workers=True, presets=[preset])
     try:
