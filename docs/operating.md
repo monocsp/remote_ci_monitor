@@ -1007,6 +1007,14 @@ exit 0 and stayed down. A worker that follows a much older server reads its `wor
 version's code, so a key that version does not know (for example `server_name` on a server before
 0.5.0) stops it with exit 2.
 
+Two more exits matter to a service manager. A worker that does not speak the server's worker
+protocol stops before it registers with `worker protocol 2 required: upgrade rcm on this worker`
+and exit 3, so it is started again once rcm is upgraded. A worker replaced by a second process
+with the same token stops its jobs, reports them `lost` and exits 0, so it is not started again
+and the two processes do not take turns. Restarting a worker no longer closes its running jobs
+at once: the server waits the [disconnect grace](configuration.md#a-lost-connection-disconnect_grace_seconds),
+and the new process checks what its last process left behind.
+
 ### The cache
 
 `$XDG_CACHE_HOME/rcm/` (by default `~/.cache/rcm/`) holds `follow.json`, the last version seen per
@@ -1122,6 +1130,36 @@ rcm version
 Point `RCM_VENV` at the virtual environment that holds `rcm` when it is not the one on `PATH`,
 and set `RCM_TOKEN` on a server with `read_auth = "basic"`. `pipx` users run
 `pipx install --force "$tmp"/*.whl` in place of the `pip install` line.
+
+## When a group is held: `rcm release-hold`
+
+A job of an [`irreversible`](configuration.md#jobs-that-must-not-run-twice-irreversible) preset
+that closed without a confirmation that its processes are gone holds its concurrency group.
+Nothing of that group starts until the hold is released, and the hold does not expire: rcm does
+not know whether the command is still running on that machine. You see it as reason
+`needs_action` (`irreversible_hold`) on the waiting jobs and in `irreversible_holds` of
+`/api/status` and `/api/health`; the job's page (`GET /jobs/N`) has its `hold`.
+
+Look at the machine first. On the worker named in the hold, `ps -g <pgid>` lists what is left of
+the job's process group (the job's last log line and `rcm logs N` tell you how far it got). When
+nothing is left and the work did not finish twice, release the hold with an admin token:
+
+```sh
+rcm release-hold 812 --reason "checked build-02: no process left"
+# released the hold on group irreversible:ship (job #812) — queued jobs in that group can start
+```
+
+| exit | meaning |
+|---|---|
+| `0` | released |
+| `1` | the job has no open hold |
+| `2` | usage, or the server refused: not an admin token (403), no such job (404), no token (401) |
+| `3` | the server could not be reached |
+
+`--json` prints the server's answer. The release is kept as an event on the job, with your token
+name and the reason (control characters removed, up to 200 characters). A worker that comes back
+and confirms the job's process group is gone releases the hold by itself; an admin release is for
+the worker that never comes back.
 
 ## Security notes
 
@@ -1280,6 +1318,6 @@ The loopback e2e test proves the flow on one machine. Checking the M1 goal ("ano
     `rcm worker --server http://<build-machine>:8787 --pool mac2 --lanes 1` with a worker token,
     give a preset `pool = "mac2"`, and `rcm run` it — the job must run there, its steps and host
     card must show under **pool mac2** in `rcm top` and the web page, and `rcm logs` must return
-    the whole log. `kill -9` the worker while a job runs: within `worker_timeout_seconds` the job
-    must be `lost` with `worker … unreachable`, the header must show `<token name>/1 down`, and a
-    restarted worker must pick up the next job.
+    the whole log. `kill -9` the worker while a job runs: within `worker_timeout_seconds` the
+    header must show `<token name>/1 down`, after `disconnect_grace_seconds` the job must be
+    `lost` with `worker … unreachable`, and a restarted worker must pick up the next job.

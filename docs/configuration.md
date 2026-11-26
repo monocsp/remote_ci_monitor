@@ -1222,9 +1222,11 @@ Git mirrors are never pruned.
   cancel). The worker registers, claims one queued job per lane, downloads the snapshot, streams
   the raw log (the server parses step markers) and reports the outcome; a heartbeat every
   `worker_heartbeat_seconds` (5) keeps it alive. If the server hears nothing for
-  `worker_timeout_seconds` (60) the worker shows `down`, its running jobs become `lost`
-  (`worker build-02 unreachable for 61s`) and are not resumed — resubmit. A worker that restarts
-  re-registers and its old jobs are closed as lost too. `rcm top` and the web header show each
+  `worker_timeout_seconds` (60) the worker shows `down`; its running jobs keep running and become
+  `lost` (`worker build-02 unreachable for 601s`) only after the
+  [disconnect grace](#a-lost-connection-disconnect_grace_seconds) (600 s by default). A worker that
+  comes back inside the grace goes on reporting, and the job ends with its real result. `rcm top`
+  and the web header show each
   remote lane as `build-02/1 busy #511`; `pools[].lanes` counts only live workers. The worker
   process itself (`rcm worker`) ships in the next release step (M5b-3).
 - **Notifications** — `[[notify]]` rules run a command (`argv`, no shell) or POST JSON to a `url`
@@ -1244,12 +1246,20 @@ Git mirrors are never pruned.
   [action](#when-a-person-has-to-act), empty without one),
   `RCM_MACHINE` (where the job ran: the remote worker's name as it claimed the job, or this
   server's current host name for a local lane; empty for a job that never started or for a local
-  lane when this server does not know its own name — the job's `ran_on`);
+  lane when this server does not know its own name — the job's `ran_on`),
+  `RCM_EVENT` (`job_finished`), and `RCM_HOLD`, `RCM_HOLD_GROUP` and `RCM_HOLD_NOTE` (`1`, the
+  group and `group held — run rcm release-hold <job>` when the job's close
+  [held its group](#jobs-that-must-not-run-twice-irreversible); `0` and empty otherwise);
   the hook also inherits `PATH`, `HOME` and `LANG`;
   user strings are sanitised and capped at 4 KB (`RCM_FAILURES` drops whole lines to fit). A `url`
-  rule POSTs `{"notify": <rule>, "job": <the finished job>, "failures": [...], "failure_count": N,
+  rule POSTs `{"notify": <rule>, "event": "job_finished", "job": <the finished job>, "hold":
+  {"held": false, "group": "", "note": ""}, "failures": [...], "failure_count": N,
   "failures_truncated": false}` with the same 20-name cap, plus `"shelf_url"` for a kept job. Each (job, rule) fires exactly once,
-  including jobs that finished while the server was down. Failures are logged and counted
+  including jobs that finished while the server was down. `on` also takes `irreversible_hold`,
+  which is never part of the default: such a rule is called once for each new group hold, with
+  `RCM_EVENT=irreversible_hold`, `RCM_HOLD_CAUSE`, `RCM_HOLD_WORKER` (empty for a local lane), a
+  one-line `RCM_SUMMARY` and, for a `url`, `"hold"` with `scope`, `cause`, `worker`, `since` and
+  `release_command` added. A hold released before the call is not announced. Failures are logged and counted
   (`server.notify_failures`) but never retried, and never mark the queue unhealthy. `rcm check`
   shows a `warn  notify` row with the count while it is above 0, and the web header a
   `notify failures N` badge (hidden at 0). The count lives in the server's
@@ -1433,11 +1443,12 @@ downloads the snapshot (or fetches the `git_ref` from its own `[[repos]]` — ke
 `worker.toml` and pass `--config`), streams the raw log to the server, which parses the step
 markers, and reports the outcome. `rcm top` and the web header show it as `build-02/1 busy #511`;
 its host sample appears under that pool. If the server hears no heartbeat for
-`worker_timeout_seconds` (60) the worker shows `down`, its running jobs become `lost`
-(`worker build-02 unreachable for 61s`) and are not resumed — resubmit. Each heartbeat lists
+`worker_timeout_seconds` (60) the worker shows `down`. Its running jobs keep running for the
+[disconnect grace](#a-lost-connection-disconnect_grace_seconds) and only then become `lost`
+(`worker build-02 unreachable for 601s`) — resubmit then. Each heartbeat lists
 the jobs the worker is running; a job the server handed it that is missing becomes `lost`
-(`worker build-02 restarted without the job`), except a job handed out since the worker's
-previous heartbeat, which gets one more heartbeat to show up. Stopping the worker
+(`worker build-02 restarted without the job`), but only once the heartbeat says the worker has
+seen that job's claim answer. Stopping the worker
 reports its running jobs as `lost` (`worker stopped`). `worker.toml` keys: `server` (a URL, or
 `"auto"`), `server_name`, `token` (or the env var), `pool`, `lanes`, `name`, `accept_any`,
 `data_dir`, `grace_seconds`, `keep_workspace_on_failure`, `[host]` (sampler) and `[[repos]]`. See
@@ -1452,6 +1463,69 @@ heartbeat finishes its jobs and restarts the same way, without losing one. `RCM_
 `rcm worker --no-follow` pin the version or turn this off, and an editable install does not follow.
 `rcm worker --check` never follows. Details, including what a service manager sees, are in
 [remote workers](operating.md#remote-workers).
+
+**One process per worker token.** Each `rcm worker` process opens its own session when it
+registers. When a second process starts with the same token, it becomes the worker: the first
+one's next request is refused, it stops its running jobs, reports them `lost`
+(`worker build-02 was replaced by a newer process`) and exits 0, so a service manager does not
+start it again. A worker older than the server's worker protocol stops before it registers with
+`worker protocol 2 required: upgrade rcm on this worker` and exit 3.
+
+### A lost connection: `disconnect_grace_seconds`
+
+A remote job is not closed when its worker goes quiet. The server waits
+`[server] disconnect_grace_seconds` after the last time it heard that worker process; only then
+does the job become `lost` (`worker_unreachable`, exit 3 from `rcm wait`). A plain job keeps
+running on the worker the whole time: if the connection comes back after the job was closed, the
+worker finishes it and the server does not change the result. A worker that is restarted on the
+same machine and data folder checks the jobs its last process left: a job whose process group is
+gone is closed at once, and an `irreversible` job whose process it cannot verify is closed as
+`orphan_unverified` (`the same work may still be running`) — check that machine.
+
+| key | default | range |
+|---|---|---|
+| `disconnect_grace_seconds` | `max(600, L + 35)` | `L + 35` to `86400` |
+
+`L` is `max(worker_timeout_seconds, 2 × worker_heartbeat_seconds + 50)`, so the floor is 95 with
+the default 60 and 5. The value is written on the job when a worker claims it; a later edit or
+`rcm reload` does not change jobs that already run. Time the server was stopped does not count:
+after a restart the grace starts again from the moment the server came up, so a restart never
+closes every remote job at once. A server with `lanes = 0` uses the same key.
+
+### Jobs that must not run twice: `irreversible`
+
+`irreversible = true` on a preset marks work that must not run twice at once, such as a store
+upload or a deploy. rcm then does three things for its jobs.
+
+- **The worker stops the job itself** when it cannot reach the server for most of the grace
+  (`G − m`, where `m` is 15 s plus the preset's `grace_seconds` plus 10 s). The job ends `lost`
+  (`worker_self_stopped`), before the server would close it. A plain preset is never stopped this
+  way.
+- **A supervisor runs the command.** The worker, or a local lane, starts the command under a small
+  supervisor process. If the worker is killed (`kill -9`), the supervisor ends the command's
+  process group within about a quarter of a second. Do not start rcm's supervisor yourself inside
+  an irreversible preset: the job already runs under one.
+- **An unconfirmed close holds the group.** When such a job closes without a confirmation that
+  its processes are gone (the grace ran out, a cancel never reached the worker, the server was
+  killed while a local job ran), the server holds the job's `concurrency_group`. No job of that
+  group starts until the worker confirms or an admin runs `rcm release-hold N` after checking the
+  machine ([releasing a hold](operating.md#when-a-group-is-held-rcm-release-hold)). The hold
+  does not expire.
+
+A preset with `irreversible = true` and no `concurrency_group` gets the group
+`irreversible:<preset name>` with `concurrency_scope = "global"`; the server logs
+`preset X: irreversible without concurrency_group — using group irreversible:X (global)` when it
+starts, and `rcm presets` shows that group.
+
+The command must not leave daemons or other processes outside its session behind (`setsid`, a
+double-fork daemon): rcm cannot see them, so for those processes this protection is fail-open.
+They keep running after the job ends, and a later job of the same group can start beside them.
+
+A held job's waiting neighbours show reason `needs_action` with `action.code =
+"irreversible_hold"` in `/api/status`, whose top-level `irreversible_holds` lists every open hold
+(`/api/health` carries the same list, for information only). `GET /jobs/N` shows the job's `hold`
+and its history. A `[[notify]]` rule can ask for one call per new hold with
+`on = ["irreversible_hold"]` ([notifications](#priority-snapshot-cache-and-notifications)).
 
 ### A server that only hands out jobs: `lanes = 0`
 
