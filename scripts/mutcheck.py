@@ -204,6 +204,8 @@
   qa-1 mdns — `md-responder-skips-the-loopback-join` · `md-querier-skips-the-loopback-send`: 같은
      호스트의 서버가 루프백으로 듣지 · 묻지 않음
      (`mdns.py`, `tests/test_mdns_servers_on_one_host.py`)
+  qa-2 mdns — `md-responder-counts-the-loopback-join`: 루프백 가입만 되어도 광고가 켜진 것으로 침
+     (`mdns.py`, `tests/test_mdns_servers_on_one_host.py`)
 
 사용: python scripts/mutcheck.py [--keep] [--only NAME] [--list] [-j N]
 
@@ -4841,6 +4843,18 @@ MUTANTS = (
             "tests/test_mdns_servers_on_one_host.py::test_md1_three_servers_on_one_host_are_all_found",
             "tests/test_mdns_servers_on_one_host.py::"
             "test_md7_each_round_asks_the_lan_then_the_loopback_and_restores_the_interface",
+        ),
+    ),
+    Mutant(
+        # 응답기가 루프백 가입도 센다 — 실제 인터페이스 가입이 모두 실패해도(오프라인 Mac) 광고가
+        # 켜진 것으로 찍히고 /health 에 error 가 없다(qa-2 2026-11-26, PLAN 「fail-open 금지」)
+        name="md-responder-counts-the-loopback-join",
+        path="src/remote_ci_monitor/mdns.py",
+        old="            joined += iface != LOOPBACK_IF\n",
+        new="            joined += 1\n",
+        tests=(
+            "tests/test_mdns_servers_on_one_host.py::"
+            "test_md8_only_the_loopback_joined_means_advertise_is_off",
         ),
     ),
 )
