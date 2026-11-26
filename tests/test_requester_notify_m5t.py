@@ -588,3 +588,22 @@ def test_tn7_notify_send_reads_a_dash_message_as_text(monkeypatch, tmp_path):
     assert cli.os_notify("rcm", "--help") is None
     (call,) = marker.read_text().splitlines()
     assert call == f"{bin_dir / 'notify-send'}|--|rcm|--help|", call
+
+
+def test_tn11_a_job_that_never_started_says_nothing_about_artifacts(monkeypatch, capsys):
+    """돌지 않은 잡에는 올릴 산출물이 없다. `unknown` 경고도, 끝 줄의 산출물 꼬리도 없다."""
+    for state in ("unknown", "failed", "collecting"):
+        doc = wait_doc(
+            state="cancelled",
+            exit_code=None,
+            started_at=None,
+            job_seconds=None,
+            worker=None,
+            ran_on=None,
+            artifacts=artifacts(state),
+        )
+        rc, out, err = wait_once(monkeypatch, capsys, code=2, doc=doc)
+        assert rc == 2
+        assert "#381 cancelled" in err.splitlines(), (state, err)
+        assert "artifacts" not in err, (state, err)
+        assert last_json(out)["artifacts"] == doc["artifacts"]  # JSON 은 그대로 싣는다

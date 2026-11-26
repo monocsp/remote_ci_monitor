@@ -886,6 +886,14 @@ def _artifact_state(job: Mapping[str, Any]) -> str | None:
     return state if isinstance(state, str) and state in _art.ARTIFACT_STATES else None
 
 
+def _never_started(job: Mapping[str, Any]) -> bool:
+    """`started_at` 이 null 로 온 잡 — 돌지 않았으니 올릴 산출물도 없다.
+
+    키가 아예 없는 문서(가짜 서버 · 다른 모양)는 시작했는지 모른다고 보고 False 다 — 돈 잡의
+    산출물 경고를 지우지 않는다."""
+    return "started_at" in job and job.get("started_at") is None
+
+
 def wait_end_line(job: Mapping[str, Any], *, job_id: int) -> str | None:
     """`#381 succeeded on build-02 · 6m 31s · artifacts ready` — 기다림 끝의 한 줄(M5t-a 248 e · f).
 
@@ -911,7 +919,8 @@ def wait_end_line(job: Mapping[str, Any], *, job_id: int) -> str | None:
     # 취소된 옛 행에는 `failed_step` 이 남아 있을 수 있다(M5h 이전, 운영 잡 #176)
     if step_name and state not in (SUCCEEDED, CANCELLED):
         parts.append(f"step {step_name}")
-    artifacts = _artifact_state(job)
+    # 시작하지 못한 잡은 산출물을 말하지 않는다(M5t-a 결정 248 e — 돌지 않았다)
+    artifacts = None if _never_started(job) else _artifact_state(job)
     if artifacts is not None and artifacts != _art.DISABLED:
         parts.append(f"artifacts {artifacts}")
     return " · ".join(parts)
@@ -922,9 +931,11 @@ def artifact_notice(job: Mapping[str, Any], *, job_id: int) -> tuple[str, str] |
 
     `failed` · `dropped` · `unavailable` · `unknown` 은 경고이고 `collecting` · `uploading` 은
     「아직 수집 중」 안내다. 끝나지 않은 잡(`--timeout`)은 말하지 않는다 — 산출물은 잡이 끝난 뒤의
-    일이다.
+    일이다. 시작하지 못한 잡(`started_at` null)도 말하지 않는다 — 올릴 것이 없었다.
     """
     if job.get("state") not in TERMINAL_STATES:
+        return None
+    if _never_started(job):
         return None
     state = _artifact_state(job)
     if state in ARTIFACT_WARN_STATES:
