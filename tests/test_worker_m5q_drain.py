@@ -635,11 +635,12 @@ def test_stop_during_the_drain_is_todays_stop(rig):
 
 
 def test_unreported_job_is_retried_before_the_restart(rig, monkeypatch):
-    # E15 · §14 B질문11: finish 보고가 재시도 끝에도 실패하면 바로 재실행하지 않고 보고를 다시
-    # 시도한다 — 재실행 뒤의 등록이 그 잡을 lost 로 닫지 않게.
-    # 미룬 보고는 heartbeat 가 성공할 때도 다시 나간다. 부하로 드레인 끝이 늦으면 heartbeat 가 먼저
-    # 보고해 드레인 끝의 줄이 안 찍혔다(맥미니 잡 #3914). 드레인이 켜진 뒤로는 heartbeat 를 503 으로
-    # 막아 다시 보고할 길을 드레인 끝 하나로 둔다. 그러면 그 경로가 없을 때 잡이 보고되지 않는다
+    # E15 · §14 B질문11: finish 보고가 실패해도 바로 재실행하지 않고 보고를 다시 시도한다 — 재실행
+    # 뒤의 등록이 그 잡을 lost 로 닫지 않게. M5t-b 에서는 그 잡의 보내는 스레드가 백오프로 다시
+    # 보내고, 레인은 그 큐가 끝날 때까지(한도 `DRAIN_REPORT_SECONDS` 안에서) 기다린다. 옛 「드레인
+    # 끝에 다시 보고」 줄(`drained — … retrying before the restart`)은 그 길과 함께 없어졌다. 이
+    # 시험은 같은 결과를 본다: finish 200 이 멈춤(재실행) 전에 한 번 가고, 한도에 닿지 않는다.
+    # heartbeat 를 503 으로 막아 heartbeat 쪽 길이 끼어들지 않게 한다(맥미니 잡 #3914)
     monkeypatch.setattr(remote_worker, "BACKOFF_START_SECONDS", 0.05)  # M5t-b 보고 큐의 백오프
     monkeypatch.setattr(remote_worker, "BACKOFF_MAX_SECONDS", 0.05)
     rw = rig.start(lanes=1)
@@ -761,9 +762,16 @@ def test_a_job_finished_while_the_server_was_away_is_reported_before_the_drain(r
     assert rig.count("restarting anyway") == 0, rig.logs
 
 
-def test_registering_again_waits_for_a_retry_already_running(rig, monkeypatch):
-    # #234 재검증: 다른 스레드(heartbeat)가 다시 보고하는 중이면 레인은 그 보고를 건너뛰고
-    # 재등록하지 않는다 — 잠금을 잠깐 기다려 미룬 보고가 재등록보다 먼저 가게 한다
+def test_registering_again_waits_for_a_registration_already_running(rig, monkeypatch):
+    """#234 재검증의 M5t-b 판: 다른 스레드가 이미 재등록하는 중이면 레인은 그 재등록이 끝날 때까지
+    기다리고 겹쳐 등록하지 않는다(`_rereg_lock`).
+
+    #234 에서는 「heartbeat 가 미룬 보고를 다시 보내는 중이면 레인의 재등록이 그 보고를 기다린다」
+    였다. 재등록이 도는 잡을 lost 로 닫았기 때문이다. M5t-b 에서는 다시 보고를 그 잡의 보내는
+    스레드가 하고, 같은 세션 id 의 재등록은 멱등이라 잡을 닫지 않는다(결정 260 · §4.5 응답 표
+    `not_registered`). 그래서 「보고가 재등록보다 먼저」라는 순서는 계약에서 빠졌다. 남은 규칙은
+    보내는 스레드와 레인이 둘 다 409 `not_registered` 를 받을 때 재등록이 하나씩 차례로 가는 것이다.
+    이 시험은 그 잠금을 쥔 채로 서버가 워커를 잊게 하고, 잠금을 놓기 전에는 재등록이 없는지 본다."""
     monkeypatch.setattr(remote_worker, "BACKOFF_START_SECONDS", 0.05)  # M5t-b 보고 큐의 백오프
     monkeypatch.setattr(remote_worker, "BACKOFF_MAX_SECONDS", 0.05)
     rw = rig.start(lanes=2)
@@ -771,11 +779,19 @@ def test_registering_again_waits_for_a_retry_already_running(rig, monkeypatch):
     rig.down = True
     rig.go(jid)
     rig.until(lambda: jid in rw._senders and rw._senders[jid].ob.finish, "queued")
-    # M5t-b PR2: 다시 보고는 그 잡의 보내는 스레드가 하고 같은 세션의 재등록은 멱등이다(결정 260) —
-    # 레인의 재등록이 그 잡을 닫지 않는다
+    rw._rereg_lock.acquire()  # 다른 스레드가 재등록하는 중인 것처럼
+    released: list[float] = []
+
+    def release() -> None:
+        released.append(time.monotonic())
+        rw._rereg_lock.release()
+
+    timer = threading.Timer(1.5, release)
     rig.forget()
     rig.down = False
+    timer.start()
     rig.until(lambda: rig.srv.store.get_worker(WORKER) is not None, "registered again")
+    assert released, "a lane or the report thread registered again without waiting for the lock"
     job = rig.state(jid)
     assert job.state == SUCCEEDED, (job.state, job.summary)
     rw.stop()

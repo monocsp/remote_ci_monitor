@@ -1621,21 +1621,44 @@ def test_claim_long_poll_polls_the_db_once_per_period_when_wake_stays_set(srv, m
     assert calls <= 5, calls  # 즉시 한 번 + 0.5초마다 한 번(여유 두 번)
 
 
-def test_partial_log_line_is_dropped_when_the_job_is_closed_as_lost(srv):
-    """잘린 마지막 줄 조각(`_log_partial`)은 잡이 lost 로 닫히면 버린다 — 재등록이든 timeout 이든
-    남기지 않는다(늦은 보고는 409 라 다시 쓰일 일이 없다)."""
+def test_job_log_memory_is_dropped_when_the_job_is_closed_as_lost(srv):
+    """잡이 lost 로 닫히면 그 잡의 로그 메모리를 버린다 — 재등록이든 끊김 유예든 레거시 잡이든
+    남기지 않는다(늦은 보고는 409 라 다시 쓰일 일이 없다).
+
+    M5t-b 프로토콜 2 잡은 잘린 마지막 줄을 메모리에 두지 않는다. 마커는 커밋된 파일의 열린 줄을
+    다시 읽어 찾는다(§4.5 step 8). 그래서 그 잡의 메모리는 잡별 로그 잠금(`_job_log_locks`)
+    하나다. 메모리 조각(`_log_partial`)은 레거시(프로토콜 1) 잡에만 생기고, 끝에서 따로 본다."""
     jid = running_job(srv)
     assert srv.log("build-02", jid, b"::rcm::st")[0] == 200
-    # M5t-b 프로토콜 2: 잘린 줄은 커밋된 파일에서 다시 읽는다. 메모리에는 잡별 로그 잠금이 남는다
-    assert jid in srv.app._job_log_locks
+    assert jid in srv.app._job_log_locks and jid not in srv.app._log_partial
     srv.restarted("build-02")  # 새 프로세스가 옛 세션을 이어받음 = 옛 잡 lost
     assert srv.store.get_job(jid).state == "lost"
-    assert jid not in srv.app._log_partial and jid not in srv.app._job_log_locks
+    assert jid not in srv.app._job_log_locks
     jid2 = running_job(srv)
     assert srv.log("build-02", jid2, b"partial")[0] == 200
+    assert jid2 in srv.app._job_log_locks
     srv.clock.advance(600 + 1)  # M5t-b: timeout 이 아니라 끊김 유예(기본 600) 뒤에 닫힌다
     assert srv.app.mark_lost_workers(srv.clock()) == [jid2]
-    assert jid2 not in srv.app._log_partial
+    assert jid2 not in srv.app._job_log_locks
+    # 레거시 잡(세션 없이 claim 됨)의 잘린 줄은 메모리 조각이다 — 등록이 그 잡을 닫으며 버린다
+    jid3 = srv.queued_job()
+    srv.store._conn().execute(
+        "UPDATE jobs SET state='running', worker_name='build-02', lane=1, started_at=? WHERE id=?",
+        (srv.clock().timestamp(), jid3),
+    )
+    status, _ = srv.req(
+        "POST",
+        f"/worker/jobs/{jid3}/log",
+        token="build-02",
+        body=b"::rcm::st",
+        headers=OCTET,
+        legacy=True,
+    )
+    assert status == 200
+    assert srv.app._log_partial.get(jid3) == b"::rcm::st"
+    srv.restarted("build-02")
+    assert srv.store.get_job(jid3).state == "lost"
+    assert jid3 not in srv.app._log_partial
 
 
 def test_log_415_eats_the_unread_body_so_the_next_request_is_whole(srv):
