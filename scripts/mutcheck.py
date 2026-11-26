@@ -5910,6 +5910,24 @@ MUTANTS = (
             "test_rl30_the_worker_grace_seconds_keeps_its_meaning_and_shrinks_only_for_an_irreversible_job",
         ),
     ),
+    Mutant(
+        # 신원을 모르는 죽은 세션을 워커 로그에 남기지 않는다 — 운영자가 왜 그룹이 G 까지
+        # 잡혀 있는지 모른다(RL31)
+        name="unverified-session-not-logged",
+        path="src/remote_ci_monitor/remote_worker.py",
+        old=(
+            "                self.unverified_sessions.append(dead.session_id)\n"
+            "                self.log(\n"
+        ),
+        new=(
+            "                self.unverified_sessions.append(dead.session_id)\n"
+            "                (lambda m: None)(\n"
+        ),
+        tests=(
+            "tests/test_worker_session_m5tb.py::"
+            "test_rl31_unknown_identity_warns_then_the_recheck_stops_the_same_group",
+        ),
+    ),
 )
 
 

@@ -571,6 +571,42 @@ def test_rl32_a_different_version_goes_the_register_path_and_follows(tmp_path):
     assert fake.calls[-1] == "POST /worker/register"
 
 
+@pytest.fixture
+def follow_env(monkeypatch, capsys, tmp_path):
+    """`rcm worker` 한 대와 프로토콜 2 의 진짜 서버(`test_cli_worker_m5q.WorkerEnv`)."""
+    from test_cli_worker_m5q import WorkerEnv
+
+    env = WorkerEnv(monkeypatch, capsys, tmp_path)
+    yield env
+    env.close()
+
+
+@pytest.mark.skipif(os.name != "posix", reason="follow is POSIX only (결정 172)")
+@pytest.mark.parametrize("following", [True, False])
+def test_rl32_a_version_409_at_register_follows_or_exits_2_and_leaves_no_session(
+    follow_env, following
+):
+    """(켬) 등록 직전에 서버 버전이 바뀌면 프로토콜 확인은 종료 3 으로 끝내지 않고 오늘의 등록
+    길로 가서 버전 409 를 받아 따라간다(M5q ②). (끔) 같은 409 로 종료 2. 어느 쪽이든 서버에
+    `workers` 행도 세션 행도 생기지 않는다."""
+    from follow_helpers import INSTALLED, NEW
+    from test_cli_worker import WORKER
+
+    env = follow_env
+    env.bump_before_register(NEW)
+    r = env.run(env.argv(), enabled=following)
+    assert r.code == ("exec" if following else 2), r.err
+    assert env.registers == [INSTALLED]  # 등록 길을 한 번 갔다
+    assert "protocol" not in r.err
+    assert env.srv.store.get_worker(WORKER) is None
+    count = env.srv.store._conn().execute(
+        "SELECT COUNT(*) FROM worker_sessions WHERE worker_name=?", (WORKER,)
+    )
+    assert count.fetchone()[0] == 0
+    if following:
+        assert env.execs[-1][2]["RCM_FOLLOWED"] == NEW
+
+
 def test_w5_a_fenced_worker_process_stops_and_exits_zero(srv, tmp_path):
     """W5: 살아 있는 프로세스의 요청이 409 session_fenced 면 모든 레인을 멈추고 종료 0."""
     url = f"http://127.0.0.1:{srv.port}"
@@ -934,6 +970,45 @@ def test_rl31_the_recheck_confirms_and_sends_one_narrow_finish_as_the_dead_sessi
         "group_gone": True,
     }
     assert fake.session_id == w.session_id  # 살아 있는 세션의 클라이언트는 그대로
+
+
+def test_rl31_unknown_identity_warns_then_the_recheck_stops_the_same_group(tmp_path, monkeypatch):
+    """(a) 신원을 못 읽는 살아 있는 그룹: 새 프로세스는 그 그룹을 죽이지 않고 워커 로그에 경고를
+    남기며 D 를 `unverified_sessions` 에 싣는다. 재확인 때 (가) 신원이 읽히고 같은 그룹이면 멈추고
+    D 의 id 로 좁은 확인 finish 를 한 번 보낸다."""
+    fake = _Who()
+    config = WorkerConfig(
+        server="http://srv", token="t", data_dir=str(tmp_path / "w"), lanes=1, grace_seconds=1
+    )
+    logs: list[str] = []
+    w = RemoteWorker(config, client=fake, log=logs.append)
+    w.config.data_path.mkdir(parents=True, exist_ok=True)
+    grp = _spawn_group(["sleep", "30"])
+    try:
+        owner = rw.owner_of(w.config, "build-02")
+        start = rw.process_start(grp.pid)
+        assert start is not None
+        d = _dead_folder(w, owner, {4: {"pgid": grp.pid, "start": start}})
+        real = rw.process_start
+        monkeypatch.setattr(rw, "process_start", lambda pid: None)  # ps · /proc 실패
+        w.prepare_sessions()
+        assert w.unverified_sessions == [d.name] and w.previous_sessions == []
+        assert grp.poll() is None  # 손대지 않았다
+        assert f"orphan #4: cannot verify process {grp.pid} — not touching it" in logs
+        assert (
+            f"dead session {d.name[:8]}: process identity unknown — keeping its group held,"
+            " checking again later"
+        ) in logs
+        monkeypatch.setattr(rw, "process_start", real)  # 재확인 때는 읽힌다
+        (dead,) = w.dead_sessions
+        assert w.recheck(dead, 4) == rw.CONFIRMED
+        assert _gone(grp)  # 같은 그룹이라 멈췄다
+        assert any(m.startswith(f"orphan #4: stopped process group {grp.pid}") for m in logs)
+        (sent,) = fake.finished
+        assert sent[0] == d.name and sent[1] == 4
+        assert sent[2]["summary_code"] == "worker_replaced" and sent[2]["group_gone"] is True
+    finally:
+        _kill(grp.pid)
 
 
 def test_rl31_the_recheck_is_scheduled_at_ok_at_plus_g_minus_m(tmp_path, monkeypatch):
