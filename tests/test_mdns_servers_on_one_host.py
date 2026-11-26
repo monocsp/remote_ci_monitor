@@ -178,7 +178,10 @@ def test_md2_the_responder_socket_also_listens_on_the_loopback(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """MD2: 응답기가 실제로 여는 소켓(`_multicast_socket`)은 루프백 인터페이스로 온 질의도
-    듣는다 — LAN 쪽을 못 듣는 프로세스라도 같은 호스트의 질의기에는 답한다."""
+    듣는다 — LAN 쪽을 못 듣는 프로세스라도 같은 호스트의 질의기에는 답한다.
+
+    macOS 에서 빨강 — Linux 는 가입 없이도 받을 수 있어 잠그지 못한다(`IP_MULTICAST_ALL` 기본값이
+    켜져 있어 다른 소켓의 가입만으로도 그룹 패킷이 온다). rcm/ci 는 macOS 에서 돈다."""
     monkeypatch.setattr(mdns_mod, "local_ipv4s", lambda: [])  # 호스트 이름 해석 없이
     m = mdns_mod._multicast_socket(0)
     port = m.getsockname()[1]
@@ -355,3 +358,114 @@ def test_md7_each_round_asks_the_lan_then_the_loopback_and_restores_the_interfac
         (LO_PACKED, DEST),
     ]
     assert sock.iface == ANY_PACKED
+
+
+# ── 응답기 소켓의 그룹 가입(qa-2, 2026-11-26) ───────────────────────────────
+
+
+class JoinSock(socket.socket):
+    """진짜 소켓이되 그룹 가입(`IP_ADD_MEMBERSHIP`)과 송신은 흉내만 낸다 — 네트워크에 아무것도
+    나가지 않는다. `fail` 에 든 인터페이스의 가입은 EADDRNOTAVAIL, 나머지는 성공으로 친다."""
+
+    fail: frozenset[bytes] = frozenset()
+
+    def setsockopt(self, level: int, opt: int, value: object, *rest: object) -> None:  # type: ignore[override]
+        if (level, opt) == (socket.IPPROTO_IP, socket.IP_ADD_MEMBERSHIP):
+            assert isinstance(value, bytes)
+            iface = value[4:8]
+            JOINS.append(iface)
+            if iface in self.fail:
+                raise OSError(errno.EADDRNOTAVAIL, "Can't assign requested address")
+            return
+        super().setsockopt(level, opt, value, *rest)  # type: ignore[arg-type]
+
+    def sendto(self, data: bytes, *args: object) -> int:  # type: ignore[override]
+        SENT.append((data, args[-1]))
+        return len(data)
+
+
+JOINS: list[bytes] = []
+SENT: list[tuple[bytes, object]] = []
+LAN_IP = "192.0.2.10"
+
+
+class _SocketModule:
+    """`mdns` 모듈이 보는 `socket` — `socket.socket` 만 `cls` 로 바꾼다(다른 모듈은 그대로)."""
+
+    def __init__(self, cls: type[socket.socket]) -> None:
+        self.socket = cls
+
+    def __getattr__(self, name: str) -> object:
+        return getattr(socket, name)
+
+
+def joins_failing(monkeypatch: pytest.MonkeyPatch, *ifaces: str) -> None:
+    fail = frozenset(socket.inet_aton(i) for i in ifaces)
+    cls = type("FailingJoinSock", (JoinSock,), {"fail": fail})
+    JOINS.clear()
+    SENT.clear()
+    monkeypatch.setattr(mdns_mod, "socket", _SocketModule(cls))
+    monkeypatch.setattr(mdns_mod, "local_ipv4s", lambda: [LAN_IP])
+
+
+def test_md8_only_the_loopback_joined_means_advertise_is_off(
+    monkeypatch: pytest.MonkeyPatch, responders: list[Responder]
+) -> None:
+    """MD8: 실제 인터페이스 가입이 모두 실패하고(오프라인 Mac · 기본 경로 없음) 루프백만 되면 광고는
+    꺼진 것이다 — `start()` 는 False, `error` 에 그 실패가 남는다(루프백 가입 전과 같다).
+    루프백 가입을 세면 `mdns: advertising …` 을 찍고 /health 에 아무 신호도 없다
+    (PLAN 「fail-open 금지」)."""
+    joins_failing(monkeypatch, "0.0.0.0", LAN_IP)
+    logs: list[str] = []
+    r = Responder(
+        instance_name("rcm-md-off"),
+        "samehost.local.",
+        8797,
+        ips_fn=lambda: [LAN_IP],
+        log=logs.append,
+        mdns_port=0,
+        route_fn=lambda _ip: None,
+    )
+    started = r.start()
+    if started:
+        responders.append(r)
+    assert LO_PACKED in JOINS  # 루프백 가입은 시도했다 — 그것만으로 켜진 것으로 치지 않는다
+    assert (started, r.error is not None) == (False, True), logs
+    assert "Can't assign requested address" in (r.error or "")
+    assert logs and logs[-1].startswith("mdns: advertise off — ")
+
+
+def test_md9_a_failed_loopback_join_still_opens_the_socket_and_answers(
+    monkeypatch: pytest.MonkeyPatch, responders: list[Responder]
+) -> None:
+    """MD9: 루프백 가입만 실패해도(멀티캐스트 없는 lo) 소켓은 열리고 LAN 쪽 가입은 그대로 —
+    `start()` True · `error` 없음, 들어온 질의에 답한다(5353 이 아닌 포트의 질의 → 그 주소로)."""
+    joins_failing(monkeypatch, LO)
+    r = Responder(
+        instance_name("rcm-md-lan"),
+        "samehost.local.",
+        8798,
+        ips_fn=lambda: [LAN_IP],
+        mdns_port=5353,
+        sock_factory=lambda: mdns_mod._multicast_socket(0, bind_ip=LO),
+        route_fn=lambda _ip: None,
+    )
+    assert r.start() is True, r.error
+    responders.append(r)
+    assert r.error is None
+    assert JOINS == [ANY_PACKED, socket.inet_aton(LAN_IP), LO_PACKED]
+    assert r._sock is not None
+    port = r._sock.getsockname()[1]
+    asker = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
+    try:
+        asker.bind((LO, 0))
+        asker.sendto(encode_query([(SERVICE, TYPE_PTR)]), (LO, port))
+        me = asker.getsockname()
+        deadline = 50
+        while deadline and not any(addr == me for _, addr in SENT):
+            deadline -= 1
+            r._stop.wait(0.05)
+        assert any(addr == me for _, addr in SENT), SENT
+        assert r.answered == 1
+    finally:
+        asker.close()
