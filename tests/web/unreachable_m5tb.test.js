@@ -196,3 +196,92 @@ describe("RL29 — 연락 두절의 다섯 끝은 번역된 문장이다", () =>
     assert.match(rcm.recentLine(job, "UTC", NOW, "ko").summary, /아직 돌 수 있으니/);
   });
 });
+
+// ── batch-3: 리드가 찾은 화면 결함 둘 ────────────────────────────────────────────────
+const fs = require("node:fs");
+const path = require("node:path");
+const I18N_PATH = path.join(__dirname, "..", "..", "src", "remote_ci_monitor", "web", "i18n.js");
+const I18N = require(I18N_PATH);
+
+describe("RL28 — 끊긴 워커 띠는 지금 동작을 말한다(유예 동안 이어 감)", () => {
+  // 옛 띠는 「돌던 잡의 결과를 잃는다」고 했다. M5t-b(결정 253 · 256)부터 원격 잡은 끊김 유예 동안
+  // 계속 돌고, 유예가 지나야 lost 로 닫힌다. 유예 값은 /api/status 에 없어서 숫자를 넣지 않는다.
+  const ONE_EN = "Worker macmini unreachable — its running jobs go on if it is back within the grace period."
+    + " Past that they end as lost, and an irreversible job can hold its group.";
+  const MANY_EN = "3 workers unreachable — their running jobs go on if the worker is back within the grace period."
+    + " Past that they end as lost, and an irreversible job can hold its group.";
+  const ONE_KO = "워커 macmini 연결 끊김 — 진행 중이던 작업은 유예 시간 안에 워커가 돌아오면 이어집니다."
+    + " 유예를 넘기면 결과를 잃음으로 닫히고 되돌릴 수 없는 작업은 그룹이 막힐 수 있습니다.";
+  const MANY_KO = "워커 3대 연결 끊김 — 진행 중이던 작업은 유예 시간 안에 워커가 돌아오면 이어집니다."
+    + " 유예를 넘기면 결과를 잃음으로 닫히고 되돌릴 수 없는 작업은 그룹이 막힐 수 있습니다.";
+
+  test("rl28 banner — 한 대 · 여러 대, 두 언어", () => {
+    assert.equal(rcm.unreachableNote(["macmini"], "en").text, ONE_EN);
+    assert.equal(rcm.unreachableNote(["macmini", "b", "c"], "en").text, MANY_EN);
+    assert.equal(rcm.unreachableNote(["macmini"], "ko").text, ONE_KO);
+    assert.equal(rcm.unreachableNote(["macmini", "b", "c"], "ko").text, MANY_KO);
+  });
+
+  test("rl28 banner — 유예 값을 지어내지 않는다(띠에 숫자는 대수뿐)", () => {
+    ["en", "ko"].forEach((lang) => {
+      assert.ok(!/\d/.test(rcm.unreachableNote(["macmini"], lang).text), lang);
+      assert.deepEqual(rcm.unreachableNote(["x", "y", "z"], lang).text.match(/\d+/g), ["3"], lang);
+    });
+  });
+
+  test("rl28 banner — 옛 문장(결과를 잃는다 · 알 수 없다)이 다시 들어오면 빨갛다", () => {
+    const OLD = [
+      /results of (its|their) running jobs are lost/,
+      /진행 중이던 작업의 결과를 알 수 없습니다/
+    ];
+    ["en", "ko"].forEach((lang) => {
+      [["solo"], ["a", "b"]].forEach((names) => {
+        const text = rcm.unreachableNote(names, lang).text;
+        OLD.forEach((re) => assert.ok(!re.test(text), lang + ": " + text));
+      });
+    });
+    const src = fs.readFileSync(I18N_PATH, "utf8");
+    OLD.forEach((re) => assert.ok(!re.test(src), "i18n.js 에 옛 띠 문장이 있다: " + re));
+  });
+});
+
+describe("한국어 조사 — 라틴 낱말 끝의 「모음 + r」는 받침이 아니다", () => {
+  // 글자 이름 읽기(규칙 4)로는 `r`(알)에 받침이 있어 `mac2-worker과` 가 됐다. 한국어로 적을 때
+  // 영어 낱말 끝의 「모음 + r」는 받침이 되지 않는다(워커 · 러너 · 서버 · 도커 · 컬러).
+  // 두 글자 이하 낱말이나 자음 + r 로 끝나는 약어(`AR` · `HDR`)와 `r` 한 글자는 글자 이름 그대로다.
+  const { withJosa } = I18N;
+
+  test("mac2-worker 는 받침 없는 쪽이다", () => {
+    assert.equal(withJosa("mac2-worker", "와/과"), "mac2-worker와");
+    assert.equal(withJosa("mac2-worker", "이/가"), "mac2-worker가");
+    assert.equal(withJosa("mac2-worker", "을/를"), "mac2-worker를");
+    assert.equal(withJosa("mac2-worker", "은/는"), "mac2-worker는");
+    assert.equal(withJosa("mac2-worker", "으로/로"), "mac2-worker로");
+  });
+
+  test("다른 「모음 + r」 낱말도 같다(대소문자 무시)", () => {
+    ["runner", "docker", "builder", "color", "USER", "Car"].forEach((w) => {
+      assert.equal(withJosa(w, "와/과"), w + "와", w);
+      assert.equal(withJosa(w, "이/가"), w + "가", w);
+    });
+  });
+
+  test("build-02 · macmini · 한글 이름은 그대로", () => {
+    assert.equal(withJosa("build-02", "와/과"), "build-02와");
+    assert.equal(withJosa("macmini", "와/과"), "macmini와");
+    assert.equal(withJosa("맥미니", "와/과"), "맥미니와");
+    assert.equal(withJosa("빌드실", "와/과"), "빌드실과");
+  });
+
+  test("약어와 한 글자는 글자 이름으로 읽는다", () => {
+    assert.equal(withJosa("r", "와/과"), "r과");
+    assert.equal(withJosa("AR", "와/과"), "AR과");
+    assert.equal(withJosa("HDR", "와/과"), "HDR과");
+    assert.equal(withJosa("ocr", "이/가"), "ocr이");
+  });
+
+  test("rl28 reason — 유예 중인 잡의 한국어 사유에 「mac2-worker와」", () => {
+    const r = rcm.reasonText(running(901, { ran_on: "mac2-worker" }), NOW, status([]), "ko");
+    assert.equal(r.text, "워커 mac2-worker와 연락이 끊김 · 유예 시간 안에 돌아오면 이어서 진행");
+  });
+});
