@@ -6019,6 +6019,22 @@ MUTANTS = (
             "test_rl41_c_a_preset_with_requires_and_a_flag_while_preparing_starts_no_process",
         ),
     ),
+    Mutant(
+        # requires 프리셋의 준비 중 취소가 `group_gone` 을 싣지 않는다 — 명령이 뜨지 않은 표식
+        # 잡의 그룹이 홀드된다(RL41 (c) 취소 갈래). e2e 의 느린 스냅샷 시험도 잡는다(손으로 확인)
+        name="requires-early-cancel-group-unknown",
+        path="src/remote_ci_monitor/runner.py",
+        old=(
+            "                # mutcheck: requires-early-cancel-group-unknown\n"
+            "                return RunResult(rc=None, started=at, finished=at, cancelled=True, "
+            "group_gone=True)\n"
+        ),
+        new="                return RunResult(rc=None, started=at, finished=at, cancelled=True)\n",
+        tests=(
+            "tests/test_job_supervisor_m5tb.py::"
+            "test_rl41_c_a_preset_with_requires_and_a_flag_while_preparing_starts_no_process",
+        ),
+    ),
 )
 
 

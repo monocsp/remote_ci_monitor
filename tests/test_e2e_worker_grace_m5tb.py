@@ -97,6 +97,16 @@ timeout_seconds = 120
 RCM_MARK_DIR = "{marks}"
 
 [[presets]]
+name = "shipreq"
+pool = "linux"
+irreversible = true
+requires = ["sh"]
+argv = ["sh", "-c", '{long}']
+timeout_seconds = 900
+[presets.env]
+RCM_MARK_DIR = "{marks}"
+
+[[presets]]
 name = "fails"
 pool = "linux"
 argv = ["sh", "-c", "sleep 0.3; exit 1"]
@@ -534,3 +544,84 @@ def test_rl50_a_heartbeat_sent_before_the_claim_answer_lands_after_it_without_ha
     time.sleep(3)
     assert grace.job(second)["state"] == "queued"  # 같은 그룹 — 두 프로세스가 같이 살지 않는다
     assert grace.holds() == []
+
+
+# ── RL41 (c) — requires 프리셋의 느린 스냅샷 동안 멈춤 · 취소 ──────────────────────
+
+
+def _logs(grace: Grace, jid: int) -> str:
+    """그 잡의 서버 로그와 워커 로컬 로그를 잇는다(서버 쪽은 배치가 늦게 닿을 수 있다)."""
+    paths = [
+        grace.server.data_dir / "jobs" / str(jid) / "log.txt",
+        *grace.tmp.glob(f"wdata-*/jobs/{jid}/log.txt"),
+    ]
+    return "".join(p.read_text(errors="replace") for p in paths if p.exists())
+
+
+def _next_in_the_group_starts(grace: Grace) -> None:
+    """같은 그룹(`shipreq`)의 다음 잡이 곧 시작한다 — 홀드가 없다. 그 잡의 로그에는 도구 판정 줄이
+    있다(멈춘 잡에 그 줄이 없는 것이 「도구 검사 앞에서 멈췄다」는 뜻임을 같은 하네스로 보인다)."""
+    nxt = grace.submit("shipreq")
+    grace.pid(nxt, 30)
+    wait_until(lambda: "[rcm] required tools: sh ok" in _logs(grace, nxt), 15, "the preflight line")
+
+
+@pytest.mark.slow
+def test_rl41_c_a_self_stop_while_a_slow_snapshot_downloads_starts_no_process(grace):
+    """`requires` 가 있는 표식 프리셋의 스냅샷 받기를 중계가 1초에 한 바이트씩 늦춘다(긴 준비 — 받는
+    쪽의 읽기 시한은 끝나지 않는다). 그동안 스냅샷 말고는 어떤 요청도 닿지 않게 끊어(분단) 감시
+    스레드가 `G − m` 에 자기 멈춤을 정한다(워커 grace 가 10 이라 55초 — `SELF_STOP` 은 위
+    상한으로만 쓴다). 그 뒤 연결을 돌리고 스냅샷을 마저 넘기면 러너는
+    Popen 전에 멈춘다 — 명령 표지 파일 0개, 도구 판정 줄 0줄(M5l S4 · 결정 333). 잡은 `lost` +
+    `worker_self_stopped`(종료 3, `cancelled` 2 가 아님), `failed_step` 없음. 보고가 G 안에
+    닿아(finish 의 `group_gone: true`) 홀드 0 이고 같은 그룹의 다음 잡이 곧 시작한다."""
+    (w,) = grace.start("build-02", relay=True)
+    grace.relay.slow_next("/tree")
+    x = grace.submit("shipreq")
+    assert grace.relay.wait_slow(30)  # 스냅샷 받기가 시작됐다 — 준비 단계다
+    grace.relay.refuse_except("/tree")
+    cut = time.monotonic()
+    mark = f"#{x}: no answer from the server for"
+    wait_until(lambda: mark in w.log_text(), SELF_STOP + 20, "the watch thread to self-stop")
+    assert time.monotonic() - cut < G - 15
+    assert grace.job(x)["state"] == "running"  # 서버는 아직 G 를 기다린다
+    grace.relay.stop_refusing()
+    grace.relay.release_slow()
+    lx = grace.wait_state(x, TERMINAL, 30)
+    assert time.monotonic() - cut < G  # 서버가 닫을 수 있는 가장 이른 시각(heard + G) 앞
+    assert lx["state"] == "lost" and lx["summary_code"] == "worker_self_stopped", lx
+    assert lx.get("failed_step") is None and lx.get("last_step") is None
+    assert grace.wait_exit(x, 10) == 3
+    assert grace.holds() == []
+    assert not (grace.marks / f"{x}.pid").exists()  # 명령이 한 번도 뜨지 않았다
+    assert "[rcm] required tools" not in _logs(grace, x)
+    _next_in_the_group_starts(grace)
+
+
+def test_rl41_c_a_cancel_while_a_slow_snapshot_downloads_starts_no_process(grace):
+    """같은 준비 단계에 사람의 취소가 온다. heartbeat 은 흐르므로 워커는 곧 취소를 알고, 스냅샷을
+    마저 넘기면 러너가 Popen 전에 멈춘다 — 표지 파일 0개, `cancelled`(종료 2), `failed_step`
+    없음, 취소 미확인이 아니고 홀드 0. 서버의 `grace_seconds` 를 20 으로 늘려 취소 미확인 창
+    (`kill_at + 2H`)이 부하 아래서도 스냅샷이 끝날 때까지 열려 있게 한다(그 창의 판정은 RL8 몫)."""
+    text = grace.server.config.read_text()
+    assert text.count("\ngrace_seconds = 2\n") == 1
+    grace.server.config.write_text(text.replace("\ngrace_seconds = 2\n", "\ngrace_seconds = 20\n"))
+    grace.start("build-02", relay=True)
+    grace.relay.slow_next("/tree")
+    x = grace.submit("shipreq")
+    assert grace.relay.wait_slow(30)
+    assert rcm("cancel", str(x), env=grace.env).returncode == 0
+    # 취소 뒤에 시작한 연결이 셋 — 워커 레인은 하나이고 그 레인은 준비 중이라 heartbeat 뿐이다.
+    # 둘째가 떠날 때 첫째(취소를 실은 응답)는 이미 읽혔다
+    base = grace.relay.accepted
+    wait_until(lambda: grace.relay.accepted >= base + 3, 20, "heartbeats after the cancel")
+    assert grace.job(x)["state"] == "cancelling"
+    grace.relay.release_slow()
+    lx = grace.wait_state(x, TERMINAL, 30)
+    assert lx["state"] == "cancelled" and lx["summary_code"] != "cancel_unconfirmed", lx
+    assert lx.get("failed_step") is None and lx.get("last_step") is None
+    assert grace.wait_exit(x, 10) == 2
+    assert grace.holds() == []
+    assert not (grace.marks / f"{x}.pid").exists()
+    assert "[rcm] required tools" not in _logs(grace, x)
+    _next_in_the_group_starts(grace)

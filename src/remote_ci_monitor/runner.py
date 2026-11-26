@@ -426,6 +426,7 @@ def run_job(
                 return RunResult(rc=None, started=at, finished=at, lost=True, group_gone=True)
             if observer.should_cancel():
                 at = now_fn()
+                # mutcheck: requires-early-cancel-group-unknown
                 return RunResult(rc=None, started=at, finished=at, cancelled=True, group_gone=True)
             # Popen 직전, **최종 환경**에서 — 프로세스가 볼 PATH 그대로, 상대 항목은 워크스페이스
             # 기준. 같은 줄을 관찰자에게도 주어 원격 워커의 서버 로그에도 남는다(마커는 아니다).

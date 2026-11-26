@@ -11,6 +11,11 @@
   `release_held()` 가 그 바이트를 서버로 넘긴다. 나머지 연결은 그대로 흐른다(RL50 의 순서 뒤바꿈).
   `refuse_rest=True` 면 붙잡은 뒤 같은 경로의 다른 연결은 `stop_refusing()` 까지 끊는다 — 붙잡힌
   요청이 그 경로의 가장 새 요청으로 서버에 닿게 한다.
+- `slow_next(path)` 는 요청줄에 `path` 가 든 다음 연결 하나의 **응답**을 `every` 초마다 한 바이트씩
+  넘긴다(느린 스냅샷, RL41 (c)). 바이트가 계속 오므로 받는 쪽의 읽기 시한은 끝나지 않는다.
+  `release_slow()` 가 남은 바이트를 제 속도로 넘긴다.
+- `refuse_except(path)` 는 요청줄에 `path` 가 없는 새 연결을 `stop_refusing()` 까지 곧바로 끊는다 —
+  그 경로 하나만 살아 있는 분단이다(느린 스냅샷은 흐르고 heartbeat 은 닿지 않는다).
 
 워커 클라이언트는 요청마다 새 연결을 쓴다(`urllib`, `Connection: close`). 그래서 연결의 첫 바이트가
 곧 요청줄이다.
@@ -39,6 +44,12 @@ class TcpRelay:
         self.refused = 0  # refuse_rest 로 끊은 연결 수
         self._held = threading.Event()  # 세워지면 붙잡은 연결을 놓는다
         self.held_count = 0  # 붙잡았던 연결 수(시험이 「정말 붙잡았나」를 본다)
+        self._slow_path: str | None = None
+        self._slow_every = 1.0
+        self._fast = threading.Event()  # 세워지면 느린 응답을 제 속도로 넘긴다
+        self._fast.set()
+        self.slow_count = 0  # 느리게 넘기기 시작한 연결 수
+        self._refuse_except: str | None = None
         self.accepted = 0
         self._listener: socket.socket | None = None
         self.port = 0
@@ -93,6 +104,7 @@ class TcpRelay:
             with self._lock:
                 self.held_count += 1
             self._held.wait()
+        slow = self._should_slow(first)
         try:
             upstream = socket.create_connection(self.upstream, timeout=30)
         except OSError:
@@ -104,7 +116,8 @@ class TcpRelay:
         if not self._send(upstream, first):
             self._close(client, upstream)
             return
-        threading.Thread(target=self._pump, args=(upstream, client), daemon=True).start()
+        back = self._pump_slow if slow else self._pump
+        threading.Thread(target=back, args=(upstream, client), daemon=True).start()
         self._pump(client, upstream)
 
     def _read_request(self, client: socket.socket, data: bytes) -> bytes:
@@ -139,12 +152,27 @@ class TcpRelay:
             self._refusing = self._refuse_path is not None
             return True
 
+    def _should_slow(self, first: bytes) -> bool:
+        with self._lock:
+            path = self._slow_path
+            if path is None:
+                return False
+            line = first.split(b"\r\n", 1)[0].decode("latin-1", "replace")
+            if path not in line:
+                return False
+            self._slow_path = None  # 다음 연결 하나만
+            self.slow_count += 1
+            return True
+
     def _should_refuse(self, first: bytes) -> bool:
         with self._lock:
             path = self._refuse_path if self._refusing else None
+            keep = self._refuse_except
+        line = first.split(b"\r\n", 1)[0].decode("latin-1", "replace")
+        if keep is not None and keep not in line:
+            return True
         if path is None:
             return False
-        line = first.split(b"\r\n", 1)[0].decode("latin-1", "replace")
         return path in line
 
     def _recv(self, s: socket.socket) -> bytes | None:
@@ -166,6 +194,22 @@ class TcpRelay:
         while True:
             data = self._recv(src)
             if data is None or not self._send(dst, data):
+                break
+        self._close(src, dst)
+
+    def _pump_slow(self, src: socket.socket, dst: socket.socket) -> None:
+        """`_pump` 와 같되 `release_slow()` 전에는 `every` 초마다 한 바이트만 넘긴다."""
+        while True:
+            data = self._recv(src)
+            if data is None:
+                break
+            while data and not self._fast.is_set():
+                if not self._send(dst, data[:1]):
+                    self._close(src, dst)
+                    return
+                data = data[1:]
+                self._fast.wait(self._slow_every)
+            if data and not self._send(dst, data):
                 break
         self._close(src, dst)
 
@@ -213,10 +257,29 @@ class TcpRelay:
             self._refuse_path = path if refuse_rest else None
             self._refusing = False
 
+    def slow_next(self, path: str, *, every: float = 1.0) -> None:
+        """요청줄에 `path` 가 든 다음 연결 하나의 응답을 `every` 초마다 한 바이트씩 넘긴다."""
+        self._fast.clear()
+        with self._lock:
+            self._slow_path = path
+            self._slow_every = every
+
+    def release_slow(self) -> None:
+        self._fast.set()
+
+    def wait_slow(self, timeout: float, *, count: int = 1) -> bool:
+        return _wait(lambda: self.slow_count >= count, timeout)
+
+    def refuse_except(self, path: str) -> None:
+        """요청줄에 `path` 가 없는 새 연결을 `stop_refusing()` 까지 곧바로 끊는다."""
+        with self._lock:
+            self._refuse_except = path
+
     def stop_refusing(self) -> None:
         with self._lock:
             self._refuse_path = None
             self._refusing = False
+            self._refuse_except = None
 
     def release_held(self) -> None:
         self._held.set()
@@ -228,6 +291,7 @@ class TcpRelay:
         self._closed = True
         self._flow.set()
         self._held.set()
+        self._fast.set()
         self.stop()
 
 
