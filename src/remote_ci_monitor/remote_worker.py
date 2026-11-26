@@ -406,6 +406,7 @@ class _JobSender:
         self.local_why: str | None = None
         self._unexpected_said = False
         self._local_first_said = False
+        self._phase_first_said = False
         self.failures = 0
         # 펜싱 — 이 프로세스의 큐는 프로세스의 펜싱(W5)을, D 의 큐는 그 큐가 받은 409 를 본다
         self.fenced = proc.fenced if dead is None else threading.Event()
@@ -464,21 +465,37 @@ class _JobSender:
         return self.ob.finish is not None and b is not None and b.get("state") == "pending"
 
     def _finish_first(self) -> bool:
-        """finish 를 앞당길 때(결정 324 · 264). 잡이 끝났고 로그나 산출물이 앞에 막혔을 때만
-        본다."""
+        """finish 를 앞당길 때(결정 324 · 264). 잡이 끝났고 phase · 로그 · 산출물이 앞에 막혔을
+        때만 본다."""
         ob = self.ob
         if ob.finish is None or ob.ended_at is None:
             return False
         blocked = (not ob.log_stopped and ob.pending() > 0) or self._art_due()
-        if not blocked:
+        # phase 는 결과가 아니라 진행 표시다. 끝난 잡의 밀린 phase 도 로그 · 산출물과 같은 300초
+        # · 24시간 규칙을 따른다 — 아니면 phase 만 남은 끝난 잡의 finish 가 영원히 안 간다(batch-6)
+        phase = ob.phase is not None and not self.fenced.is_set()  # mutcheck: phase-holds-finish
+        if not (blocked or phase):
             return False
         age = self.proc._epoch() - ob.ended_at
         if age >= RETRANSMIT_SECONDS:
             if not self._abandon_said:
                 self._abandon_said = True
+                what = "log and artifacts" if blocked else "phase"
                 self.proc.log(
-                    f"#{self.job_id} report: log and artifacts not delivered in 24h — sending the"
-                    " finish without them"
+                    f"#{self.job_id} report: {what} not delivered in 24h — sending the finish"
+                    f" without {'them' if blocked else 'it'}"
+                )
+            return True
+        if not blocked:
+            # 막힌 것이 phase 뿐이다. 5xx(서버에 닿았다)나 예상 못 한 예외(다시 해도 같다)면 300초
+            # 뒤 finish 를 먼저 보내고 phase 는 버린다. 연결 실패면 finish 도 못 가니 순서를 지킨다
+            if not (self.last_5xx or self.local_error) or age < FINISH_HOLD_SECONDS:
+                return False
+            if not self._phase_first_said:
+                self._phase_first_said = True
+                self.proc.log(
+                    f"#{self.job_id} report: phase still not delivered {FINISH_HOLD_SECONDS}s"
+                    " after the job ended — sending the finish first, the phase is dropped"
                 )
             return True
         # 못 읽는 스풀은 서버가 고칠 수 없다 — 5xx 와 같이 300초 뒤 finish 를 먼저 보내 잡을 진짜
@@ -739,16 +756,18 @@ class _JobSender:
         return False
 
     def waits_on_nothing(self) -> bool:
-        """D 의 큐가 로컬 오류로 막혔고 그 오류를 끝낼 길이 없다(batch-5 #2). 끝난 잡의 로그 ·
-        산출물만 막혔으면 끝난 지 300초 뒤 finish 가 먼저 간다(`_finish_first`) — 벽시계로 길이가
-        정해진 기다림이라 등록은 기다린다. finish 자체 · phase 가 막혔거나 끝나지 않은 잡이면
-        다시 해 봐도 같으니 등록은 그 큐를 기다리지 않는다. 서버가 응답하지 않은 시간이라 300초에
-        세면 등록이 매번 300초 늦고 줄은 「server errors」라고 거짓을 말한다(결정 337)."""
+        """D 의 큐가 로컬 오류로 막혔고 그 오류를 끝낼 길이 없다(batch-5 #2). 끝난 잡의 phase ·
+        로그 · 산출물만 막혔으면 끝난 지 300초 뒤 finish 가 먼저 간다(`_finish_first`, phase 는
+        batch-6) — 벽시계로 길이가 정해진 기다림이라 등록은 기다린다. finish 자체가 막혔거나
+        끝나지 않은 잡이면 다시 해 봐도 같으니 등록은 그 큐를 기다리지 않는다. 서버가 응답하지
+        않은 시간이라 300초에 세면 등록이 매번 300초 늦고 줄은 「server errors」라고 거짓을
+        말한다(결정 337)."""
         if not (self.local_error or self.spool_unreadable):
             return False
         ob = self.ob
         finish_goes = ob.finish is not None and ob.ended_at is not None
-        return not (finish_goes and self.local_step in ("query", "log", "artifacts"))
+        ahead = ("phase", "query", "log", "artifacts")  # mutcheck: dead-phase-not-waited
+        return not (finish_goes and self.local_step in ahead)
 
     def _send_finish(self, fenced: bool) -> None:
         rec = dict(self.ob.finish or {})

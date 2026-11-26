@@ -7822,6 +7822,36 @@ MUTANTS = (
             "test_b5_6_b_a_readable_outbox_of_a_dead_session_is_not_set_aside",
         ),
     ),
+    # ── M5t-b PR2 · batch-6 ──
+    Mutant(
+        # 끝난 잡의 밀린 phase 가 finish 를 영원히 막는다 — 서버의 잡이 running 으로 남는다(batch-6)
+        name="phase-holds-finish",
+        path="src/remote_ci_monitor/remote_worker.py",
+        old=(
+            "        phase = ob.phase is not None and not self.fenced.is_set()"
+            "  # mutcheck: phase-holds-finish\n"
+        ),
+        new="        phase = False\n",
+        tests=(
+            "tests/test_worker_outbox_m5tb.py::"
+            "test_b6_1_a_a_finished_job_whose_phase_keeps_getting_5xx_sends_the_finish_after_300s",
+        ),
+    ),
+    Mutant(
+        # 죽은 세션 큐의 끝난 잡이 phase 만 로컬 오류로 막혀도 기다리지 않는다 — 결과를
+        # 잃는다(batch-6)
+        name="dead-phase-not-waited",
+        path="src/remote_ci_monitor/remote_worker.py",
+        old=(
+            '        ahead = ("phase", "query", "log", "artifacts")'
+            "  # mutcheck: dead-phase-not-waited\n"
+        ),
+        new='        ahead = ("query", "log", "artifacts")\n',
+        tests=(
+            "tests/test_worker_outbox_m5tb.py::"
+            "test_b6_3_a_dead_queue_whose_phase_fails_locally_still_sends_the_finish_first",
+        ),
+    ),
 )
 
 
