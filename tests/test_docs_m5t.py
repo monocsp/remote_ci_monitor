@@ -212,13 +212,166 @@ def test_readme_mirrors_have_the_same_h2_headings():
     assert heads[0] == heads[1], heads
 
 
+def nav_line(path: Path) -> str:
+    """README 머리의 길잡이 줄 — `#install` 링크로 여는 `<p align="center">` 단락. 머리의 단락
+    수가 바뀌어도(배지 줄 · 그림) 같은 단락을 찾는다."""
+    m = re.search(r'<p align="center">\s*<a href="#install">.*?</p>', read(path), re.S)
+    assert m, f"{path.name}: no nav line opening with the #install link"
+    return m.group(0)
+
+
 def test_readme_nav_line_links_the_first_run_and_the_test_install():
     """README 첫 화면(머리의 길잡이 줄)에서 처음 설정과 시험 설치로 갈 수 있다 — 운영 rcm 이 도는
     머신에서 따라 하는 사람이 운영 자리에 setup 을 치기 전에 시험 설치 길을 본다."""
     for path in (README, README_KO):
-        nav = read(path).split('<p align="center">')[3]
+        nav = nav_line(path)
         assert 'href="#first-run' in nav, f"{path.name}: the nav line does not link the first run"
         assert f'href="{TEST_INSTALL_LINK[path]}"' in nav, f"{path.name}: no test install link"
+
+
+# ── PR #275 P3: 운영 머신 주의 · 그대로 도는 코드 블록 · 시험 설치 ──────────────────
+
+#: 운영 rcm 이 서비스로 도는 머신이면 이 명령을 돌리지 말라는 줄(두 언어)
+RUNS_AS_A_SERVICE = {
+    "en": r"If this machine already runs rcm as a service, do not run these commands",
+    "ko": r"이 머신에서 rcm 이 이미 서비스로 돈다면 이 명령을 돌리지 않는다",
+}
+#: 같은 쪽 안에서 본 시험 설치 앵커
+TEST_INSTALL_ANCHOR = {
+    USAGE: "#a-test-install-next-to-one-that-runs",
+    USAGE_KO: "#도는-설치-옆의-시험-설치",
+}
+
+
+def first_paragraph(sec: str) -> str:
+    return next(p for p in re.split(r"\n\s*\n", sec) if p.strip())
+
+
+def lang(path: Path) -> str:
+    return "ko" if path.name.endswith(".ko.md") else "en"
+
+
+@pytest.mark.parametrize("path", READMES)
+def test_p3_1_readme_build_machine_opens_with_the_running_service_warning(path: Path):
+    """# PR275-P3-1 — 「Build machine (3 commands)」의 `rcm init server` · `rcm token add` ·
+    `rcm serve` 는 기본 server.toml 과 기본 data_dir 을 쓴다. 운영 rcm 이 도는 머신에서 서비스가
+    아닌 빌드가 그 DB 를 열면 마이그레이션한다(AGENTS.md 「The build machine's own install」).
+    그래서 절의 첫 단락이 멈추라고 하고 시험 설치로 보낸다."""
+    para = flat(first_paragraph(h2(read(path), "Build machine")))
+    assert re.search(RUNS_AS_A_SERVICE[lang(path)], para), f"{path.name}: {para[:160]!r}"
+    assert f"]({TEST_INSTALL_LINK[path]})" in para, f"{path.name}: no test install link"
+
+
+@pytest.mark.parametrize("path", USAGE_GUIDES)
+def test_p3_1_usage_section_2_opens_with_the_running_service_warning(path: Path):
+    """# PR275-P3-1 — 사용 안내 2절의 `rcm token add` · `rcm serve` 도 같다."""
+    para = flat(first_paragraph(numbered(read(path), 2)))
+    assert re.search(RUNS_AS_A_SERVICE[lang(path)], para), f"{path.name}: {para[:160]!r}"
+    assert f"]({TEST_INSTALL_ANCHOR[path]})" in para, f"{path.name}: no test install link"
+
+
+def first_run_block(path: Path) -> list[str]:
+    blocks = re.findall(r"```sh\n(.*?)```", h2(read(path), FIRST_RUN), re.S)
+    assert len(blocks) == 1, f"{path.name}: '## {FIRST_RUN}' has {len(blocks)} sh blocks"
+    return blocks[0].splitlines()
+
+
+@pytest.mark.parametrize("path", READMES)
+def test_p3_2_readme_first_run_block_runs_in_order(path: Path):
+    """# PR275-P3-2 — 코드 블록만 따라 해도 된다: 서버 setup 뒤, 클라이언트 setup 앞에 「setup 이
+    찍은 `next —` 줄과 `tokens —` 의 첫 줄을 돌린다」 주석 줄이 있다. 없으면 서비스도 토큰도 없이
+    `export RCM_TOKEN` 으로 간다."""
+    lines = first_run_block(path)
+    server = next(i for i, ln in enumerate(lines) if "--role coordinator-worker" in ln)
+    client = next(i for i, ln in enumerate(lines) if "--role client" in ln)
+    token = next(i for i, ln in enumerate(lines) if "RCM_TOKEN" in ln)
+    between = [ln for ln in lines[server + 1 : client] if ln.lstrip().startswith("#")]
+    assert any("`next —`" in ln and "`tokens —`" in ln for ln in between), (path.name, lines)
+    assert server < client < token, (path.name, lines)
+
+
+def trial_install(path: Path) -> str:
+    return h3(getting_started(path), SUBSECTIONS[path][2])
+
+
+#: 시험 설치에서 setup 의 `next —` 줄을 돌리지 않는다는 문장(두 언어)
+NO_SERVICE_IN_A_TEST = {
+    "en": [
+        r"Do not run the lines setup prints under `next —` \(the service install\)",
+        r"`rcm serve`",
+        r"launchd[^.]*every login",
+    ],
+    "ko": [
+        r"setup 이 `next —` 아래에 찍는 줄\(서비스 설치\)은 돌리지 않는다",
+        r"`rcm serve`",
+        r"launchd[^.]*로그인할 때마다",
+    ],
+}
+
+
+@pytest.mark.parametrize("path", USAGE_GUIDES)
+def test_p3_3_test_install_says_not_to_install_the_service(path: Path):
+    """# PR275-P3-3 — 시험 설치는 터미널의 `rcm serve` 로 돈다. setup 이 찍는 서비스 설치 줄을
+    따라 하면 launchd 가 로그인마다 시험 서버를 다시 띄운다(operating.md 에만 있던 말)."""
+    sec = flat(trial_install(path))
+    for pattern in NO_SERVICE_IN_A_TEST[lang(path)]:
+        assert re.search(pattern, sec), f"{path.name} test install lacks /{pattern}/"
+
+
+#: 코드가 환경에서 읽는 RCM_* 이름 — `environ.get("RCM_X")` · `env["RCM_X"]` · `.pop("RCM_X")`
+ENV_READ = re.compile(r"""(?:environ|env)(?:\.get\(|\.pop\(|\[)\s*["'](RCM_[A-Z0-9_]+)["']""")
+#: 상수로 읽는 것(follow.ENV_MODE)
+ENV_READ_BY_CONSTANT = {"RCM_CLIENT_VERSION"}
+
+
+def env_names_the_code_reads() -> set[str]:
+    """`src/remote_ci_monitor` 에서 사용자가 셸에 둘 수 있는 RCM_* 이름. 잡에 건네는 이름 ·
+    프리셋 입력(`RCM_INPUT_*`) · 잡 안에서 도는 스킬 템플릿(`skills/`)은 뺀다."""
+    pkg = ROOT / "src" / "remote_ci_monitor"
+    names = set(ENV_READ_BY_CONSTANT)
+    for py in pkg.rglob("*.py"):
+        if "skills" in py.relative_to(pkg).parts:
+            continue
+        names |= set(ENV_READ.findall(read(py)))
+    return {n for n in names if not n.startswith("RCM_INPUT")}
+
+
+@pytest.mark.parametrize("path", USAGE_GUIDES)
+def test_p3_4_test_install_clears_every_rcm_variable_with_a_command(path: Path):
+    """# PR275-P3-4 — 「셸의 `RCM_*` 를 지운다」에 명령이 있다: 코드가 읽는 이름을 빠짐없이
+    `unset` 하고, `RCM_<SECTION>_<KEY>` 덮어쓰기처럼 이름을 다 셀 수 없는 것은 `env | grep` 줄로
+    남은 것을 본다. 토큰은 명령 줄에 두지 않는다(셸 기록에 남는다) — 파일에서 읽는다."""
+    sec = trial_install(path)
+    code = "\n".join(re.findall(r"```sh\n(.*?)```", sec, re.S))
+    unset = next((ln for ln in code.splitlines() if ln.startswith("unset ")), "")
+    named = set(unset.split("#", 1)[0].split()[1:])
+    missing = sorted(env_names_the_code_reads() - named)
+    assert unset and not missing, f"{path.name}: unset line {unset!r} lacks {missing}"
+    assert re.search(r"^env \| grep '\^RCM_'", code, re.M), f"{path.name}: no env | grep check"
+    assert code.index("unset ") < code.index("rcm setup "), f"{path.name}: unset after setup"
+    assert not re.search(r"RCM_TOKEN=<", code), f"{path.name}: a token on the command line"
+    assert re.search(r'export RCM_TOKEN="\$\(cat [^)\s]+\)"', code), f"{path.name}: token file"
+
+
+def test_p3_4_the_code_reads_the_names_the_test_install_clears():
+    """# PR275-P3-4 — 위 시험의 이름 목록이 비지 않았는지(정규식이 낡으면 빈 집합이 통과한다)."""
+    assert {
+        "RCM_CONFIG",
+        "RCM_SERVER",
+        "RCM_TOKEN",
+        "RCM_WORKER_TOKEN",
+    } <= env_names_the_code_reads()
+
+
+def test_p3_5_the_wait_end_line_example_is_what_the_code_prints():
+    """# PR275-P3-5 — 처음 설정 6단계의 끝 줄 예는 `render_text.wait_end_line` 의 꼴이다."""
+    from remote_ci_monitor.core.render_text import wait_end_line
+
+    job = {"state": "succeeded", "ran_on": "macmini", "job_seconds": 1, "started_at": "x"}
+    line = wait_end_line(job, job_id=1)
+    assert line == "#1 succeeded on macmini · 1s", line
+    for path in USAGE_GUIDES:
+        assert f"`{line}`" in getting_started(path.values[0]), path.values[0].name
 
 
 def test_readme_status_line_names_the_current_minor_release():
