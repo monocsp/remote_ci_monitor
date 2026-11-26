@@ -660,3 +660,111 @@ def test_tn6_os_notify_failures_warn_once_and_never_raise(monkeypatch, tmp_path)
     assert got is not None and got.startswith("warning: --notify: notify-send could not start ("), (
         got
     )
+
+
+def end_line_of(doc: dict[str, Any]) -> str | None:
+    from remote_ci_monitor.core.render_text import wait_end_line
+
+    return wait_end_line(doc, job_id=int(doc["id"]))
+
+
+def test_tn9_a_local_lane_job_lost_to_a_restart_keeps_this_machine(tmp_path):
+    """서버 재시작으로 lost 가 된 로컬 레인 잡도 돈 머신은 이 서버다(시작했으니까)."""
+    srv = Server(tmp_path, workers=False)
+    try:
+        status, body = srv.submit()
+        assert status == 201, body
+        jid = body["job_id"]
+        assert srv.upload(jid)[0] == 200
+        now = datetime.now(UTC)
+        claimed = srv.store.claim(1, now)  # 로컬 레인(worker_name 없음)
+        assert claimed is not None and claimed.id == jid
+        lost, _cancelled = srv.store.recover_on_start(now + timedelta(seconds=3))
+        assert lost == [jid]
+        status, doc = srv.req("GET", f"/jobs/{jid}")
+        assert doc["state"] == "lost" and doc["worker"] is None, doc
+        name = this_machine()
+        assert doc.get("ran_on", "<no key>") == name, doc
+        head = f"#{jid} lost on {name}" if name else f"#{jid} lost"
+        assert (end_line_of(doc) or "").startswith(head), end_line_of(doc)
+    finally:
+        srv.close()
+
+
+def test_tn9_a_remote_job_lost_with_its_worker_keeps_the_worker_name(tmp_path):
+    """원격 워커를 잃어 lost 가 된 잡(`mark_lost_for_worker`)은 claim 때의 워커 이름 그대로다."""
+    srv = Server(tmp_path, workers=False)
+    try:
+        status, body = srv.submit()
+        jid = body["job_id"]
+        assert srv.upload(jid)[0] == 200
+        now = datetime.now(UTC)
+        assert srv.store.claim(1, now, worker_name="build-02") is not None
+        assert srv.store.mark_lost_for_worker("build-02", now, "worker went away") == [jid]
+        status, doc = srv.req("GET", f"/jobs/{jid}")
+        assert doc["state"] == "lost" and doc["worker"] == "build-02", doc
+        assert doc.get("ran_on") == "build-02", doc
+        assert (end_line_of(doc) or "").startswith(f"#{jid} lost on build-02"), end_line_of(doc)
+    finally:
+        srv.close()
+
+
+def test_tn9_a_retried_attempt_names_the_machine_it_ran_on():
+    """반복 사슬의 앞 시도(`retried`)도 돈 머신을 싣는다. 다음 시도와 이름을 섞지 않는다."""
+    first = job(
+        JOB_ID,
+        state="retried",
+        created_min=9,
+        started_min=8,
+        finished_min=2,
+        exit_code=75,
+        worker_name="build-02",
+        host_key=OTHER_KEY,
+        retried_as=382,
+        attempt=1,
+        retry_max_attempts=3,
+    )
+    doc = status_mod.recent_json(first, local=local_machine())
+    assert doc["ran_on"] == "build-02" and doc["retried_as"] == 382
+    assert (end_line_of(doc) or "").startswith("#381 retried on build-02 · 6m"), end_line_of(doc)
+    # 로컬 레인에서 돈 다음 시도는 이 서버 이름이다
+    second = job(
+        382,
+        state=SUCCEEDED,
+        created_min=2,
+        started_min=1,
+        finished_min=0,
+        exit_code=0,
+        host_key=LOCAL_KEY,
+        retry_of=JOB_ID,
+        attempt=2,
+        retry_max_attempts=3,
+    )
+    doc2 = status_mod.recent_json(second, local=local_machine())
+    assert doc2["ran_on"] == "macmini" and doc2["worker"] is None
+    assert (end_line_of(doc2) or "").startswith("#382 succeeded on macmini"), end_line_of(doc2)
+
+
+def test_tn1_an_old_server_document_has_an_end_line_without_machine_or_artifacts(
+    monkeypatch, capsys
+):
+    """`ran_on` · `artifacts` 키가 아예 없는 옛 서버의 문서 — 머신도 산출물도 없이 끝 줄을 낸다."""
+    doc = wait_doc()
+    del doc["ran_on"]
+    assert "artifacts" not in doc
+    rc, out, err = wait_once(monkeypatch, capsys, code=0, doc=doc)
+    assert rc == 0
+    assert "#381 succeeded · 6m 31s" in err.splitlines(), err
+    assert "warning" not in err and "still collecting" not in err, err
+    assert "ran_on" not in last_json(out)  # 클라이언트가 키를 지어내지 않는다
+
+
+def test_tn9_a_started_job_whose_machine_is_unknown_has_no_machine_on_the_end_line(
+    monkeypatch, capsys
+):
+    """시작했지만 서버가 이름을 모르는 잡(`ran_on` null). `on …` 만 빠지고 산출물은 말한다."""
+    doc = wait_doc(ran_on=None, worker=None, artifacts=artifacts("unknown"))
+    rc, out, err = wait_once(monkeypatch, capsys, code=0, doc=doc)
+    assert rc == 0
+    assert "#381 succeeded · 6m 31s · artifacts unknown" in err.splitlines(), err
+    assert "rcm: warning: #381 artifacts unknown" in err.splitlines(), err
