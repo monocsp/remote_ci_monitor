@@ -38,7 +38,11 @@ of a key bumps that number and is listed here.
   worker's token line before its start, and its last `rcm doctor` line names the `rcm` the service
   runs. `--bind` takes an address, not a name, and an IPv6 one without brackets; a `server.toml`
   setup cannot read is a warning that `--force config` fixes; a service manager that does not
-  answer is "could not tell", not "not loaded".
+  answer is "could not tell", not "not loaded". Right before it writes, setup looks for the rcm
+  services it can find on this machine (launchd and systemd, user and system places) and refuses,
+  with exit 1 and no override, a config file, service file or `data_dir` that is one of theirs or
+  inside their config, `data_dir`, virtualenv or source checkout, and their label unless
+  `--force service` rewrites a file it wrote; an rcm-looking service it cannot read stops it too.
   ([#272](https://github.com/monocsp/remote_ci_monitor/pull/272))
 - **`lanes = 0` runs a server that only hands jobs out.** It runs no job itself: `@local` is not
   alive and never a candidate, its probes do not run, `--machine @local`, `rcm recheck @local`

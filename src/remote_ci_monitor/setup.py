@@ -11,6 +11,11 @@ docs/m5t-workplan.md §4.1).
 - **등록하지 않는다(⛔ Q9).** 서비스 파일은 `~/Library/LaunchAgents/` 가 아니라 설정 폴더 아래
   `service/` 에 쓰고, 복사 · 시작 명령만 찍는다. 같은 라벨이 로드돼 있는지는 읽기 전용
   조회(`launchctl print`, `systemctl --user is-active` · `is-enabled`)로만 본다.
+- **운영을 스스로 알아본다(결정 352).** 계획을 마친 뒤와 쓰기 직전에 이 머신의 rcm 서비스
+  (`scan_services`)를 찾아, 쓸 자리가 그 서비스의 설정 · data_dir · venv · 체크아웃이거나 그
+  안이면, 또는 라벨이 같으면 거절한다(`core.production_refusal`, 종료 1, 우회 플래그 없음).
+  훅(`tools/guard_production.py`)은 셸 글을 판정하는 1차 방어라 바깥이 남는다 — 그 바깥을 여기서
+  막는다.
 - **Store 를 열지 않고 토큰을 만들지도 받지도 않는다.** 다른 빌드가 DB 를 열면 그 자리에서
   마이그레이션한다. `--reuse-data-dir` 의 DB 판은 헤더만 읽는다(6-B-V3).
 - **묻는 것은** stdin 과 stderr 가 모두 TTY 이고 `--yes` 가 없을 때뿐이다(결정 240). 물을 사람이
@@ -27,14 +32,17 @@ from __future__ import annotations
 
 import argparse
 import errno
+import json
 import os
 import plistlib
+import re
 import shlex
 import shutil
 import socket
 import subprocess
 import sys
 import tarfile
+import tomllib
 import urllib.parse
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
@@ -188,6 +196,183 @@ def service_loaded(manager: str, label: str) -> bool | None:
     return False if state in SYSTEMD_ABSENT_STATES else None
 
 
+# ── 운영 알아보기(결정 352) ──────────────────────────────────────────────────
+
+#: setup 이 rcm 서비스를 찾는 시스템 자리 — launchd 의 모든 사용자 자리와 데몬 자리, systemd 의
+#: 시스템 유닛과 모든 사용자의 사용자 유닛. 시험이 바꿔 끼운다
+SYSTEM_SERVICE_PLACES: tuple[Path, ...] = (
+    Path("/Library/LaunchAgents"),
+    Path("/Library/LaunchDaemons"),
+    Path("/etc/systemd/system"),
+    Path("/etc/systemd/user"),
+)
+#: root 가 읽고 `User=` · `UserName` 으로 띄우는 자리 — 그 유닛의 `%h` · `~` 는 이 사용자의 홈이
+#: 아니다
+_ROOT_PLACES = ("LaunchDaemons", "system")
+#: 읽지 못한 서비스 파일이 rcm 의 것일 수 있나 — 바이트에 rcm 실행 파일 · 패키지 이름이 있다
+_RCM_BYTES = re.compile(rb"(?<![\w.-])rcm(?![\w.-])|remote_ci_monitor|remote-ci-monitor")
+#: 서비스 하위 명령마다 data_dir 을 읽는 절과 그 환경 변수 · 기본값(config.py 와 같다)
+_DATA_DIRS = {
+    "serve": ("server", "RCM_SERVER_DATA_DIR", "~/.local/share/rcm"),
+    "worker": ("worker", "RCM_WORKER_DATA_DIR", "~/.local/share/rcm-worker"),
+}
+
+
+def real_path(path: Path) -> Path:
+    """심볼릭 링크를 푼 경로 — 있는 조상까지 `realpath` 로 풀고 없는 꼬리는 그대로 붙인다."""
+    head = Path(os.path.abspath(path))
+    tail: list[str] = []
+    while not os.path.lexists(head) and head != head.parent:
+        tail.append(head.name)
+        head = head.parent
+    return Path(os.path.realpath(head)).joinpath(*reversed(tail))
+
+
+def service_places(home: Path, environ: Mapping[str, str]) -> list[tuple[Path, bool]]:
+    """(자리, root 자리인가). 사용자 자리(`~/Library/LaunchAgents`, `~/.config/systemd/user`,
+    `$XDG_CONFIG_HOME/systemd/user`)와 시스템 자리(`SYSTEM_SERVICE_PLACES`)다."""
+    user = [home / "Library" / "LaunchAgents", home / ".config" / "systemd" / "user"]
+    xdg = environ.get("XDG_CONFIG_HOME")
+    if xdg and os.path.isabs(xdg):
+        user.append(Path(xdg) / "systemd" / "user")
+    out = [(place, False) for place in user]
+    out += [(place, place.name in _ROOT_PLACES) for place in SYSTEM_SERVICE_PLACES]
+    return out
+
+
+def _editable_checkout(venv: Path) -> Path | None:
+    """venv 가 editable 로 설치한 rcm 소스 폴더(`direct_url.json`). 없거나 못 읽으면 None."""
+    for info in venv.glob("lib/python*/site-packages/remote_ci_monitor-*.dist-info"):
+        try:
+            record = json.loads((info / "direct_url.json").read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        if not isinstance(record, dict) or not (record.get("dir_info") or {}).get("editable"):
+            continue
+        url = str(record.get("url", ""))
+        if url.startswith("file://"):
+            return real_path(Path(urllib.parse.unquote(urllib.parse.urlsplit(url).path)))
+    return None
+
+
+def _venv_of(program: str | None, env: Mapping[str, str]) -> Path | None:
+    """서비스가 실행하는 파일의 venv — 심볼릭 링크(`~/.local/bin/rcm`)를 푼 `…/bin/x` 의 위에
+    `pyvenv.cfg` 가 있으면 그 폴더. 이름만 적혀 있으면 서비스의 PATH 로 찾는다."""
+    if not program:
+        return None
+    found = program if os.path.isabs(program) else shutil.which(program, path=env.get("PATH"))
+    if not found:
+        return None
+    venv = Path(os.path.realpath(found)).parent.parent
+    return venv if (venv / "pyvenv.cfg").is_file() else None
+
+
+def _service_path(raw: str, *, home: str | None, workdir: str) -> Path | None:
+    """서비스가 받은 경로 글자 하나를 그 서비스의 눈으로 푼다 — `~` 는 그 서비스의 홈, 상대
+    경로는 작업 폴더 기준. 풀 수 없으면(홈을 모르는 `~`, `~user`) None."""
+    if raw == "~" or raw.startswith("~/"):
+        if not home:
+            return None
+        raw = home.rstrip("/") + raw[1:]
+    elif raw.startswith("~"):
+        return None
+    return real_path(Path(os.path.join(workdir, raw)))
+
+
+def _rcm_service(path: Path, *, home: Path, root: bool) -> core.RcmService | None:
+    """서비스 파일 하나 → rcm 서비스의 사실. rcm 의 서비스가 아님이 확실하면 None."""
+    from remote_ci_monitor import doctor
+
+    file = real_path(path)
+    stem = path.name.rsplit(".", 1)[0]
+    data: bytes | None = None
+    try:
+        data = path.read_bytes()
+        sf = doctor.read_service_file(path, user_home=None if root else str(home), system=root)
+    except (OSError, doctor.ServiceFileUnreadable) as e:
+        named = doctor.looks_like_rcm(doctor.ServiceFile(path=path, label=stem))
+        if named or (data is not None and _RCM_BYTES.search(data)):
+            if isinstance(e, doctor.ServiceFileUnreadable):
+                reason = e.reason
+            else:
+                reason = e.strerror or type(e).__name__
+            return core.RcmService(stem, file, (stem,), problem=f"setup cannot read it ({reason})")
+        return None
+    name = sf.label if path.suffix == ".plist" and sf.label else stem
+    names = tuple(dict.fromkeys(n for n in (sf.label, stem) if n))
+
+    def problem(why: str) -> core.RcmService:
+        return core.RcmService(name, file, names, data=data, problem=why)
+
+    if sf.launch is None:
+        if not doctor.looks_like_rcm(sf):
+            return None
+        return problem("setup cannot tell which rcm command it starts")
+    if sf.launch_unexpanded:
+        return problem("its command line has a systemd specifier setup does not expand")
+    service_home = sf.env.get("HOME") or (None if root else str(home))
+    if sf.workdir is not None and os.path.isabs(sf.workdir):
+        workdir = sf.workdir
+    elif sf.workdir_unknown:
+        return problem("setup cannot tell its working directory")
+    else:  # launchd 와 시스템 유닛은 `/`, systemd 사용자 유닛은 그 사용자의 홈에서 돈다
+        workdir = "/" if path.suffix == ".plist" or root else (service_home or "/")
+    venv = _venv_of(sf.program, sf.env)
+    checkout = _editable_checkout(venv) if venv is not None else None
+    command = sf.launch.get("command")
+    raw_config = sf.launch.get("config") or sf.env.get("RCM_CONFIG")
+    config = None
+    if raw_config:
+        config = _service_path(str(raw_config), home=service_home, workdir=workdir)
+        if config is None:
+            return problem(f"setup cannot resolve its config path {raw_config}")
+    data_dir = None
+    if command in _DATA_DIRS:
+        if config is None:
+            return problem("it names no --config, so setup cannot tell which config it reads")
+        section, env_name, default = _DATA_DIRS[command]
+        try:
+            with config.open("rb") as fh:
+                doc = tomllib.load(fh)
+        except (OSError, ValueError) as e:
+            why = getattr(e, "strerror", None) or type(e).__name__
+            return problem(f"setup cannot read its config {config} ({why})")
+        table = doc.get(section)
+        declared = table.get("data_dir") if isinstance(table, dict) else None
+        raw_data = sf.env.get(env_name) or (declared if isinstance(declared, str) else default)
+        data_dir = _service_path(raw_data, home=service_home, workdir=workdir)
+        if data_dir is None:
+            return problem(f"setup cannot resolve its data_dir {raw_data}")
+    return core.RcmService(name, file, names, config, data_dir, venv, checkout, data)
+
+
+def scan_services(
+    home: Path | None = None, environ: Mapping[str, str] | None = None
+) -> list[core.RcmService]:
+    """이 머신에서 찾을 수 있는 rcm 서비스 — 지원하는 자리의 `*.plist` · `*.service` 만 본다
+    (결정 352). 설정은 TOML 로 읽기만 하고 DB 는 열지 않는다. 읽지 못하는 자리(권한)도 닫는
+    쪽이다 — 그 안에 rcm 서비스가 있는지 모른다."""
+    home = Path.home() if home is None else home
+    environ = os.environ if environ is None else environ
+    out: list[core.RcmService] = []
+    for place, root in service_places(home, environ):
+        try:
+            entries = sorted(place.iterdir())
+        except (FileNotFoundError, NotADirectoryError):
+            continue
+        except OSError as e:
+            reason = f"setup cannot list that folder ({e.strerror or type(e).__name__})"
+            out.append(core.RcmService(place.name, real_path(place), problem=reason))
+            continue
+        for path in entries:
+            if path.suffix not in (".plist", ".service") or not path.is_file():
+                continue
+            found = _rcm_service(path, home=home, root=root)
+            if found is not None:
+                out.append(found)
+    return out
+
+
 def host_facts() -> dict[str, Any]:
     from remote_ci_monitor import hostsample
 
@@ -210,6 +395,7 @@ class World:
     service_loaded: Callable[[str, str], bool | None] = service_loaded
     host_facts: Callable[[], dict[str, Any]] = host_facts
     find_rcm: Callable[[], tuple[Path | None, bool]] = find_rcm
+    services: Callable[[], list[core.RcmService]] = scan_services
 
 
 def _is_tty() -> bool:
@@ -435,6 +621,8 @@ class Plan:
     #: 같은 라벨이 setup 전에 이미 올라가 있었나 — 제거 줄이 그 서비스는 setup 이 쓴 것이 아닐 수
     #: 있다고 말한다(P6 재확인 3)
     preloaded: bool = False
+    #: 서버 역할의 data_dir — 운영 알아보기(결정 352)가 견준다
+    data_dir: Path | None = None
     #: 마지막 `rcm doctor` 줄에 붙일 경로 — 사용자가 `--config` · `--service-file` 을 줬을 때만
     doctor_config: Path | None = None
     doctor_service: Path | None = None
@@ -587,7 +775,35 @@ def _plan(args: argparse.Namespace, world: World) -> Plan:
         plan.rcm, _ = world.find_rcm()
     plan.doctor_config = plan.config if args.config is not None else None
     plan.doctor_service = plan.service if args.service_file is not None else None
+    _check_production(args, plan, world)
     return plan
+
+
+def _check_production(args: argparse.Namespace, plan: Plan, world: World) -> None:
+    """쓸 자리가 이 머신의 rcm 서비스가 쓰는 것이면 거절한다(결정 352) — 종료 1, 쓰지 않는다,
+    우회 플래그는 없다. 계획을 마친 뒤와 쓰기 직전에 한 번씩 부른다(스캔과 쓰기 사이에 생긴
+    유닛). 경로는 심볼릭 링크를 풀어 견주고 darwin 은 대소문자를 접는다."""
+    targets = {"--config": plan.config}
+    if plan.service is not None:
+        targets["--service-file"] = plan.service
+    if plan.data_dir is not None:
+        targets["--data-dir"] = plan.data_dir
+    written = [f.data for f in plan.files if f.kind == "service"]
+    if plan.service is not None:
+        try:
+            written.append(plan.service.read_bytes())
+        except OSError:
+            pass
+    reason = core.production_refusal(
+        world.services(),
+        {flag: real_path(path) for flag, path in targets.items()},
+        label=plan.label if plan.service is not None else None,
+        written=written,
+        force_service=bool(set(args.force or ()) & {"service", "all"}),
+        fold_case=core.folds_case(world.platform),
+    )
+    if reason is not None:
+        raise SetupFailed(reason)
 
 
 def _label(args: argparse.Namespace, ask: _Ask | None, role: str) -> str:
@@ -714,7 +930,7 @@ def _server(
     text = core.server_toml(
         template, bind=bind, port=port, data_dir=str(data_dir), lanes=lanes, advertise=advertise
     )
-    plan = Plan(role=role, config=path, label=label, warnings=warnings)
+    plan = Plan(role=role, config=path, label=label, warnings=warnings, data_dir=data_dir)
     plan.files.append(Planned(path, text.encode("utf-8"), 0o644, "config"))
     db = data_dir / DB_FILE
     try:
@@ -1074,6 +1290,7 @@ def run(args: argparse.Namespace, world: World) -> int:
     try:
         plan = _plan(args, world)
         _check_free(args, plan)
+        _check_production(args, plan, world)  # 쓰기 직전에 한 번 더(결정 352)
         _write(plan)
     except SetupUsage as e:
         _say(world, f"rcm: {e}")

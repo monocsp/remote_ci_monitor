@@ -830,3 +830,105 @@ def where(
         raw = data_dir if data_dir is not None else default_data_dir
         data = abs_path(raw, home=home, cwd=cwd, expand_user=expand_user)
     return Where(role, folder, conf, chosen, service, place, data)
+
+
+# ── 운영 알아보기(결정 352) ──────────────────────────────────────────────────
+#
+# 훅(`tools/guard_production.py`)은 셸 글을 판정하므로 닫힌 목록(런처 · 메타 문자 · 자리)마다
+# 바깥이 있다(P6 재확인 여덟 라운드). 그래서 setup 자신이 쓰기 직전에, 이 머신에서 찾을 수 있는
+# rcm 서비스의 설정 · data_dir · venv · 체크아웃 · 라벨과 쓸 자리를 견준다. 사실을 모으는 것(스캔)은
+# `remote_ci_monitor/setup.py` 의 일이고, 여기는 모은 사실과 대상만 보고 거절 이유를 낸다.
+
+
+@dataclass(frozen=True)
+class RcmService:
+    """설치 자리에서 찾은 rcm 서비스 하나 — 경로는 모두 심볼릭 링크를 푼 것이다."""
+
+    #: 거절 문장에 쓰는 이름 — plist 의 `Label`, systemd 는 유닛 이름(`.service` 를 뗀 것)
+    name: str
+    #: 설치된 서비스 파일
+    file: Path
+    #: 라벨 비교에 쓰는 이름들 — `Label` 과 파일 이름(확장자를 뗀 것)
+    names: tuple[str, ...] = ()
+    #: 서비스가 읽는 설정 파일
+    config: Path | None = None
+    #: 그 설정의 data_dir(서버는 `[server]`, 워커는 `[worker]`)
+    data_dir: Path | None = None
+    #: 서비스가 실행하는 venv
+    venv: Path | None = None
+    #: 그 venv 가 editable 로 설치한 소스 폴더
+    checkout: Path | None = None
+    #: 서비스 파일의 바이트 — 설치 파일이 setup 이 쓴 것과 같은지(cmp) 본다
+    data: bytes | None = None
+    #: rcm 처럼 보이는데 읽지 못했거나 설정 · data_dir 을 풀지 못한 이유 — 있으면 닫는 쪽이다
+    problem: str | None = None
+
+
+#: 운영 서비스에서 견주는 자리와 거절 문장의 이름
+PRODUCTION_PIECES = (
+    ("file", "service file"),
+    ("config", "config"),
+    ("data_dir", "data_dir"),
+    ("venv", "venv"),
+    ("checkout", "checkout"),
+)
+
+
+def same_or_inside(path: Path, root: Path, *, fold_case: bool) -> bool:
+    """`path` 가 `root` 이거나 그 안인가 — 글자로 견준다(심볼릭 링크는 호출자가 푼다)."""
+    text, top = place_key(path, fold_case=fold_case), place_key(root, fold_case=fold_case)
+    return text == top or text.startswith(top.rstrip("/") + "/")
+
+
+def production_refusal(
+    services: Sequence[RcmService],
+    targets: Mapping[str, Path],
+    *,
+    label: str | None,
+    written: Sequence[bytes],
+    force_service: bool,
+    fold_case: bool,
+) -> str | None:
+    """setup 이 쓸 자리(`targets`: 플래그 이름 → 경로)가 이 머신의 rcm 서비스가 쓰는 것이면 그
+    거절 문장, 아니면 None. 우회 플래그는 없다.
+
+    1. 읽지 못했거나 설정 · data_dir 을 풀지 못한 rcm 서비스가 하나라도 있으면 거절한다(닫는
+       쪽) — 그 서비스가 무엇을 쓰는지 모른다.
+    2. 대상이 어느 서비스의 서비스 파일 · 설정 · data_dir · venv · 체크아웃이거나 그 안이면
+       거절한다.
+    3. setup 의 라벨(과 그 유닛 이름)이 설치된 서비스의 이름이면 `--force service` 이고 설치
+       파일이 setup 이 쓴(쓸) 파일과 같을 때(`written`)만 받는다. 그 서비스는 setup 자신의
+       것이라 2 에서도 견주지 않는다 — 설치한 뒤 `--force` 로 다시 쓰는 길이다(덮는 것은
+       여전히 `--force` 의 몫이다)."""
+    for svc in services:
+        if svc.problem is not None:
+            return (
+                f"{svc.file} looks like an rcm service, but {svc.problem} — setup cannot tell "
+                "what that service uses, so it is refusing (nothing was written)"
+            )
+    mine = {label, unit_name(label)} if label is not None else set()
+
+    def own(svc: RcmService) -> bool:
+        named = bool(mine.intersection(svc.names))
+        return named and force_service and svc.data is not None and svc.data in written
+
+    for flag, target in targets.items():
+        for svc in services:
+            if own(svc):
+                continue
+            for attr, what in PRODUCTION_PIECES:
+                root = getattr(svc, attr)
+                if root is not None and same_or_inside(target, root, fold_case=fold_case):
+                    return (
+                        f"{flag} {target}: this is {svc.name}'s {what} — refusing (nothing was "
+                        "written)"
+                    )
+    for svc in services:
+        if mine.intersection(svc.names) and not own(svc):
+            return (
+                f"--label {label}: this is {svc.name}'s label — refusing (nothing was written); "
+                f"{svc.file} is installed and is not a file this setup wrote. Pass another "
+                "--label; --force service rewrites it only when the installed file is the one "
+                "setup wrote"
+            )
+    return None

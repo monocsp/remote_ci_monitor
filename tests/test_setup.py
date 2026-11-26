@@ -1704,3 +1704,258 @@ def test_b9_systemd_failed_means_the_unit_is_there(tmp_path, monkeypatch):
     _manager_stub(tmp_path / "bin", "systemctl", script)
     monkeypatch.setenv("PATH", str(tmp_path / "bin"))
     assert setup.service_loaded("systemd", "test.rcm.server") is True
+
+
+# ── P6 재확인(batch 9) 352: setup 자신이 쓰기 직전에 운영을 알아본다 ──
+#
+# 「운영 서비스」는 모두 임시 HOME 아래의 가짜 plist · 유닛이다. 진짜 서비스 관리자는 부르지 않고
+# 시스템 자리(`setup.SYSTEM_SERVICE_PLACES`)도 임시 폴더로 바꿔 끼운다.
+
+
+@pytest.fixture
+def no_system_places(tmp_path, monkeypatch):
+    places = tuple(tmp_path / "sys" / name for name in ("LaunchAgents", "LaunchDaemons", "system"))
+    monkeypatch.setattr(setup, "SYSTEM_SERVICE_PLACES", places)
+    return places
+
+
+@pytest.fixture
+def prod(home, tmp_path, no_system_places):
+    """임시 HOME 의 가짜 운영 서버: LaunchAgents 의 표준 라벨 plist 가 venv 의 rcm 을
+    `serve --config ~/.config/rcm/server.toml` 로 띄우고, 그 venv 는 체크아웃을 editable 로
+    설치했고, 설정의 data_dir 은 따로 있다."""
+    checkout = tmp_path / "svc" / "remote_ci_monitor-service"
+    (checkout / "src").mkdir(parents=True)
+    venv = tmp_path / "svc" / "venv"
+    (venv / "bin").mkdir(parents=True)
+    (venv / "pyvenv.cfg").write_text("home = /usr/bin\n")
+    (venv / "bin" / "rcm").write_text("#!/bin/sh\n")
+    info = venv / "lib" / "python3.11" / "site-packages" / "remote_ci_monitor-0.0.0.dist-info"
+    info.mkdir(parents=True)
+    url = checkout.as_uri()
+    (info / "direct_url.json").write_text(f'{{"url": "{url}", "dir_info": {{"editable": true}}}}')
+    config = home / ".config" / "rcm" / "server.toml"
+    config.parent.mkdir(parents=True)
+    data = tmp_path / "prod-data"
+    data.mkdir()
+    config.write_text(f'[server]\ndata_dir = "{data}"\n')
+    plist = home / "Library" / "LaunchAgents" / f"{SERVER_LABEL}.plist"
+    plist.parent.mkdir(parents=True)
+    doc = {
+        "Label": SERVER_LABEL,
+        "ProgramArguments": [str(venv / "bin" / "rcm"), "serve", "--config", str(config)],
+    }
+    plist.write_bytes(plistlib.dumps(doc))
+    return {
+        "checkout": checkout,
+        "venv": venv,
+        "config": config,
+        "data": data,
+        "plist": plist,
+    }
+
+
+def _nothing_written(cfg: Path, *paths: Path) -> None:
+    assert not (cfg / "server.toml").exists() and not (cfg / "service").exists()
+    for path in paths:
+        assert not path.exists(), path
+
+
+@pytest.mark.parametrize(
+    ("finding", "what"),
+    [
+        # v1-1: 변수가 명령 자리(`R=rcm; $R setup …`) — 운영 data_dir 을 고른다
+        ("v1-1", "data_dir"),
+        # v1-2: `sed … | sh` 가 만든 명령 — 운영 설정 파일을 덮는다
+        ("v1-2", "config"),
+        # v1-3: 인터프리터가 만든 명령(`python3 -c 'os.system(…)'`) — 운영 venv 안에 쓴다
+        ("v1-3", "venv"),
+        # v1-4: 명령 낱말의 glob · `r(c)m` · 목록 밖 런처 — 운영 체크아웃 안에 서비스 파일을 쓴다
+        ("v1-4", "checkout"),
+    ],
+)
+def test_b9_352_setup_refuses_a_production_target_whatever_shell_built_it(
+    cfg, tmp_path, prod, finding, what
+):
+    # 결정 352 · 353: 훅이 셸 글에서 놓친 명령이 setup 을 운영 쪽으로 돌려도 setup 자신이 쓰기
+    # 직전에 거절한다(종료 1, 쓰지 않음, 우회 플래그 없음). 시험은 setup 을 그 인자로 직접 부른다
+    argv = coordinator_args(tmp_path / "data")
+    target: Path
+    if what == "data_dir":
+        target = prod["data"] / "inner"
+        argv[argv.index("--data-dir") + 1] = str(target)
+    elif what == "config":
+        target = prod["config"]
+        argv += ["--config", str(target), "--force", "all"]
+    elif what == "venv":
+        target = prod["venv"] / "etc" / "server.toml"
+        argv += ["--config", str(target)]
+    else:
+        target = prod["checkout"] / "service" / "test.rcm.server.plist"
+        argv += ["--service-file", str(target)]
+    before = prod["config"].read_bytes()
+    fake = Fake()
+    assert go(fake, *argv) == 1, (finding, fake.text)
+    err = fake.err.getvalue()
+    assert f"this is {SERVER_LABEL}'s {what} — refusing" in err, (finding, err)
+    assert "--force" not in err.split("refusing", 1)[1], err
+    _nothing_written(cfg, tmp_path / "data")
+    if what != "data_dir":
+        assert not target.exists() or target == prod["config"], target
+    assert prod["config"].read_bytes() == before
+
+
+def test_b9_352_a_symlink_to_the_production_data_dir_is_refused(cfg, tmp_path, prod):
+    # 심볼릭 링크를 풀어 견준다 — 링크가 운영 data_dir 을 가리키면 그 링크도 운영이다
+    link = tmp_path / "looks-new"
+    link.symlink_to(prod["data"])
+    fake = Fake()
+    assert go(fake, *coordinator_args(link / "sub")) == 1, fake.text
+    assert f"this is {SERVER_LABEL}'s data_dir — refusing" in fake.err.getvalue()
+
+
+def test_b9_352_darwin_compares_paths_without_case(cfg, tmp_path, prod):
+    # darwin 은 대소문자를 접어 견준다
+    other = Path(str(prod["data"]).upper().replace(str(tmp_path).upper(), str(tmp_path)))
+    fake = Fake(platform="darwin")
+    assert go(fake, *coordinator_args(other / "x")) == 1, fake.text
+    assert "data_dir — refusing" in fake.err.getvalue()
+
+
+def test_b9_352_the_production_label_needs_force_service_and_the_same_file(cfg, tmp_path, prod):
+    # 라벨이 설치된 rcm 서비스와 같으면 `--force service` 이고 설치 파일이 setup 이 쓴 것과 같을
+    # 때만 쓴다
+    argv = coordinator_args(tmp_path / "data")
+    argv[argv.index("--label") + 1] = SERVER_LABEL
+    fake = Fake()
+    assert go(fake, *argv) == 1, fake.text
+    assert f"this is {SERVER_LABEL}'s label — refusing" in fake.err.getvalue()
+    fake = Fake()
+    assert go(fake, *argv, "--force", "service") == 1, fake.text
+    assert "label — refusing" in fake.err.getvalue()
+    _nothing_written(cfg)
+
+
+def test_b9_352_a_label_setup_wrote_and_installed_may_be_rewritten_with_force(
+    cfg, home, tmp_path, no_system_places
+):
+    # 설치 파일이 setup 이 쓴 파일과 같으면(cmp) `--force service` 로 다시 쓸 수 있다
+    argv = coordinator_args(tmp_path / "data")
+    assert go(Fake(), *argv) == 0
+    staged, installed = _installed_and_staged(cfg, home, "darwin")
+    installed.parent.mkdir(parents=True, exist_ok=True)
+    installed.write_bytes(staged.read_bytes())
+    fake = Fake()
+    assert go(fake, *argv, "--force", "all") == 0, fake.text
+    fake = Fake()
+    assert go(fake, *argv) == 1, fake.text
+    # `--force service` 가 없으면 설치된 그 서비스도 운영이다(설정 · 라벨 어느 쪽으로든 거절)
+    assert "this is test.rcm.server's" in fake.err.getvalue()
+    # 같은 라벨인데 설치 파일이 다르다(다른 설정을 띄운다) — `--force` 로도 거절한다
+    other = tmp_path / "other.toml"
+    other.write_text(f'[server]\ndata_dir = "{tmp_path / "other-data"}"\n')
+    doc = plistlib.loads(staged.read_bytes())
+    doc["ProgramArguments"][-1] = str(other)
+    installed.write_bytes(plistlib.dumps(doc))
+    fake = Fake()
+    assert go(fake, *argv, "--force", "all") == 1, fake.text
+    assert "test.rcm.server's label — refusing" in fake.err.getvalue()
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        b"<plist><dict><key>Label",
+        plistlib.dumps({"Label": "x", "ProgramArguments": ["/bin/sh", "-c", "exec rcm serve"]}),
+        plistlib.dumps({"Label": "x", "ProgramArguments": ["/opt/v/bin/rcm", "serve"]}),
+    ],
+    ids=["unreadable", "sh-c", "no-config"],
+)
+def test_b9_352_an_rcm_service_setup_cannot_read_closes(
+    cfg, home, tmp_path, no_system_places, body
+):
+    # 읽지 못하거나 `--config` 를 풀 수 없는 rcm 같은 유닛이 있으면 닫는 쪽이다 — 그 파일을 댄다
+    plist = home / "Library" / "LaunchAgents" / "com.remote-ci-monitor.server.plist"
+    plist.parent.mkdir(parents=True)
+    plist.write_bytes(body)
+    fake = Fake()
+    assert go(fake, *coordinator_args(tmp_path / "data")) == 1, fake.text
+    err = fake.err.getvalue()
+    assert str(plist) in err and "refusing" in err, err
+    _nothing_written(cfg, tmp_path / "data")
+
+
+def test_b9_352_a_service_that_is_not_rcm_is_ignored(cfg, home, tmp_path, no_system_places):
+    # rcm 이 아닌 서비스(rcm-ci-connect 의 ci-watch)는 운영이 아니다
+    plist = home / "Library" / "LaunchAgents" / "com.remote-ci-monitor.ci-watch.plist"
+    plist.parent.mkdir(parents=True)
+    doc = {"Label": "com.remote-ci-monitor.ci-watch", "ProgramArguments": ["python3", "w.py"]}
+    plist.write_bytes(plistlib.dumps(doc))
+    fake = Fake()
+    assert go(fake, *coordinator_args(tmp_path / "data")) == 0, fake.text
+
+
+@pytest.mark.parametrize("where", ["home", "xdg", "system"])
+def test_b9_352_systemd_units_in_every_supported_place_are_seen(
+    cfg, home, tmp_path, no_system_places, where
+):
+    # systemd 사용자 자리(`~/.config/systemd/user`, `$XDG_CONFIG_HOME/systemd/user`)와 시스템 자리
+    data = tmp_path / "unit-data"
+    config = tmp_path / "unit-config" / "worker.toml"
+    config.parent.mkdir(parents=True)
+    config.write_text(f'[worker]\ndata_dir = "{data}"\n')
+    folder = {
+        "home": home / ".config" / "systemd" / "user",
+        "xdg": tmp_path / "xdg-config" / "systemd" / "user",
+        "system": no_system_places[2],
+    }[where]
+    folder.mkdir(parents=True)
+    unit = folder / "rcm-worker.service"
+    unit.write_text(f"[Service]\nExecStart=/opt/v/bin/rcm worker --config {config}\n")
+    fake = Fake(platform="linux")
+    assert go(fake, *coordinator_args(data / "x")) == 1, fake.text
+    assert "rcm-worker's data_dir — refusing" in fake.err.getvalue()
+
+
+def test_b9_352_a_unit_that_appears_after_the_scan_is_seen_before_writing(cfg, tmp_path, prod):
+    # 스캔과 쓰기 사이에 생긴 유닛 — 쓰기 직전에 한 번 더 본다
+    found = setup.scan_services()
+    seen: list[int] = []
+
+    def services():
+        seen.append(1)
+        return [] if len(seen) == 1 else found
+
+    fake = Fake(services=services)
+    argv = coordinator_args(prod["data"])
+    assert go(fake, *argv) == 1, fake.text
+    assert len(seen) == 2 and "data_dir — refusing" in fake.err.getvalue()
+    _nothing_written(cfg)
+
+
+def test_b9_352_core_refusal_is_pure():
+    # core 는 모은 사실과 대상만 본다
+    svc = core.RcmService(
+        name="lbl",
+        file=Path("/s/lbl.plist"),
+        names=("lbl",),
+        config=Path("/c/server.toml"),
+        data_dir=Path("/d"),
+        venv=Path("/v"),
+        checkout=Path("/k"),
+        data=b"x",
+    )
+    ask = dict(label=None, written=(), force_service=False, fold_case=False)
+    assert core.production_refusal([svc], {"--data-dir": Path("/d/e")}, **ask) == (
+        "--data-dir /d/e: this is lbl's data_dir — refusing (nothing was written)"
+    )
+    assert core.production_refusal([svc], {"--data-dir": Path("/dd")}, **ask) is None
+    assert core.production_refusal([svc], {"--config": Path("/K/x")}, **ask) is None
+    fold = {**ask, "fold_case": True}
+    assert "checkout" in (core.production_refusal([svc], {"--config": Path("/K/x")}, **fold) or "")
+    named = {**ask, "label": "lbl"}
+    assert "label — refusing" in (core.production_refusal([svc], {}, **named) or "")
+    forced = {**named, "force_service": True, "written": (b"x",)}
+    assert core.production_refusal([svc], {}, **forced) is None
+    broken = core.RcmService(name="b", file=Path("/s/b.plist"), problem="cannot read it")
+    assert "/s/b.plist" in (core.production_refusal([broken], {}, **ask) or "")

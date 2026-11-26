@@ -184,6 +184,24 @@ loaded before setup ran, the line adds that it may not be one setup wrote.
 
 **What it refuses or warns about.**
 
+- **A production service's files.** Just before it writes, and once more right before the first
+  write, setup looks for the rcm services on this machine: every `*.plist` in
+  `~/Library/LaunchAgents`, `/Library/LaunchAgents` and `/Library/LaunchDaemons`, and every
+  `*.service` in `~/.config/systemd/user`, `$XDG_CONFIG_HOME/systemd/user`, `/etc/systemd/user`
+  and `/etc/systemd/system` that starts `rcm` or `python -m remote_ci_monitor.cli` (or is named
+  like one). For each it reads the `--config` the service starts with, that config's `data_dir`
+  (TOML only; no database is opened), the virtualenv of the executable it runs and that
+  virtualenv's editable source checkout. A config file, service file or `data_dir` that is one of
+  these or inside one is refused with exit 1, `this is <label>'s <config|data_dir|venv|checkout>
+  — refusing`, and nothing is written; no flag overrides it. A label equal to an installed rcm
+  service's label (or unit name) is refused the same way unless you pass `--force service` and the
+  installed file is the one setup wrote (`cmp`). An rcm-looking service setup cannot read, or
+  whose `--config` or `data_dir` it cannot resolve (no `--config`, `sh -c`, a `~` with no known
+  home), also stops it, naming the file. Paths are compared with symbolic links resolved and, on
+  macOS, without case. This holds for the services setup can find in those places only: a server
+  started by hand, another user's services, units under `/run` or `/usr/lib`, template and
+  transient units, drop-ins and `EnvironmentFile=`, and a unit created after the last check are
+  not seen.
 - An existing config or service file is kept: the run stops with exit 1 and writes nothing.
   `--force config`, `--force service` or `--force` (both) replace them. When a write fails part
   way, what was already written is undone. An existing `server.toml` that is not TOML or not

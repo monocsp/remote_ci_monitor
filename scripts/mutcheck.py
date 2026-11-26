@@ -3762,6 +3762,133 @@ MUTANTS = (
         tests=("tests/test_setup.py::test_b9_systemd_failed_means_the_unit_is_there",),
     ),
     Mutant(
+        # 운영 data_dir 「안」을 보지 않는다 — `--data-dir <운영>/x` 가 지나간다(결정 352)
+        name="setup-production-inside-missed",
+        path="src/remote_ci_monitor/core/setup.py",
+        old='    return text == top or text.startswith(top.rstrip("/") + "/")\n',
+        new="    return text == top\n",
+        tests=(
+            "tests/test_setup.py::test_b9_352_setup_refuses_a_production_target_whatever_shell_built_it",
+        ),
+    ),
+    Mutant(
+        # 읽지 못한 rcm 서비스를 건너뛴다 — 무엇을 쓰는지 모르는데 쓴다(결정 352, 닫는 쪽)
+        name="setup-production-unreadable-ignored",
+        path="src/remote_ci_monitor/core/setup.py",
+        old="        if svc.problem is not None:\n",
+        new="        if False:\n",
+        tests=("tests/test_setup.py::test_b9_352_an_rcm_service_setup_cannot_read_closes",),
+    ),
+    Mutant(
+        # 운영 라벨을 보지 않는다 — 운영 서비스와 같은 라벨의 서비스 파일을 쓴다(결정 352)
+        name="setup-production-label-ignored",
+        path="src/remote_ci_monitor/core/setup.py",
+        old="        if mine.intersection(svc.names) and not own(svc):\n",
+        new="        if False:\n",
+        tests=(
+            "tests/test_setup.py::test_b9_352_the_production_label_needs_force_service_and_the_same_file",
+        ),
+    ),
+    Mutant(
+        # `--force service` 만으로 운영 라벨을 받는다 — 설치 파일이 setup 이 쓴 것인지(cmp) 보지
+        # 않는다(결정 352)
+        name="setup-production-own-without-cmp",
+        path="src/remote_ci_monitor/core/setup.py",
+        old=(
+            "        return named and force_service and svc.data is not None "
+            "and svc.data in written\n"
+        ),
+        new="        return named and force_service\n",
+        tests=(
+            "tests/test_setup.py::test_b9_352_the_production_label_needs_force_service_and_the_same_file",
+            "tests/test_setup.py::test_b9_352_a_label_setup_wrote_and_installed_may_be_rewritten_with_force",
+        ),
+    ),
+    Mutant(
+        # 쓰기 직전의 두 번째 확인이 없다 — 스캔 뒤에 생긴 유닛을 못 본다(결정 352)
+        name="setup-production-second-check-dropped",
+        path="src/remote_ci_monitor/setup.py",
+        old="        _check_production(args, plan, world)  # 쓰기 직전에 한 번 더(결정 352)\n",
+        new="        pass  # 쓰기 직전에 한 번 더(결정 352)\n",
+        tests=(
+            "tests/test_setup.py::test_b9_352_a_unit_that_appears_after_the_scan_is_seen_before_writing",
+        ),
+    ),
+    Mutant(
+        # 대상의 심볼릭 링크를 풀지 않는다 — 운영 data_dir 을 가리키는 링크가 지나간다(결정 352)
+        name="setup-production-symlink-not-resolved",
+        path="src/remote_ci_monitor/setup.py",
+        old="        {flag: real_path(path) for flag, path in targets.items()},\n",
+        new="        dict(targets),\n",
+        tests=("tests/test_setup.py::test_b9_352_a_symlink_to_the_production_data_dir_is_refused",),
+    ),
+    Mutant(
+        # darwin 에서도 대소문자를 가린다 — 대소문자만 다른 운영 경로가 지나간다(결정 352)
+        name="setup-production-case-not-folded",
+        path="src/remote_ci_monitor/setup.py",
+        old="        fold_case=core.folds_case(world.platform),\n",
+        new="        fold_case=False,\n",
+        tests=("tests/test_setup.py::test_b9_352_darwin_compares_paths_without_case",),
+    ),
+    Mutant(
+        # `$XDG_CONFIG_HOME/systemd/user` 를 찾지 않는다(결정 352)
+        name="setup-scan-xdg-units-missed",
+        path="src/remote_ci_monitor/setup.py",
+        old='        user.append(Path(xdg) / "systemd" / "user")\n',
+        new="        pass\n",
+        tests=("tests/test_setup.py::test_b9_352_systemd_units_in_every_supported_place_are_seen",),
+    ),
+    Mutant(
+        # 시스템 자리(`/Library/LaunchDaemons` · `/etc/systemd/system` …)를 찾지 않는다(결정 352)
+        name="setup-scan-system-places-missed",
+        path="src/remote_ci_monitor/setup.py",
+        old="    out += [(place, place.name in _ROOT_PLACES) for place in SYSTEM_SERVICE_PLACES]\n",
+        new="    out += []\n",
+        tests=("tests/test_setup.py::test_b9_352_systemd_units_in_every_supported_place_are_seen",),
+    ),
+    Mutant(
+        # 읽지 못한 rcm 같은 파일을 rcm 이 아닌 것으로 본다(결정 352, 닫는 쪽)
+        name="setup-scan-unreadable-rcm-skipped",
+        path="src/remote_ci_monitor/setup.py",
+        old=(
+            "            return core.RcmService(stem, file, (stem,), "
+            'problem=f"setup cannot read it ({reason})")\n'
+        ),
+        new="            return None\n",
+        tests=("tests/test_setup.py::test_b9_352_an_rcm_service_setup_cannot_read_closes",),
+    ),
+    Mutant(
+        # `--config` 없는 rcm 서비스를 건너뛴다 — 어느 설정 · data_dir 인지 모르는데 쓴다(결정 352)
+        name="setup-scan-no-config-allowed",
+        path="src/remote_ci_monitor/setup.py",
+        old=(
+            '            return problem("it names no --config, so setup cannot tell which config '
+            'it reads")\n'
+        ),
+        new="            return None\n",
+        tests=("tests/test_setup.py::test_b9_352_an_rcm_service_setup_cannot_read_closes",),
+    ),
+    Mutant(
+        # 서비스 venv 의 editable 소스(체크아웃)를 모른다(결정 352)
+        name="setup-scan-checkout-missed",
+        path="src/remote_ci_monitor/setup.py",
+        old="    checkout = _editable_checkout(venv) if venv is not None else None\n",
+        new="    checkout = None\n",
+        tests=(
+            "tests/test_setup.py::test_b9_352_setup_refuses_a_production_target_whatever_shell_built_it",
+        ),
+    ),
+    Mutant(
+        # 서비스가 실행하는 venv 를 모른다(결정 352)
+        name="setup-scan-venv-missed",
+        path="src/remote_ci_monitor/setup.py",
+        old="    venv = _venv_of(sf.program, sf.env)\n",
+        new="    venv = None\n",
+        tests=(
+            "tests/test_setup.py::test_b9_352_setup_refuses_a_production_target_whatever_shell_built_it",
+        ),
+    ),
+    Mutant(
         # 마지막 doctor 줄이 맨 이름 rcm 이다 — PATH 의 다른 빌드가 그 머신을 잰다(P5 B-E7)
         name="setup-doctor-line-bare-rcm",
         path="src/remote_ci_monitor/core/setup.py",
