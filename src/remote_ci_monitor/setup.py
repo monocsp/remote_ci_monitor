@@ -388,9 +388,11 @@ def _ask_bind(ask: _Ask, world: World) -> str:
         index = _whole_number(answer)
         if index is not None and 1 <= index <= len(choices):
             return choices[index - 1][0]
-        if answer and not core.is_address(answer):
-            ask.say(f"{answer}: {core.NAME_NOT_ADDRESS}")
+        problem = core.address_problem(answer) if answer else None
+        if problem is not None:
+            ask.say(f"{answer}: {problem}")
             continue
+        answer = core.normal_address(answer) if answer else answer
         if answer and world.is_local_address(answer):
             return answer
         ask.say(f"{answer or '(empty)'} is not an address of this machine")
@@ -659,8 +661,12 @@ def _server(
     template = cli.read_template("server.toml").decode("utf-8")
     if args.bind is not None:
         bind = args.bind.strip()
-        if not core.is_address(bind):  # 이름은 풀지 않는다 — DNS · mDNS 를 묻지 않는다(P5 A-E7)
-            raise SetupUsage(f"--bind {bind}: {core.NAME_NOT_ADDRESS}, such as 0.0.0.0")
+        problem = core.address_problem(bind)  # 이름은 풀지 않는다 — DNS · mDNS 를 묻지 않는다
+        if problem == core.NAME_NOT_ADDRESS:
+            raise SetupUsage(f"--bind {bind}: {problem}, such as 0.0.0.0")
+        if problem is not None:  # 괄호를 친 주소(P6 재확인 6)
+            raise SetupUsage(f"--bind {bind}: {problem}")
+        bind = core.normal_address(bind)
         if not world.is_local_address(bind):
             raise SetupUsage(
                 f"--bind {bind} is not an address of this machine — use one of its interface "

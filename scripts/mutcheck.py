@@ -3505,11 +3505,34 @@ MUTANTS = (
         name="setup-bind-name-resolved",
         path="src/remote_ci_monitor/setup.py",
         old=(
-            "        if not core.is_address(bind):  "
-            "# 이름은 풀지 않는다 — DNS · mDNS 를 묻지 않는다(P5 A-E7)\n"
+            "        problem = core.address_problem(bind)  "
+            "# 이름은 풀지 않는다 — DNS · mDNS 를 묻지 않는다\n"
         ),
-        new="        if False:\n",
+        new=(
+            "        problem = None if world.is_local_address(bind) else "
+            "core.address_problem(bind)\n"
+        ),
         tests=("tests/test_setup.py::test_s10_bind_takes_an_address_not_a_name",),
+    ),
+    Mutant(
+        # 괄호를 친 IPv6 주소(`[::1]`)를 이름이라고 거절한다 — 무엇을 고칠지 틀리게 말한다
+        # (P6 재확인 6)
+        name="setup-bind-brackets-called-a-name",
+        path="src/remote_ci_monitor/core/setup.py",
+        old="        return BRACKETED_ADDRESS\n",
+        new="        return NAME_NOT_ADDRESS\n",
+        tests=("tests/test_setup.py::test_b8_6_a_bracketed_bind_is_told_to_drop_the_brackets",),
+    ),
+    Mutant(
+        # 모두 0 인 IPv6(`0:0:0:0:0:0:0:0`)를 그대로 적는다 — `::` 과 다른 글자라 「모든 주소」
+        # 규칙이 보지 못한다(P6 재확인 6)
+        name="setup-bind-ipv6-not-normalized",
+        path="src/remote_ci_monitor/setup.py",
+        old="        bind = core.normal_address(bind)\n",
+        new="        pass\n",
+        tests=(
+            "tests/test_setup.py::test_b8_6_an_all_zero_ipv6_bind_is_written_as_the_all_address",
+        ),
     ),
     Mutant(
         # 역할 스캔이 읽지 못한 설정으로 setup 을 멈춘다 — TOML · UTF-8 이 아닌 server.toml 하나가

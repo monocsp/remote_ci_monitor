@@ -35,10 +35,10 @@ of a key bumps that number and is listed here.
   order that replaces a service already loaded or rewritten with `--force service`, a
   `to remove: …` line (it unloads and deletes the installed service file only when `cmp` finds
   it is the one setup wrote), the `loginctl enable-linger` line before the start on Linux and a
-  worker's token line before its start, and its last `rcm doctor` line names the `rcm` the service runs.
-  `--bind` takes an address, not a name; a `server.toml` setup cannot read is a warning that
-  `--force config` fixes; a service manager that does not answer is "could not tell", not "not
-  loaded".
+  worker's token line before its start, and its last `rcm doctor` line names the `rcm` the service
+  runs. `--bind` takes an address, not a name, and an IPv6 one without brackets; a `server.toml`
+  setup cannot read is a warning that `--force config` fixes; a service manager that does not
+  answer is "could not tell", not "not loaded".
   ([#272](https://github.com/monocsp/remote_ci_monitor/pull/272))
 - **`lanes = 0` runs a server that only hands jobs out.** It runs no job itself: `@local` is not
   alive and never a candidate, its probes do not run, `--machine @local`, `rcm recheck @local`

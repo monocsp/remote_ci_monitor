@@ -160,6 +160,10 @@ def missing_for_yes(role: str, given: Mapping[str, Any]) -> list[str]:
 NAME_NOT_ADDRESS = "give an address, not a name"
 
 
+#: 괄호를 친 IPv6 주소(`[::1]`)의 거절 — 이름이 아니라 괄호가 문제다(P6 재확인 6)
+BRACKETED_ADDRESS = "write an IPv6 address without the brackets, such as ::1"
+
+
 def is_address(text: str) -> bool:
     """IPv4 · IPv6 주소 글자인가. 이름(`localhost` · `macmini.local`)은 아니다 — 풀지 않는다."""
     try:
@@ -167,6 +171,23 @@ def is_address(text: str) -> bool:
     except ValueError:
         return False
     return True
+
+
+def address_problem(text: str) -> str | None:
+    """`--bind` 글자의 문제 — 주소면 None, 괄호를 친 주소(`[::1]`)면 괄호를 빼라는 말, 그 밖은
+    이름이라는 말. 이름을 풀지 않는다."""
+    if is_address(text):
+        return None
+    if text.startswith("[") and text.endswith("]") and is_address(text[1:-1]):
+        return BRACKETED_ADDRESS
+    return NAME_NOT_ADDRESS
+
+
+def normal_address(text: str) -> str:
+    """주소를 적는 꼴 하나로 — IPv6 은 줄인 꼴(`0:0:0:0:0:0:0:0` → `::`, `0:0::1` → `::1`)이다.
+    그래야 `bind_kind` 의 `::` · `::1` 과 같은 글자로 견준다. IPv4 는 그대로다."""
+    address = ipaddress.ip_address(text)
+    return str(address) if address.version == 6 else text
 
 
 def bind_kind(address: str) -> str:

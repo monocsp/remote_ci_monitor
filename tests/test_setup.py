@@ -1627,3 +1627,43 @@ def test_b8_5_an_unreadable_server_config_still_finds_the_client_role(cfg, monke
     roles, warning = setup.scan_roles(os.environ)
     assert warning is not None and "could not read" in warning
     assert roles == ["client"], roles
+
+
+def test_b8_6_a_bracketed_bind_is_told_to_drop_the_brackets(cfg, tmp_path):
+    # LOW: `[::1]` 은 이름이 아니라 괄호를 친 주소다 — 그렇게 말한다. 괄호 친 이름은 이름이다
+    fake = Fake(local=("::1",))
+    argv = coordinator_args(tmp_path / "data")
+    argv[argv.index("--bind") + 1] = "[::1]"
+    assert go(fake, *argv) == 2
+    err = fake.err.getvalue()
+    assert "without the brackets" in err and "not a name" not in err, err
+    fake = Fake()
+    argv[argv.index("--bind") + 1] = "[my-host]"
+    assert go(fake, *argv) == 2
+    assert "give an address, not a name" in fake.err.getvalue()
+    assert not (cfg / "server.toml").exists()
+
+
+@pytest.mark.parametrize("spelled", ["0:0:0:0:0:0:0:0", "::0", "0::"])
+def test_b8_6_an_all_zero_ipv6_bind_is_written_as_the_all_address(cfg, tmp_path, spelled):
+    # 모두 0 인 IPv6 꼴은 `::` 로 적는다 — 그래야 「모든 주소」 경고와 같은 규칙으로 읽힌다
+    seen: list[str] = []
+
+    def local(address):
+        seen.append(address)
+        return address == "::"
+
+    fake = Fake(is_local_address=local)
+    argv = coordinator_args(tmp_path / "data")
+    argv[argv.index("--bind") + 1] = spelled
+    assert go(fake, *argv) == 0, fake.text
+    assert read_toml(cfg / "server.toml")["server"]["bind"] == "::"
+    assert seen == ["::"]
+
+
+def test_b8_6_a_typed_bracketed_address_is_asked_again(cfg, tmp_path):
+    answers = ["coordinator-worker", "[::1]", "127.0.0.1", "", "", "n", ""]
+    fake = Fake(answers=answers)
+    assert go(fake, "--data-dir", str(tmp_path / "data"), "--label", "test.rcm.server") == 0
+    assert "without the brackets" in fake.err.getvalue()
+    assert read_toml(cfg / "server.toml")["server"]["bind"] == "127.0.0.1"

@@ -195,7 +195,9 @@ loaded before setup ran, the line adds that it may not be one setup wrote.
   connects to nothing.
 - `--bind` must be an address of this machine or `0.0.0.0`, written as an address: a name
   (`localhost`, `macmini.local`) is refused with exit 2, `give an address, not a name`, because
-  setup looks no name up. A Tailscale address is the
+  setup looks no name up. An IPv6 address goes without brackets (`[::1]` is refused with exit 2
+  and that hint) and is written in its short form, so `0:0:0:0:0:0:0:0` is `::`, every address.
+  A Tailscale address is the
   recommended choice: setup writes `advertise = false` (mDNS would hand LAN workers an address
   they cannot reach, so give workers the URL) and warns that everyone on the tailnet can read the
   queue. A LAN address or `0.0.0.0` gets the warning that anyone on the network can read the queue,
