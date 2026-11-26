@@ -2782,3 +2782,34 @@ def test_b12_l2_a_file_another_error_kept_from_setup_is_not_skipped_quietly(
         assert code == 1, fake.text
         assert str(plist) in err and "refusing" in err, err
         _nothing_written(cfg, tmp_path / "data")
+
+
+@pytest.mark.parametrize("where", ["home-data", "xdg-data"])
+def test_b12_l3_units_in_the_data_home_are_seen(cfg, home, tmp_path, where):
+    # batch 12 L3(v1-5 · v1-7): systemd 는 `~/.local/share/systemd/user` 와
+    # `$XDG_DATA_HOME/systemd/user` 의 사용자 유닛도 읽는다 — 스캔도 그 자리를 본다
+    data = tmp_path / "unit-data"
+    config = tmp_path / "unit-config" / "worker.toml"
+    config.parent.mkdir(parents=True)
+    config.write_text(f'[worker]\ndata_dir = "{data}"\n')
+    folder = {
+        "home-data": home / ".local" / "share" / "systemd" / "user",
+        "xdg-data": tmp_path / "xdg-data" / "systemd" / "user",
+    }[where]
+    folder.mkdir(parents=True)
+    unit = folder / "rcm-worker.service"
+    unit.write_text(f"[Service]\nExecStart=/opt/v/bin/rcm worker --config {config}\n")
+    fake = Fake(platform="linux")
+    assert go(fake, *coordinator_args(data / "x")) == 1, fake.text
+    assert "rcm-worker's data_dir — refusing" in fake.err.getvalue(), fake.text
+
+
+def test_b12_l3_the_system_places_include_xdg_and_usr_local(home, monkeypatch):
+    # `/etc/xdg/systemd/user` 와 `/usr/local/lib/systemd/{system,user}` 도 스캔한다. system 은
+    # root 가 읽는 자리, user 는 사용자 유닛 자리다(경로만 견준다 — 진짜 자리는 읽지 않는다)
+    monkeypatch.setattr(setup, "SYSTEM_SERVICE_PLACES", REAL_SYSTEM_SERVICE_PLACES)
+    monkeypatch.setattr(setup, "real_path", lambda path: path)
+    places = {place: root for place, root, _ in setup.service_places([home], {})}
+    assert places.get(Path("/etc/xdg/systemd/user")) is False, places
+    assert places.get(Path("/usr/local/lib/systemd/system")) is True, places
+    assert places.get(Path("/usr/local/lib/systemd/user")) is False, places
