@@ -5840,6 +5840,37 @@ MUTANTS = (
             "test_rl8_a_irreversible_cancel_unconfirmed_in_the_new_window_closes_and_holds",
         ),
     ),
+    Mutant(
+        # 펜싱된 프로세스가 0 이 아닌 코드로 끝난다 — 감독자가 되살려 새 세션을 되펜싱하는
+        # 핑퐁이 된다(RL10 · 결정 258)
+        name="fenced-exit-nonzero",
+        path="src/remote_ci_monitor/remote_worker.py",
+        old="            return 0  # 펜싱 — 감독자가 되살리지 않는다(결정 258)\n",
+        new="            return 1\n",
+        tests=(
+            "tests/test_worker_session_m5tb.py::"
+            "test_rl10_a_fake_supervisor_does_not_bring_back_a_fenced_process",
+        ),
+    ),
+    Mutant(
+        # 유예를 잡의 세션이 아니라 그 이름의 현재 세션의 들음으로 잰다 — 펜싱된 A 가 확인을
+        # 못 보내면 X 가 살아 있는 B 때문에 영영 닫히지 않는다(RL10)
+        name="grace-heard-of-the-current-session",
+        path="src/remote_ci_monitor/remote_workers.py",
+        old=(
+            "        for job in self.store.busy_remote_jobs():\n"
+            '            key = job.worker_session_id or f"legacy:{job.worker_name}"\n'
+        ),
+        new=(
+            "        for job in self.store.busy_remote_jobs():\n"
+            "            key = self.store.current_session(job.worker_name)"
+            ' or f"legacy:{job.worker_name}"\n'
+        ),
+        tests=(
+            "tests/test_worker_session_m5tb.py::"
+            "test_rl10_an_unconfirmed_fenced_process_keeps_the_job_until_its_last_heard_plus_g",
+        ),
+    ),
 )
 
 

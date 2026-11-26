@@ -22,10 +22,10 @@ from typing import Any
 
 import pytest
 
-from remote_ci_monitor import __version__
+from remote_ci_monitor import __version__, cli
 from remote_ci_monitor import remote_worker as rw
-from remote_ci_monitor.client import ClientError
-from remote_ci_monitor.config import WorkerConfig, parse_preset
+from remote_ci_monitor.client import Client, ClientError
+from remote_ci_monitor.config import WorkerConfig, disconnect_grace, parse_preset
 from remote_ci_monitor.core.model import CANCELLING, LOST, QUEUED, RUNNING, SUCCEEDED
 from remote_ci_monitor.remote_worker import RemoteWorker, WorkerExit
 from test_worker_api import WORKER_PRESETS, WorkerServer, sh
@@ -600,6 +600,86 @@ def test_w5_a_fenced_worker_process_stops_and_exits_zero(srv, tmp_path):
     t.join(30)
     assert not t.is_alive()
     assert out["code"] == 0 and w.fenced.is_set()
+
+
+def test_rl10_a_fake_supervisor_does_not_bring_back_a_fenced_process(srv, tmp_path):
+    """가짜 감독자(launchd `KeepAlive.SuccessfulExit=false` · systemd `Restart=on-failure` 흉내 —
+    0 이 아닌 종료면 새 프로세스를 띄운다) 아래의 A 를 같은 토큰의 B 가 펜싱한다. A 는 종료 0 이라
+    되살아나지 않는다 — 1분 안 `register` 는 A 하나 · B 하나로 2번이고 B 가 현재 세션으로 남는다."""
+    url = f"http://127.0.0.1:{srv.port}"
+    registers: list[str] = []
+    real = srv.app.worker_register
+
+    def counting(token: Any, body: Any) -> dict[str, Any]:
+        if token.name == "build-02":
+            registers.append(str((body or {}).get("worker_session_id")))
+        return real(token, body)
+
+    srv.app.worker_register = counting  # type: ignore[method-assign]
+    procs: list[RemoteWorker] = []
+    codes: list[int | None] = []
+
+    def supervisor() -> None:
+        for _ in range(4):  # 핑퐁이면 여기서 되살린다
+            cfg = WorkerConfig(
+                server=url, token=srv.tokens["build-02"], data_dir=str(tmp_path / "w"), lanes=1
+            )
+            w = RemoteWorker(cfg, log=lambda m: None)
+            register = w.register
+
+            def short_polls(w: RemoteWorker = w, register: Any = register) -> dict[str, Any]:
+                answer = register()
+                w.claim_wait_seconds = 1  # 시험 시간만 — 레인이 20초 claim 을 다 기다리지 않게
+                return answer
+
+            w.register = short_polls  # type: ignore[method-assign]
+            procs.append(w)
+            try:
+                code: int | None = w.run()
+            except WorkerExit as e:
+                code = e.code
+            codes.append(code)
+            if code == 0:
+                return
+
+    started = time.monotonic()
+    t = threading.Thread(target=supervisor, daemon=True)
+    t.start()
+    for _ in range(200):
+        if procs and srv.store.get_session(procs[0].session_id) is not None:
+            break
+        threading.Event().wait(0.05)
+    srv.new_process("build-02")
+    srv.registered("build-02")  # B — A 를 펜싱한다
+    b = srv.session("build-02")
+    procs[0].heartbeat_once()  # A 의 다음 요청이 409 session_fenced
+    while t.is_alive() and len(registers) <= 2 and time.monotonic() - started < 40:
+        threading.Event().wait(0.05)
+    threading.Event().wait(1.0)  # 감독자가 되살릴 틈
+    assert time.monotonic() - started < 60
+    assert len(registers) <= 2 and len(procs) == 1, registers
+    assert codes == [0] and not t.is_alive()
+    assert srv.store.current_session("build-02") == b  # B 가 되펜싱되지 않았다
+
+
+def test_rl10_an_unconfirmed_fenced_process_keeps_the_job_until_its_last_heard_plus_g(srv):
+    """A 가 분단돼 확인을 못 보내면 X 는 A 의 마지막 들음 + G 까지 busy, 그 뒤 `lost`."""
+    srv.registered("build-02")
+    jid = running(srv)
+    grace = disconnect_grace(srv.cfg.server)
+    srv.clock.advance(5)
+    assert srv.heartbeat("build-02", jobs=[jid])[0] == 200  # A 의 마지막 들음
+    srv.new_process("build-02")
+    srv.registered("build-02")  # B 가 A 를 펜싱한다 — A 는 분단돼 모른다
+    for _ in range(int(grace // 30)):
+        srv.clock.advance(30)
+        assert srv.heartbeat("build-02", jobs=[])[0] == 200  # B 는 살아 있다
+        assert srv.app.mark_lost_workers(srv.clock.now) == []
+        assert job_of(srv, jid).state == RUNNING  # 확인 전까지 그룹 자리가 안 풀린다
+    srv.clock.advance(grace - (grace // 30) * 30 + 1)
+    assert srv.app.mark_lost_workers(srv.clock.now) == [jid]
+    j = job_of(srv, jid)
+    assert j.state == LOST and j.summary_code == "worker_unreachable"
 
 
 def test_parse_preset_accepts_the_irreversible_key_used_here():
@@ -1259,3 +1339,91 @@ def test_rl44_hold_release_events_are_one_for_a_b_c_and_zero_for_d(srv, tmp_path
     assert body.get("hold_released") is True, (status, body)
     assert _released_events(srv, b) == 1
     assert _released_events(srv, d) == 1 and _released_events(srv, c) == 1  # 다시 세지 않는다
+
+
+# ── 기준선(RL6 (a)) ─────────────────────────────────────────────────────────
+
+#: 36069787(이 PR 의 base, v0.11.1)의 종료 원격 잡 문서 키 — `rcm wait` JSON 의 몸통이다. 이 PR 은
+#: `App._with_hold` 로 `hold` 하나만 더한다(`git diff 36069787 -- src/remote_ci_monitor/server.py
+#: src/remote_ci_monitor/core/status.py` 의 잡 문서 쪽 변경은 그것뿐이다). 잠금이다.
+BASE_TERMINAL_DOC_KEYS = frozenset(
+    (
+        "action",
+        "artifacts",
+        "attempt",
+        "cancelled_by",
+        "chain_id",
+        "concurrent_at_start",
+        "created_at",
+        "display_pool",
+        "exit_code",
+        "failed_step",
+        "finished_at",
+        "host_key",
+        "id",
+        "inputs",
+        "job_seconds",
+        "joiners",
+        "keep",
+        "key",
+        "last_step",
+        "link",
+        "max_attempts",
+        "not_before",
+        "placement",
+        "pool",
+        "preset",
+        "ran_on",
+        "requester",
+        "retried_as",
+        "retry_of",
+        "shelf",
+        "source",
+        "start_deadline",
+        "started_at",
+        "state",
+        "step_timeline",
+        "summary",
+        "summary_args",
+        "summary_code",
+        "superseded_by",
+        "target_worker",
+        "timeout_seconds",
+        "transitions",
+        "url",
+        "waited_seconds",
+        "worker",
+    )
+)
+#: 실패 · 시간초과 잡에만 있던 키(같은 base)
+BASE_FAILURE_KEYS = frozenset(("failures", "failures_truncated"))
+
+
+@pytest.mark.parametrize(
+    ("outcome", "exit_code", "wait_code"),
+    [("succeeded", 0, 0), ("failed", 1, 1), ("timed_out", None, 2), ("cancelled", -15, 2)],
+)
+def test_rl6_a_an_unbroken_remote_job_keeps_its_exit_code_and_the_wait_json_keys(
+    srv, monkeypatch, capsys, outcome, exit_code, wait_code
+):
+    """(a) 끊김 없는 원격 잡의 성공 · 실패 · 시간초과 · 취소: `rcm wait` 종료 코드는 0 · 1 · 2 · 2
+    그대로이고, wait JSON 은 기존 키를 모두 지닌 채 `hold`(null)만 더한다."""
+    srv.registered("build-02")
+    jid = running(srv)
+    if outcome == "cancelled":
+        assert srv.cancel(jid)[1]["state"] == "cancelling"
+        assert srv.heartbeat("build-02", jobs=[jid])[1]["cancel"] == [jid]
+    assert srv.finish("build-02", jid, outcome, exit_code=exit_code)[0] == 200
+    url = f"http://127.0.0.1:{srv.port}"
+    monkeypatch.setattr(cli, "_client", lambda *a, **kw: Client(url, srv.tokens["alice"]))
+    args = cli.argparse.Namespace(job=jid, timeout=30, poll=True, return_on_action=False)
+    assert cli.cmd_wait(args) == wait_code
+    lines = [ln for ln in capsys.readouterr().out.splitlines() if ln.startswith("{")]
+    got = json.loads(lines[-1])
+    assert got["state"] == outcome and got["wait_exit_code"] == wait_code
+    keys = set(got) - {"job_id", "wait_exit_code"}  # `rcm wait` 가 늘 더하던 두 키
+    failing = outcome in ("failed", "timed_out")
+    base = BASE_TERMINAL_DOC_KEYS | (BASE_FAILURE_KEYS if failing else frozenset())
+    assert base - keys == set()  # 기존 키 불변
+    assert keys - base == {"hold"}  # 더한 키만 있다
+    assert got["hold"] is None
