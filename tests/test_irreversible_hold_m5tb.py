@@ -246,6 +246,31 @@ def test_rl48_the_other_order_blocks_too(store):
     assert claim_remote(store, "build-02") is None  # 그룹 NULL 옛 잡도 유효 그룹으로 막힌다
 
 
+@pytest.mark.parametrize("claimant", [False, True])
+def test_gap3_a_job_running_before_the_mark_blocks_the_synthetic_group(store, claimant):
+    """# GAP3 reload 로 `irreversible = true` 가 붙는 날, 이미 도는 그 프리셋의 잡은 그룹이
+    NULL 이다(claim 때 표식이 없었다). 그 잡도 유효 그룹 `irreversible:<프리셋>` 으로 센다 —
+    아니면 새 제출이 막히지 않고 같은 명령이 두 번 돈다. claim 의 두 길(옛 풀 길 · M5n 후보 길)
+    모두에서."""
+    from remote_ci_monitor.store import Claimant
+
+    store.irreversible = {}  # 표식 전
+    register(store, "build-02")
+    register(store, "lin-01", pool=LINUX)
+    old = enqueue(store, "deploy", group=None, tree="old")
+    got = claim_remote(store, "build-02")
+    assert got.id == old.id and got.concurrency_group is None
+    store.irreversible = {"deploy": (SYNTH, SCOPE_GLOBAL)}  # reload 가 표식을 붙였다
+    new = enqueue(store, "deploy", group=SYNTH, scope=SCOPE_GLOBAL, pool=LINUX, tree="new")
+    if claimant:
+        c = Claimant(worker="lin-01", pool=LINUX, host_key=None, fingerprint_hash=None)
+        second = store.claim(1, NOW, claimant=c)
+    else:
+        second = claim_remote(store, "lin-01", pool=LINUX)
+    assert second is None
+    assert store.get_job(new.id).state == QUEUED
+
+
 def test_rl48_config_fills_a_synthetic_global_group_for_an_irreversible_preset():
     p = parse_preset({"name": "ship", "argv": ["sh", "-c", "true"], "irreversible": True})
     assert p.irreversible is True

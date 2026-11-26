@@ -6701,6 +6701,28 @@ MUTANTS = (
             "test_gap2_a_fenced_sessions_natural_end_goes_as_the_narrow_confirm",
         ),
     ),
+    Mutant(
+        # GAP3 후보 길이 도는 잡의 저장된 그룹만 본다 — 표식 전에 claim 된 그룹 NULL 잡과 겹친다
+        name="busy-group-raw",
+        path="src/remote_ci_monitor/store.py",
+        old='AND b.eg = c.eg AND ("  # mutcheck: busy-group-raw\n',
+        new='AND b.concurrency_group = c.eg AND ("\n',
+        tests=(
+            "tests/test_irreversible_hold_m5tb.py::"
+            "test_gap3_a_job_running_before_the_mark_blocks_the_synthetic_group",
+        ),
+    ),
+    Mutant(
+        # GAP3 옛 풀 길도 같다
+        name="busy-group-raw-pool",
+        path="src/remote_ci_monitor/store.py",
+        old='AND b.eg = c.eg "  # mutcheck: busy-group-raw-pool\n',
+        new='AND b.concurrency_group = c.eg "\n',
+        tests=(
+            "tests/test_irreversible_hold_m5tb.py::"
+            "test_gap3_a_job_running_before_the_mark_blocks_the_synthetic_group",
+        ),
+    ),
 )
 
 

@@ -3465,19 +3465,22 @@ class Store:
             eff = self._effective_jobs_sql()
             if claimant is None:
                 hold_sql, hold_params = _open_hold_sql(None, pool)
+                # 도는 잡도 유효 그룹으로 센다(P6 GAP3) — 표식 전에 claim 된 그 프리셋의 잡은
+                # 그룹이 NULL 이지만 같은 명령이다
                 row = conn.execute(
                     f"SELECT c.id, c.preset, c.eg, c.es, c.concurrency_group AS g0 FROM {eff[0]} c "
                     "WHERE c.state=? AND c.pool=? "
                     "AND (c.start_deadline IS NULL OR c.start_deadline >= ?) "
-                    "AND (c.eg IS NULL OR NOT EXISTS (SELECT 1 FROM jobs b "
-                    f"WHERE b.state IN ({busy}) AND b.concurrency_group = c.eg "
-                    "AND (b.pool=? OR c.es=? OR b.concurrency_scope=?))) "
+                    f"AND (c.eg IS NULL OR NOT EXISTS (SELECT 1 FROM {eff[0]} b "
+                    f"WHERE b.state IN ({busy}) AND b.eg = c.eg "  # mutcheck: busy-group-raw-pool
+                    "AND (b.pool=? OR c.es=? OR b.es=?))) "
                     f"AND {hold_sql} ORDER BY c.priority DESC, c.id LIMIT 1",
                     (
                         *eff[1],
                         QUEUED,
                         pool,
                         ts,
+                        *eff[1],
                         *busy_states,
                         pool,
                         SCOPE_GLOBAL,
@@ -3604,14 +3607,16 @@ class Store:
                 f"({','.join('?' * len(known))}))"
             )
             params += [PLACEMENT_CAPABLE, *known]
+        # 도는 잡도 유효 그룹으로 센다(P6 GAP3) — 표식 전에 claim 된 그룹 NULL 잡도 막는다
         group_sql = (
-            "(c.eg IS NULL OR NOT EXISTS (SELECT 1 FROM jobs b "
-            f"WHERE b.state IN ({busy}) AND b.concurrency_group = c.eg AND ("
+            f"(c.eg IS NULL OR NOT EXISTS (SELECT 1 FROM {eff[0]} b "
+            f"WHERE b.state IN ({busy}) AND b.eg = c.eg AND ("  # mutcheck: busy-group-raw
             "c.es = ? "
             "OR (c.es = ? AND (? IS NULL OR b.host_key IS NULL OR b.host_key = ?)) "
             "OR (c.es NOT IN (?, ?) AND b.pool = ?))))"
         )
         params_group = [
+            *eff[1],
             *busy_states,
             SCOPE_GLOBAL,
             SCOPE_HOST,
