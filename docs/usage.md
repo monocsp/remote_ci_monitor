@@ -364,8 +364,10 @@ rcm: native Windows is not supported — install and run rcm inside WSL (see doc
    A checkout made by Git for Windows with `core.autocrlf` turned on has CRLF line ends, and a
    shell script with CRLF fails on the build machine. Clone with the git inside WSL, or add
    `*.sh text eol=lf` to the repository's `.gitattributes`.
-7. **`--notify` shows nothing.** WSL has no desktop notifier that rcm uses, so
-   `rcm wait --notify` prints one warning line instead. The JSON and the exit code do not change.
+7. **`--notify` may show nothing.** On Linux `--notify` runs `notify-send`. WSL usually has none
+   installed, and then `rcm wait --notify` prints one warning line instead. The JSON and the exit
+   code do not change. Whether an installed `notify-send` shows anything depends on WSLg (not
+   verified).
 
 ## 4. Your first job
 

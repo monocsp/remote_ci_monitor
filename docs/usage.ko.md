@@ -354,8 +354,10 @@ rcm: native Windows is not supported — install and run rcm inside WSL (see doc
    `/mnt/c` 에서는 스크립트의 실행 비트가 제대로 남지 않고 파일 읽기도 느리다. Git for Windows 가
    `core.autocrlf` 를 켠 채 받은 저장소는 줄 끝이 CRLF 이고, CRLF 셸 스크립트는 빌드 머신에서
    돌지 않는다. WSL 안의 git 으로 받거나, 저장소의 `.gitattributes` 에 `*.sh text eol=lf` 를 적는다.
-7. **`--notify` 는 아무것도 띄우지 않는다.** WSL 에는 rcm 이 쓰는 데스크톱 알림 도구가 없어서
-   `rcm wait --notify` 는 대신 경고 한 줄을 찍는다. JSON 과 종료 코드는 바뀌지 않는다.
+7. **`--notify` 는 아무것도 띄우지 않을 수 있다.** Linux 에서 `--notify` 는 `notify-send` 를 부른다.
+   WSL 에는 보통 이것이 깔려 있지 않고, 그러면 `rcm wait --notify` 는 대신 경고 한 줄을 찍는다.
+   JSON 과 종료 코드는 바뀌지 않는다. `notify-send` 를 깔았을 때 알림이 뜨는지는 WSLg 에 달려
+   있다(확인하지 못했다).
 
 ## 4. 첫 작업
 
