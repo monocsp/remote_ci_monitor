@@ -380,6 +380,19 @@ def test_rl41_a_flag_between_the_check_and_popen_is_caught_by_the_first_immediat
     assert time.monotonic() - began < 1 + 4  # grace_J + 4초, 기준선 20초의 4분의 1
 
 
+def test_rl43_an_observer_failing_right_after_popen_does_not_abandon_the_process(tmp_path):
+    """`spawned` 가 어떤 예외를 내도 러너는 이미 띄운 프로세스를 끝까지 펌프한다(P3 1라운드
+    HIGH)."""
+    obs = Obs()
+
+    def broken(pid: int) -> None:
+        raise RuntimeError("observer broke")
+
+    obs.spawned = broken  # type: ignore[method-assign]
+    result = run_job(spec(tmp_path, ["sh", "-c", "echo hi"], irreversible=True), obs)
+    assert result.rc == 0 and b"hi" in obs.out and result.group_gone is True
+
+
 def test_rl34_f_sigkill_follows_the_monotonic_clock_when_the_wall_clock_goes_back(tmp_path):
     """(f) SIGTERM 뒤 워커 벽시계가 1시간 뒤로 가도 SIGKILL 은 단조 시계로 grace + 2초 안(F67)."""
     obs = Obs()

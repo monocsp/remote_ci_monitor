@@ -188,6 +188,7 @@ class _RemoteObserver:
         self.self_stop_seconds = 0
         self.closed_stop = threading.Event()
         self.closed_state: str | None = None  # 서버가 알린 끝 상태(W4)
+        self.finish_sent = False  # `_finish` 를 거쳤다(보냈거나 못 보낸 보고로 남겼다)
 
     def phase(self, phase: str) -> None:
         self.proc.report(
@@ -278,11 +279,29 @@ class _RemoteObserver:
         return self.proc.stopping.is_set() or self.self_stop.is_set()
 
     def spawning(self) -> None:
-        """Popen 직전 확인을 지났다 — `proc.json` 에 「띄우는 중」(결정 333)."""
-        self.proc._write_proc(self.job_id, None)
+        """Popen 직전 확인을 지났다 — `proc.json` 에 「띄우는 중」(결정 333).
+
+        이 기록이 없으면 다음 프로세스는 「띄운 적 없음」(CONFIRMED)으로 읽는다. 그래서 표식 잡은
+        기록하지 못하면 띄우지 않는다 — 도는 그룹을 사라졌다고 판정받는 것보다 안 띄우는 것이
+        안전하다. 일반 잡은 홀드가 없으니 로그 한 줄 뒤 띄운다(P3 1라운드 HIGH)."""
+        try:
+            self.proc._write_proc(self.job_id, None)
+        except OSError as e:
+            self.proc.log(f"#{self.job_id} session folder: {type(e).__name__}")
+            if self.irreversible:  # mutcheck: spawning-record-missing-still-spawns
+                raise RunnerError(
+                    "launch_failed",
+                    error=type(e).__name__,
+                    log=f"cannot record the process in the worker session folder: {e.strerror}",
+                ) from e
 
     def spawned(self, pid: int) -> None:
-        self.proc._write_proc(self.job_id, pid)
+        """띄운 뒤 `{pgid, start}`. 실패해도 잡은 멈추지 않는다 — 「띄우는 중」 기록이 남아 다음
+        프로세스는 그 그룹을 모름(UNKNOWN)으로 읽는다."""
+        try:
+            self.proc._write_proc(self.job_id, pid)
+        except OSError as e:  # mutcheck: spawned-record-error-escapes
+            self.proc.log(f"#{self.job_id} session folder: {type(e).__name__}")
 
     def server_closed(self, state: str, had_cancel: bool) -> None:
         """W4 표(§4.1.2, V2-6). 서버 상태는 이미 정해졌고 워커의 finish 는 확인으로만 쓰인다."""
@@ -1753,6 +1772,31 @@ class RemoteWorker:
         with self._lock:
             self._observers[job.id] = observer
         try:
+            self._run_claimed(lane, claimed, spec, job, observer)
+        except Exception as e:  # noqa: BLE001 — 예외가 레인 루프로 새면 잡이 `running` 에 멈춘다
+            if observer.finish_sent:  # mutcheck: run-claimed-error-leaves-job-running
+                raise
+            self.log(f"lane {lane}: #{job.id} worker error: {type(e).__name__}")
+            try:
+                observer.final_flush()
+            except Exception:  # noqa: BLE001
+                pass
+            # 러너가 띄운 그룹을 끝내고 확인했으면 그 값이 실린다. 모르면 싣지 않는다 — 서버는
+            # 표식 잡이면 홀드로 읽는다
+            self._finish(
+                job.id,
+                FAILED,
+                None,
+                f"worker error: {type(e).__name__}",
+                observer,
+                group_gone=getattr(e, "group_gone", None),
+            )
+            self._cleanup(spec, failed=True)
+
+    def _run_claimed(
+        self, lane: int, claimed: dict[str, Any], spec: RunSpec, job: Job, observer: Any
+    ) -> None:
+        try:
             self._write_claim(job.id, spec.irreversible, spec.disconnect_grace_seconds)
         except OSError as e:
             self.log(f"#{job.id} session folder: {type(e).__name__}")
@@ -1949,6 +1993,8 @@ class RemoteWorker:
         띄운 적이 없으면 참이다. 모르면 싣지 않는다 — 서버는 표식 잡이면 홀드로 읽는다.
         펜싱된 프로세스(W5)의 `lost` 는 좁은 확인(`worker_replaced`)으로 보낸다(결정 261).
         """
+        if observer is not None:
+            observer.finish_sent = True  # 바깥 안전망(`run_claimed`)이 두 번 보내지 않게
         with self._lock:
             self.cancel_requested.discard(job_id)
             self._observers.pop(job_id, None)  # 프로세스는 끝났다 — 감시할 것이 없다

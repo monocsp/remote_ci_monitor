@@ -6106,6 +6106,79 @@ MUTANTS = (
             "test_rl52_b_a_non_executable_command_under_the_supervisor_has_the_same_code",
         ),
     ),
+    # ── M5t-b P3 1라운드 HIGH — 관찰자의 기록 실패가 띄운 프로세스를 버린다 ──
+    Mutant(
+        # 러너가 `spawned` 의 예외를 올린다 — 펌프가 시작하지 않고 잡이 `running` 에 멈춘다
+        name="runner-spawned-error-escapes",
+        path="src/remote_ci_monitor/runner.py",
+        old=(
+            "            except Exception:  # noqa: BLE001  # mutcheck: "
+            "runner-spawned-error-escapes\n"
+            "                pass\n"
+        ),
+        new=(
+            "            except Exception:  # noqa: BLE001  # mutcheck: "
+            "runner-spawned-error-escapes\n"
+            "                raise\n"
+        ),
+        tests=(
+            "tests/test_job_supervisor_m5tb.py::"
+            "test_rl43_an_observer_failing_right_after_popen_does_not_abandon_the_process",
+        ),
+    ),
+    Mutant(
+        # 관찰자가 `proc.json` 쓰기 실패를 로그 없이 올린다 — 무엇이 빠졌는지 아무 데도 안 남는다
+        name="spawned-record-error-escapes",
+        path="src/remote_ci_monitor/remote_worker.py",
+        old=(
+            "        except OSError as e:  # mutcheck: spawned-record-error-escapes\n"
+            '            self.proc.log(f"#{self.job_id} session folder: {type(e).__name__}")\n'
+        ),
+        new=(
+            "        except OSError as e:  # mutcheck: spawned-record-error-escapes\n"
+            "            raise\n"
+        ),
+        tests=(
+            "tests/test_worker_session_m5tb.py::"
+            "test_rl31_c_a_proc_record_that_cannot_be_written_after_popen_keeps_the_job_watched",
+        ),
+    ),
+    Mutant(
+        # 「띄우는 중」 기록 없이 표식 잡을 띄운다 — 다음 프로세스가 도는 그룹을 CONFIRMED 로 읽는다
+        name="spawning-record-missing-still-spawns",
+        path="src/remote_ci_monitor/remote_worker.py",
+        old="            if self.irreversible:  # mutcheck: spawning-record-missing-still-spawns\n",
+        new="            if False:\n",
+        tests=(
+            "tests/test_worker_session_m5tb.py::"
+            "test_rl31_c_an_irreversible_job_whose_spawning_record_fails_starts_nothing",
+        ),
+    ),
+    Mutant(
+        # 바깥 안전망이 예외를 그대로 올린다 — 레인 루프가 로그만 남기고 잡이 `running` 에 멈춘다
+        name="run-claimed-error-leaves-job-running",
+        path="src/remote_ci_monitor/remote_worker.py",
+        old=(
+            "            if observer.finish_sent:  # mutcheck: "
+            "run-claimed-error-leaves-job-running\n"
+        ),
+        new="            if True:\n",
+        tests=(
+            "tests/test_worker_session_m5tb.py::"
+            "test_rl43_any_observer_error_after_popen_stops_the_job_and_reports_it",
+        ),
+    ),
+    Mutant(
+        # 펌프가 터졌을 때 그룹을 끝내지 않는다 — 명령이 감시 없이 계속 돈다
+        name="runner-abandon-leaves-group",
+        path="src/remote_ci_monitor/runner.py",
+        old="    # mutcheck: runner-abandon-leaves-group\n    signal_group(proc, signal.SIGTERM)\n",
+        new="    # mutcheck: runner-abandon-leaves-group\n    return False\n",
+        tests=(
+            "tests/test_worker_session_m5tb.py::"
+            "test_rl43_any_observer_error_after_popen_stops_the_job_and_reports_it",
+        ),
+    ),
 )
 
 

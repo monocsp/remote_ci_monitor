@@ -1194,6 +1194,141 @@ def test_rl38_the_session_files_follow_the_job(tmp_path):
     assert not jd.exists()
 
 
+# ── 관찰자의 기록 실패가 이미 띄운 프로세스를 버리지 않는다(P3 1라운드 HIGH · RL31 (c) · RL43) ──
+
+
+class _Runs(_Who):
+    """run_claimed 를 진짜 러너로 돌릴 만큼의 대역(phase · log 를 받는다)."""
+
+    def phase(self, job_id: int, phase: str) -> dict:
+        return {}
+
+    def log(self, job_id: int, chunk: bytes) -> dict:
+        return {}
+
+    def finish(self, job_id: int, outcome: str, rc: Any, summary: Any, **extra: Any) -> dict:
+        self.finished.append(
+            (self.session_id, job_id, {"outcome": outcome, "summary": summary, **extra})
+        )
+        return {}
+
+
+def _claim_of(job_id: int, argv: list[str], *, irreversible: bool) -> dict[str, Any]:
+    return {
+        "job": {
+            "id": job_id,
+            "preset": "ship" if irreversible else "ok",
+            "state": RUNNING,
+            "irreversible": irreversible,
+            "disconnect_grace_seconds": 600 if irreversible else None,
+            "source": {"mode": "tree"},
+        },
+        "preset": {"name": "ship" if irreversible else "ok", "argv": argv},
+    }
+
+
+def _run_claimed(w: RemoteWorker, claim: dict[str, Any]) -> None:
+    w._materialize = lambda spec, job: spec.workspace.mkdir(parents=True, exist_ok=True)
+    t = threading.Thread(target=w.run_claimed, args=(1, claim), daemon=True)
+    t.start()
+    t.join(20)
+    assert not t.is_alive()
+
+
+@pytest.mark.parametrize("irreversible", [False, True])
+def test_rl31_c_a_proc_record_that_cannot_be_written_after_popen_keeps_the_job_watched(
+    tmp_path, monkeypatch, irreversible
+):
+    """Popen 뒤 `proc.json` 쓰기가 디스크 가득으로 실패해도 잡은 감시 · 보고되고 끝난다. 그때 남은
+    기록은 「띄우는 중」(`pgid: null`)이라 다음 프로세스는 UNKNOWN 으로 읽는다 — 그룹을 사라졌다고
+    판정하지 않는다."""
+    fake = _Runs()
+    logs: list[str] = []
+    w = _worker(tmp_path, fake)
+    w.log = logs.append
+    w.prepare_sessions()
+    real = rw._write_json
+    seen: list[str] = []
+
+    def full_disk(path: Path, data: dict[str, Any]) -> None:
+        if path.name == "proc.json" and data.get("pgid") is not None:
+            seen.append(rw.judge_orphan(path.parent, 1.0, logs.append))
+            raise OSError(28, "No space left on device")
+        real(path, data)
+
+    monkeypatch.setattr(rw, "_write_json", full_disk)
+    _run_claimed(w, _claim_of(7, ["sh", "-c", "echo ran"], irreversible=irreversible))
+    assert seen == [rw.UNKNOWN]
+    assert w.running == {}
+    ((_, jid, body),) = fake.finished
+    assert jid == 7 and body["outcome"] == SUCCEEDED
+    if irreversible:
+        assert body["group_gone"] is True
+    assert any("#7 session folder: OSError" in m for m in logs)
+
+
+def test_rl31_c_an_irreversible_job_whose_spawning_record_fails_starts_nothing(
+    tmp_path, monkeypatch
+):
+    """「띄우는 중」 기록이 없으면 다음 프로세스는 「띄운 적 없음」(CONFIRMED)으로 읽는다 —
+    그래서 표식 잡은 그 기록 없이 띄우지 않고 `launch_failed` 로 끝낸다(그룹 없음). 일반 잡은
+    기록 없이 돈다."""
+    fake = _Runs()
+    w = _worker(tmp_path, fake)
+    w.prepare_sessions()
+    real = rw._write_json
+
+    def full_disk(path: Path, data: dict[str, Any]) -> None:
+        if path.name == "proc.json":
+            raise OSError(28, "No space left on device")
+        real(path, data)
+
+    monkeypatch.setattr(rw, "_write_json", full_disk)
+    ran = tmp_path / "ran"
+    _run_claimed(w, _claim_of(7, ["touch", str(ran)], irreversible=True))
+    assert len(fake.finished) == 1 and w.running == {}
+    ((_, _, body),) = fake.finished
+    assert body["outcome"] == "failed" and body["summary_code"] == "launch_failed"
+    assert body["summary_args"] == {"error": "OSError"} and body["group_gone"] is True
+    assert not ran.exists() and w.running == {}
+    fake.finished.clear()
+    _run_claimed(w, _claim_of(8, ["touch", str(ran)], irreversible=False))
+    ((_, _, body),) = fake.finished
+    assert body["outcome"] == SUCCEEDED and ran.exists() and w.running == {}
+
+
+@pytest.mark.parametrize("irreversible", [False, True])
+def test_rl43_any_observer_error_after_popen_stops_the_job_and_reports_it(
+    tmp_path, monkeypatch, irreversible
+):
+    """펌프 안의 관찰자 호출이 어떤 예외를 내도 띄운 그룹을 끝내고 finish 를 보낸다 — 레인 루프가
+    예외로 잡을 놓쳐 `running` 에 멈추지 않는다. 그룹이 사라졌음을 확인해 싣는다."""
+    fake = _Runs()
+    w = _worker(tmp_path, fake)
+    w.prepare_sessions()
+    pid_file = tmp_path / "pid"
+
+    def broken(self, data: bytes) -> None:
+        raise RuntimeError("observer broke")
+
+    monkeypatch.setattr(rw._RemoteObserver, "output", broken)
+    script = f"echo $$ > {pid_file}; echo hi; exec sleep 30"
+    _run_claimed(w, _claim_of(7, ["sh", "-c", script], irreversible=irreversible))
+    pid = int(pid_file.read_text())
+    try:
+        assert w.running == {}
+        with pytest.raises(ProcessLookupError):
+            os.kill(pid, 0)
+    finally:
+        try:
+            os.killpg(pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+    ((_, jid, body),) = fake.finished
+    assert jid == 7 and body["outcome"] == "failed"
+    assert body["summary"] == "worker error: RuntimeError" and body["group_gone"] is True
+
+
 # ── admin 이 푸는 길(RL45 PR1 몫 · §4.12 · 결정 330) ────────────────────────────
 
 

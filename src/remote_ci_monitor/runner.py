@@ -451,7 +451,17 @@ def run_job(
         argv = supervised_argv(spec) if spec.irreversible else list(spec.argv)
         spawning = getattr(observer, "spawning", None)
         if callable(spawning):
-            spawning()
+            try:
+                spawning()
+            except RunnerError as e:
+                e.group_gone = True  # type: ignore[attr-defined]  # 띄우기 전이다
+                raise
+            except Exception as e:  # noqa: BLE001 — 관찰자의 어떤 예외든 「띄우지 못함」이다
+                failure = RunnerError(
+                    "launch_failed", error=type(e).__name__, log=f"observer: {safe_error(e)}"
+                )
+                failure.group_gone = True  # type: ignore[attr-defined]
+                raise failure from e
         try:
             proc = subprocess.Popen(
                 argv,
@@ -464,10 +474,22 @@ def run_job(
             )
         except OSError as e:
             raise _launch_error(e, spec.argv[0]) from e
+        # 여기서부터 프로세스가 돈다 — 관찰자의 어떤 예외도 그 프로세스를 감시 없이 남기면 안 된다
+        # (P3 1라운드 HIGH). 기록 실패는 잡을 멈추지 않는다: `spawning` 의 「띄우는 중」 기록이
+        # 남아 있어 다음 프로세스는 그 그룹을 모름(UNKNOWN)으로 읽는다
         spawned = getattr(observer, "spawned", None)
         if callable(spawned):
-            spawned(proc.pid)
-        result, head = _pump(spec, proc, log, observer, started, now_fn, mono_fn)
+            try:
+                spawned(proc.pid)
+            except Exception:  # noqa: BLE001  # mutcheck: runner-spawned-error-escapes
+                pass
+        try:
+            result, head = _pump(spec, proc, log, observer, started, now_fn, mono_fn)
+        except Exception as e:
+            # 펌프 안의 관찰자 호출이 터졌다 — 그룹을 끝내고 거둔 뒤 올린다. 호출자가 finish 를
+            # 보낸다. 그룹이 사라졌는지는 여기서 확인한 대로다
+            e.group_gone = _abandon(proc, spec)  # type: ignore[attr-defined]
+            raise
     if spec.irreversible:
         failure = _not_started(result, head)
         if failure is not None:
@@ -591,6 +613,31 @@ def _pump(
         result.group_gone = _reap_group(proc, result, term_mono, grace, mono_fn)
     result.finished = now_fn()
     return result, head
+
+
+def _abandon(proc: subprocess.Popen, spec: RunSpec) -> bool:
+    """감시를 이어 갈 수 없는 그룹을 끝낸다: SIGTERM, `grace_seconds` 뒤 SIGKILL, 그 뒤
+    `GROUP_GONE_WAIT_SECONDS` 안에 그룹이 사라졌으면 참. 리더는 거둔다(좀비 리더는 그룹에
+    남는다)."""
+    # mutcheck: runner-abandon-leaves-group
+    signal_group(proc, signal.SIGTERM)
+    kill_at = time.monotonic() + float(spec.grace_seconds)  # 주입 시계가 멈춰 있어도 끝난다
+    while proc.poll() is None and time.monotonic() < kill_at:
+        time.sleep(0.05)
+    signal_group(proc, signal.SIGKILL)
+    try:
+        proc.wait(timeout=GROUP_GONE_WAIT_SECONDS)
+    except subprocess.TimeoutExpired:
+        pass
+    try:
+        if proc.stdout is not None:
+            proc.stdout.close()
+    except OSError:
+        pass
+    gone_by = time.monotonic() + GROUP_GONE_WAIT_SECONDS
+    while _group_alive(proc.pid) and time.monotonic() < gone_by:
+        time.sleep(0.05)
+    return proc.poll() is not None and not _group_alive(proc.pid)
 
 
 def _group_alive(pgid: int) -> bool:
