@@ -404,3 +404,88 @@ def test_rl45_client_role_has_a_null_hold_list(env, coordinator, monkeypatch, ca
     coordinator.route("GET", "/api/health", {**health, "irreversible_holds": [HOLD_B]})
     code, doc = run_json(capsys, "--role", "client", "--server", coordinator.url)
     assert code == 0 and doc["irreversible_holds"] is None, doc
+
+
+# ── P6-1 테마 B: 홀드는 어디서나 계산의 입력이다 ─────────────────────────────────
+
+
+@pytest.fixture
+def held_server(tmp_path):
+    """`ship`(되돌릴 수 없음)의 잡이 확인 없이 닫혀 그 그룹이 홀드된 서버. `ok` 는 그룹이 없다."""
+    from test_worker_api import WorkerServer, sh
+
+    s = WorkerServer(
+        tmp_path, presets=[sh("ship", "echo ship", irreversible=True), sh("ok", "echo ok")]
+    )
+    try:
+        s.registered("build-02")
+        jid = s.queued_job(preset="ship")
+        assert s.claimed("build-02", 1) == jid
+        # finish 에 group_gone 이 없다 — 확인 없는 닫힘이라 서버가 홀드를 건다(§4.12)
+        assert s.finish("build-02", jid, "succeeded", exit_code=0)[0] == 200
+        assert s.store.has_open_hold(jid)
+        s.hold_job = jid  # type: ignore[attr-defined]
+        yield s
+    finally:
+        s.close()
+
+
+def test_g2_rl45_eta_for_a_preset_in_a_held_group_has_no_wait_finish_or_ahead(held_server):
+    """# RL45 P6-1 G2: `rcm eta <preset>`(POST /api/eta, 풀 배치 경로)도 열린 홀드를 넘긴다.
+    안 넘기면 홀드된 그룹의 새 잡이 곧 시작할 것처럼 유한한 wait · finish 를 받는다 — 실제로
+    넣은 잡은 needs_action 이고 ETA 가 없다. 그룹 없는 프리셋은 그대로 숫자를 받는다(대조)."""
+    s = held_server
+    status, doc = s.req("POST", "/api/eta", token="alice", json_body={"preset": "ship"})
+    assert status == 200, doc
+    row = doc["job"]
+    assert row["reason"] == "needs_action", row
+    assert row["action"]["code"] == "irreversible_hold", row
+    assert row["blocked_by"]["job_id"] == s.hold_job, row
+    assert row["estimate"]["wait_seconds"] is None, row["estimate"]
+    assert row["estimate"]["finish_at"] is None, row["estimate"]
+    assert doc["ahead"] is None, doc  # 오지 않을 순번을 세지 않는다
+    status, ok = s.req("POST", "/api/eta", token="alice", json_body={"preset": "ok"})
+    assert status == 200 and ok["job"]["reason"] != "needs_action", ok
+    assert ok["job"]["estimate"]["wait_seconds"] is not None, ok
+
+
+def test_g2_g4_rl45_rcm_eta_preset_says_the_group_is_held(fake, capsys):
+    """# RL45 P6-1 G2 · G4: 사람용 줄은 「wait — · eta —」만 찍지 않고 사유 문장(rcm top 과 같은
+    말)을 붙인다. 앞선 잡 수는 모른다."""
+    row = {**queued(), "id": None, "url": None, "position": 1}
+    fake.fake.route("POST", "/api/eta", {"job": row, "ahead": None, "generated_at": "x"})
+    code, out, err = cli_run(capsys, ["eta", "ship"])
+    assert code == 0, err
+    assert "group irreversible:ship is held by #812 — rcm release-hold 812" in out, out
+    assert "ahead" not in out, out
+    no_raw_code(out)
+
+
+def top_doc(queue: list[dict[str, Any]], holds: Any) -> dict[str, Any]:
+    return {
+        "schema_version": 1,
+        "generated_at": "2026-11-27T09:00:00Z",
+        "display_timezone": "UTC",
+        "server": {"lanes": 1, "workers": []},
+        "pools": [{"name": "default", "queue": queue, "recent": [], "medians": {}, "hosts": []}],
+        "irreversible_holds": holds,
+    }
+
+
+def test_g3_rl45_rcm_top_does_not_promise_an_immediate_start_while_a_group_is_held():
+    """# RL45 P6-1 G3: 대기 잡이 없어도 열린 홀드가 있으면 「rcm run <preset> starts immediately」는
+    그 그룹의 프리셋에 거짓이다. 그 말을 하지 않고 홀드마다 한 줄을 더한다. 홀드가 없거나 키가 없는
+    옛 서버는 오늘 그대로다."""
+    text = render(top_doc([], [HOLD_A, HOLD_B]))
+    assert "starts immediately" not in text, text
+    lines = text.splitlines()
+    assert any(
+        "group irreversible:ship is held by #812 — rcm release-hold 812" in ln for ln in lines
+    ), text
+    assert any("group devices is held by #815 — rcm release-hold 815" in ln for ln in lines), text
+    no_raw_code(text)
+    for holds in ([], ...):
+        doc = top_doc([], holds)
+        if holds is ...:
+            del doc["irreversible_holds"]
+        assert "queue — empty (rcm run <preset> starts immediately)" in render(doc)

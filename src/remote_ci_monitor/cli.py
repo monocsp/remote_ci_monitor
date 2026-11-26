@@ -125,6 +125,7 @@ from remote_ci_monitor.core.render_text import (
     shelf_row,
     source_ident,
     storage_row,
+    unknown_eta_reason,
     unreachable_text,
     verdict_text,
     wait_end_line,
@@ -2677,6 +2678,10 @@ def _fmt_eta_row(row: dict[str, Any], ahead: int | None) -> str:
             "check_pending",
         ):
             parts.append(reason.replace("_", " "))
+        # 끊김 유예 · 끊긴 잡 뒤의 그룹 대기 · 그룹 홀드(M5t-b) — `rcm top` 과 같은 사람 문장(P6-1)
+        said = unknown_eta_reason(row)
+        if said:  # mutcheck: eta-unknown-reason-dropped
+            parts.append(said)
     conf = est.get("confidence")
     source = est.get("source")
     n = est.get("sample_count")

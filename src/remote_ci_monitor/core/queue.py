@@ -780,11 +780,16 @@ def eta_for_new(
     now: datetime,
     priority: int = PRIORITY_NORMAL,
     pool: str = DEFAULT_POOL,
-) -> tuple[QueueRow, int]:
+    open_holds: Sequence[OpenHold] = (),
+) -> tuple[QueueRow, int | None]:
     """지금 이 키의 잡을 넣으면 어떻게 되나 — 가상 잡을 붙여 계산한다(`rcm eta`).
 
     가상 잡은 같은 우선순위의 맨 뒤에 선다(더 낮은 우선순위보다는 앞). 다른 풀의 잡은 세지 않는다.
     반환: (가상 잡의 큐 행, 실제로 앞선 활성 잡 수 — 실행 중 + 우선순위가 같거나 높은 대기 잡).
+
+    `open_holds` 는 `compute_queue` 와 같다(M5t-b §4.8) — 홀드된 그룹의 가상 잡은 실제 잡처럼
+    `needs_action` 이고 wait · finish 가 null 이다. 그때 앞선 잡 수는 None 이다: 사람이 풀기 전에는
+    오지 않을 순번이다(P6-1 G2).
     """
     jobs = [j for j in jobs if j.pool == pool]
     next_id = max((j.id for j in jobs), default=0) + 1
@@ -794,6 +799,8 @@ def eta_for_new(
         inputs=dict(inputs or {}),
         key=key,
         concurrency_group=preset.concurrency_group,
+        # 제출된 잡처럼 프리셋의 범위를 단다 — 홀드가 막는지는 범위로 정해진다(`_hold_blocks`)
+        concurrency_scope=preset.concurrency_scope,
         source=Source(mode="tree"),
         requester=Requester(name="", label=""),
         state=QUEUED,
@@ -810,8 +817,11 @@ def eta_for_new(
         presets=presets,
         cfg=cfg,
         now=now,
+        open_holds=open_holds,
     )
     row = next(r for r in rows if r.job.id == next_id)
+    if row.action is not None and row.action.code == ACTION_IRREVERSIBLE_HOLD:
+        return row, None  # mutcheck: eta-held-ahead-counted
     ahead = sum(
         1 for j in jobs if j.state in ACTIVE_STATES and (j.is_busy or j.priority >= priority)
     )

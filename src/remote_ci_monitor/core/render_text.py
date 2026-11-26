@@ -750,6 +750,43 @@ def unreachable_text(machine: Any) -> str:
 _GRACE_TAIL = "the job goes on if the worker is back within the grace period"
 
 
+def unknown_eta_reason(row: Mapping[str, Any]) -> str | None:
+    """ETA 가 「—」인 까닭 가운데 M5t-b 가 더한 셋의 사람 문장(`rcm eta`, P6-1 G2 · G4).
+
+    끊김 유예 중인 잡, 그 잡 뒤에서 그룹을 기다리는 잡(쥔 잡의 끝을 모른다), 홀드에 막힌 잡이다.
+    `rcm top` 의 이유 줄과 같은 말이다. 다른 사유는 None — 부르는 쪽이 오늘의 꼬리를 쓴다."""
+    reason = row.get("reason")
+    blocked = row.get("blocked_by")
+    if reason == "worker_unreachable_grace":
+        return _plain_reason_text(dict(row))
+    if reason == "needs_action" and held_group(row.get("action"), blocked) is not None:
+        return _plain_reason_text(dict(row))
+    if (
+        reason == "blocked_by_group"
+        and isinstance(blocked, dict)
+        and blocked.get("remaining_seconds") is None
+    ):
+        return _plain_reason_text(dict(row))
+    return None
+
+
+def hold_top_lines(holds: Any) -> list[str] | None:
+    """`rcm top` 의 열린 홀드 줄(P6-1 G3) — 홀드마다 한 줄. 하나라도 못 읽으면 None(모름)."""
+    if not isinstance(holds, list):
+        return None
+    out = []
+    for h in holds:
+        f = hold_fields(h)
+        if f is None:
+            return None
+        job_id, group, _preset, _worker = f
+        out.append(
+            f"  group {group} is held by #{job_id} — rcm release-hold {job_id} after checking "
+            "the machine"
+        )
+    return out
+
+
 def held_group(action: Any, blocked_by: Any) -> tuple[str, int] | None:
     """홀드에 막힌 대기 잡이면 (그룹, 홀드 잡 번호). 아니면 None(M5t-b §4.8).
 
@@ -1262,8 +1299,9 @@ def render(
         out.append(f"  notify failures {server['notify_failures']} · see the server log")
     if server.get("last_error"):
         out.append(f"  error · {str(server['last_error'])[:60]}")
+    holds = status["irreversible_holds"] if "irreversible_holds" in status else ...
     for pl in pools or [{}]:  # pools 가 비면 조회 실패 모양(오늘과 같다)
-        out.extend(render_pool(pl, tz=tz, now=now, server=server, workers=workers))
+        out.extend(render_pool(pl, tz=tz, now=now, server=server, workers=workers, holds=holds))
     return "\n".join(out) + "\n"
 
 
@@ -1320,11 +1358,16 @@ def render_pool(
     now: datetime | None = None,
     server: dict[str, Any] | None = None,
     workers: list[dict[str, Any]] | None = None,
+    holds: Any = ...,
 ) -> list[str]:
-    """풀 하나(큐 · recent · medians · host)를 줄 목록으로. 기본 풀은 M1 모양 그대로."""
+    """풀 하나(큐 · recent · medians · host)를 줄 목록으로. 기본 풀은 M1 모양 그대로.
+
+    `holds` 는 상태 문서의 `irreversible_holds` 다(`...` 이면 키가 없는 옛 서버). 빈 기본 풀이
+    「바로 시작한다」고 말할지 정한다(P6-1 G3)."""
     server = server or {}
     workers = workers if workers is not None else (server.get("workers") or [])
     out: list[str] = []
+    held = [] if holds is ... else hold_top_lines(holds)
     hosts = pool.get("hosts")
     remote = pool.get("name") not in (None, "default")
     lanes = pool.get("lanes")
@@ -1340,6 +1383,14 @@ def render_pool(
             out.append(f"queue — empty{label}{' · paused' if server.get('paused') else ''}")
         elif server.get("paused") or (workers and all(w.get("state") == "down" for w in workers)):
             out.append("queue — empty but paused/no worker — nothing will start")
+        elif held != []:  # mutcheck: top-held-empty-promises-start
+            # 열린 그룹 홀드가 있으면(P6-1 G3) 그 그룹의 프리셋은 바로 시작하지 않는다 — 그 약속을
+            # 하지 않고 홀드마다 한 줄. 못 읽었으면 모른다고 말한다
+            if held is None:
+                out.append("queue — empty · group holds unknown")
+            else:
+                out.append("queue — empty · a held group does not start until it is released")
+                out.extend(held)
         else:
             out.append("queue — empty (rcm run <preset> starts immediately)")
     else:

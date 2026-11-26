@@ -7128,6 +7128,51 @@ MUTANTS = (
         tests=("tests/web/unreachable_m5tb.test.js",),
         runner="node",
     ),
+    Mutant(
+        # `rcm eta <preset>` 이 열린 홀드를 넘기지 않아 홀드된 그룹의 새 잡이 곧 시작할 것처럼
+        # 유한한 wait · finish 를 받는다(P6-1 G2)
+        name="eta-open-holds-dropped",
+        path="src/remote_ci_monitor/server.py",
+        old="            open_holds=snap.open_holds or [],  # mutcheck: eta-open-holds-dropped\n",
+        new="",
+        tests=(
+            "tests/test_hold_display_m5tb.py::"
+            "test_g2_rl45_eta_for_a_preset_in_a_held_group_has_no_wait_finish_or_ahead",
+        ),
+    ),
+    Mutant(
+        # 홀드된 그룹의 가상 잡에 오지 않을 순번(앞선 잡 수)을 센다(P6-1 G2)
+        name="eta-held-ahead-counted",
+        path="src/remote_ci_monitor/core/queue.py",
+        old="        return row, None  # mutcheck: eta-held-ahead-counted\n",
+        new="        pass\n",
+        tests=(
+            "tests/test_hold_display_m5tb.py::"
+            "test_g2_rl45_eta_for_a_preset_in_a_held_group_has_no_wait_finish_or_ahead",
+        ),
+    ),
+    Mutant(
+        # `rcm eta` 이 끊김 · 끊긴 잡 뒤 대기 · 홀드에 「eta —」만 찍고 까닭을 말하지 않는다
+        # (P6-1 G2 · G4)
+        name="eta-unknown-reason-dropped",
+        path="src/remote_ci_monitor/cli.py",
+        old="        if said:  # mutcheck: eta-unknown-reason-dropped\n",
+        new="        if False:\n",
+        tests=(
+            "tests/test_hold_display_m5tb.py::test_g2_g4_rl45_rcm_eta_preset_says_the_group_is_held",
+        ),
+    ),
+    Mutant(
+        # 홀드가 열려 있어도 빈 큐의 `rcm top` 이 「바로 시작한다」고 약속한다(P6-1 G3)
+        name="top-held-empty-promises-start",
+        path="src/remote_ci_monitor/core/render_text.py",
+        old="        elif held != []:  # mutcheck: top-held-empty-promises-start\n",
+        new="        elif False:\n",
+        tests=(
+            "tests/test_hold_display_m5tb.py::"
+            "test_g3_rl45_rcm_top_does_not_promise_an_immediate_start_while_a_group_is_held",
+        ),
+    ),
 )
 
 
