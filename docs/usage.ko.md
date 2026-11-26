@@ -137,15 +137,19 @@ rcm 이 이미 서비스로 도는 머신에서 `rcm setup` 은 그 서비스의
 모드 600 파일에 받은 다음 그 파일에서 셸로 읽는다. 그래서 토큰이 명령 줄이나 셸 기록에 남지 않는다.
 
 ```sh
-unset RCM_CONFIG RCM_SERVER RCM_TOKEN RCM_LABEL RCM_WORKER_TOKEN RCM_CLIENT_VERSION
+unset RCM_CONFIG RCM_SERVER RCM_TOKEN RCM_LABEL RCM_WORKER_TOKEN RCM_CLIENT_VERSION RCM_SERVER_DATA_DIR RCM_WORKER_DATA_DIR
 env | grep '^RCM_'                             # 아무것도 찍지 않는다
 rcm setup --role coordinator-worker --bind 127.0.0.1 --port 8790 --no-advertise --label com.example.rcm-test --config ~/rcm-test/server.toml --data-dir ~/rcm-test/data --yes
 rcm serve --config ~/rcm-test/server.toml      # 따로 연 터미널에서. Ctrl-C 로 멈춘다
-rcm token --config ~/rcm-test/server.toml add test > ~/rcm-test/token && chmod 600 ~/rcm-test/token
+(umask 077 && rcm token --config ~/rcm-test/server.toml add test > ~/rcm-test/token) && chmod 600 ~/rcm-test/token
 export RCM_TOKEN="$(cat ~/rcm-test/token)"
 RCM_SERVER=http://127.0.0.1:8790 rcm check --config ~/rcm-test/server.toml
 RCM_SERVER=http://127.0.0.1:8790 rcm run ok
+unset RCM_TOKEN                                # 시험 토큰이 export 된 채 남지 않게 한다
 ```
+
+`umask 077` 은 서브셸 안에서만 적용된다. 그래서 토큰 파일은 `chmod` 가 돌기 전에도 셸의 umask 가
+허락하는 만큼이 아니라 처음부터 본인만 읽을 수 있게 만들어진다.
 
 시험 빌드에 도는 설치의 `--config` 나 `--data-dir` 을 주지 않는다. DB 를 여는 rcm 은 그 DB 를 자기
 판으로 마이그레이션한다.

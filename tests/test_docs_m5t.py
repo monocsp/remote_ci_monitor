@@ -329,6 +329,10 @@ def env_names_the_code_reads() -> set[str]:
     프리셋 입력(`RCM_INPUT_*`) · 잡 안에서 도는 스킬 템플릿(`skills/`)은 뺀다."""
     pkg = ROOT / "src" / "remote_ci_monitor"
     names = set(ENV_READ_BY_CONSTANT)
+    # setup 이 data_dir 을 읽는 변수는 `_DATA_DIRS` 표에서 이름이 나온다(정규식이 못 찾는 꼴)
+    from remote_ci_monitor.setup import _DATA_DIRS
+
+    names |= {env for _section, env, _default in _DATA_DIRS.values()}
     for py in pkg.rglob("*.py"):
         if "skills" in py.relative_to(pkg).parts:
             continue
@@ -360,6 +364,8 @@ def test_p3_4_the_code_reads_the_names_the_test_install_clears():
         "RCM_SERVER",
         "RCM_TOKEN",
         "RCM_WORKER_TOKEN",
+        "RCM_SERVER_DATA_DIR",
+        "RCM_WORKER_DATA_DIR",
     } <= env_names_the_code_reads()
 
 

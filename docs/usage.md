@@ -138,15 +138,19 @@ a file of mode 600 and from there into the shell, so it never stands on a comman
 shell history:
 
 ```sh
-unset RCM_CONFIG RCM_SERVER RCM_TOKEN RCM_LABEL RCM_WORKER_TOKEN RCM_CLIENT_VERSION
+unset RCM_CONFIG RCM_SERVER RCM_TOKEN RCM_LABEL RCM_WORKER_TOKEN RCM_CLIENT_VERSION RCM_SERVER_DATA_DIR RCM_WORKER_DATA_DIR
 env | grep '^RCM_'                             # prints nothing
 rcm setup --role coordinator-worker --bind 127.0.0.1 --port 8790 --no-advertise --label com.example.rcm-test --config ~/rcm-test/server.toml --data-dir ~/rcm-test/data --yes
 rcm serve --config ~/rcm-test/server.toml      # in a terminal of its own; Ctrl-C stops it
-rcm token --config ~/rcm-test/server.toml add test > ~/rcm-test/token && chmod 600 ~/rcm-test/token
+(umask 077 && rcm token --config ~/rcm-test/server.toml add test > ~/rcm-test/token) && chmod 600 ~/rcm-test/token
 export RCM_TOKEN="$(cat ~/rcm-test/token)"
 RCM_SERVER=http://127.0.0.1:8790 rcm check --config ~/rcm-test/server.toml
 RCM_SERVER=http://127.0.0.1:8790 rcm run ok
+unset RCM_TOKEN                                # the test token does not stay exported
 ```
+
+The `umask 077` runs in a subshell, so the token file is created readable by you alone from the
+first byte instead of by whatever the shell's umask allows until `chmod` runs.
 
 Never give a test build the running install's `--config` or `--data-dir`: any rcm that opens a
 database migrates it to its own version.
