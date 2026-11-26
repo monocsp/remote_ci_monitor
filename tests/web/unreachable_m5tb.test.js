@@ -583,3 +583,35 @@ describe("P6-2 G8 — 잡 문서가 첫 로그 답보다 늦게 와도 「로그
     assert.equal(h.sub(), said);
   });
 });
+
+describe("P6-2 — 그룹이 홀드돼 있으면 빈 대기열이 「바로 시작」을 약속하지 않는다", () => {
+  // rcm top 이 P6-1 G3 에서 고친 것과 같은 거짓 약속 — 홀드된 그룹의 프리셋은 풀기 전에는 시작하지 않는다.
+  test("p6-2 empty — 열린 홀드가 있으면 held, 홀드를 모르면 holds_unknown, 없으면 null", () => {
+    assert.equal(typeof rcm.queueEmptyKey, "function");
+    assert.equal(rcm.queueEmptyKey(status([], { irreversible_holds: [HOLD_A] })), "queue.empty_held");
+    assert.equal(rcm.queueEmptyKey(status([], { irreversible_holds: null })), "queue.empty_holds_unknown");
+    assert.equal(rcm.queueEmptyKey(status([], { irreversible_holds: [{ job_id: 812 }] })), "queue.empty_holds_unknown");
+    assert.equal(rcm.queueEmptyKey(status([], { irreversible_holds: [] })), null);
+    assert.equal(rcm.queueEmptyKey(status([])), null);  // 키가 없는 옛 서버는 그대로
+    const paused = status([], { irreversible_holds: [HOLD_A] });
+    paused.server.paused = true;
+    assert.equal(rcm.queueEmptyKey(paused), "queue.empty_paused");
+  });
+  test("p6-2 empty — 두 언어의 문장", () => {
+    assert.ok(I18N.has("queue.empty_held") && I18N.has("queue.empty_holds_unknown"), "문장 키가 없다");
+    assert.equal(I18N.t("en", "queue.empty_held"), "Queue is empty — a held group does not start until it is released.");
+    assert.equal(I18N.t("ko", "queue.empty_held"), "큐가 비었습니다 — 막힌 그룹은 풀기 전에는 시작하지 않습니다.");
+    assert.equal(I18N.t("en", "queue.empty_holds_unknown"), "Queue is empty — group holds unknown.");
+    assert.equal(I18N.t("ko", "queue.empty_holds_unknown"), "큐가 비었습니다 — 그룹 홀드를 알 수 없습니다.");
+    ["en", "ko"].forEach((lang) => ["queue.empty_held", "queue.empty_holds_unknown"].forEach((k) => {
+      const t = I18N.t(lang, k);
+      assert.ok(t.indexOf("starts immediately") === -1 && t.indexOf("바로 시작") === -1, t);
+    }));
+  });
+  test("p6-2 empty — 배선: 빈 대기열이 queueEmptyKey 를 본다", () => {
+    const src = APP_SRC();
+    const at = src.indexOf("if (!p.queue.length) {");
+    const block = src.slice(at, src.indexOf("expandedGc();", at));
+    assert.ok(block.indexOf("queueEmptyKey(st)") !== -1, "빈 대기열이 홀드를 보지 않는다");
+  });
+});

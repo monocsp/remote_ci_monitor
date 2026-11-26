@@ -7364,6 +7364,18 @@ MUTANTS = (
         tests=("tests/web/unreachable_m5tb.test.js",),
         runner="node",
     ),
+    Mutant(
+        # 그룹이 홀드돼 있어도 웹 빈 대기열이 「rcm run <preset> 하면 바로 시작」을 약속한다(P6-2)
+        name="web-held-empty-promises-start",
+        path="src/remote_ci_monitor/web/app.js",
+        old=(
+            '    if (holds.length) return "queue.empty_held";'
+            "   // mutcheck: web-held-empty-promises-start"
+        ),
+        new="",
+        tests=("tests/web/unreachable_m5tb.test.js",),
+        runner="node",
+    ),
 )
 
 

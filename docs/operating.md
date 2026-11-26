@@ -1257,7 +1257,7 @@ People see a hold in words, without the code:
 
 | where | what it shows |
 |---|---|
-| web «Needs a look» | one entry per hold, even when no job waits on that group: `Group irreversible:ship is held: job #812 (ship) on build-02 closed without a stop confirmation. Check build-02 for a leftover process, then run rcm release-hold 812.` The held job's row in Recent carries a `group held` chip |
+| web «Needs a look» | one entry per hold, even when no job waits on that group: `Group irreversible:ship is held: job #812 (ship) on build-02 closed without a stop confirmation. Check build-02 for a leftover process, then run rcm release-hold 812.` The held job's row in Recent carries a `group held` chip. With no job in the queue, the queue box does not promise an immediate start either: `Queue is empty — a held group does not start until it is released.` |
 | `rcm wait` and `rcm run`, while they wait (stderr) | `#821 needs action · group irreversible:ship is held by job #812 — check that machine for a leftover process, then ask an admin to run rcm release-hold 812`; `rcm wait --return-on-action` ends there with exit 4 |
 | `rcm top` | the waiting job's reason line: `needs action · group irreversible:ship is held by #812 — rcm release-hold 812 after checking the machine`. With no job in the queue it does not promise an immediate start: `queue — empty · a held group does not start until it is released`, then one line per hold, `group irreversible:ship is held by #812 — rcm release-hold 812 after checking the machine` |
 | `rcm eta` | a preset of a held group, or a job waiting on one, gets `wait —` and `eta —` with the same reason sentence as `rcm top`, and no `N ahead`: the job does not move until the hold is released |
@@ -1268,7 +1268,8 @@ People see a hold in words, without the code:
 A job of the server's own local lane has no worker: the web and `rcm check` say «the server's
 local lane» and «check the server». When the server could not read its holds
 (`irreversible_holds: null`), the web says `unknown — group holds unavailable` instead of «nothing
-to look at», and `rcm check` prints one warning row saying so. An entry rcm cannot read (no job
+to look at» (an empty queue says `Queue is empty — group holds unknown.`), and `rcm check` prints
+one warning row saying so. An entry rcm cannot read (no job
 number, no group, or no `worker` key: `worker: null` means the local lane, so a missing one cannot
 be read as local) makes the whole list unknown in all three places, rather than a shorter list
 that looks complete: the web says the same `unknown — group holds unavailable`, `rcm check` prints

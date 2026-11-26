@@ -559,6 +559,19 @@
     });
     return ok.length === h.length ? ok : null;   // mutcheck: holds-unreadable-entry-dropped
   }
+  /** 빈 대기열의 문장 키(P6-2). null 이면 「rcm run <preset> 하면 바로 시작」이다. 열린 그룹 홀드가
+   *  있으면 그 그룹의 프리셋은 풀기 전에는 시작하지 않으므로 그 약속을 하지 않는다. 홀드를 못
+   *  읽었으면 모른다고 말한다(`rcm top` 과 같은 규칙, P6-1 G3). */
+  function queueEmptyKey(status) {
+    var server = (status && status.server) || {};
+    var localOnly = Array.isArray(server.workers) ? server.workers.filter(function (w) { return !w.worker; }) : [];
+    var allDown = localOnly.length && localOnly.every(function (w) { return w.state === "down"; });
+    if (server.paused || allDown) return "queue.empty_paused";
+    var holds = holdsOf(status);
+    if (holds === null) return "queue.empty_holds_unknown";
+    if (holds.length) return "queue.empty_held";   // mutcheck: web-held-empty-promises-start
+    return null;
+  }
   /** 홀드 하나의 사람 문장 — 원인 코드는 드러내지 않는다. */
   function holdText(hold, lang) {
     return T(lang, "hold.needs_look", {
@@ -3661,7 +3674,7 @@
     ordinal: ordinal, truncate: truncate, stateWord: stateWord, stateGlyph: stateGlyph, personLabel: personLabel,
     reasonText: reasonText, confidenceBadge: confidenceBadge, etaText: etaText,
     elapsedText: elapsedText, notMoving: notMoving, yourJobs: yourJobs, isMine: isMine,
-    holdChip: holdChip, logCompleteNote: logCompleteNote, drawerLogNote: drawerLogNote, drawerSubText: drawerSubText, drawerTakeDoc: drawerTakeDoc, stuckBand: stuckBand, heardLive: heardLive, laneClass: laneClass,
+    holdChip: holdChip, logCompleteNote: logCompleteNote, drawerLogNote: drawerLogNote, drawerSubText: drawerSubText, drawerTakeDoc: drawerTakeDoc, queueEmptyKey: queueEmptyKey, stuckBand: stuckBand, heardLive: heardLive, laneClass: laneClass,
     scheduledOf: scheduledOf, scheduledRowModel: scheduledRowModel, notifyFailuresBadge: notifyFailuresBadge, cancelLocked: cancelLocked, hostPressure: hostPressure,
     jobStorageLine: jobStorageLine, hostRunsNoJobs: hostRunsNoJobs, hostFacts: hostFacts,
     queueHeader: queueHeader, sortQueue: sortQueue, workerPills: workerPills, workersCrowded: workersCrowded, workerName: workerName, hostCards: hostCards, headerNote: headerNote, progressHead: progressHead, progressHeadHtml: progressHeadHtml, queueGroups: queueGroups, runningStep: runningStep,
@@ -4201,11 +4214,11 @@
       return;
     }
     if (!p.queue.length) {
-      var localOnly = Array.isArray(server.workers) ? server.workers.filter(function (w) { return !w.worker; }) : [];
-      var allDown = localOnly.length && localOnly.every(function (w) { return w.state === "down"; });
       var presets = Array.isArray(st.presets) ? st.presets.map(function (x) { return x.name; }).join(" · ") : "";
-      var emptyHtml = server.paused || allDown
-        ? esc(tr("queue.empty_paused"))
+      // 정지 · 워커 없음 · 열린 그룹 홀드 · 홀드 모름이면 「바로 시작」을 약속하지 않는다(P6-2)
+      var emptyKey = queueEmptyKey(st);
+      var emptyHtml = emptyKey
+        ? esc(tr(emptyKey))
         : esc(tr("queue.empty")) + "<code>rcm run &lt;preset&gt;</code>" + esc(tr("queue.empty_hint"));
       body.innerHTML = '<div class="empty">' + emptyHtml + (presets ? '<br><span class="sub">' + esc(tr("queue.presets", { names: presets })) + "</span>" : "") + "</div>" + sched;
       return;

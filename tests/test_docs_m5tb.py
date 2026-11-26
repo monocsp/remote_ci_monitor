@@ -550,3 +550,16 @@ def test_g2_g3_g4_g7_g9_operating_quotes_the_new_hold_lines():
     )
     assert owner is not None and f"`{owner}`" in body, owner
     assert "no job number, no group, or no `worker` key" in body
+
+
+def test_p6_2_operating_quotes_the_web_empty_queue_while_a_group_is_held():
+    """# RL45 P6-2: 웹 빈 대기열도 홀드가 있으면(또는 모르면) 「바로 시작」을 약속하지 않는다.
+    문서는 웹 카탈로그(i18n.js)의 영어 문장을 그대로 인용한다."""
+    body = flat(section(OPERATING, HELD))
+    catalog = (ROOT / "src" / "remote_ci_monitor" / "web" / "i18n.js").read_text()
+    for line in (
+        "Queue is empty — a held group does not start until it is released.",
+        "Queue is empty — group holds unknown.",
+    ):
+        assert f"`{line}`" in body, line
+        assert f'"{line}"' in catalog, line

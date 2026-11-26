@@ -295,6 +295,9 @@
     "queue.empty_paused": "Queue is empty but paused — nothing will start.",
     "queue.empty": "Queue is empty — ",
     "queue.empty_hint": " starts immediately.",
+    // 열린 그룹 홀드가 있으면 「바로 시작」을 약속하지 않는다(P6-2, `rcm top` 의 P6-1 G3 과 같은 말)
+    "queue.empty_held": "Queue is empty — a held group does not start until it is released.",
+    "queue.empty_holds_unknown": "Queue is empty — group holds unknown.",
     "queue.presets": function (a) { return "presets: " + a.names; },
     "queue.more": function (a) { return "and " + a.n + " more"; },
     "queue.group_running": function (a) { return "Running now (" + a.n + ")"; },
@@ -1560,6 +1563,8 @@
     "queue.empty_paused": "큐가 비었지만 멈춰 있습니다 — 아무것도 시작하지 않습니다.",
     "queue.empty": "큐가 비었습니다 — ",
     "queue.empty_hint": " 하면 바로 시작합니다.",
+    "queue.empty_held": "큐가 비었습니다 — 막힌 그룹은 풀기 전에는 시작하지 않습니다.",
+    "queue.empty_holds_unknown": "큐가 비었습니다 — 그룹 홀드를 알 수 없습니다.",
     "queue.presets": function (a) { return "작업 유형: " + a.names; },
     "queue.more": function (a) { return a.n + "개 더 보기"; },
     "queue.group_running": function (a) { return "작업 중 (" + a.n + ")"; },
