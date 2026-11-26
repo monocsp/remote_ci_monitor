@@ -1582,6 +1582,23 @@ def test_rl45_status_and_health_list_every_open_hold_and_health_stays_as_it_was(
     assert [h["job_id"] for h in srv.status()["irreversible_holds"]] == [b]
 
 
+def test_rl45_status_says_null_not_empty_when_the_holds_cannot_be_read(srv, monkeypatch):
+    """홀드를 못 읽으면 `irreversible_holds` 는 모름(null)이다 — `[]` 은 「열린 홀드 없음」이라는
+    거짓말이다(`/api/health` 와 같은 규칙, P3 1라운드 LOW)."""
+    import sqlite3
+
+    srv.registered("build-02")
+    _held(srv)
+
+    def broken() -> list:
+        raise sqlite3.OperationalError("disk I/O error")
+
+    monkeypatch.setattr(srv.store, "open_holds", broken)
+    srv.app._mark_dirty()
+    assert srv.status()["irreversible_holds"] is None
+    assert srv.req("GET", "/api/health")[1]["irreversible_holds"] is None
+
+
 def test_rl45_the_job_document_carries_the_hold_and_its_release(srv):
     srv.registered("build-02")
     plain = running(srv, preset="ok")

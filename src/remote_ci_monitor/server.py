@@ -497,8 +497,9 @@ class _DbSnapshot:
     scheduled: list[Job] | None = field(default_factory=list)
     scheduled_error: str | None = None
     scheduled_error_code: str | None = None
-    #: 열린 그룹 홀드(M5t-b §4.8) — 큐 행의 사유와 `irreversible_holds`. 큐 절의 일부다
-    open_holds: list[OpenHold] = field(default_factory=list)
+    #: 열린 그룹 홀드(M5t-b §4.8) — 큐 행의 사유와 `irreversible_holds`. 큐 절의 일부다.
+    #: 못 읽었으면 None(모름) — `[]` 은 「열린 홀드 없음」이다
+    open_holds: list[OpenHold] | None = field(default_factory=list)
 
 
 def open_hold_of(row: dict[str, Any]) -> OpenHold:
@@ -3466,7 +3467,7 @@ class App(RemoteWorkersMixin, CapabilitiesMixin, ShelfAppMixin):
         queue_error = None
         queue_error_code: str | None = None
         chain_actions: dict[int, Action] = {}
-        open_holds: list[OpenHold] = []
+        open_holds: list[OpenHold] | None = None
         try:
             jobs = self.store.list_active()
             markers = self.store.markers_for([j.id for j in jobs if j.state in BUSY_STATES])
@@ -3741,7 +3742,7 @@ class App(RemoteWorkersMixin, CapabilitiesMixin, ShelfAppMixin):
                 None: self.local_host_key(),
                 **{v.id: h for v in views if v.kind == "remote" and (h := self.host_of(v.id))},
             },
-            open_holds=snap.open_holds,
+            open_holds=snap.open_holds or [],
         )
         rows = [with_chain_action(r, snap.chain_actions.get(r.job.id)) for r in rows]
         if pool is None:
@@ -3857,7 +3858,8 @@ class App(RemoteWorkersMixin, CapabilitiesMixin, ShelfAppMixin):
             pools=tuple(pools),
             base_url=self.base_url(host),
             local_machine=self.local_machine(),  # M5t-a — 로컬 레인 잡의 `ran_on`
-            irreversible_holds=tuple(snap.open_holds),  # M5t-b §4.8
+            # M5t-b §4.8 — 못 읽었으면 None(모름, `/api/health` 와 같다)
+            irreversible_holds=None if snap.open_holds is None else tuple(snap.open_holds),
         )
         tails: dict[int, list[str]] = {}
         if queue and token is not None:
@@ -3890,7 +3892,8 @@ class App(RemoteWorkersMixin, CapabilitiesMixin, ShelfAppMixin):
                 by_id[job.id] = job
         base = model.base_url or self.base_url()
         for pool in doc.get("pools", []):
-            for row in [*pool.get("queue", []), *pool.get("recent", [])]:
+            # 절이 실패하면 그 값은 null 이다 — 그 자리에서 500 이 되면 안 된다
+            for row in [*(pool.get("queue") or []), *(pool.get("recent") or [])]:
                 job = by_id.get(row.get("id"))
                 if job is not None:
                     row["artifacts"] = self.artifacts_public(job)

@@ -789,5 +789,6 @@ class StatusModel:
     base_url: str | None = None
     #: 이 서버 머신(M5t-a). 없으면 로컬 레인 잡의 `ran_on` 은 null 이다
     local_machine: LocalMachine | None = None
-    #: 열린 그룹 홀드(M5t-b §4.8) — `/api/status` 의 `irreversible_holds`. 없으면 빈 튜플
-    irreversible_holds: tuple[OpenHold, ...] = ()
+    #: 열린 그룹 홀드(M5t-b §4.8) — `/api/status` 의 `irreversible_holds`. 없으면 빈 튜플,
+    #: 못 읽었으면 None(모름)
+    irreversible_holds: tuple[OpenHold, ...] | None = ()

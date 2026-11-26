@@ -6269,6 +6269,18 @@ MUTANTS = (
             "test_rl7_a_cancel_window_that_ran_out_while_the_server_was_down_starts_again",
         ),
     ),
+    # ── M5t-b P3 1라운드 LOW — 못 읽은 홀드를 [] 로 ──
+    Mutant(
+        # `/api/status` 가 홀드를 못 읽고도 「열린 홀드 없음」([])이라고 말한다
+        name="status-holds-unknown-as-empty",
+        path="src/remote_ci_monitor/core/status.py",
+        old="            None  # mutcheck: status-holds-unknown-as-empty\n",
+        new="            []\n",
+        tests=(
+            "tests/test_worker_session_m5tb.py::"
+            "test_rl45_status_says_null_not_empty_when_the_holds_cannot_be_read",
+        ),
+    ),
 )
 
 

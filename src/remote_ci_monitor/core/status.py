@@ -766,6 +766,11 @@ def status_json(
             )
             for p in model.pools
         ],
-        # M5t-b §4.8 — 열린 그룹 홀드(만든 순서). 없으면 [] · 키 추가만(schema_version 그대로)
-        "irreversible_holds": [hold_item_json(h) for h in model.irreversible_holds],
+        # M5t-b §4.8 — 열린 그룹 홀드(만든 순서). 없으면 [], 못 읽었으면 null · 키 추가만
+        # (schema_version 그대로)
+        "irreversible_holds": (
+            None  # mutcheck: status-holds-unknown-as-empty
+            if model.irreversible_holds is None
+            else [hold_item_json(h) for h in model.irreversible_holds]
+        ),
     }

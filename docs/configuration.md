@@ -1526,7 +1526,8 @@ They keep running after the job ends, and a later job of the same group can star
 
 A held job's waiting neighbours show reason `needs_action` with `action.code =
 "irreversible_hold"` in `/api/status`, whose top-level `irreversible_holds` lists every open hold
-(`/api/health` carries the same list, for information only). `GET /jobs/N` shows the job's `hold`
+(`/api/health` carries the same list, for information only; both say `null` when the server could
+not read them, never an empty list). `GET /jobs/N` shows the job's `hold`
 and its history. A `[[notify]]` rule can ask for one call per new hold with
 `on = ["irreversible_hold"]` ([notifications](#priority-snapshot-cache-and-notifications)).
 
