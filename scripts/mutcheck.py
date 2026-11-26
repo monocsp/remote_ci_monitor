@@ -5744,6 +5744,88 @@ MUTANTS = (
             "test_rl54_the_job_end_notification_of_a_held_job_carries_the_hold",
         ),
     ),
+    # ── M5t-b PR1 (P2-5: 계획↔시험 대조가 약하다고 한 행) ──
+    Mutant(
+        # 로그 배치를 러너의 펌프 스레드에서 보낸다 — 분단 중 전송 하나가 시한까지 매달려 펌프가
+        # 멈춘다(로컬 log.txt · 취소 · 자기 멈춤 점검이 멈춤, RL5 에서 찾은 결함)
+        name="log-sent-in-the-pump",
+        path="src/remote_ci_monitor/remote_worker.py",
+        old="            self._send_later()\n",
+        new="            self.flush()\n",
+        tests=(
+            "tests/test_worker_selfstop_m5tb.py::"
+            "test_rl5_a_hanging_log_post_does_not_stall_the_runner_pump",
+        ),
+    ),
+    Mutant(
+        # 유예 닫기가 잠금 안에서 heard 를 다시 보지 않는다 — 판정 뒤에 든 heartbeat 를 무시하고
+        # 닫는다(RL56 · RL4)
+        name="grace-close-no-recheck",
+        path="src/remote_ci_monitor/remote_workers.py",
+        old=(
+            "                if gap <= grace:\n"
+            "                    continue  # 판정 뒤에 들었다 — 닫지 않는다\n"
+        ),
+        new="                if False:\n                    continue\n",
+        tests=(
+            "tests/test_worker_selfstop_m5tb.py::"
+            "test_rl56_a_heard_that_rises_between_the_judgement_and_the_lock_keeps_the_job_open",
+        ),
+    ),
+    Mutant(
+        # 유예 닫기가 세션 잠금 밖이다 — 같은 세션의 heartbeat 가 닫기와 줄을 서지 않는다(RL56)
+        name="grace-close-outside-the-session-lock",
+        path="src/remote_ci_monitor/remote_workers.py",
+        old=(
+            "            with self._session_lock(key):\n"
+            "                gap = self.mono_fn() - self.heard_at(key)  #"
+            " type: ignore[attr-defined]\n"
+        ),
+        new=(
+            "            with threading.Lock():\n"
+            "                gap = self.mono_fn() - self.heard_at(key)  #"
+            " type: ignore[attr-defined]\n"
+        ),
+        tests=(
+            "tests/test_worker_selfstop_m5tb.py::"
+            "test_rl56_the_same_sessions_heartbeat_waits_for_the_close_and_sees_it",
+        ),
+    ),
+    Mutant(
+        # 취소 미확인 닫기가 홀드를 걸지 않는다 — 들리는 워커가 확인하지 않은 표식 잡의 그룹이
+        # 풀린다(RL8 · 결정 330)
+        name="cancel-unconfirmed-no-hold",
+        path="src/remote_ci_monitor/remote_workers.py",
+        old='                    hold_cause="cancel_unconfirmed",\n',
+        new="                    hold_cause=None,\n",
+        tests=(
+            "tests/test_worker_selfstop_m5tb.py::"
+            "test_rl8_a_live_session_that_never_confirms_an_irreversible_cancel_holds",
+        ),
+    ),
+    Mutant(
+        # 홀드 풀기가 사건 hold(released)를 남기지 않는다(RL44)
+        name="hold-release-no-event",
+        path="src/remote_ci_monitor/store.py",
+        old=(
+            '            {"action": "released", "release_kind": kind, '
+            '"released_by": by, "reason": reason},\n'
+            "            ts,\n"
+            "        )\n"
+            "        return True\n"
+        ),
+        new=(
+            '            {"action": "released", "release_kind": kind, '
+            '"released_by": by, "reason": reason},\n'
+            "            ts,\n"
+            "        ) if False else None\n"
+            "        return True\n"
+        ),
+        tests=(
+            "tests/test_worker_session_m5tb.py::"
+            "test_rl44_hold_release_events_are_one_for_a_b_c_and_zero_for_d",
+        ),
+    ),
 )
 
 
