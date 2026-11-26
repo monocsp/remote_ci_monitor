@@ -1022,27 +1022,7 @@ class RemoteWorkersMixin:
                 return self._narrow_confirm(token, job_id, session, body, gone)
         job = self._session_job(token, job_id, session)
         if job.state not in BUSY_STATES:
-            # 늦은 보고(T14). 같은 세션의 `group_gone: true` 는 그 잡의 열린 홀드를 푼다 — 확인은
-            # 뒤에 와도 참이다(§4.12 표의 1). `late_result` 기록은 PR2 다
-            released = (
-                gone is True  # mutcheck: hold-released-without-group-gone
-                and session is not None
-                and self.store.release_hold(
-                    job.id, kind=RELEASE_WORKER, by=token.name, reason=None, now=self.now_fn()
-                )
-                is not None
-            )
-            if released:
-                self.log(f"job #{job.id}: hold released — the worker confirmed the group is gone")
-                self._publish_job(None, job.id)
-                self.wake.set()
-            raise _api_error(
-                409,
-                f"job #{job.id} is {job.state}",
-                state=job.state,
-                code="job_closed",
-                hold_released=released,
-            )
+            raise self._closed_answer(token, job, session, gone)
         reported = body.get("outcome")
         if reported not in WORKER_OUTCOMES:
             raise _api_error(400, f"outcome must be one of {', '.join(WORKER_OUTCOMES)}")
@@ -1135,6 +1115,9 @@ class RemoteWorkersMixin:
         ):
             current = self.store.get_job(job.id)
             st = current.state if current else "unknown"
+            if current is not None and st not in BUSY_STATES:
+                # 확인과 닫기 사이에 janitor 가 닫았다 — 늦은 보고와 같은 답(P3 1라운드 LOW)
+                raise self._closed_answer(token, current, session, gone)  # mutcheck: race-closed
             racing = preflight is not None or state == RETRIED
             if not racing or current is None or st != CANCELLING:
                 raise _api_error(409, f"job #{job.id} is {st}", state=st)
@@ -1146,6 +1129,8 @@ class RemoteWorkersMixin:
             ):
                 current = self.store.get_job(job.id)
                 st = current.state if current else "unknown"
+                if current is not None and st not in BUSY_STATES:
+                    raise self._closed_answer(token, current, session, gone)
                 raise _api_error(409, f"job #{job.id} is {st}", state=st)
         if hold_cause is not None and self.store.has_open_hold(job.id):
             self._hold_created(job.id)
@@ -1153,6 +1138,32 @@ class RemoteWorkersMixin:
         self._publish_server()
         self.wake.set()
         return {"job_id": job.id, "state": state}
+
+    def _closed_answer(
+        self, token: TokenInfo, job: Job, session: str | None, gone: bool | None
+    ) -> Exception:
+        """이미 닫힌 잡에 온 finish(T14)의 답 — 409 `code: job_closed`. 같은 세션의 `group_gone:
+        true` 는 그 잡의 열린 홀드를 푼다 — 확인은 뒤에 와도 참이다(§4.12 표의 1). `late_result`
+        기록은 PR2 다. 앞에서 닫혀 있었든 확인과 닫기 사이에 닫혔든 같은 답이다."""
+        released = (
+            gone is True  # mutcheck: hold-released-without-group-gone
+            and session is not None
+            and self.store.release_hold(
+                job.id, kind=RELEASE_WORKER, by=token.name, reason=None, now=self.now_fn()
+            )
+            is not None
+        )
+        if released:
+            self.log(f"job #{job.id}: hold released — the worker confirmed the group is gone")
+            self._publish_job(None, job.id)
+            self.wake.set()
+        return _api_error(
+            409,
+            f"job #{job.id} is {job.state}",
+            state=job.state,
+            code="job_closed",
+            hold_released=released,
+        )
 
     def _narrow_confirm(
         self, token: TokenInfo, job_id: int, session: str, body: dict[str, Any], gone: bool | None

@@ -5379,8 +5379,8 @@ MUTANTS = (
         # group_gone 이 거짓이어도 홀드를 푼다(RL44)
         name="hold-released-without-group-gone",
         path="src/remote_ci_monitor/remote_workers.py",
-        old="                gone is True  # mutcheck: hold-released-without-group-gone\n",
-        new="                True\n",
+        old="            gone is True  # mutcheck: hold-released-without-group-gone\n",
+        new="            True\n",
         tests=(
             "tests/test_worker_session_m5tb.py::"
             "test_rl44_a_late_finish_with_group_gone_releases_the_hold",
@@ -6294,6 +6294,21 @@ MUTANTS = (
         tests=(
             "tests/test_irreversible_hold_m5tb.py::"
             "test_rl42_mark_lost_for_worker_follows_the_hold_rule",
+        ),
+    ),
+    # ── M5t-b P3 1라운드 LOW — 확인과 닫기 사이 janitor ──
+    Mutant(
+        # 확인과 store.finish 사이에 닫힌 잡에 job_closed 없는 409 를 주고 홀드를 풀지 않는다
+        name="finish-race-not-job-closed",
+        path="src/remote_ci_monitor/remote_workers.py",
+        old=(
+            "                raise self._closed_answer(token, current, session, gone)  # mutcheck: "
+            "race-closed\n"
+        ),
+        new='                raise _api_error(409, f"job #{job.id} is {st}", state=st)\n',
+        tests=(
+            "tests/test_worker_session_m5tb.py::"
+            "test_rl44_c_a_finish_racing_the_janitor_close_gets_job_closed_and_releases",
         ),
     ),
 )

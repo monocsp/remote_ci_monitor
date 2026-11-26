@@ -1599,6 +1599,43 @@ def test_rl45_status_says_null_not_empty_when_the_holds_cannot_be_read(srv, monk
     assert srv.req("GET", "/api/health")[1]["irreversible_holds"] is None
 
 
+def test_rl44_c_a_finish_racing_the_janitor_close_gets_job_closed_and_releases(srv, monkeypatch):
+    """조기 확인(잡이 busy)과 `store.finish` 사이에 janitor 가 잡을 닫았다. 그 응답도 늦은 보고와
+    같아야 한다 — 409 `code: job_closed`, 그리고 `group_gone: true` 면 방금 걸린 홀드를 푼다
+    (P3 1라운드 LOW). 다르면 워커는 그 409 를 닫힌 잡으로 읽지 못하고 홀드가 남는다."""
+    srv.registered("build-02")
+    jid = running(srv, preset="ship")
+    real_finish = srv.store.finish
+    raced: list[bool] = []
+
+    def janitor_first(job_id: int, *args: Any, **kw: Any):
+        if not raced:
+            raced.append(
+                real_finish(
+                    job_id,
+                    LOST,
+                    now=srv.clock(),
+                    summary="x",
+                    only_from=(RUNNING,),
+                    hold_cause="worker_unreachable",
+                )
+            )
+        return real_finish(job_id, *args, **kw)
+
+    monkeypatch.setattr(srv.store, "finish", janitor_first)
+    status, body = srv.req(
+        "POST",
+        f"/worker/jobs/{jid}/finish",
+        token="build-02",
+        json_body={"outcome": "succeeded", "exit_code": 0, "group_gone": True},
+    )
+    assert raced == [True]
+    assert (status, body.get("code"), body.get("hold_released")) == (409, "job_closed", True), body
+    assert job_of(srv, jid).state == LOST
+    (h,) = hold_rows(srv)
+    assert h["released_at"] is not None and h["release_kind"] == "worker"
+
+
 def test_rl45_the_job_document_carries_the_hold_and_its_release(srv):
     srv.registered("build-02")
     plain = running(srv, preset="ok")
