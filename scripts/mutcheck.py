@@ -5952,6 +5952,22 @@ MUTANTS = (
             "test_rl48_the_server_logs_one_startup_line_per_synthetic_group",
         ),
     ),
+    Mutant(
+        # 감독자의 미시작(parent_gone · terminated)이 러너 플래그를 이긴다 — 멈춤 · 취소한 잡이
+        # launch_failed 로 보인다(RL52 (a))
+        name="supervisor-not-started-beats-the-flag",
+        path="src/remote_ci_monitor/runner.py",
+        old=(
+            "    if result.lost or result.cancelled or result.timed_out:\n"
+            "        return None\n"
+            '    return RunnerError("launch_failed", error="SupervisorNotStarted", log=reason)\n'
+        ),
+        new='    return RunnerError("launch_failed", error="SupervisorNotStarted", log=reason)\n',
+        tests=(
+            "tests/test_job_supervisor_m5tb.py::"
+            "test_rl52_a_a_supervisor_that_sees_the_wrong_parent_logs_the_marker_and_the_flag_wins",
+        ),
+    ),
 )
 
 

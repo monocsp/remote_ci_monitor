@@ -492,6 +492,138 @@ def test_rl51_c_the_runner_reaps_from_its_first_sigterm_not_from_the_leader_end(
             kill_quietly(box["child"])
 
 
+def test_rl51_b_a_live_worker_cancel_sweeps_a_term_ignoring_child_from_the_first_sigterm(
+    tmp_path,
+):
+    """(b) 워커가 산 채: 러너가 취소로 SIGTERM 을 보내고 명령은 곧 끝나지만 SIGTERM 을 무시하는
+    자식이 남는다. 남은 자식은 첫 SIGTERM + `grace_J` + 0.5초 안에 사라지고(감독자의 쓸기와 러너
+    S7 가운데 먼저 닿는 쪽), 결과는 `cancelled` · `group_gone` 참이다."""
+    child = tmp_path / "child.pid"
+    cmd = py_cmd(tmp_path, "leaver", LEAVES_A_TERM_IGNORING_CHILD.format(pidfile=str(child)))
+    obs = Obs()
+    box: dict[str, Any] = {}
+    grace = 1
+
+    def cancel() -> None:
+        box["child"] = read_pid(child)
+        box["term"] = time.monotonic()
+        obs.cancel.set()
+        took = wait_dead(box["child"], 10)
+        box["dead_at"] = None if took is None else time.monotonic()
+
+    t = threading.Thread(target=cancel, daemon=True)
+    t.start()
+    try:
+        result = run_job(spec(tmp_path, cmd, irreversible=True, grace_seconds=grace), obs)
+        t.join(12)
+        assert result.cancelled and result.group_gone is True
+        assert box["dead_at"] is not None, "the term-ignoring child outlived the cancel"
+        # 명세의 상한 grace + 0.5 에 러너 폴링(0.25) · 부하 여유 1.5초 — 쓸기가 없으면 끝나지 않는다
+        assert box["dead_at"] - box["term"] < grace + 0.5 + 1.5
+    finally:
+        if "child" in box:
+            kill_quietly(box["child"])
+
+
+@pytest.mark.parametrize("flag", ["stop", "cancel"])
+def test_rl52_a_a_supervisor_that_sees_the_wrong_parent_logs_the_marker_and_the_flag_wins(
+    tmp_path, monkeypatch, flag
+):
+    """(a) 러너를 거쳐: 감독자가 기대한 부모를 못 보면 명령은 0회, 잡 로그 첫 줄이
+    `[rcm] supervisor: not started: parent_gone` 이고 결과는 러너 플래그(stop → lost,
+    cancel → cancelled)를 따른다 — 감독자 실패로 바뀌지 않는다."""
+    real = runner.supervised_argv
+
+    def wrong_parent(s: RunSpec) -> list[str]:
+        argv = real(s)
+        argv[argv.index("--parent") + 1] = "1"
+        return argv
+
+    monkeypatch.setattr(runner, "supervised_argv", wrong_parent)
+    ran = tmp_path / "ran"
+    obs = Obs()
+    s = spec(tmp_path, ["touch", str(ran)], irreversible=True)
+
+    def output(data: bytes) -> None:
+        obs.out.extend(data)
+        getattr(obs, flag).set()  # 감독자가 표지를 낸 뒤 · 러너의 끝 점검 전에 선 플래그
+
+    obs.output = output  # type: ignore[method-assign]
+    result = run_job(s, obs)
+    assert not ran.exists()  # 명령 0회
+    first = bytes(obs.out).split(b"\n", 1)[0]  # 잡 로그로 가는 스트림
+    assert first == MARK.encode() + b"parent_gone"
+    assert (result.lost, result.cancelled) == ((True, False) if flag == "stop" else (False, True))
+
+
+def test_rl52_a_without_a_flag_the_wrong_parent_is_a_launch_failure(tmp_path, monkeypatch):
+    real = runner.supervised_argv
+
+    def wrong_parent(s: RunSpec) -> list[str]:
+        argv = real(s)
+        argv[argv.index("--parent") + 1] = "1"
+        return argv
+
+    monkeypatch.setattr(runner, "supervised_argv", wrong_parent)
+    ran = tmp_path / "ran"
+    with pytest.raises(RunnerError) as e:
+        run_job(spec(tmp_path, ["touch", str(ran)], irreversible=True), Obs())
+    assert e.value.code == "launch_failed"
+    assert e.value.args_public == {"error": "SupervisorNotStarted"}
+    assert not ran.exists()
+
+
+def test_rl52_e_a_worker_from_a_source_tree_starts_the_supervisor_and_the_command(tmp_path):
+    """(e) rcm 을 설치하지 않은 파이썬에서 소스 트리를 `PYTHONPATH` 로 읽은 러너 — 감독자(`-I` 로
+    파일 경로)가 뜨고 명령이 돈다(F83)."""
+    base = getattr(sys, "_base_executable", sys.executable)
+    src = Path(runner.__file__).resolve().parents[1]
+    probe = subprocess.run([base, "-I", "-c", "import remote_ci_monitor"], capture_output=True)
+    if probe.returncode == 0:
+        pytest.skip("this python has rcm installed — no source-tree-only interpreter here")
+    ran = tmp_path / "ran"
+    script = tmp_path / "from_src.py"
+    script.write_text(
+        textwrap.dedent(
+            f"""
+            from pathlib import Path
+            import remote_ci_monitor
+            from remote_ci_monitor.core.model import Source
+            from remote_ci_monitor.runner import RunSpec, run_job
+
+            assert remote_ci_monitor.__file__.startswith({str(src)!r}), remote_ci_monitor.__file__
+
+            class Obs:
+                def phase(self, p): pass
+                def output(self, d): pass
+                def should_cancel(self): return False
+                def should_stop(self): return False
+                def spawning(self): pass
+                def spawned(self, pid): pass
+
+            ws = Path({str(tmp_path / "ws")!r})
+            ws.mkdir()
+            spec = RunSpec(
+                job_id=1, preset_name="ship", argv=("touch", {str(ran)!r}), env={{}},
+                env_passthrough=("PATH",), timeout_seconds=None, inputs={{}},
+                requester_label="t", source=Source(mode="tree", tree_hash="x"), workspace=ws,
+                log_path=Path({str(tmp_path / "log.txt")!r}), irreversible=True,
+            )
+            r = run_job(spec, Obs())
+            print("rc", r.rc, r.group_gone)
+            """
+        ),
+        encoding="utf-8",
+    )
+    env = {"PATH": os.environ.get("PATH", ""), "PYTHONPATH": str(src)}
+    out = subprocess.run(
+        [base, str(script)], capture_output=True, text=True, env=env, timeout=30, cwd=tmp_path
+    )
+    assert out.returncode == 0, out.stderr
+    assert out.stdout.strip() == "rc 0 True"
+    assert ran.exists()
+
+
 def test_rl49_a_descendant_that_left_the_session_is_not_seen(tmp_path):
     """명령이 `setsid` 로 세션을 빠져나간 자손을 남기고 끝난다. rcm 은 그 자손을 끊지 않는다(지금
     할 수 있는 일이 아님을 고정한다). 그룹은 사라져 `group_gone` 은 참이다(§1.3 · §9)."""
