@@ -898,6 +898,11 @@ class Client:
         body = {"cancel_token": cancel_token} if cancel_token else {}
         return self.post_json(f"/jobs/{job_id}/cancel", body)
 
+    def release_hold(self, job_id: int, *, reason: str | None = None) -> dict[str, Any]:
+        """`POST /jobs/{id}/release-hold`(admin, M5t-b §4.12)."""
+        body = {"reason": reason} if reason else {}
+        return self.post_json(f"/jobs/{job_id}/release-hold", body)
+
     def gc(self, *, dry_run: bool = False, timeout: float | None = None) -> dict[str, Any]:
         """`POST /gc`(admin). 스캔이 오래 걸릴 수 있어 **자기 시한**을 쓴다 — 일반 요청의
         15초로는 데이터가 조금만 커도 못 기다린다."""

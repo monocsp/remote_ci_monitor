@@ -902,3 +902,98 @@ def test_rl38_the_session_files_follow_the_job(tmp_path):
     assert "wall" in json.loads((w.session_dir / "ok_at.json").read_text())
     w._forget_job_dir(7)
     assert not jd.exists()
+
+
+# ── admin 이 푸는 길(RL45 PR1 몫 · §4.12 · 결정 330) ────────────────────────────
+
+
+def _held(srv: WorkerServer) -> int:
+    srv.registered("build-02")
+    jid = running(srv, preset="ship")
+    srv.store.finish(jid, LOST, now=srv.clock(), summary="x", hold_cause="worker_unreachable")
+    assert len(hold_rows(srv)) == 1
+    return jid
+
+
+def test_rl45_an_admin_releases_the_hold_with_a_cleaned_reason(srv):
+    jid = _held(srv)
+    waiting = srv.queued_job(preset="ship")
+    assert srv.claim("build-02", 1)[0] == 204  # 홀드가 그룹을 막는다
+    reason = "checked \x1b[31mbuild-02\x07: no process\n" + "x" * 300
+    status, body = srv.req(
+        "POST", f"/jobs/{jid}/release-hold", token="admin", json_body={"reason": reason}
+    )
+    assert status == 200
+    assert set(body) == {"job_id", "group", "released_at", "released_by", "release_kind"}
+    assert body["job_id"] == jid and body["group"] == "irreversible:ship"
+    assert body["release_kind"] == "admin" and body["released_by"] == "macmini-admin"
+    (h,) = hold_rows(srv)
+    assert h["release_kind"] == "admin"
+    assert len(h["release_reason"]) == 200
+    assert not any(ord(c) < 32 or ord(c) == 127 for c in h["release_reason"])
+    assert srv.claimed("build-02", 1) == waiting  # 그룹이 다시 열렸다
+
+
+def test_rl45_release_hold_answers_403_404_and_409_no_hold(srv):
+    jid = _held(srv)
+    status, body = srv.req("POST", f"/jobs/{jid}/release-hold", token="alice", json_body={})
+    assert status == 403
+    assert hold_rows(srv)[0]["released_at"] is None
+    status, body = srv.req("POST", "/jobs/999/release-hold", token="admin", json_body={})
+    assert status == 404
+    assert srv.req("POST", f"/jobs/{jid}/release-hold", token="admin", json_body={})[0] == 200
+    status, body = srv.req("POST", f"/jobs/{jid}/release-hold", token="admin", json_body={})
+    assert status == 409 and body["code"] == "no_hold" and "error" in body
+    status, _ = srv.req("POST", f"/jobs/{jid}/release-hold", token="admin", json_body={"reason": 5})
+    assert status == 400
+
+
+class _HoldClient:
+    server = "http://srv"
+    token = "t"
+
+    def __init__(self, answer: Any) -> None:
+        self.answer = answer
+        self.calls: list[tuple[int, str | None]] = []
+
+    def release_hold(self, job_id: int, *, reason: str | None = None) -> dict[str, Any]:
+        self.calls.append((job_id, reason))
+        if isinstance(self.answer, Exception):
+            raise self.answer
+        return self.answer
+
+
+@pytest.mark.parametrize(
+    "answer, code",
+    [
+        ({"job_id": 7, "group": "g", "released_at": "t", "released_by": "a"}, 0),
+        (ClientError(409, "job #7 has no open hold", {"code": "no_hold"}), 1),
+        (ClientError(403, "admin token required"), 2),
+        (ClientError(404, "no job #7"), 2),
+        (ClientError(401, "token required"), 2),
+        (ClientError(0, "connection refused"), 3),
+    ],
+)
+def test_rl45_rcm_release_hold_exit_codes(monkeypatch, capsys, answer, code):
+    from remote_ci_monitor import cli
+
+    fake = _HoldClient(answer)
+    monkeypatch.setattr(cli, "_client", lambda args: fake)
+    assert cli.main(["release-hold", "7", "--reason", "checked", "--json"]) == code
+    assert fake.calls == [(7, "checked")]
+    out, err = capsys.readouterr()
+    if code == 0:
+        assert json.loads(out)["group"] == "g"
+        assert "released the hold on group g (job #7)" in err
+
+
+def test_rl45_rcm_release_hold_is_its_own_command_with_a_help_line(capsys):
+    from remote_ci_monitor import cli
+
+    with pytest.raises(SystemExit):
+        cli.main(["--help"])
+    assert "release-hold" in capsys.readouterr().out
+    with pytest.raises(SystemExit):
+        cli.main(["release-hold", "--help"])
+    out = capsys.readouterr().out
+    assert "after you checked the machine" in out and "--reason" in out

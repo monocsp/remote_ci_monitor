@@ -1694,6 +1694,27 @@ def cmd_cancel(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_release_hold(args: argparse.Namespace) -> int:
+    """`rcm release-hold N [--reason TEXT] [--json]`(M5t-b §4.12 · 결정 330). 종료 0 풀었다 · 1 열린
+    홀드 없음(409 `no_hold`) · 2 사용법 · 401/403/404 · 3 서버에 못 닿음."""
+    client = _client(args)
+    try:
+        resp = client.release_hold(args.job, reason=args.reason)
+    except ClientError as e:
+        if e.status == 409 and e.body.get("code") == "no_hold":
+            _err(f"release-hold: {e.message}")
+            return 1
+        _err(f"release-hold failed: {e.message}")
+        return USAGE_EXIT if e.status else EXIT_UNKNOWN
+    if args.json:
+        _print_json(resp)
+    _info(
+        f"released the hold on group {resp.get('group')} (job #{args.job})"
+        " — queued jobs in that group can start"
+    )
+    return 0
+
+
 def cmd_bump(args: argparse.Namespace) -> int:
     """대기 잡의 우선순위 변경(admin)."""
     client = _client(args)
@@ -5683,6 +5704,16 @@ def build_parser() -> argparse.ArgumentParser:
     client_opts(gc)
     gc.set_defaults(func=cmd_gc)
 
+    hold_help = (
+        "release an irreversible job's group hold after you checked the machine "
+        "(admin token; not a store release)"
+    )
+    hold = sub.add_parser("release-hold", help=hold_help, description=hold_help)
+    hold.add_argument("job", type=int)
+    hold.add_argument("--reason", help="why it is safe (kept in the audit trail, 200 chars)")
+    hold.add_argument("--json", action="store_true", help="print the answer as JSON")
+    client_opts(hold)
+    hold.set_defaults(func=cmd_release_hold)
     cancel = sub.add_parser("cancel", help="cancel a job (joiners only leave the join list)")
     cancel.add_argument("job", type=int)
     cancel.add_argument(

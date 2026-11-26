@@ -259,7 +259,7 @@ RESOLVE_CONCURRENCY = 2  # 동시에 원격 ls-remote 를 도는 제출 수. 핸
 MANIFEST_CONCURRENCY = 4  # 동시에 메모리에 올리는 manifest 수(32 MB × 핸들러 32개를 막는다)
 _JOB_RE = re.compile(
     r"^/jobs/(\d+)"
-    r"(/tree/manifest|/tree|/log|/cancel|/priority|/keep"
+    r"(/tree/manifest|/tree|/log|/cancel|/priority|/keep|/release-hold"
     r"|/artifacts/archive|/artifacts/ack|/artifacts)?$"
 )
 _SHA_RE = re.compile(r"^[0-9a-f]{64}$")
@@ -1141,6 +1141,25 @@ class App(RemoteWorkersMixin, CapabilitiesMixin, ShelfAppMixin):
         if not t.admin:
             raise ApiError(403, "admin token required")
         return t
+
+    def release_hold(self, job_id: int, t: TokenInfo, body: Any) -> dict[str, Any]:
+        """admin 이 그룹 홀드를 푼다(M5t-b §4.12 · 결정 330). 행 갱신과 사건은 한 트랜잭션이다.
+        풀기 전에 그 머신을 보는 일은 사람의 몫이다 — rcm 은 프로세스가 남았는지 모른다."""
+        if self.store.get_job(job_id) is None:
+            raise ApiError(404, f"no job #{job_id}")
+        reason = (body or {}).get("reason") if isinstance(body, dict) else None
+        if reason is not None and not isinstance(reason, str):
+            raise ApiError(400, "reason must be a string")
+        if reason is not None:
+            reason = "".join(c for c in reason if ord(c) >= 32 and ord(c) != 127)[:200]
+        out = self.store.release_hold(
+            job_id, kind="admin", by=t.name, reason=reason or None, now=self.now_fn()
+        )
+        if out is None:
+            raise ApiError(409, f"job #{job_id} has no open hold", code="no_hold")
+        at = out["released_at"]
+        released = at.replace(microsecond=0).isoformat().replace("+00:00", "Z") if at else None
+        return {**out, "released_at": released}
 
     # ── 스토어 탭 — 저장소 · 비밀 · 설정 게이트 (API 계약 v1) ─────────────────
 
@@ -6044,6 +6063,12 @@ class Handler(ShelfHandlerMixin, BaseHTTPRequestHandler):
                 self._only(method, "POST")
                 t = self.app.require_client_token(self._token())
                 self._send_json(200, self.app.cancel(job_id, t, self._json_body()))
+                return
+            if sub == "/release-hold":
+                # `rcm release-hold N`(M5t-b §4.12 · 결정 330) — admin, Bearer 만(쓰기다)
+                self._only(method, "POST")
+                t = self.app.require_admin(self._token())
+                self._send_json(200, self.app.release_hold(job_id, t, self._json_body()))
                 return
         if path in _STATIC_FILES or path.startswith("/static/"):
             self._only(method, "GET")
