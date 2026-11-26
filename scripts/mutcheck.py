@@ -7376,6 +7376,21 @@ MUTANTS = (
         tests=("tests/web/unreachable_m5tb.test.js",),
         runner="node",
     ),
+    Mutant(
+        # `rcm eta` 의 가상 잡이 프리셋의 그룹 범위를 잃고 기본 `pool` 로 읽힌다 — `host` 범위
+        # 그룹의 새 잡이 다른 호스트의 빈 레인을 두고도 쥔 잡을 기다린다고 말한다(P6-2)
+        name="eta-ghost-scope-dropped",
+        path="src/remote_ci_monitor/core/queue.py",
+        old=(
+            "        concurrency_scope=preset.concurrency_scope,"
+            "  # mutcheck: eta-ghost-scope-dropped\n"
+        ),
+        new="",
+        tests=(
+            "tests/test_queue_unreachable_m5tb.py::"
+            "test_p6_2_rl45_eta_for_new_carries_the_presets_group_scope",
+        ),
+    ),
 )
 
 

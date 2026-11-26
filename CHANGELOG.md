@@ -86,6 +86,13 @@ of a key bumps that number and is listed here.
   worker went out of reach is cancelled when the worker is back, and the screens now say so. While
   contact is lost a job is never `overdue` or `stuck`, and the web row stops counting its time.
   ([#285](https://github.com/monocsp/remote_ci_monitor/pull/285))
+- **Fewer false promises around holds and lost contact.** With a group held, the web's empty queue
+  says `Queue is empty — a held group does not start until it is released.` (or
+  `… group holds unknown.`) instead of «starts immediately». While contact is lost, the web
+  progress bar shows no time scale and never `past the estimate` or `quiet`. `rcm eta <preset>`
+  now reads the preset's `concurrency_scope` as a submitted job does: for a `host` scope group it
+  only waits for that group's jobs on the same machine, so it can show an earlier start than
+  before. ([#285](https://github.com/monocsp/remote_ci_monitor/pull/285))
 - **Hold notifications.** Every notification carries `RCM_EVENT`, `RCM_HOLD`, `RCM_HOLD_GROUP` and
   `RCM_HOLD_NOTE` (and `event` · `hold` in a webhook body); a `[[notify]]` rule with
   `on = ["irreversible_hold"]` is called once for each new hold. The default `on` is unchanged.

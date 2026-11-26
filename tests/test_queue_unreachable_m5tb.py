@@ -35,7 +35,7 @@ from remote_ci_monitor.core.model import (
     Step,
     WorkerInfo,
 )
-from remote_ci_monitor.core.queue import compute_queue
+from remote_ci_monitor.core.queue import compute_queue, eta_for_new
 from remote_ci_monitor.core.render_text import render
 from test_cli_m1 import last_json
 
@@ -641,3 +641,32 @@ def test_p6_2_g6_rl28_an_unreachable_job_is_never_quiet():
     down = one(remote_lane("mac2", "down"))
     assert down.reason == GRACE
     assert down.estimate.quiet is False, down.estimate
+
+
+def test_p6_2_rl45_eta_for_new_carries_the_presets_group_scope():
+    """# RL45 P6-2: `rcm eta <preset>` 의 가상 잡은 제출된 잡처럼 프리셋의 그룹 범위를 단다. 그래서
+    `host` 범위 그룹의 새 잡은 다른 호스트의 빈 레인에서 지금 시작한다고 본다 — 실제 제출과 같다.
+    범위를 빼면 기본 `pool` 로 읽혀 같은 풀의 쥔 잡이 끝날 때까지 기다린다고 말한다(옛 값).
+    대조: `pool` · `global` 범위는 같은 풀 안에서 쥔 잡을 기다린다."""
+    lanes = [remote_lane("mac2", "busy", job_id=940), remote_lane("build-02", "idle")]
+
+    def wait_for(scope: str) -> float | None:
+        preset = replace(PRESETS["qa"], concurrency_scope=scope)
+        holder = busy(940, key="qa", group="devices", concurrency_scope=scope)
+        row, _ahead = eta_for_new(
+            [holder],
+            preset=preset,
+            key="qa",
+            workers=lanes,
+            paused=False,
+            medians={},
+            presets={**PRESETS, "qa": preset},
+            cfg=CFG,
+            now=NOW,
+        )
+        return row.estimate.wait_seconds
+
+    assert wait_for("host") == 0
+    for scope in ("pool", "global"):
+        got = wait_for(scope)
+        assert got is not None and got > 0, (scope, got)

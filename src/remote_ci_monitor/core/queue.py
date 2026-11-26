@@ -803,7 +803,7 @@ def eta_for_new(
         key=key,
         concurrency_group=preset.concurrency_group,
         # 제출된 잡처럼 프리셋의 범위를 단다 — 홀드가 막는지는 범위로 정해진다(`_hold_blocks`)
-        concurrency_scope=preset.concurrency_scope,
+        concurrency_scope=preset.concurrency_scope,  # mutcheck: eta-ghost-scope-dropped
         source=Source(mode="tree"),
         requester=Requester(name="", label=""),
         state=QUEUED,
