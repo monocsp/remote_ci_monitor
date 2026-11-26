@@ -234,9 +234,13 @@ def hold_env(
     `RCM_HOLD_WORKER` 를 더하고 `RCM_SUMMARY` 를 홀드 한 줄로 바꾼다(§4.12). 워커는 로컬 레인이면
     빈 값이다."""
     env = notify_env(job_row, rule_name, event=EVENT_IRREVERSIBLE_HOLD, hold=hold, **kw)
-    env["RCM_SUMMARY"] = sanitize_text(
-        hold_summary(hold, int(job_row.get("id") or 0), str(job_row.get("preset") or ""))
+    # 쓰는 키다 — `env[...] =` 꼴은 `tests/test_docs_m5t.py` 가 「셸에서 읽는 이름」으로 센다
+    summary = hold_summary(hold, int(job_row.get("id") or 0), str(job_row.get("preset") or ""))
+    env.update(
+        {
+            "RCM_SUMMARY": sanitize_text(summary),
+            "RCM_HOLD_CAUSE": sanitize_text(hold.get("cause")),
+            "RCM_HOLD_WORKER": sanitize_text(hold.get("worker")),
+        }
     )
-    env["RCM_HOLD_CAUSE"] = sanitize_text(hold.get("cause"))
-    env["RCM_HOLD_WORKER"] = sanitize_text(hold.get("worker"))
     return env
