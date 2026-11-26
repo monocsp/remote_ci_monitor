@@ -198,6 +198,62 @@ def test_ob2_no_such_line_when_the_service_runs_this_config(home, trial_server, 
     assert "no service starts rcm" not in out and "another install" not in out, out
 
 
+TRIAL_LABEL = "test.rcm.server"  # coordinator_args 의 --label
+
+
+def _trial_install(tmp_path: Path, port: int) -> tuple[Path, Path]:
+    """진짜 `rcm setup` 이 시험 설치를 만든다(`<시험>/service/<라벨>.plist` 를 그 규칙대로 둔다).
+    설정은 가짜 시험 서버의 포트로 다시 쓴다 — 서비스 파일은 setup 이 쓴 그대로다."""
+    trial = tmp_path / "rcm-test" / "server.toml"
+    fake = Fake()
+    argv = coordinator_args(tmp_path / "rcm-test" / "data", "--config", str(trial))
+    assert go(fake, *argv) == 0, fake.text
+    staged = trial.parent / "service" / f"{TRIAL_LABEL}.plist"
+    assert staged.is_file(), fake.text
+    _server_toml(trial, port)
+    return trial, staged
+
+
+def _staged_path(staged: Path) -> str:
+    return plistlib.loads(staged.read_bytes())["EnvironmentVariables"]["PATH"]
+
+
+def test_ob2_doctor_measures_the_service_file_setup_put_next_to_this_config(
+    home, trial_server, tmp_path, capsys
+):
+    """# OB2 — 근본 원인: doctor 는 setup 이 둔 서비스 파일을 기본 설정 폴더 아래에서만 찾아,
+    시험 설치의 `<시험>/service/<라벨>.plist` 를 못 보고 도는 설치의 서비스로 떨어졌다. `--config`
+    를 주면 그 폴더 아래 `service/` 에서 setup 의 파일을 먼저 찾고 그 파일로 잰다 — 서비스 줄 ·
+    PATH · `--config` 일치 판정 모두."""
+    trial, staged = _trial_install(tmp_path, trial_server.port)
+    # 도는 설치의 서비스(다른 설정). setup 의 운영 스캔이 거절하지 않게 시험 설치 뒤에 둔다
+    _server_plist(home, home / ".config" / "rcm" / "server.toml")
+    argv = ("--role", "coordinator-worker", "--config", str(trial))
+    _code, out = _doctor(capsys, *argv)
+    assert "--config" not in "\n".join(ln for ln in out.splitlines() if ln.startswith("warn  "))
+    assert "no service starts rcm" not in out and PROD_LABEL not in out, out
+    _code, raw = _doctor(capsys, *argv, "--json")
+    doc = json.loads(raw)
+    assert doc["service"]["file"] == str(staged), doc["service"]
+    assert doc["service"]["path"] == _staged_path(staged), doc["service"]
+    assert set(doc["service"]) == {"file", "manager", "path", "env_names"}, doc["service"]
+
+
+def test_ob2_doctor_prefers_the_installed_copy_of_this_configs_service_file(
+    home, trial_server, tmp_path, capsys
+):
+    """# OB2 — setup 이 찍은 복사 명령으로 설치한 뒤면(같은 내용) 서비스 관리자가 읽는 설치 자리의
+    그 파일을 잰다(6-B-V2) — 도는 설치의 표준 라벨 서비스가 아니다."""
+    trial, staged = _trial_install(tmp_path, trial_server.port)
+    _server_plist(home, home / ".config" / "rcm" / "server.toml")
+    installed = home / "Library" / "LaunchAgents" / f"{TRIAL_LABEL}.plist"
+    installed.write_bytes(staged.read_bytes())
+    _code, raw = _doctor(capsys, "--role", "coordinator-worker", "--config", str(trial), "--json")
+    doc = json.loads(raw)
+    assert doc["service"]["file"] == f"~/Library/LaunchAgents/{TRIAL_LABEL}.plist", doc["service"]
+    assert not any("--config" in w for w in doc["warnings"]), doc["warnings"]
+
+
 # ── OB3: setup 이 찍는 명령의 uid ──────────────────────────────────────────────
 
 
