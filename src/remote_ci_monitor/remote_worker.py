@@ -1059,6 +1059,20 @@ def _write_json(path: Path, data: dict[str, Any]) -> None:
     _fsync_dir(path.parent)
 
 
+def _write_json_unsynced(path: Path, data: dict[str, Any]) -> None:
+    """`_write_json` 과 같이 임시 파일에 써서 rename 하지만 fsync 하지 않는다. 읽는 쪽이 반쯤 쓴
+    파일을 보지 않는 것만 지킨다 — 내구성이 필요 없는 `ok_at.json` 용이다(batch-5 #1)."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(f".{path.name}.{secrets.token_hex(4)}")
+    try:
+        tmp.write_text(json.dumps(data, sort_keys=True), encoding="utf-8")
+        os.replace(tmp, path)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            tmp.unlink(missing_ok=True)
+        raise
+
+
 def _fsync_dir(folder: Path) -> None:
     """이름 바꾸기를 디스크에 남긴다. 폴더를 열거나 fsync 할 수 없는 파일 시스템(일부 네트워크
     파일 시스템)에서는 건너뛴다 — 내용은 이미 fsync 했고, 이름 바꾸기는 끝났다."""
@@ -1603,7 +1617,11 @@ class RemoteWorker:
                 self._ok_written = mono
         if due and self.session_dir is not None:
             try:
-                _write_json(self.session_dir / "ok_at.json", {"wall": _iso_exact(best)})
+                # fsync 하지 않는다 — heartbeat 의 도우미 스레드가 여기서 멈추면 그 회차가 시한을
+                # 넘긴다. 다음 프로세스가 D 를 다시 볼 때만 읽는 값이라 OS 충돌 뒤 옛 값이어도
+                # 된다(없으면 `lock` 의 mtime, §4.4 step 9). 보고 큐는 그대로 fsync 한다(batch-5)
+                # mutcheck: ok-at-synced-on-heartbeat
+                _write_json_unsynced(self.session_dir / "ok_at.json", {"wall": _iso_exact(best)})
             except OSError as e:
                 self.log(f"session folder: {type(e).__name__}")
 

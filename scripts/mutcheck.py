@@ -7726,6 +7726,23 @@ MUTANTS = (
             "test_a_line_longer_than_max_line_bytes_is_delivered_without_waiting_for_eof",
         ),
     ),
+    Mutant(
+        # ok_at.json 을 heartbeat 경로에서 fsync 한다 — 느린 디스크가 회차를 늦춘다(batch-5 #1)
+        name="ok-at-synced-on-heartbeat",
+        path="src/remote_ci_monitor/remote_worker.py",
+        old=(
+            '                _write_json_unsynced(self.session_dir / "ok_at.json",'
+            ' {"wall": _iso_exact(best)})\n'
+        ),
+        new=(
+            '                _write_json(self.session_dir / "ok_at.json",'
+            ' {"wall": _iso_exact(best)})\n'
+        ),
+        tests=(
+            "tests/test_worker_outbox_m5tb.py::"
+            "test_b5_1_ok_at_is_replaced_without_fsync_while_the_report_queue_is_synced",
+        ),
+    ),
 )
 
 
