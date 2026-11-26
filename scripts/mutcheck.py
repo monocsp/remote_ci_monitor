@@ -4614,6 +4614,26 @@ MUTANTS = (
             "test_tl3_a_capacity_error_is_logged_once_not_on_every_health_call",
         ),
     ),
+    Mutant(
+        # setup 그물이 터지면 setup 이 아니라고 본다 — main() 이 경고만 남기고 그 명령을 허용한다
+        # (PR #274 P3 LOW, fail-open)
+        name="guard-net-crash-not-setup",
+        path="tools/guard_production.py",
+        old=(
+            "    except Exception:  # noqa: BLE001 — 그물이 터지면 setup 이 어디에 쓸지 모른다\n"
+            "        return True\n"
+        ),
+        new=(
+            "    except Exception:  # noqa: BLE001 — 그물이 터지면 setup 이 어디에 쓸지 모른다\n"
+            "        return False\n"
+        ),
+        tests=(
+            "tests/test_guard_production_setup.py::"
+            "test_pr274_a_crash_inside_the_net_counts_as_reaching_setup",
+            "tests/test_guard_production_setup.py::"
+            "test_pr274_a_crash_inside_the_net_is_a_deny_from_the_hook",
+        ),
+    ),
 )
 
 

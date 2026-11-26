@@ -1277,3 +1277,148 @@ def test_b10_l3_a_cli_py_path_run_of_setup_passes_the_hook_by_design(command):
     # tests/test_setup.py::test_b9_352_setup_refuses_a_production_target_whatever_shell_built_it 의
     # config 칸). 이 시험이 빨개지면 훅이 다시 경로 조각을 세는 것이다 — 354 의 과잉 차단이다
     assert judge(command, environ=TEST_XDG) is None, command
+
+
+# ── PR #274: 그물은 #272 그대로 — 터지면 거절하고, 우회 꼴과 과잉 차단을 잠근다 ──
+#
+# PR #274 는 #272 그물의 과잉 차단을 두 번 풀려 했다(글을 실행하는 명령의 열거, 다음에 좁은 면제).
+# P3 격리 검증은 세 라운드 내리 면제가 글을 실행하는 무언가에 닿는 우회를 찾았다. 셸 명령 글의 허용
+# 목록으로는 이 부류를 닫을 수 없다고 보고, 메인 세션이 Codex 와 논의해 선택지 B 를 골랐다
+# (2026-11-26): 면제를 모두 거두고 #272 그물을 그대로 둔다. 운영 보호의 본체는 setup 자신의 거절이다
+# (결정 352). 그물의 과잉 차단은 받아들인 비용이다 — 글은 파일로 넘긴다.
+
+
+def _crashing_net(_command):
+    raise RuntimeError("net-boom")
+
+
+def test_pr274_a_crash_inside_the_net_counts_as_reaching_setup(monkeypatch):
+    # PR #274 P3 LOW: `_about_setup` 은 `_setup_net` 이 터지면 False(setup 아님)를 돌려줬다 — 그러면
+    # main() 은 경고만 남기고 명령을 허용한다. main() 의 fail-closed 주석과 어긋났다. 그물이 터진
+    # Bash 명령은 setup 에 닿을 수 있는 쪽이다. 모양이 이상한 입력 · Bash 가 아닌 도구는 그대로
+    # False 다
+    monkeypatch.setattr(guard, "_setup_net", _crashing_net)
+    assert guard._about_setup({"tool_name": "Bash", "tool_input": {"command": "ls"}}) is True
+    assert guard._about_setup({"tool_name": "Read", "tool_input": {"file_path": "/x"}}) is False
+    assert guard._about_setup({"tool_name": "Bash", "tool_input": "not a mapping"}) is False
+    assert guard._about_setup("not a mapping") is False
+
+
+def test_pr274_a_crash_inside_the_net_is_a_deny_from_the_hook(monkeypatch, capsys):
+    # PR #274 P3 LOW: 그물이 터지면 훅 전체가 거절한다 — 경고만 남기고 허용하지 않는다
+    import io
+    import json
+
+    monkeypatch.setattr(guard, "find_production", lambda: PROD)
+    monkeypatch.setattr(guard, "_setup_net", _crashing_net)
+    payload = {"tool_name": "Bash", "tool_input": {"command": "ls /tmp"}, "cwd": "/tmp"}
+    monkeypatch.setattr(sys, "stdin", io.StringIO(json.dumps(payload)))
+    assert guard.main() == 0
+    out = json.loads(capsys.readouterr().out or "{}")
+    assert out.get("hookSpecificOutput", {}).get("permissionDecision") == "deny", out
+    assert "net-boom" in out["hookSpecificOutput"]["permissionDecisionReason"], out
+
+
+#: P3 라운드들이 찾은 우회 꼴 — 면제가 있던 동안 지나갔거나 지나갈 뻔한 것. #272 그물은 모두 막는다
+PR274_BYPASSES = [
+    # 1라운드 HIGH F1: 실행자 목록에 없는 따옴표 글(trap · git 별칭 · 환경 변수 명령 · $SHELL ·
+    # 파일에 써서 실행)
+    "S=se; S=${S}tup; export S; trap 'rcm $S' EXIT; exit",
+    "S=se; S=${S}tup; export S; git config alias.x '!rcm $S'; git x",
+    "export S; GIT_SSH_COMMAND='rcm $S' git ls-remote ssh://h/x",
+    "export S; git -c core.sshCommand='rcm $S' ls-remote ssh://h/x",
+    "export S; echo 'rcm $S' | $SHELL",
+    "printf 'rcm $S\\n' > /tmp/x.sh; chmod +x /tmp/x.sh; /tmp/x.sh",
+    "printf 'rcm $S\\n' > /tmp/x.py; python3 /tmp/x.py",
+    # 1라운드 HIGH F2: 명령 자리 모형이 놓친 자리(목록 밖 래퍼 · zsh 앞말 · coproc · 함수 · 변수)
+    "R=r; R=${R}cm; echo | taskset 1 xargs $R $S",
+    "echo | numactl -C 0 xargs $R $S",
+    "echo | busybox xargs $R $S",
+    "echo | strace -f xargs $R $S",
+    "noglob xargs $R $S",
+    "nocorrect xargs $R $S",
+    "coproc xargs $R $S",
+    "f() { xargs $R $S; }; echo | f",
+    "R=r; R=${R}cm; F=find; $F . -exec $R $S \\;",
+    'docker exec c sh -c "rcm $S"',
+    # 1라운드 MED 1: `#` 주석 속 아포스트로피가 따옴표를 열어 진짜 줄을 따옴표 글로 만들었다
+    "# don't\nrcm $S\n# won't",
+    "echo a # it's\nrcm ${S}tup\n# 'x",
+    "gh pr comment 1 --body #'\nrcm ${S}tup\n#'",
+    # 1라운드 MED 4 · batch-2: 글이 실행될 파일로 흘러가는 꼴, 글 자리 밖의 rcm 글
+    "echo 'rcm $S' && rcm status",
+    "gh pr create --base 'rcm ${S}tup' --title x",
+    "T='rcm $S'; git commit -m \"$T\"; echo $T",
+    "git commit -m 'rcm ${S}tup' && git log -1 --format=%B | sh",
+    "printf '%s' 'S=se; S=${S}tup; rcm $S' > /tmp/t.txt && cp /tmp/t.txt .git/hooks/pre-commit "
+    "&& git commit -m x",
+    "git commit -m 'S=se; S=${S}tup; rcm $S' && git log -1 --output=.git/hooks/post-commit "
+    "&& git commit --allow-empty -m y",
+    "git commit -m 'S=se; S=${S}tup; rcm $S' && git log -1 --format=%B > .git/hooks/post-commit",
+    "cd /tmp/r && git commit -m 'S=se; S=${S}tup; rcm $S' && git log -1 --format=%B "
+    "> /tmp/r/.git/hooks/post-commit && git commit --allow-empty -m y",
+    "printf '%s' 'S=se; S=${S}tup; rcm $S' > /tmp/t.txt && find /tmp/t.txt -exec sh {} \\;",
+    "git commit -m 'S=se; S=${S}tup; rcm $S' && S=$(git rev-parse --output=.git/hooks/x) "
+    "&& git log -1 $S",
+    "printf '%s' '--output=.git/hooks/x' > /tmp/a.txt && git commit -m 'rcm $S' "
+    "&& git log -1 $(cat /tmp/a.txt)",
+    "PATH=/tmp/e:$PATH; git commit -m 'rcm (x) 고친다'",
+    "git commit -m 'fix rcm (x)' <<'EOF'\nEOF",
+    # 2라운드 HIGH: 파일에 써 둔 글을 면제된 명령(`python3 tools/guard_naming.py`)이 실행한다
+    "mkdir -p /tmp/x/tools && printf '%s' 'import os; os.system(\"rcm $(echo set)up\")' "
+    "> /tmp/a.txt && cat /tmp/a.txt > /tmp/x/tools/guard_naming.py && cd /tmp/x "
+    "&& python3 tools/guard_naming.py pr t",
+    # 2라운드 HIGH: `$'…'` 가 find 의 플래그 검사를 숨긴다
+    "printf '%s' 'S=se; S=${S}tup; rcm $S' > /tmp/t.txt && find /tmp/t.txt $'-exec' sh {} \\;",
+]
+
+
+@pytest.mark.parametrize("command", PR274_BYPASSES)
+def test_pr274_the_bypass_shapes_the_p3_rounds_found_stay_denied(command):
+    """잠금(처음부터 초록): PR #274 의 P3 라운드들이 찾은 우회 꼴을 #272 그물이 모두 막는다.
+
+    누가 그물을 넓히거나 면제를 다시 얹으면 이 칸이 빨개진다. 그물을 바꾸려면 이 꼴마다 왜
+    안전한지 먼저 보여야 한다 — 세 라운드 동안 면제가 이 부류(글을 실행하는 무언가에 닿는 꼴)를
+    닫지 못했다."""
+    verdict = judge(command, environ=TEST_XDG)
+    assert verdict is not None and verdict.decision == "deny", command
+    assert PLAIN_MESSAGE in verdict.reason, command
+
+
+#: PR #272 머지 뒤 이 Mac 에서 막힌 평범한 명령(관찰 2026-11-26)과 그 이웃 — 낱말 setup 은 없다
+PR274_ACCEPTED_OVER_BLOCKING = [
+    # 관찰 1: 제목 변수와 `$(…)` · `tar -x` 가 한 명령에 있다
+    "cd /home/op/src/remote_ci_monitor-x && H=/home/op/src/remote_ci_monitor-x/.verify/h && "
+    "T='feat(cli): rcm wait 이 잡을 돌린 머신과 산출물 상태를 알려 준다 — --notify 로 알림' && "
+    'python3 tools/guard_naming.py pr "$T" && GH_TOKEN=$(gh auth token --user u) gh pr create '
+    '--base dev --title "$T" --body-file "$H/pr-body.md"; S=$(git rev-parse HEAD); '
+    "mkdir -p $H/snap-1 && git archive $S | tar -x -C $H/snap-1",
+    # 관찰 2: 제목을 파일로 넘기고 `"$(cat …)"` 로 읽는다 — 이 꼴도 막힌다
+    "printf '%s' 'feat(cli): rcm wait 이 잡을 돌린 머신을 알려 준다' > /tmp/title.txt && "
+    'python3 tools/guard_naming.py pr "$(cat /tmp/title.txt)"',
+    # 관찰 3: 본문 안의 「rcm (…)」
+    'gh pr comment 273 --body "verify-round: 3 · rcm/ci green · rcm (job 3712) 끝"',
+    'T="docs(wait): rcm wait 안내"; gh pr create --title "$T" --body-file "$H/pr.md"',
+    'git commit -m \'fix(cli): rcm wait 이 (#273) 을 고친다\' && git log -1 "$A" "$B"',
+    # 인자 자리의 런처 낱말(`-x` · `expect` · `xargs` · `-exec`)과 rcm 이 한 명령에 있다
+    "fd -e py src | wc -l; git archive HEAD | tar -x -C /tmp/snap; rcm status",
+    "fd -e md docs > /tmp/l; unzip -x a.zip b; rcm wait --job 5 --timeout 60",
+    "grep -x foo /tmp/a && fd -e md; rcm status",
+    "grep -n expect docs/operating.md; rcm status",
+    "git log --grep xargs -1 && rcm status",
+    "find . -name '*.md' > /tmp/l; grep -n -- -exec /tmp/l; rcm status",
+]
+
+
+@pytest.mark.parametrize("command", PR274_ACCEPTED_OVER_BLOCKING)
+def test_pr274_the_over_blocking_is_an_accepted_cost(command):
+    """잠금 — 받아들인 비용(PR #274, 선택지 B, 2026-11-26): 이 명령들은 setup 과 상관없지만 #272
+    그물이 막는다.
+
+    두 번의 면제 시도가 P3 에서 우회를 남겨 거두었다(결정: 면제 없음, 운영 보호의 본체는 setup
+    자신의 거절 — 결정 352). 비켜 가는 길은 글을 파일로 넘기는 것이다: `gh pr … --body-file`,
+    `git commit -F <파일>`, 그리고 rcm 낱말이 없는 명령. 그물을 넓혀 이 칸을 허용으로 바꾸려면
+    test_pr274_the_bypass_shapes_the_p3_rounds_found_stay_denied 의 모든 꼴이 계속 막힘을 먼저
+    보여야 한다."""
+    verdict = judge(command, environ=TEST_XDG)
+    assert verdict is not None and verdict.decision == "deny", command
