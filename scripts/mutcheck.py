@@ -4692,16 +4692,37 @@ MUTANTS = (
         # 서비스 파일을 못 찾고 도는 설치의 서비스로 잰다(온보딩 시험 OB2 의 근본 원인)
         name="ob2-doctor-skips-this-configs-service-file",
         path="src/remote_ci_monitor/doctor.py",
-        old=(
-            "    own = [] if config_file is None else "
-            "_own_service_files(config_file, home, user_home)\n"
-        ),
-        new="    own: list[Path] = []\n",
+        old="    if config_file is not None:\n        own = _own_service_file(\n",
+        new="    if False:\n        own = _own_service_file(\n",
         tests=(
             "tests/test_onboarding_findings.py::"
             "test_ob2_doctor_measures_the_service_file_setup_put_next_to_this_config",
             "tests/test_onboarding_findings.py::"
             "test_ob2_doctor_prefers_the_installed_copy_of_this_configs_service_file",
+        ),
+    ),
+    Mutant(
+        # 기본 설정 폴더의 `--config` 에서도 새 단계가 돈다 — 설치하지 않은 setup 사본이 표준
+        # 라벨의 설치된 서비스를 이겨 예전 결과가 바뀐다(PR #277 검토 MED 1)
+        name="ob2-doctor-new-stage-runs-for-the-default-config",
+        path="src/remote_ci_monitor/doctor.py",
+        old="    if _default_config_dir(config, home, config_dir):\n        return None\n",
+        new="    if False:\n        return None\n",
+        tests=(
+            "tests/test_onboarding_findings.py::"
+            "test_ob2_default_config_keeps_the_old_order_over_a_staged_only_file",
+        ),
+    ),
+    Mutant(
+        # 설정 옆 `service/` 에 이 역할의 파일이 여럿이어도 새 단계가 하나를 고른다 — 예전
+        # 순서로 넘기지 않는다(PR #277 검토 MED 2)
+        name="ob2-doctor-picks-one-of-several-next-to-the-config",
+        path="src/remote_ci_monitor/doctor.py",
+        old="    if skipped or len(found) != 1:\n        return None\n    return found[0]\n",
+        new="    if skipped or not found:\n        return None\n    return found[0]\n",
+        tests=(
+            "tests/test_onboarding_findings.py::"
+            "test_ob2_several_files_next_to_the_config_fall_back_to_the_old_order",
         ),
     ),
     Mutant(

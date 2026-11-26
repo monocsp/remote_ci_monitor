@@ -165,9 +165,10 @@ another in the same terminal; only `rcm serve` gets a terminal of its own.
 
 In a test install, `rcm version`, `rcm doctor` and `rcm setup` can still show the running
 install's default config, service or cache: they look in the default places too. `rcm doctor
---config ~/rcm-test/server.toml` measures the service file setup put in `~/rcm-test/service/`; only
-when that folder has none does it fall back to the running install's service, and then it says
-that service starts rcm with another install's config. `rcm setup` names the running install's
+--config ~/rcm-test/server.toml` measures the service file setup put in `~/rcm-test/service/`, or
+its installed copy once you installed it; only when that folder has none (or several) does it fall
+back to the running install's service, and then it says that service starts rcm with another
+install's config. `rcm setup` names the running install's
 `worker.toml` as separate from this config. What ties a test client to the test
 server is `RCM_SERVER` and `RCM_TOKEN` (or `--server`), as in the block above.
 

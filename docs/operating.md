@@ -347,10 +347,14 @@ anywhere else. `--config` and `--server` given to `rcm doctor` win, with a warni
 service starts with another `--config` (or a relative one, which depends on the service's working
 directory and is not compared). That warning says no service starts rcm with the config given,
 names the service it found by label and file with the config that service uses, another
-install's, and says the given file was measured as given. With `--config`, the service file
-`rcm setup` put next to that config (in its `service/` folder) is looked at first, so a test install
-next to a running one measures its own service; only a test install without one of its own falls
-back to the running install's service, with that warning. A `coordinator` or `coordinator-worker` report
+install's, and says the given file was measured as given; with `--service-file` it only says that
+the given file starts rcm with another config. With a `--config` outside the default config folder,
+the service file `rcm setup` put next to that config (in its `service/` folder) is looked at first,
+or its installed copy when one with the same label is installed, so a test install next to a
+running one measures its own service. When that folder holds none of the role's files, several,
+or one rcm cannot read, doctor picks nothing from that folder and looks in the places it always
+has; a test install without one of its own falls back to the running install's service, with that
+warning. With the default config, doctor only looks in those places. A `coordinator` or `coordinator-worker` report
 with no server config anywhere is a usage error (exit 2): it does not ask whatever answers on port
 8787 with the built-in defaults. When the service file cannot be read and no `--config` is given,
 or the config the service names cannot be read, rcm does not know what the service runs with: the
