@@ -402,3 +402,24 @@ describe("G6 — 끊긴 잡의 행은 살아 있는 것처럼 세지 않는다",
     assert.ok(src.indexOf("var lc = laneClass(row);") !== -1, "레인 색");
   });
 });
+
+describe("G8 — 목록 밖 잡의 로그 서랍도 「로그 불완전」을 말한다", () => {
+  // 서랍은 큐 · 최근 행에서만 `log_complete` 를 읽었다 — 딥 링크나 홀드 잡 링크로 연 목록 밖 잡은
+  // 아무 표시도 없었다. CLI 는 잡 문서를 읽는다. 목록에 없으면 잡 문서를 한 번 읽어 거기서 본다.
+  test("g8 — drawerLogNote: 목록 행이 있으면 그 행, 없으면 잡 문서", () => {
+    assert.equal(typeof rcm.drawerLogNote, "function");
+    assert.equal(rcm.drawerLogNote(null, { log_complete: false }, "en"), "log incomplete — the worker could not keep all of it");
+    assert.equal(rcm.drawerLogNote({ log_complete: true }, { log_complete: false }, "en"), null);
+    assert.equal(rcm.drawerLogNote(null, null, "en"), null);
+    assert.equal(rcm.drawerLogNote(null, { log_complete: false }, "ko"), "로그가 불완전함 — 워커가 일부를 남기지 못함");
+  });
+  test("g8 — 배선: 서랍을 열 때 목록에 없으면 잡 문서를 한 번 읽고, 머리 줄이 그것을 쓴다", () => {
+    const src = APP_SRC();
+    const open = src.slice(src.indexOf("function openDrawer(id)"), src.indexOf("function closeDrawer("));
+    assert.ok(open.indexOf("state.drawer.doc = null") !== -1, "openDrawer 가 잡 문서를 비우지 않는다");
+    assert.ok(/if \(!row\) api\("\/jobs\/" \+ id\)/.test(open), "목록 밖 잡의 문서를 읽지 않는다");
+    assert.ok(open.indexOf("state.drawer.jobId === id") !== -1, "늦게 온 답이 다른 잡의 서랍에 붙는다");
+    const poll = src.slice(src.indexOf("function pollLog()"), src.indexOf("// 취소 (항목 13 · 30)"));
+    assert.ok(poll.indexOf("drawerLogNote(findAnyJob(id), state.drawer.doc, L())") !== -1, "pollLog 가 잡 문서를 보지 않는다");
+  });
+});

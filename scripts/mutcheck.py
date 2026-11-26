@@ -7286,6 +7286,19 @@ MUTANTS = (
             "test_g7_rl45_a_hold_without_a_readable_worker_is_unknown_not_local",
         ),
     ),
+    Mutant(
+        # 목록 밖 잡의 로그 서랍이 잡 문서의 `log_complete` 를 보지 않아 「로그 불완전」이 없다
+        # (P6-1 G8)
+        name="drawer-log-note-ignores-job-doc",
+        path="src/remote_ci_monitor/web/app.js",
+        old=(
+            "    return logCompleteNote(row || doc, lang);"
+            "   // mutcheck: drawer-log-note-ignores-job-doc"
+        ),
+        new="    return logCompleteNote(row, lang);",
+        tests=("tests/web/unreachable_m5tb.test.js",),
+        runner="node",
+    ),
 )
 
 

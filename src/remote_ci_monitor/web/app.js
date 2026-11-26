@@ -578,6 +578,10 @@
   function logCompleteNote(job, lang) {
     return job && job.log_complete === false ? T(lang, "drawer.log_incomplete") : null;
   }
+  // 서랍 머리 줄의 한 마디 — 목록 행이 있으면 그 행, 없으면 서랍이 읽은 잡 문서(P6-1 G8)
+  function drawerLogNote(row, doc, lang) {
+    return logCompleteNote(row || doc, lang);   // mutcheck: drawer-log-note-ignores-job-doc
+  }
   /** 워커에서 지금 소식이 오는 행인가(P6-1 G6). 끊김 유예 중이면 아는 것은 마지막으로 들은 값뿐이다 —
    *  단계 · 경과 초를 스스로 세지 않고, 막대도 세지 않는다. */
   function heardLive(row) {
@@ -3640,7 +3644,7 @@
     ordinal: ordinal, truncate: truncate, stateWord: stateWord, stateGlyph: stateGlyph, personLabel: personLabel,
     reasonText: reasonText, confidenceBadge: confidenceBadge, etaText: etaText,
     elapsedText: elapsedText, notMoving: notMoving, yourJobs: yourJobs, isMine: isMine,
-    holdChip: holdChip, logCompleteNote: logCompleteNote, stuckBand: stuckBand, heardLive: heardLive, laneClass: laneClass,
+    holdChip: holdChip, logCompleteNote: logCompleteNote, drawerLogNote: drawerLogNote, stuckBand: stuckBand, heardLive: heardLive, laneClass: laneClass,
     scheduledOf: scheduledOf, scheduledRowModel: scheduledRowModel, notifyFailuresBadge: notifyFailuresBadge, cancelLocked: cancelLocked, hostPressure: hostPressure,
     jobStorageLine: jobStorageLine, hostRunsNoJobs: hostRunsNoJobs, hostFacts: hostFacts,
     queueHeader: queueHeader, sortQueue: sortQueue, workerPills: workerPills, workersCrowded: workersCrowded, workerName: workerName, hostCards: hostCards, headerNote: headerNote, progressHead: progressHead, progressHeadHtml: progressHeadHtml, queueGroups: queueGroups, runningStep: runningStep,
@@ -3683,7 +3687,7 @@
     // `machinesKey` 는 `/api/status` 의 머신 요약이 바뀌었는지 보는 열쇠다(바뀔 때만 다시 받는다).
     machines: null, machinesMissing: false, machinesKey: null, machinesLoading: false,
     es: null, retryTimer: null, pollTimer: null, refetchTimer: null, hiddenSince: null, lostShownAt: null,
-    drawer: { jobId: null, offset: 0, timer: null, lines: 0 }, cancelTarget: null, hl: null, tz: null,
+    drawer: { jobId: null, offset: 0, timer: null, lines: 0, doc: null }, cancelTarget: null, hl: null, tz: null,
     // 스토어 탭. `repos` 는 릴리스 프로파일이 있는 저장소(null = 아직 안 물어봄). 비밀 값은 여기 없다.
     view: "queue", store: { api: null, repos: null, reposStatus: null, repo: null, doc: null, secrets: null, screen: null,
       error: null, fetchError: null, fetching: false, verifying: false, loadedAt: null, timer: null, seq: 0, dialogSecret: null,
@@ -5300,6 +5304,12 @@
     var row = findAnyJob(id);
     state.drawer.jobId = id; state.drawer.offset = 0; state.drawer.lines = 0;
     state.drawer.key = row ? (row.key || "") : "";
+    // 큐 · 최근 목록 밖의 잡(딥 링크 · 홀드 잡 링크)은 `log_complete` 를 잡 문서에서 읽는다 —
+    // 한 번만, 늦게 온 답은 그 사이 다른 잡의 서랍에 붙이지 않는다(P6-1 G8)
+    state.drawer.doc = null;
+    if (!row) api("/jobs/" + id).then(function (r) { return r.ok ? r.json() : null; }).then(function (job) {
+      if (job && state.drawer.jobId === id) state.drawer.doc = job;
+    }).catch(function () { /* 모르면 아무 말도 하지 않는다 — 「완전함」이라고도 하지 않는다 */ });
     $("[data-drawer-title]").textContent = tr("drawer.job", { id: id, key: state.drawer.key });
     $("[data-drawer-title]").title = tr("drawer.job", { id: id, key: state.drawer.key });
     var linkSlot = $("[data-drawer-link]");
@@ -5348,7 +5358,7 @@
       }
       state.drawer.offset = res.next;
       // 워커가 로그 일부를 남기지 못했으면(M5t-b §4.6) 머리 줄에 한 마디 — 잡 행의 `log_complete`
-      var gap = logCompleteNote(findAnyJob(id), L());
+      var gap = drawerLogNote(findAnyJob(id), state.drawer.doc, L());
       $("[data-drawer-sub]").textContent = (res.more ? tr("drawer.live", { bytes: fmtBytes(res.next) }) : tr("drawer.finished", { bytes: fmtBytes(res.next) })) + (gap ? " · " + gap : "");
       if (res.more) state.drawer.timer = setTimeout(pollLog, 2000);
     }).catch(function () { $("[data-drawer-sub]").textContent = tr("drawer.load_failed"); state.drawer.timer = setTimeout(pollLog, 5000); });
