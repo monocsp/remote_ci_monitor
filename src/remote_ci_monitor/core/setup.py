@@ -495,21 +495,41 @@ def replace_commands(manager: str, *, staged: Path, installed: Path, label: str)
 
 
 def remove_line(
-    manager: str | None, *, installed: Path | None, label: str | None, files: Sequence[Path]
+    manager: str | None,
+    *,
+    installed: Path | None,
+    label: str | None,
+    files: Sequence[Path],
+    staged: Path | None = None,
+    preloaded: bool = False,
 ) -> str:
     """setup 이 한 일을 되돌리는 한 줄(P5 B-E3) — 서비스를 내리고(launchd `bootout`, systemd
-    `disable --now`), 설치한 서비스 파일과 setup 이 쓴 파일을 지운다. data_dir 은 지우지 않는다."""
+    `disable --now`), 설치한 서비스 파일과 setup 이 쓴 파일을 지운다. data_dir 은 지우지 않는다.
+
+    설치 자리의 파일은 setup 이 쓴 파일(`staged`)과 같을 때만(`cmp -s`) 내리고 지운다 — 다르면
+    그 서비스는 다른 누가 쓴 것이라 그대로 둔다(P6 재확인 3 · v2-3). 같은 라벨이 setup 전에 이미
+    올라가 있었으면(`preloaded`) 그 서비스는 setup 이 쓴 것이 아닐 수 있다고 덧붙인다."""
     q = shlex.quote
-    rm = "rm -f " + " ".join(q(str(p)) for p in ([installed] if installed else []) + list(files))
-    if manager == LAUNCHD and installed is not None and label:
-        return f"to remove: launchctl bootout gui/$(id -u)/{q(label)}; {rm}"
-    if manager == SYSTEMD and installed is not None:
-        unit = q(installed.name)
-        return (
-            f"to remove: systemctl --user disable --now {unit}; {rm}; "
-            "systemctl --user daemon-reload"
+    rm = "rm -f " + " ".join(q(str(p)) for p in files)
+    service = ""
+    if manager in (LAUNCHD, SYSTEMD) and installed is not None and staged is not None:
+        same = f"cmp -s {q(str(staged))} {q(str(installed))}"
+        gone = f"rm -f {q(str(installed))}"
+        if manager == LAUNCHD and label:
+            service = f"{same} && launchctl bootout gui/$(id -u)/{q(label)} && {gone}; "
+        elif manager == SYSTEMD:
+            unit = q(installed.name)
+            service = (
+                f"{same} && systemctl --user disable --now {unit} && {gone} && "
+                "systemctl --user daemon-reload; "
+            )
+    line = f"to remove: {service}{rm}"
+    if service and preloaded:
+        line += (
+            f" (a service labelled {label} was already loaded before setup: it may not be one "
+            "setup wrote, so the cmp keeps it unless its installed file is the one setup wrote)"
         )
-    return f"to remove: {rm}"
+    return line
 
 
 def token_commands(rcm: Path, config: Path) -> list[str]:

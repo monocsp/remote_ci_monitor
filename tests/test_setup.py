@@ -11,6 +11,7 @@ from __future__ import annotations
 import io
 import os
 import plistlib
+import shutil
 import socket
 import sqlite3
 import subprocess
@@ -1534,3 +1535,55 @@ def test_s11_korean_paths_round_trip(tmp_path, monkeypatch, platform):
         doc = plistlib.loads(sf.read_bytes())
         assert doc["ProgramArguments"] == [str(rcm), "serve", "--config", str(config)]
         assert doc["StandardOutPath"] == str(h / "Library" / "Logs" / "rcm" / "test.rcm.server.log")
+
+
+# ── P6 재확인(batch 8) 3 · 4 · 5 · 6 ──
+
+
+def _installed_and_staged(cfg: Path, home: Path, platform: str) -> tuple[Path, Path]:
+    if platform == "darwin":
+        name = "test.rcm.server.plist"
+        return cfg / "service" / name, home / "Library" / "LaunchAgents" / name
+    name = "test.rcm.server.service"
+    return cfg / "service" / name, home / ".config" / "systemd" / "user" / name
+
+
+@pytest.mark.parametrize("same", [True, False])
+@pytest.mark.parametrize("platform", ["darwin", "linux"])
+def test_b8_3_the_remove_line_takes_the_installed_file_only_when_setup_wrote_it(
+    cfg, home, tmp_path, platform, same
+):
+    # v2-3: 설치 자리의 파일이 setup 이 쓴 파일과 같을 때만(cmp) 서비스를 내리고 지운다. 다른
+    # 파일이면 그대로 두고 setup 이 쓴 파일만 지운다. 서비스 관리자는 PATH 의 가짜다
+    fake = Fake(platform=platform)
+    assert go(fake, *coordinator_args(tmp_path / "data")) == 0
+    remove = _lines(fake)[-2]
+    assert remove.startswith("to remove: "), remove
+    staged, installed = _installed_and_staged(cfg, home, platform)
+    installed.parent.mkdir(parents=True, exist_ok=True)
+    installed.write_bytes(staged.read_bytes() if same else b"a service someone else wrote\n")
+    bin_dir, log = tmp_path / "stub-bin", tmp_path / "manager.log"
+    for manager in ("launchctl", "systemctl"):
+        _manager_stub(bin_dir, manager, f'echo "$*" >> {log}\nexit 0\n')
+    for tool in ("cmp", "rm", "id"):
+        found = shutil.which(tool)
+        assert found is not None, tool
+        (bin_dir / tool).symlink_to(found)
+    env = {"PATH": str(bin_dir), "HOME": str(home)}
+    subprocess.run(["/bin/sh", "-c", remove.removeprefix("to remove: ")], env=env, check=False)
+    assert installed.exists() is not same, remove
+    assert not staged.exists() and not (cfg / "server.toml").exists()
+    called = log.read_text() if log.exists() else ""
+    assert ("bootout" in called or "disable" in called) is same, called
+
+
+def test_b8_3_a_label_already_loaded_may_not_be_setups(cfg, tmp_path):
+    # setup 이 「건드리지 않는다」고 한 이미 올라간 라벨이면 제거 줄이 그 서비스는 setup 이 쓴
+    # 것이 아닐 수 있다고 말한다
+    fake = Fake(loaded=True)
+    assert go(fake, *coordinator_args(tmp_path / "data")) == 0
+    remove = _lines(fake)[-2]
+    assert remove.startswith("to remove: ") and "may not be one setup wrote" in remove, remove
+    fake = Fake()
+    assert go(fake, *coordinator_args(tmp_path / "data2"), "--force", "all") == 0
+    assert "may not be one setup wrote" not in _lines(fake)[-2]

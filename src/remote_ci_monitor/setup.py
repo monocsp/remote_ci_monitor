@@ -407,6 +407,9 @@ class Plan:
     #: 올라간 서비스를 바꿔 끼우는 순서를 찍나 — 같은 라벨이 올라가 있거나 `--force service` 로
     #: 있던 서비스 파일을 다시 쓸 때(P5 B-E2)
     replacing: bool = False
+    #: 같은 라벨이 setup 전에 이미 올라가 있었나 — 제거 줄이 그 서비스는 setup 이 쓴 것이 아닐 수
+    #: 있다고 말한다(P6 재확인 3)
+    preloaded: bool = False
     #: 마지막 `rcm doctor` 줄에 붙일 경로 — 사용자가 `--config` · `--service-file` 을 줬을 때만
     doctor_config: Path | None = None
     doctor_service: Path | None = None
@@ -803,6 +806,7 @@ def _service(args: argparse.Namespace, ask: _Ask | None, world: World, plan: Pla
     loaded = world.service_loaded(manager, label)
     forced = set(args.force or ()) & {"service", "all"}
     plan.replacing = bool(loaded) or (bool(forced) and staged.exists())
+    plan.preloaded = bool(loaded)
     if loaded:
         plan.warnings.append(
             f"a service labelled {label} is already loaded — setup leaves it alone; the copy "
@@ -978,6 +982,8 @@ def _report(plan: Plan, world: World) -> None:
         installed=plan.installed,
         label=plan.label,
         files=[f.path for f in plan.files],
+        staged=plan.service,
+        preloaded=plan.preloaded,
     )
     err.write(f"{removal}\n")
     doctor = core.doctor_command(

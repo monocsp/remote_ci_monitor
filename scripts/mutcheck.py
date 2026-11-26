@@ -3576,6 +3576,30 @@ MUTANTS = (
         ),
     ),
     Mutant(
+        # 제거 줄이 설치 자리의 파일을 cmp 없이 지운다 — setup 이 쓰지 않은 같은 이름의 서비스를
+        # 내리고 지우라고 한다(P6 재확인 3 · v2-3)
+        name="setup-remove-line-without-cmp",
+        path="src/remote_ci_monitor/core/setup.py",
+        old=(
+            '            service = f"{same} && launchctl bootout gui/$(id -u)/{q(label)} && '
+            '{gone}; "\n'
+        ),
+        new='            service = f"launchctl bootout gui/$(id -u)/{q(label)} && {gone}; "\n',
+        tests=(
+            "tests/test_setup.py::"
+            "test_b8_3_the_remove_line_takes_the_installed_file_only_when_setup_wrote_it",
+        ),
+    ),
+    Mutant(
+        # 이미 올라간 라벨이어도 제거 줄이 아무 말을 하지 않는다 — setup 이 「건드리지 않는다」고
+        # 한 서비스를 setup 의 것처럼 지우라고 읽힌다(P6 재확인 3)
+        name="setup-remove-line-silent-on-a-preloaded-label",
+        path="src/remote_ci_monitor/core/setup.py",
+        old="    if service and preloaded:\n",
+        new="    if False:\n",
+        tests=("tests/test_setup.py::test_b8_3_a_label_already_loaded_may_not_be_setups",),
+    ),
+    Mutant(
         # 마지막 doctor 줄이 맨 이름 rcm 이다 — PATH 의 다른 빌드가 그 머신을 잰다(P5 B-E7)
         name="setup-doctor-line-bare-rcm",
         path="src/remote_ci_monitor/core/setup.py",
