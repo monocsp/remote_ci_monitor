@@ -7753,6 +7753,17 @@ MUTANTS = (
             "tests/test_worker_outbox_m5tb.py::test_b5_3_a_dropped_item_clears_the_local_error_mark",
         ),
     ),
+    Mutant(
+        # 로컬 오류로 끝날 길이 없는 D 큐를 등록이 끝없이 기다린다(batch-5 #2 · 결정 337)
+        name="dead-queue-local-error-blocks-register",
+        path="src/remote_ci_monitor/remote_worker.py",
+        old="                if stuck and s.waits_on_nothing():\n",
+        new="                if False:\n",
+        tests=(
+            "tests/test_worker_outbox_m5tb.py::"
+            "test_b5_2_a_a_dead_queue_stuck_on_a_local_error_is_not_counted_as_server_errors",
+        ),
+    ),
 )
 
 

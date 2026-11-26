@@ -367,8 +367,9 @@ class _JobSender:
         self.query_first = resumed
         self.delay = 0.0
         self.last_5xx = False  # 지금 막힌 항목의 마지막 시도가 HTTP 5xx 였다(결정 324)
-        # 마지막 시도가 서버의 오류 응답이었거나 스풀을 못 읽었다 — 죽은 세션 D 의 등록 대기
-        # 300초가 세는 시간(결정 337). 큐마다 두고 성공 · 연결 실패에 내린다(P3 1라운드)
+        # 마지막 시도가 서버의 오류 응답이었다 — 죽은 세션 D 의 등록 대기 300초가 세는 시간(결정
+        # 337: 서버가 응답하는 시간만). 큐마다 두고 성공 · 연결 실패 · 로컬 오류에 내린다(P3
+        # 1라운드, batch-5 #2)
         self.answered = False
         # 마지막 로그 시도가 스풀을 못 읽었다 — 끝난 잡이면 5xx 와 같은 300초 뒤 finish 가 먼저
         # 간다(결정 324, P3 2라운드). 스풀을 다시 읽으면 내린다
@@ -378,6 +379,10 @@ class _JobSender:
         # 마지막 시도가 예상 못 한 예외였다(P6-1 G4) — 못 읽는 스풀처럼 끝난 잡이면 300초 뒤
         # finish 가 먼저 간다. 시도가 성공하거나 서버 · 연결 오류로 끝나면 내린다
         self.local_error = False
+        # 마지막 로컬 오류(예상 못 한 예외 · 못 읽는 스풀)의 단계와 줄에 쓸 말 — D 의 큐가 그
+        # 오류로 막혔을 때 등록이 기다릴지 정한다(`waits_on_nothing`, batch-5 #2)
+        self.local_step: str | None = None
+        self.local_why: str | None = None
         self._unexpected_said = False
         self._local_first_said = False
         self.failures = 0
@@ -668,13 +673,16 @@ class _JobSender:
         """한 단계가 예상 못 한 예외를 냈다(버그 · 로컬 고장). 스레드를 끝내지 않고 백오프로 다시
         해 본다 — 같은 결정적 원인이 매번 스레드를 죽이면 살아 있는 프로세스는 레인과 잡을
         재시작까지 잡고, 다음 프로세스의 죽은 큐 보내기도 같은 오류로 죽는다(P6-1 G4). 줄은 한
-        번이다. D 의 등록 대기 300초가 이 시간도 센다(등록을 끝없이 막지 않게). 끝난 잡이면 300초
-        뒤 finish 가 먼저 간다(`_finish_first`)."""
+        번이다. 끝난 잡이면 300초 뒤 finish 가 먼저 간다(`_finish_first`). 서버 탓이 아니라 D 의
+        등록 대기 300초에는 세지 않는다(결정 337) — 그 대신 등록은 finish 가 그렇게 갈 수 없는 D 의
+        큐를 기다리지 않는다(`waits_on_nothing`, batch-5 #2)."""
         if not self._unexpected_said:
             self._unexpected_said = True
             self.proc.log(f"{self._label(step)}: unexpected {type(e).__name__} — retrying")
         self.local_error = True
-        self.answered = True
+        self.local_step = step
+        self.local_why = f"unexpected {type(e).__name__} in {step}"
+        self.answered = False
         self.failures += 1
         return False
 
@@ -698,14 +706,28 @@ class _JobSender:
         """`stream.log` 를 못 읽었다(없다 · 잘렸다). 빈 조각을 보내 성공으로 세지 않는다 —
         그러면 `acked` 는 그대로인 채 쉬지 않고 돈다. 백오프로 다시 해 보고 로그는 한 줄이다.
         끝난 잡이면 5xx 와 같이 끝난 지 300초 뒤 finish 가 먼저 간다(`_finish_first`, 결정 324)
-        — 24시간 묶이면 서버에서 잡이 `running` 이고 레인도 잡혀 있다(P3 2라운드 MED). D 의
-        큐면 등록 대기 300초가 이 시간도 센다. 서버 탓이 아니어도 등록을 끝없이 막지 않게."""
+        — 24시간 묶이면 서버에서 잡이 `running` 이고 레인도 잡혀 있다(P3 2라운드 MED). 로컬
+        오류라 D 의 등록 대기 300초에는 세지 않는다(결정 337, batch-5 #2). `_unexpected` 와 같다."""
         if not self._read_failed_said:
             self._read_failed_said = True
             self.proc.log(f"#{self.job_id} report: cannot read the spooled log — retrying")
         self.spool_unreadable = True
-        self.answered = True
+        self.local_step = "log"
+        self.local_why = "the spooled log cannot be read"
+        self.answered = False
         return False
+
+    def waits_on_nothing(self) -> bool:
+        """D 의 큐가 로컬 오류로 막혔고 그 오류를 끝낼 길이 없다(batch-5 #2). 끝난 잡의 로그 ·
+        산출물만 막혔으면 끝난 지 300초 뒤 finish 가 먼저 간다(`_finish_first`) — 벽시계로 길이가
+        정해진 기다림이라 등록은 기다린다. finish 자체 · phase 가 막혔거나 끝나지 않은 잡이면
+        다시 해 봐도 같으니 등록은 그 큐를 기다리지 않는다. 서버가 응답하지 않은 시간이라 300초에
+        세면 등록이 매번 300초 늦고 줄은 「server errors」라고 거짓을 말한다(결정 337)."""
+        if not (self.local_error or self.spool_unreadable):
+            return False
+        ob = self.ob
+        finish_goes = ob.finish is not None and ob.ended_at is not None
+        return not (finish_goes and self.local_step in ("query", "log", "artifacts"))
 
     def _send_finish(self, fenced: bool) -> None:
         rec = dict(self.ob.finish or {})
@@ -1836,7 +1858,8 @@ class RemoteWorker:
         """등록 전에 D 의 큐를 D 의 세션 id 로 보낸다(§4.4 의 7 · 결정 326 · 337). 등록이 D 를
         펜싱하면
         D 의 finish 가 버려지기 때문이다. 서버가 응답하는(HTTP 상태가 오는) 시간으로 300초가 지나면
-        남은 큐를 디스크에 둔 채 등록한다 — 연결 실패 시간은 세지 않는다."""
+        남은 큐를 디스크에 둔 채 등록한다 — 연결 실패 시간과 로컬 오류는 세지 않는다. 로컬 오류로
+        막혀 끝날 길이 없는 큐(`waits_on_nothing`)는 기다리지 않는다(batch-5 #2)."""
         senders = self.dead_queues()
         if not senders:
             return
@@ -1858,6 +1881,17 @@ class RemoteWorker:
             if answering:
                 answered += max(0.0, now - last)
             last = now
+            for s in senders:
+                stuck = s.alive() and not s.halt.is_set() and not s.ob.done
+                # mutcheck: dead-queue-local-error-blocks-register
+                if stuck and s.waits_on_nothing():
+                    assert s.dead is not None
+                    self.log(
+                        f"dead session {s.dead.session_id[:8]} job #{s.job_id}: stopped on a"
+                        f" local error ({s.local_why}) — registering without waiting;"
+                        f" job #{s.job_id} will close as restarted-without-job"
+                    )
+                    s.halt.set()
             if answered >= DEAD_SESSION_WAIT_SECONDS:  # mutcheck: dead-session-wait-forever
                 for s in senders:
                     if s.alive() and not s.ob.done:
