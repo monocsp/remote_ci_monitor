@@ -28,6 +28,7 @@ import sqlite3
 import tarfile
 import threading
 import time
+from collections.abc import Iterable
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -65,7 +66,7 @@ from remote_ci_monitor.core.model import (
 from remote_ci_monitor.core.progress import parse_marker
 from remote_ci_monitor.core.status import iso, source_json
 from remote_ci_monitor.materialize import MaterializeError, assemble_tar_from_manifest
-from remote_ci_monitor.release_secrets import mask_bytes
+from remote_ci_monitor.release_secrets import MASK, mask_bytes
 from remote_ci_monitor.store import (
     RELEASE_WORKER,
     LaneBusy,
@@ -157,6 +158,24 @@ def _open_line(fh: Any, pos: int) -> bytes:
     head = fh.read(pos - start)
     cut = head.rfind(b"\n")
     return head[cut + 1 :] if cut >= 0 else (head if start == 0 else b"")
+
+
+def _mask_piece(head: bytes, rest: bytes, values: Iterable[bytes]) -> bytes:
+    """조각 하나를 가린다(F14). `head` 는 앞 조각이 줄 끝 없이 남긴 커밋된 열린 줄이다. 그 줄과 이
+    조각에 걸친 값은 이 조각 쪽 뒷부분을 가린다 — 서버는 워커의 줄 맞춤에 기대지 않는다(P3
+    1라운드). 커밋된 앞부분은 바꾸지 않는다: 읽는 쪽이 이미 봤을 수 있고 그 길이까지는 바뀌지
+    않는다(결정 339-f). 그래서 걸친 값의 앞부분은 남지만 온전한 값은 파일에 남지 않는다."""
+    vals = tuple(v for v in values if v)
+    cut = 0
+    if head:
+        joined = head + rest
+        for v in vals:
+            i = joined.find(v, max(0, len(head) - len(v) + 1))
+            while 0 <= i < len(head):
+                cut = max(cut, i + len(v) - len(head))
+                i = joined.find(v, i + 1)
+    masked = mask_bytes(rest[cut:], vals)
+    return MASK + masked if cut else masked  # mutcheck: straddling-secret-unmasked
 
 
 def _truncate_quietly(fh: Any, pos: int) -> None:
@@ -1093,7 +1112,7 @@ class RemoteWorkersMixin:
         if not rest:
             return {"job_id": job.id, "bytes": 0, "markers": 0, "offset": committed}, []
         # step 6 — 원격 워커의 stdout 도 서버의 릴리스 비밀 규칙으로 가린다(F14)
-        masked = mask_bytes(rest, self.mask_for_preset(job.preset))
+        values = self.mask_for_preset(job.preset)
         path = self.log_path(job.id)
         path.parent.mkdir(parents=True, exist_ok=True)
         try:
@@ -1108,6 +1127,8 @@ class RemoteWorkersMixin:
                 self.store.pin_log_incomplete(job.id)
                 self.log(f"log gap: job #{job.id} log.txt is {size} bytes, committed {file_bytes}")
                 pos = size
+            head = _open_line(fh, pos)  # 앞 조각이 줄 끝 없이 남긴 커밋된 열린 줄
+            masked = _mask_piece(head, rest, values)
             try:
                 _write_at(fh, pos, masked)  # step 7
             except OSError as e:
@@ -1118,7 +1139,7 @@ class RemoteWorkersMixin:
             # 마커는 끝난 줄에서만 찾는다. 앞 조각이 줄 끝 없이 끝났으면(러너가 64 KiB 마다 끊은
             # 줄 · 옛 시험) 파일의 그 꼬리를 앞에 붙인다 — 메모리 조각(`_log_partial`)이 아니라
             # 커밋된 파일에서 읽으므로 재시작을 넘어도 같다
-            lines = (_open_line(fh, pos) + masked).split(b"\n")[:-1]
+            lines = (head + masked).split(b"\n")[:-1]
             parsed = [
                 p for raw in lines if (p := parse_marker(raw.decode("utf-8", errors="replace")))
             ]

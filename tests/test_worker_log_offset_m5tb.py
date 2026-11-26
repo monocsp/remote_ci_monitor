@@ -141,6 +141,31 @@ def test_rl18_d_masked_bytes_keep_raw_offsets(srv, monkeypatch):
     assert r["log_offset"] == len(stream) and r["log_file_bytes"] == len(text) != len(stream)
 
 
+@pytest.mark.parametrize("inside", ["0123", "789 end"])
+def test_rl18_e_a_secret_split_across_two_mid_line_pieces_never_reaches_the_log(
+    srv, monkeypatch, inside
+):
+    """조각이 줄 가운데서 끝나도(kill -9 로 줄 중간에 멈춘 죽은 세션 큐 · 워커 결함) 서버는 두
+    조각에 걸친 비밀을 가린다(P3 1라운드 LOW). 서버는 워커의 줄 맞춤에 기대지 않는다. 앞 조각의
+    커밋된 열린 줄은 바꾸지 않고(읽는 쪽이 이미 봤을 수 있다, 결정 339-f) 걸친 값의 뒷부분을
+    가린다 — 온전한 값은 `log.txt` 와 `rcm logs` 어디에도 없다."""
+    jid = running(srv)
+    secret = b"tok-0123456789"
+    monkeypatch.setattr(srv.app, "mask_for_preset", lambda name: (secret,))
+    stream = b"start\nkey=" + secret + b" end\nnext " + secret + b"\n"
+    cut = stream.index(inside.encode())
+    status, body = post_log(srv, jid, stream[:cut], 0)
+    assert status == 200 and body["offset"] == cut, body
+    status, body = post_log(srv, jid, stream[cut:], cut)
+    assert status == 200 and body["offset"] == len(stream), body
+    text = log_file(srv, jid)
+    assert secret not in text, text
+    assert text.endswith(b" end\nnext ****\n"), text
+    status, _, got = srv.req("GET", f"/jobs/{jid}/log?offset=0", token="alice", raw=True)
+    assert status == 200 and got == text
+    assert row(srv, jid)["log_offset"] == len(stream)
+
+
 def test_rl17_b_marker_in_a_chunk_is_committed_once(srv):
     jid = running(srv)
     data = b"::rcm::step::build\nhello\n"
@@ -238,6 +263,20 @@ def test_rl36_d_job_closed_between_write_and_commit_is_409_and_leaves_no_bytes(s
     assert (status, body.get("code"), body.get("state")) == (409, "job_closed", LOST), body
     assert log_file(srv, jid) == b"a\n"
     assert row(srv, jid)["log_offset"] == 2
+
+
+def test_rl36_f_an_unexpected_commit_error_truncates_too(srv, monkeypatch):
+    """커밋이 바쁨이 아닌 오류로 터져도 파일은 커밋된 길이로 되자른다(§4.5 step 8, P3 1라운드)."""
+    jid = running(srv)
+    assert post_log(srv, jid, b"a\n", 0)[0] == 200
+
+    def broken(*args: Any, **kw: Any) -> bool:
+        raise RuntimeError("commit fails")
+
+    monkeypatch.setattr(srv.store, "commit_log", broken)
+    assert post_log(srv, jid, b"b\n", 2)[0] == 500
+    assert log_file(srv, jid) == b"a\n"
+    assert (row(srv, jid)["log_offset"], row(srv, jid)["log_file_bytes"]) == (2, 2)
 
 
 def test_rl36_e_fence_between_write_and_commit_is_409_session_fenced(srv, monkeypatch):
