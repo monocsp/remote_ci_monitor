@@ -7894,6 +7894,17 @@ MUTANTS = (
             "test_b7_2_c_the_300s_cap_does_not_cut_off_a_finish_that_has_not_been_tried",
         ),
     ),
+    Mutant(
+        # finish 가 먼저 가며 남긴 로그 · 산출물을 말하지 않는다(batch-7 #3)
+        name="left-behind-unsaid",
+        path="src/remote_ci_monitor/remote_worker.py",
+        old="            self._say_left_behind()  # mutcheck: left-behind-unsaid\n",
+        new="            pass\n",
+        tests=(
+            "tests/test_worker_outbox_m5tb.py::"
+            "test_b7_3_a_finish_sent_first_says_what_it_leaves_behind",
+        ),
+    ),
 )
 
 

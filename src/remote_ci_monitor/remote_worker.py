@@ -409,6 +409,7 @@ class _JobSender:
         self._unexpected_said = False
         self._local_first_said = False
         self._phase_first_said = False
+        self._left_behind_said = False
         self.failures = 0
         # 펜싱 — 이 프로세스의 큐는 프로세스의 펜싱(W5)을, D 의 큐는 그 큐가 받은 409 를 본다
         self.fenced = proc.fenced if dead is None else threading.Event()
@@ -527,6 +528,30 @@ class _JobSender:
         # 5xx 는 서버에 닿았다는 뜻이다. 연결 실패면 finish 도 갈 수 없으니 순서를 지킨다
         return age >= FINISH_HOLD_SECONDS and self.last_5xx  # mutcheck: finish-waits-forever
 
+    def _say_left_behind(self) -> None:
+        """finish 가 먼저 가면 남은 phase · 로그 · 산출물은 보내지 않는다(finish 2xx 뒤 큐가
+        끝난다). 무엇이 남았는지 한 번 말한다 — phase 와 로그가 함께 밀렸고 phase 가 5xx 면 한
+        번도 보내 보지 않은 로그 꼬리가 줄 없이 버려졌다(batch-7 #3). 24시간 창이 끝난 때는 그
+        줄(`... not delivered in 24h — sending the finish without ...`)이 이미 말한다."""
+        if self._left_behind_said or self._window_over():
+            return
+        ob = self.ob
+        parts: list[str] = []
+        if ob.phase is not None and not self.fenced.is_set():
+            parts.append("the phase")
+        pending = ob.pending()
+        if not ob.log_stopped and pending > 0:
+            parts.append(f"the last {pending} bytes of the log (log_complete is false)")
+        if self._art_due():
+            parts.append("the bundle (upload_failed)")
+        if parts in ([], ["the phase"]):
+            return  # phase 만 남았으면 phase 의 줄(`phase still not delivered ...`)이 말한다
+        self._left_behind_said = True
+        self.proc.log(
+            f"{self._label('report')}: the finish goes first {FINISH_HOLD_SECONDS}s after the job"
+            f" ended; not sent: {', '.join(parts)}"
+        )
+
     def _window_over(self) -> bool:
         """잡이 끝난 지 `RETRANSMIT_SECONDS` 가 지났다(디스크의 `ended_at`, 결정 264)."""
         ob = self.ob
@@ -539,6 +564,7 @@ class _JobSender:
         if ob.done:
             return None
         if ob.finish is not None and self._finish_first():
+            self._say_left_behind()  # mutcheck: left-behind-unsaid
             return "finish"
         if ob.phase is not None and not self.fenced.is_set():
             return "phase"
