@@ -3842,8 +3842,8 @@ MUTANTS = (
         # darwin 에서도 대소문자를 가린다 — 대소문자만 다른 운영 경로가 지나간다(결정 352)
         name="setup-production-case-not-folded",
         path="src/remote_ci_monitor/setup.py",
-        old="        fold_case=core.folds_case(world.platform),\n",
-        new="        fold_case=False,\n",
+        old="        fold_case=fold,\n        installed=",
+        new="        fold_case=False,\n        installed=",
         tests=("tests/test_setup.py::test_b9_352_darwin_compares_paths_without_case",),
     ),
     Mutant(
