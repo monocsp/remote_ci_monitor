@@ -21,6 +21,7 @@ HTTP 핸들러는 얇게 여기를 부른다.
 from __future__ import annotations
 
 import hashlib
+import math
 import re
 import secrets
 import sqlite3
@@ -103,6 +104,9 @@ MAX_SEQ = 2**53 - 1
 #: janitor 한 틱에 유예로 닫는 잡의 상한(결정 339-g). 늦게 닫는 것은 안전한 쪽이라 판단이고 재지
 #: 않았다 — 서버 재시작 뒤 한꺼번에 넘어도 다른 janitor 일을 막지 않는다
 GRACE_CLOSES_PER_TICK = 20
+#: 세션마다 기억하는 「조용했다가 다시 들림」 기록의 수(T4). 취소 중 잡의 창은 그 가운데 요청 뒤의
+#: 것만 보고, 최근 것만 있어도 판정이 맞다 — 더 오래된 기록은 이미 지난 창이다
+RESUMED_KEEP = 8
 
 
 def _api_error(status: int, message: str, **extra: Any) -> Exception:
@@ -323,9 +327,9 @@ class RemoteWorkersMixin:
         self._heard_lock = threading.Lock()
         self._heard: dict[str, float] = {}
         self._hb_seq: dict[str, int] = {}
-        # 조용했다가(`worker_timeout` 넘게) 다시 들린 벽시계 시각 — 취소 미확인 창은 조용했던 시간을
-        # 세지 않고 이때부터 새로 잰다(T4)
-        self._resumed: dict[str, datetime] = {}
+        # 조용했다가 다시 들린 때(벽시계)와 그 전에 조용했던 초 — 취소 미확인 창은 조용했던 시간을
+        # 세지 않고 이때부터 새로 잰다(T4). 2H 를 넘긴 침묵만 적고 세션마다 최근 몇 개만 둔다
+        self._resumed: dict[str, list[tuple[datetime, float]]] = {}
         self._session_locks: dict[str, threading.Lock] = {}
         self._synthetic_said: set[str] = set()  # 합성 그룹 로그는 프리셋마다 한 번(결정 330)
 
@@ -361,16 +365,19 @@ class RemoteWorkersMixin:
     def _hear(self, key: str) -> None:
         """서버가 그 세션(또는 레거시 이름)의 인증된 요청을 들었다 — 세션별 잠금 안에서 올린다."""
         now = self.mono_fn()  # type: ignore[attr-defined]
-        quiet = self.config.server.worker_timeout_seconds
+        missed = 2 * self.config.server.worker_heartbeat_seconds
         with self._session_lock(key):
             last = self.heard_at(key)
             with self._heard_lock:
-                if now - last > quiet:  # mutcheck: t4-quiet-time-counted
-                    self._resumed[key] = self.now_fn()
-                elif key not in self._heard:  # mutcheck: restart-not-quiet
+                gap = now - last
+                if key not in self._heard:  # mutcheck: restart-not-quiet
                     # 기동 뒤 처음 듣는다 — 서버가 꺼져 있던 동안도 그 세션이 조용했던 시간이다.
-                    # 취소 미확인 창을 여기서 새로 잰다(바닥이 기동 시각이라 위 판정이 못 본다)
-                    self._resumed[key] = self.now_fn()
+                    # 얼마나 조용했는지 모른다(바닥이 기동 시각이다) — 창은 늘 새로 잰다
+                    gap = math.inf
+                if gap > missed:  # mutcheck: t4-quiet-time-counted
+                    records = self._resumed.setdefault(key, [])
+                    records.append((self.now_fn(), gap))
+                    del records[:-RESUMED_KEEP]
                 self._heard[key] = max(self._heard.get(key, now), now)
 
     def heard_at(self, key: str) -> float:
@@ -1418,19 +1425,36 @@ class RemoteWorkersMixin:
         return [j for j in active if j.id not in set(closed)]
 
     def _cancel_deadline(self, job: Job) -> datetime | None:
-        """취소 미확인 닫기의 기준 `kill_at`. 취소 요청 뒤 그 세션이 조용했다가 다시 들렸으면 창을
-        다시 들린 때부터 새로 잰다 — `다시 들린 때 + (kill_at − 요청)`(T4 「조용해지면 `kill_at`
-        규칙 멈춤」: 조용했던 시간은 세지 않는다). 돌아온 첫 heartbeat 가 그 잡을 닫지 않고
-        `cancel` 을 전해, 워커가 멈춤을 확인할 시간을 받는다."""
+        """취소 미확인 닫기의 기준 `kill_at`. None 이면 아직 닫지 않는다.
+
+        T4 「조용해지면 `kill_at` 규칙 멈춤」: 조용했던 시간은 세지 않는다(P2-6 의 답). 워커는
+        heartbeat 의 답으로 취소를 듣는다. 그래서 창은 워커가 취소를 들을 수 있었던 때부터 잰다.
+
+        - 요청 뒤로 그 세션을 아직 못 들었으면 None 이다. 워커는 취소를 모른다(분단 중의 janitor).
+          `worker_timeout` 이 지나면 유예 판정이 맡는다.
+        - 요청을 걸친 침묵(2H 넘게)이 끝나고 다시 들렸으면 창을 그때부터 새로 잰다 —
+          `다시 들린 때 + (kill_at − 요청)`. 돌아온 첫 heartbeat 는 닫지 않고 `cancel` 을 전한다.
+          서버가 꺼져 있던 동안도 침묵이다(기동 뒤 처음 들음).
+        - 워커가 취소를 들은 뒤의 침묵은 창을 늘리지 않는다."""
         cancel = job.cancel
         if cancel is None or cancel.kill_at is None:
             return None
         key = job.worker_session_id or f"legacy:{job.worker_name}"
+        silent = self.mono_fn() - self.heard_at(key)  # type: ignore[attr-defined]
+        last_heard = self.now_fn() - timedelta(seconds=max(0.0, silent))
+        if last_heard <= cancel.requested_at:  # mutcheck: t4-unheard-since-cancel-closed
+            return None
+        window = cancel.kill_at - cancel.requested_at
         with self._heard_lock:
-            resumed = self._resumed.get(key)
-        if resumed is None or resumed <= cancel.requested_at:
-            return cancel.kill_at
-        return max(cancel.kill_at, resumed + (cancel.kill_at - cancel.requested_at))
+            records = list(self._resumed.get(key, ()))
+        deadline = cancel.kill_at
+        for at, gap in records:
+            began = None if gap == math.inf else at - timedelta(seconds=gap)
+            # mutcheck: t4-short-quiet-counted
+            spans = began is None or began <= cancel.requested_at
+            if at > cancel.requested_at and spans:
+                deadline = max(deadline, at + window)
+        return deadline
 
     def _close_unconfirmed_cancels(self, jobs: list[Job], now: datetime) -> list[int]:
         """살아 있는 워커가 취소를 확인하지 않으면 `kill_at + 2 × heartbeat` 뒤 서버가 닫는다.

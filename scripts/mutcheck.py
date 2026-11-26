@@ -5826,7 +5826,7 @@ MUTANTS = (
         # 워커의 확인을 기다리지 않고 `cancel_unconfirmed` + 홀드로 닫는다(T4 · RL8 (a))
         name="t4-quiet-time-counted",
         path="src/remote_ci_monitor/remote_workers.py",
-        old="                if now - last > quiet:  # mutcheck: t4-quiet-time-counted\n",
+        old="                if gap > missed:  # mutcheck: t4-quiet-time-counted\n",
         new="                if False:\n",
         tests=(
             "tests/test_worker_selfstop_m5tb.py::"
@@ -6246,8 +6246,8 @@ MUTANTS = (
         # 기동 뒤 처음 들린 세션의 창을 새로 재지 않는다 — 돌아온 첫 heartbeat 가 곧바로 닫는다
         name="restart-not-quiet",
         path="src/remote_ci_monitor/remote_workers.py",
-        old="                elif key not in self._heard:  # mutcheck: restart-not-quiet\n",
-        new="                elif False:\n",
+        old="                if key not in self._heard:  # mutcheck: restart-not-quiet\n",
+        new="                if False:\n",
         tests=(
             "tests/test_worker_selfstop_m5tb.py::"
             "test_rl7_a_cancel_window_that_ran_out_while_the_server_was_down_starts_again",
@@ -6417,6 +6417,35 @@ MUTANTS = (
         tests=(
             "tests/test_job_supervisor_m5tb.py::"
             "test_rl43_a_swallowed_spawned_error_leaves_a_line_in_the_job_log",
+        ),
+    ),
+    # ── M5t-b P3 2라운드 LOW — worker_timeout 보다 짧은 분단의 취소 창 ──
+    Mutant(
+        # 요청을 걸친 침묵이 worker_timeout 보다 짧으면 창을 새로 재지 않는다
+        name="t4-short-quiet-counted",
+        path="src/remote_ci_monitor/remote_workers.py",
+        old=(
+            "            # mutcheck: t4-short-quiet-counted\n"
+            "            spans = began is None or began <= cancel.requested_at\n"
+        ),
+        new="            spans = gap > self.config.server.worker_timeout_seconds\n",
+        tests=(
+            "tests/test_worker_selfstop_m5tb.py::"
+            "test_rl8_a_a_partition_shorter_than_worker_timeout_starts_the_cancel_window_again",
+        ),
+    ),
+    Mutant(
+        # 분단 중(요청 뒤로 못 들은 세션)의 취소 중 잡을 janitor 가 닫는다 — 워커는 취소를 모른다
+        name="t4-unheard-since-cancel-closed",
+        path="src/remote_ci_monitor/remote_workers.py",
+        old=(
+            "        if last_heard <= cancel.requested_at:  # mutcheck: "
+            "t4-unheard-since-cancel-closed\n"
+        ),
+        new="        if False:\n",
+        tests=(
+            "tests/test_worker_selfstop_m5tb.py::"
+            "test_rl8_a_a_partition_shorter_than_worker_timeout_starts_the_cancel_window_again",
         ),
     ),
 )

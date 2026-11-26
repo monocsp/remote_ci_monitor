@@ -336,6 +336,9 @@ def test_rl54_a_cancel_unconfirmed_hold_is_announced_once(wsrv, by):
     jid = wsrv.queued_job(preset="ship")
     assert wsrv.claimed("build-02", 1) == jid
     assert wsrv.cancel(jid)[1]["state"] == "cancelling"
+    # 워커가 취소를 들었다 — 요청 뒤로 들리지 않은 세션은 취소를 모르니 닫지 않는다(T4 · P3 2라운드)
+    wsrv.clock.advance(1)
+    assert wsrv.heartbeat("build-02", jobs=[jid])[1]["cancel"] == [jid]
     job = wsrv.store.get_job(jid)
     past = (job.cancel.kill_at - wsrv.clock()).total_seconds() + 2 * 5 + 1
     assert past < 60  # 세션은 worker_timeout 안에 들린 채다

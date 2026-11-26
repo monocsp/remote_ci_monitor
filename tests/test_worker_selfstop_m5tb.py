@@ -277,6 +277,10 @@ def test_rl33_a_fenced_sessions_cancelling_job_is_not_closed_as_unconfirmed(srv)
     a = srv.queued_job()
     assert srv.claimed("build-02", 1) == a
     assert srv.cancel(a)[1]["state"] == "cancelling"
+    # A 는 취소를 들었다 — 들리지 않은 세션의 잡은 그 이유만으로도 닫히지 않으니(T4), 펜싱된
+    # 세션이라서 닫히지 않는다는 것을 보려면 A 가 들린 뒤여야 한다
+    srv.clock.advance(1)
+    assert srv.heartbeat("build-02", jobs=[a])[1]["cancel"] == [a]
     srv.new_process("build-02")
     srv.registered("build-02")  # B 가 살아서 heartbeat 를 보낸다
     for _ in range(10):
@@ -1349,6 +1353,43 @@ def test_rl8_a_irreversible_cancel_unconfirmed_in_the_new_window_closes_and_hold
         assert srv.heartbeat("build-02", jobs=[a])[0] == 200
     else:
         srv.app.mark_lost_workers(srv.clock.now)
+    j = srv.store.get_job(a)
+    assert j.state == CANCELLED and j.summary_code == "cancel_unconfirmed"
+    assert [(h["job_id"], h["cause"]) for h in holds(srv)] == [(a, "cancel_unconfirmed")]
+
+
+@pytest.mark.parametrize("worker", ["confirms", "stays_silent"])
+def test_rl8_a_a_partition_shorter_than_worker_timeout_starts_the_cancel_window_again(srv, worker):
+    """분단이 `kill 창 + 2H` 보다 길고 `worker_timeout` 보다 짧다(P3 2라운드 LOW). 워커는 분단 중에
+    취소를 들을 수 없었다. 돌아온 첫 heartbeat 가 그 잡을 `cancel_unconfirmed` 로 닫으면 안 되고
+    `cancel` 로 전한다 — 마지막으로 들은 뒤 kill 창보다 오래 조용했으면 창을 다시 들린 때부터
+    새로 잰다. 새 창 안에 확인하면 `cancelled` · 홀드 0, 확인이 없으면 그때 닫고 홀드한다."""
+    srv.registered("build-02")
+    a = srv.queued_job(preset="ship")
+    assert srv.claimed("build-02", 1) == a
+    assert srv.heartbeat("build-02", jobs=[a])[0] == 200
+    srv.clock.advance(1)
+    assert srv.cancel(a)[1]["state"] == "cancelling"
+    j = srv.store.get_job(a)
+    window = (j.cancel.kill_at - j.cancel.requested_at).total_seconds() + 2 * 5  # H = 5
+    srv.clock.advance(window + 10)  # 분단 — 옛 창은 조용한 동안 지났다
+    assert window + 11 < 60  # worker_timeout 안이다
+    srv.app.mark_lost_workers(srv.clock.now)  # 분단 중의 janitor — 워커는 취소를 모른다
+    assert srv.store.get_job(a).state == CANCELLING and holds(srv) == []
+    status, body = srv.heartbeat("build-02", jobs=[a])
+    assert status == 200 and body["cancel"] == [a]
+    assert srv.store.get_job(a).state == CANCELLING
+    if worker == "confirms":
+        srv.clock.advance(5)
+        assert _confirm_cancel(srv, a)[0] == 200
+        j = srv.store.get_job(a)
+        assert j.state == CANCELLED and j.summary_code != "cancel_unconfirmed"
+        assert holds(srv) == []
+        return
+    steps = int(window // 5)
+    for _ in range(steps):
+        srv.clock.advance(5)
+        assert srv.heartbeat("build-02", jobs=[a])[0] == 200
     j = srv.store.get_job(a)
     assert j.state == CANCELLED and j.summary_code == "cancel_unconfirmed"
     assert [(h["job_id"], h["cause"]) for h in holds(srv)] == [(a, "cancel_unconfirmed")]
