@@ -1229,7 +1229,10 @@ Git mirrors are never pruned.
   `100+` when the job reported more than the ledger keeps; both empty when nothing was named),
   `RCM_SHELF_URL` (a kept job's [shelf](#keeping-a-jobs-files-the-shelf) link, empty otherwise),
   `RCM_ACTION_CODE` and `RCM_ACTION_NOTE` (the job's last
-  [action](#when-a-person-has-to-act), empty without one);
+  [action](#when-a-person-has-to-act), empty without one),
+  `RCM_MACHINE` (where the job ran: the remote worker's name, or this server's host name for a
+  local lane; empty for a job that never started or when the server does not know the name — the
+  job's `ran_on`);
   the hook also inherits `PATH`, `HOME` and `LANG`;
   user strings are sanitised and capped at 4 KB (`RCM_FAILURES` drops whole lines to fit). A `url`
   rule POSTs `{"notify": <rule>, "job": <the finished job>, "failures": [...], "failure_count": N,

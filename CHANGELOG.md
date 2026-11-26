@@ -16,6 +16,18 @@ of a key bumps that number and is listed here.
   ([#268](https://github.com/monocsp/remote_ci_monitor/pull/268))
 
 ### Added
+- **`rcm wait` says where the job ran, and what became of its artifacts.** Its last line for a
+  finished job is `#381 succeeded on build-02 · 6m 31s · artifacts ready`: the machine, the time,
+  the failed step of a failed job and the artifact state (left out when the preset declares no
+  artifacts). Artifacts that `failed`, were `dropped`, are `unavailable` or `unknown` add a warning
+  line, and artifacts still `collecting` or `uploading` add a line saying so; the exit code does
+  not change. `rcm wait --notify` also shows a desktop notification on the computer that waits
+  (`osascript` on macOS, `notify-send` on Linux; without the tool it warns once and exits as it
+  would have). It is off by default and `rcm run` does not have it. Job documents
+  (`GET /jobs/<id>`, `/api/status` rows, `rcm wait --json`) gain `ran_on`: the remote worker's
+  name, this server's host name for a local lane, `null` for a job that never started or a name
+  the server does not know. `worker` stays `null` for a local lane. `[[notify]]` hooks get
+  `RCM_MACHINE` with the same value, empty when it is `null`.
 - **`rcm setup` sets a machine up as a client, worker, coordinator or coordinator-worker.** It
   writes the config file and, for the last three, a launchd plist or systemd user unit under the
   config folder's `service/`; it registers and starts nothing and prints the `cp -n` and start

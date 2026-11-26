@@ -149,6 +149,18 @@ chmod 600 ~/.config/rcm/client.toml
 4. **`rcm wait --job N`** 은 이미 있는 작업에 붙어 이벤트 스트림으로 따라가고 작업이 끝나면 끝난다.
    Ctrl-C 로 다시 떼어 놔도 작업은 계속 돈다.
 5. 종료 코드는 처음부터 기다린 것과 똑같이 그 작업의 것이다.
+6. 마지막 줄은 작업이 어느 머신에서 얼마나 돌았는지 알려 준다.
+   `#381 succeeded on build-02 · 6m 31s · artifacts ready` 처럼 찍힌다. 실패한 작업이면 실패한
+   스텝을 덧붙인다(`· step test`). 프리셋이 산출물을 선언하지 않았으면 산출물 상태는 빠진다.
+   산출물이 `failed` · `dropped` · `unavailable` · `unknown` 이면 경고 줄이 하나 더 나온다.
+   아직 `collecting` 이나 `uploading` 이면
+   `#381 artifacts still collecting (uploading) — see them later with rcm artifacts 381` 이
+   나온다. 두 줄 모두 종료 코드를 바꾸지 않는다. JSON 에는 같은 머신이 `ran_on` 으로 실린다.
+   빌드 머신 자신의 레인에서 돈 작업의 `worker` 는 지금처럼 `null` 이다.
+7. **`rcm wait --job N --notify`** 는 기다림이 끝날 때 기다리던 컴퓨터에 데스크톱 알림도 띄운다.
+   macOS 는 `osascript`, Linux 는 `notify-send` 를 쓴다. 도구가 없으면 경고 한 줄을 찍고 원래대로
+   끝난다. 이 플래그를 줄 때만 켜지고 `rcm run` 에는 없다. 알림을 받으려면 `--no-wait` 로 낸 뒤
+   `--notify` 로 기다린다.
 
 **지금 대신 나중에.** `rcm run deploy --ref main --at 15:00` 은 서버에 시각을 넘긴다. 길이로
 주려면 `--in 90m` 을 쓴다. 작업은 `scheduled` 상태로 기다리다가 그 시각에 큐에 들어간다.
