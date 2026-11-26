@@ -2112,3 +2112,26 @@ def test_b10_h2_own_needs_the_install_place_and_the_service_file_is_refused_firs
     assert reason == (
         "--service-file /s/lbl.plist: this is lbl's service file — refusing (nothing was written)"
     )
+
+
+@pytest.mark.parametrize("which", ["flag", "env", "config"])
+def test_b10_m1_every_data_dir_a_unit_can_use_is_protected(cfg, home, tmp_path, which):
+    # batch 10 M1(v1-4): 유닛의 `--data-dir` 플래그와 env `RCM_SERVER_DATA_DIR`, 설정의 data_dir 을
+    # 모두 data_dir 로 본다 — 우선순위를 흉내 내지 않는다(어느 것이 이기는지는 rcm 판마다 다르다)
+    dirs = {name: tmp_path / f"{name}-data" for name in ("flag", "env", "config")}
+    config = tmp_path / "unit" / "server.toml"
+    config.parent.mkdir()
+    config.write_text(f'[server]\ndata_dir = "{dirs["config"]}"\n')
+    plist = home / "Library" / "LaunchAgents" / f"{SERVER_LABEL}.plist"
+    plist.parent.mkdir(parents=True)
+    argv = ["/opt/v/bin/rcm", "serve", "--config", str(config), "--data-dir", str(dirs["flag"])]
+    doc = {
+        "Label": SERVER_LABEL,
+        "ProgramArguments": argv,
+        "EnvironmentVariables": {"RCM_SERVER_DATA_DIR": str(dirs["env"])},
+    }
+    plist.write_bytes(plistlib.dumps(doc))
+    fake = Fake()
+    assert go(fake, *coordinator_args(dirs[which] / "x")) == 1, fake.text
+    assert f"this is {SERVER_LABEL}'s data_dir — refusing" in fake.err.getvalue(), fake.text
+    _nothing_written(cfg, dirs[which] / "x")
