@@ -2201,11 +2201,12 @@ def test_b10_l1_a_service_file_setup_may_not_read_closes_without_a_traceback(
     cfg, home, tmp_path, where
 ):
     # batch 10 L1(v1-9): 스캔의 `is_file()` · 읽기에서 난 PermissionError 는 traceback 이 아니라
-    # 닫는 쪽이다 — 그 파일 이름을 대고 거절한다(그 안이 rcm 서비스인지 모른다)
+    # 닫는 쪽이다 — 그 파일 이름을 대고 거절한다(그 안이 rcm 서비스인지 모른다). batch 11 MED
+    # (v1-2) 부터는 이름이 rcm 같을 때만 닫는다 — 다른 프로그램의 이름은 아래 b11 시험이 본다
     agents = home / "Library" / "LaunchAgents"
     agents.mkdir(parents=True)
-    plist = agents / "com.example.thing.plist"
-    plist.write_bytes(plistlib.dumps({"Label": "com.example.thing", "ProgramArguments": ["x"]}))
+    plist = agents / "com.example.rcm-hub.plist"
+    plist.write_bytes(plistlib.dumps({"Label": "com.example.rcm-hub", "ProgramArguments": ["x"]}))
     locked = plist if where == "file" else agents
     locked.chmod(0o000 if where == "file" else 0o600)  # 폴더: 목록은 읽고 stat 은 못 한다
     try:
@@ -2384,3 +2385,68 @@ def test_b11_h_an_execstart_setup_cannot_read_with_rcm_bytes_closes(cfg, home, t
     hub["unit"].write_text("[Service]\nExecStart=/opt/hub/start '--fast\n", encoding="utf-8")
     fake = Fake(platform="linux")
     assert go(fake, *coordinator_args(tmp_path / "data")) == 0, fake.text
+
+
+def _lock(path: Path, where: str) -> Path:
+    """읽지 못하게 잠근다 — 파일은 0o000, 폴더는 0o600(목록은 읽고 stat 은 못 한다)."""
+    locked = path if where == "file" else path.parent
+    locked.chmod(0o000 if where == "file" else 0o600)
+    return locked
+
+
+def _unlock(locked: Path, where: str) -> None:
+    locked.chmod(0o644 if where == "file" else 0o755)
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root reads a file whatever its mode")
+@pytest.mark.parametrize("where", ["file", "folder"])
+def test_b11_m_an_unreadable_file_another_program_names_only_warns(cfg, home, tmp_path, where):
+    # batch 11 MED(v1-2): 권한 때문에 읽지 못한 `*.plist` 가 rcm 과 무관한 이름이면 setup 전체를
+    # 막지 않는다 — 내용을 볼 수 없으니 이름으로 가리고, 그 파일을 대는 경고만 남긴다
+    agents = home / "Library" / "LaunchAgents"
+    agents.mkdir(parents=True)
+    plist = agents / "com.example.backup.plist"
+    plist.write_bytes(plistlib.dumps({"Label": "com.example.backup", "ProgramArguments": ["x"]}))
+    locked = _lock(plist, where)
+    try:
+        fake = Fake()
+        code = go(fake, *coordinator_args(tmp_path / "data"))
+    finally:
+        _unlock(locked, where)
+    assert code == 0, fake.text
+    warning = f"could not read {plist} — skipped; if it runs rcm, setup cannot protect it"
+    assert warning in fake.err.getvalue(), fake.text
+    assert (cfg / "server.toml").is_file()
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root reads a file whatever its mode")
+@pytest.mark.parametrize(
+    "name",
+    ["rcm-hub.service", "ci.remote_ci_monitor.service", "worker.service", "link-to-rcm"],
+)
+def test_b11_m_an_unreadable_file_with_an_rcm_name_still_closes(cfg, home, tmp_path, name):
+    # batch 11 MED(v1-2): 이름이 rcm 같으면(파일 이름이나, 링크면 링크가 가리키는 파일 이름) 읽지
+    # 못한 파일은 여전히 닫는 쪽이다 — 그 파일을 대고 거절한다
+    units = home / ".config" / "systemd" / "user"
+    units.mkdir(parents=True)
+    if name == "link-to-rcm":
+        target = tmp_path / "elsewhere" / "rcm-server.service"
+        target.parent.mkdir()
+        target.write_text("[Service]\nExecStart=/opt/x\n")
+        unit = units / "ci-hub.service"
+        unit.symlink_to(target)
+        locked = target
+    else:
+        unit = units / name
+        unit.write_text("[Service]\nExecStart=/opt/x\n")
+        locked = unit
+    locked.chmod(0o000)
+    try:
+        fake = Fake(platform="linux")
+        code = go(fake, *coordinator_args(tmp_path / "data"))
+    finally:
+        locked.chmod(0o644)
+    err = fake.err.getvalue()
+    assert code == 1, fake.text
+    assert os.path.realpath(unit) in err and "refusing" in err, err
+    _nothing_written(cfg, tmp_path / "data")
