@@ -1836,20 +1836,28 @@ def test_b9_352_the_production_label_needs_force_service_and_the_same_file(cfg, 
     _nothing_written(cfg)
 
 
-def test_b9_352_a_label_setup_wrote_and_installed_may_be_rewritten_with_force(
+def test_b9_352_setups_own_installed_service_still_guards_its_config(
     cfg, home, tmp_path, no_system_places
 ):
-    # 설치 파일이 setup 이 쓴 파일과 같으면(cmp) `--force service` 로 다시 쓸 수 있다
+    # batch 10 H1(v1-1): 설치 파일이 setup 이 쓴 파일과 같아도(cmp) 그 서비스의 예외는 라벨 검사뿐
+    # 이다. 그 서비스의 설정 · data_dir · venv · 체크아웃은 예외 없이 거절한다 — 같은 인자에
+    # `--force all` 이면 설치된 서비스가 읽는 server.toml 을 덮었다(결정 352 「대상이 그중 하나와
+    # 같거나 그 안이면 거절」)
     argv = coordinator_args(tmp_path / "data")
     assert go(Fake(), *argv) == 0
     staged, installed = _installed_and_staged(cfg, home, "darwin")
     installed.parent.mkdir(parents=True, exist_ok=True)
     installed.write_bytes(staged.read_bytes())
+    config = cfg / "server.toml"
+    before = config.read_bytes()
+    config.write_bytes(before + b"# the installed service reads this\n")
+    kept = config.read_bytes()
     fake = Fake()
-    assert go(fake, *argv, "--force", "all") == 0, fake.text
+    assert go(fake, *argv, "--force", "all") == 1, fake.text
+    assert "this is test.rcm.server's config — refusing" in fake.err.getvalue(), fake.text
+    assert config.read_bytes() == kept
     fake = Fake()
     assert go(fake, *argv) == 1, fake.text
-    # `--force service` 가 없으면 설치된 그 서비스도 운영이다(설정 · 라벨 어느 쪽으로든 거절)
     assert "this is test.rcm.server's" in fake.err.getvalue()
     # 같은 라벨인데 설치 파일이 다르다(다른 설정을 띄운다) — `--force` 로도 거절한다
     other = tmp_path / "other.toml"
@@ -1859,7 +1867,37 @@ def test_b9_352_a_label_setup_wrote_and_installed_may_be_rewritten_with_force(
     installed.write_bytes(plistlib.dumps(doc))
     fake = Fake()
     assert go(fake, *argv, "--force", "all") == 1, fake.text
-    assert "test.rcm.server's label — refusing" in fake.err.getvalue()
+    assert "test.rcm.server's" in fake.err.getvalue() and "refusing" in fake.err.getvalue()
+    assert config.read_bytes() == kept
+
+
+@pytest.mark.parametrize(
+    ("flag", "attr", "what"),
+    [
+        ("--config", "config", "config"),
+        ("--data-dir", "data_dir", "data_dir"),
+        ("--config", "venv", "venv"),
+        ("--service-file", "checkout", "checkout"),
+    ],
+)
+def test_b10_h1_setups_own_service_is_free_of_the_label_check_only(flag, attr, what):
+    # batch 10 H1: setup 자신의 서비스(라벨 · `--force service` · 같은 바이트)라도 설정 · data_dir ·
+    # venv · 체크아웃은 거절한다. 풀리는 것은 라벨 검사뿐이다
+    svc = core.RcmService(
+        name="lbl",
+        file=Path("/s/lbl.plist"),
+        names=("lbl",),
+        config=Path("/c/server.toml"),
+        data_dir=Path("/d"),
+        venv=Path("/v"),
+        checkout=Path("/k"),
+        data=b"x",
+    )
+    own = dict(label="lbl", written=(b"x",), force_service=True, fold_case=False)
+    assert core.production_refusal([svc], {}, **own) is None
+    target = getattr(svc, attr) / "inner" if attr != "config" else svc.config
+    reason = core.production_refusal([svc], {flag: target}, **own)
+    assert reason == f"{flag} {target}: this is lbl's {what} — refusing (nothing was written)"
 
 
 @pytest.mark.parametrize(
