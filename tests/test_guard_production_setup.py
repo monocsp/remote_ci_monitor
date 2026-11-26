@@ -1256,3 +1256,24 @@ def test_b9_timeout_durations_that_strtod_reads_are_stripped(duration):
     # GNU timeout 은 시간을 strtod 로 읽는다 — `.5` · `1e1` · `inf` 도 시간이다
     verdict = judge(f"timeout {duration} rcm serve --config /home/op/.config/rcm/server.toml")
     assert verdict is not None and verdict.decision == "deny", duration
+
+
+# ── P6 재확인(batch 10) L3: 경로로 부른 cli.py 의 setup 은 훅이 통과시킨다(의도) ──
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        f"python src/remote_ci_monitor/cli.py {SERVER.removeprefix('rcm ')}",
+        f"./.venv/bin/python src/remote_ci_monitor/cli.py {WORKER.removeprefix('rcm ')}",
+        f"python src/remote_ci_monitor/cli.py {SERVER.removeprefix('rcm ')} "
+        "--config /home/op/.config/rcm/server.toml --force all",
+    ],
+)
+def test_b10_l3_a_cli_py_path_run_of_setup_passes_the_hook_by_design(command):
+    # 잠금: 결정 354 뒤로 `src/remote_ci_monitor/…` 같은 경로 조각은 rcm 낱말이 아니다. 그래서
+    # `python src/remote_ci_monitor/cli.py setup …` 은 운영 설정을 줘도 훅을 지난다 — 결정 353 의
+    # 「남는 위험」이고, 뒤는 setup 자신이 막는다(결정 352,
+    # tests/test_setup.py::test_b9_352_setup_refuses_a_production_target_whatever_shell_built_it 의
+    # config 칸). 이 시험이 빨개지면 훅이 다시 경로 조각을 세는 것이다 — 354 의 과잉 차단이다
+    assert judge(command, environ=TEST_XDG) is None, command

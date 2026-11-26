@@ -2233,3 +2233,82 @@ def test_b10_l2_the_remove_line_says_it_deletes_even_when_the_unload_fails(cfg, 
     fake = Fake()
     assert go(fake, "--role", "client", "--server", "http://10.0.0.5:1", "--yes") == 0
     assert core.REMOVE_NOTE not in _lines(fake)
+
+
+def _server_venv(tmp_path: Path) -> Path:
+    venv = tmp_path / "svc" / "venv"
+    (venv / "bin").mkdir(parents=True)
+    (venv / "pyvenv.cfg").write_text("home = /usr/bin\n")
+    (venv / "bin" / "rcm").write_text("#!/bin/sh\n")
+    return venv
+
+
+@pytest.mark.parametrize("manager", ["launchd", "systemd"])
+def test_b10_m5_a_relative_config_is_read_from_the_working_directory(cfg, home, tmp_path, manager):
+    # batch 10 M5: 상대 `--config` 는 그 서비스의 WorkingDirectory 기준이다
+    venv = _server_venv(tmp_path)
+    workdir = tmp_path / "wd"
+    config = workdir / "conf" / "server.toml"
+    config.parent.mkdir(parents=True)
+    config.write_text(f'[server]\ndata_dir = "{tmp_path / "unit-data"}"\n')
+    rcm = venv / "bin" / "rcm"
+    if manager == "launchd":
+        place = home / "Library" / "LaunchAgents" / f"{SERVER_LABEL}.plist"
+        place.parent.mkdir(parents=True)
+        doc = {
+            "Label": SERVER_LABEL,
+            "ProgramArguments": [str(rcm), "serve", "--config", "conf/server.toml"],
+            "WorkingDirectory": str(workdir),
+        }
+        place.write_bytes(plistlib.dumps(doc))
+        name = SERVER_LABEL
+    else:
+        place = home / ".config" / "systemd" / "user" / "rcm-server.service"
+        place.parent.mkdir(parents=True)
+        place.write_text(
+            f"[Service]\nWorkingDirectory={workdir}\nExecStart={rcm} serve --config "
+            "conf/server.toml\n"
+        )
+        name = "rcm-server"
+    before = config.read_bytes()
+    fake = Fake(platform="darwin" if manager == "launchd" else "linux")
+    argv = coordinator_args(tmp_path / "data", "--config", str(config), "--force", "all")
+    assert go(fake, *argv) == 1, fake.text
+    assert f"this is {name}'s config — refusing" in fake.err.getvalue(), fake.text
+    assert config.read_bytes() == before
+
+
+def test_b10_m5_systemd_quotes_and_percent_are_read_as_systemd_does(cfg, home, tmp_path):
+    # batch 10 M5: ExecStart 의 따옴표와 `%%`(글자 `%`)를 systemd 처럼 풀어 견준다
+    venv = _server_venv(tmp_path)
+    config = tmp_path / "a b" / "100%" / "server.toml"
+    config.parent.mkdir(parents=True)
+    config.write_text(f'[server]\ndata_dir = "{tmp_path / "unit-data"}"\n')
+    unit = home / ".config" / "systemd" / "user" / "rcm-server.service"
+    unit.parent.mkdir(parents=True)
+    spelled = str(config).replace("%", "%%")
+    unit.write_text(f'[Service]\nExecStart={venv / "bin" / "rcm"} serve --config "{spelled}"\n')
+    fake = Fake(platform="linux")
+    argv = coordinator_args(tmp_path / "data", "--config", str(config), "--force", "all")
+    assert go(fake, *argv) == 1, fake.text
+    assert "this is rcm-server's config — refusing" in fake.err.getvalue(), fake.text
+
+
+def test_b10_m5_a_symlinked_program_names_the_venv_it_points_into(cfg, home, tmp_path):
+    # batch 10 M5: ProgramArguments[0] 이 venv 밖의 링크(`~/.local/bin/rcm`)면 링크를 푼 자리의
+    # venv 가 그 서비스의 venv 다
+    venv = _server_venv(tmp_path)
+    link = home / ".local" / "bin" / "rcm"
+    link.parent.mkdir(parents=True)
+    link.symlink_to(venv / "bin" / "rcm")
+    config = tmp_path / "unit" / "server.toml"
+    config.parent.mkdir()
+    config.write_text(f'[server]\ndata_dir = "{tmp_path / "unit-data"}"\n')
+    plist = home / "Library" / "LaunchAgents" / f"{SERVER_LABEL}.plist"
+    plist.parent.mkdir(parents=True)
+    argv0 = [str(link), "serve", "--config", str(config)]
+    plist.write_bytes(plistlib.dumps({"Label": SERVER_LABEL, "ProgramArguments": argv0}))
+    target = venv / "etc" / "server.toml"
+    fake = Fake()
+    assert go(fake, *coordinator_args(tmp_path / "data", "--config", str(target))) == 1
+    assert f"this is {SERVER_LABEL}'s venv — refusing" in fake.err.getvalue(), fake.text
