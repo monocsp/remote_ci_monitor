@@ -3869,11 +3869,17 @@ class App(RemoteWorkersMixin, CapabilitiesMixin, ShelfAppMixin):
         )
         tails: dict[int, list[str]] = {}
         if queue and token is not None:
-            for row in queue:
-                if row.job.state in BUSY_STATES and self.can_read_log(row.job, token):
-                    t = tail_lines(self.log_path(row.job.id), DEFAULT_TAIL)
-                    if t is not None:
-                        tails[row.job.id] = t
+            readable = [
+                row.job.id
+                for row in queue
+                if row.job.state in BUSY_STATES and self.can_read_log(row.job, token)
+            ]
+            # 원격 잡은 커밋된 길이까지만(M5t-b 결정 339-f) — 로컬 · 레거시는 파일 길이까지
+            committed = self.store.log_file_bytes_for(readable) if readable else {}
+            for job_id in readable:
+                t = tail_lines(self.log_path(job_id), DEFAULT_TAIL, end=committed.get(job_id))
+                if t is not None:
+                    tails[job_id] = t
         doc = status_json(model, log_tails=tails)
         self._inject_artifacts(doc, model)
         recent_ids = [
@@ -3939,7 +3945,8 @@ class App(RemoteWorkersMixin, CapabilitiesMixin, ShelfAppMixin):
             return self._with_hold(self._terminal_view(job, host), job.id)
         log_tail = None
         if tail > 0 and row.job.state in BUSY_STATES and self.can_read_log(row.job, token):
-            log_tail = tail_lines(self.log_path(job_id), min(tail, MAX_TAIL))
+            end = self.store.log_file_bytes_for((job_id,)).get(job_id)  # 결정 339-f
+            log_tail = tail_lines(self.log_path(job_id), min(tail, MAX_TAIL), end=end)
         doc = queue_row_json(
             row, base_url=self.base_url(host), log_tail=log_tail, local=self.local_machine()
         )
@@ -5359,10 +5366,16 @@ class App(RemoteWorkersMixin, CapabilitiesMixin, ShelfAppMixin):
         if not self.can_read_log(job, token):
             raise ApiError(403, "not your job")
         path = self.log_path(job_id)
+        want = 4 * 1024 * 1024
+        # 원격 잡은 커밋된 길이까지만 읽는다(M5t-b 결정 339-f). 쓰고 커밋하기 전의 바이트와 커밋이
+        # 실패해 되자를 바이트를 보이지 않는다. 그 길이까지는 바뀌지 않는다(쓰기는 늘 그 뒤)
+        committed = self.store.log_file_bytes_for((job_id,)).get(job_id)
+        if committed is not None:  # mutcheck: log-read-past-committed
+            want = max(0, min(want, committed - max(0, offset)))
         try:
             with path.open("rb") as fh:
                 fh.seek(max(0, offset))
-                data = fh.read(4 * 1024 * 1024)
+                data = fh.read(want)
                 next_offset = fh.tell()
         except FileNotFoundError:
             if not job.is_terminal:

@@ -5401,6 +5401,21 @@ class Store:
         )
         return [dict(r) for r in rows]
 
+    def log_file_bytes_for(self, job_ids: Iterable[int]) -> dict[int, int]:
+        """잡마다 커밋된 `log.txt` 길이(M5t-b 결정 339-f). NULL(로컬 · 레거시)인 잡은 빠진다."""
+        ids = [int(j) for j in job_ids]
+        out: dict[int, int] = {}
+        for i in range(0, len(ids), 500):
+            part = ids[i : i + 500]
+            marks = ",".join("?" * len(part))
+            for row in self._conn().execute(
+                f"SELECT id, log_file_bytes FROM jobs WHERE id IN ({marks}) "
+                "AND log_file_bytes IS NOT NULL",
+                part,
+            ):
+                out[int(row["id"])] = int(row["log_file_bytes"])
+        return out
+
     def log_complete_for(self, job_ids: Iterable[int]) -> dict[int, bool | None]:
         """잡마다 `log_complete`(참 · 거짓 · 모름 None). 없는 잡은 빠진다."""
         ids = [int(j) for j in job_ids]
