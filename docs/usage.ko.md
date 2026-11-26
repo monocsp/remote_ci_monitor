@@ -5,12 +5,149 @@
 
 영어판: [Usage guide](usage.md).
 
-**차례** — [1. 준비물](#1-준비물) · [2. 빌드 머신](#2-빌드-머신) · [3. 내 컴퓨터](#3-내-컴퓨터) ·
+**차례** — [처음 설정](#처음-설정-역할을-고르고-설정한다) · [1. 준비물](#1-준비물) · [2. 빌드 머신](#2-빌드-머신) · [3. 내 컴퓨터](#3-내-컴퓨터) ·
 [4. 첫 작업](#4-첫-작업) · [5. 기다리지 않기](#5-기다리지-않기) · [6. 실패했을 때](#6-실패했을-때) ·
 [7. 같은 트리를 두 세션이 낼 때](#7-같은-트리를-두-세션이-낼-때) ·
 [8. 파일을 돌려받기](#8-파일을-돌려받기) ·
 [9. 한 화면으로 보는 큐](#9-한-화면으로-보는-큐) · [10. 웹 화면](#10-웹-화면) ·
 [11. 두 번째 컴퓨터](#11-두-번째-컴퓨터) · [12. 그다음](#12-그다음)
+
+## 처음 설정: 역할을 고르고 설정한다
+
+가장 짧은 길은 이렇다. `rcm setup` 이 파일을 쓰고, 내가 setup 이 찍은 줄을 치고, 머신 한 대가
+서비스로 첫 작업을 돌린다. 아래 1절에서 12절은 같은 길을 서비스 없이 손으로 가고, 단계마다 화면을
+보인다.
+
+rcm 을 쓰는 머신에는 저마다 역할이 있다. `rcm setup` 이 역할 하나에 필요한 파일을 쓴다.
+
+| 역할 | 그 머신이 하는 일 | `rcm setup` 이 쓰는 것 |
+|---|---|---|
+| `client` | 작업을 보내고 결과를 읽는다. 내 노트북이 여기에 든다 | `client.toml` |
+| `worker` | 코디네이터가 나눠 준 작업을 돌린다 | `worker.toml` 과 워커 서비스 파일 |
+| `coordinator` | 큐를 맡고 작업을 워커에 나눠 준다. 자기는 돌리지 않는다(`lanes = 0`) | `server.toml` 과 서버 서비스 파일 |
+| `coordinator-worker` | 큐를 맡으면서 작업도 돌린다. 머신 한 대가 전부 한다 | `server.toml`(`lanes = 1`)과 서버 서비스 파일 |
+
+빌드할 머신에서 `coordinator-worker` 로 시작하고, 그 머신을 `client` 로도 설정해 작업을 보낸다.
+빌드를 더 맡길 컴퓨터마다 `worker` 를 하나씩 붙이고, 작업만 보낼 컴퓨터는 `client` 로 둔다. 한
+머신이 역할을 여럿 가질 수 있다. rcm 은 있는 설정 파일에서 역할을 읽어 내고 역할을 따로 적어 두지
+않는다.
+
+### 한 머신에서
+
+1. **설정을 쓴다.** rcm 설정이 아직 없는 머신의 터미널에서 인자 없이 `rcm` 을 치면
+   `No rcm config on this machine yet. Set it up now? (y/n) [y]` 라고 묻고 `rcm setup` 으로
+   안내한다. 답을 한 번에 줄 수도 있다.
+
+   ```sh
+   rcm setup --role coordinator-worker --bind 127.0.0.1 --yes
+   ```
+
+   `--bind` 는 서버가 받을 주소다. `127.0.0.1` 이면 이 머신 안에서만 닿는다. 다른 컴퓨터에서도
+   쓰려면 이 머신의 Tailscale 주소나 LAN 주소, 또는 `0.0.0.0` 을 주고, 그때 누가 큐를 읽을 수
+   있는지 setup 이 찍는 경고를 읽는다. setup 은 `~/.config/rcm/server.toml` 과
+   `~/.config/rcm/service/` 아래의 서비스 파일을 쓴 뒤 다음에 칠 줄을 찍는다. 서비스를 등록하지도
+   띄우지도 않고, 토큰을 만들지 않고, DB 를 열지 않는다. 이미 있는 파일은 `--force` 를 주지 않으면
+   그대로 두고 종료 1 로 끝난다. rcm 이 이미 서비스로 도는 머신이라면 이 차례 대신
+   [도는 설치 옆의 시험 설치](#도는-설치-옆의-시험-설치)를 따른다.
+2. **서비스를 설치하고 띄운다.** setup 이 `next —` 아래에 찍은 줄을 찍힌 그대로 친다. macOS 에서는
+   `mkdir -p`, `~/Library/LaunchAgents/` 로 복사하는 `cp -n`,
+   `cmp -s … && launchctl bootstrap gui/$(id -u) …` 다. Linux 에서는
+   `sudo loginctl enable-linger $USER`(로그아웃해도 서비스가 남게 한다)와
+   `systemctl --user … enable --now` 다. 그러면 `curl http://127.0.0.1:8787/api/health` 가
+   답한다. 로그는 macOS 에서 `~/Library/Logs/rcm/server.log`, Linux 에서
+   `~/.local/state/rcm/server.log` 다.
+3. **토큰을 만든다.** setup 이 `tokens —` 아래에 찍은 첫 줄
+   `<rcm> token --config ~/.config/rcm/server.toml add CLIENT_NAME` 을 친다. `CLIENT_NAME` 자리에는
+   원하는 이름을 쓴다. 토큰은 한 번만 찍힌다. 그 줄의 `rcm`, 곧 서비스가 띄우는 `rcm` 을 쓴다. 다른
+   빌드의 rcm 은 DB 를 열면서 자기 판으로 마이그레이션한다.
+4. **이 머신을 클라이언트로도 설정한다.**
+
+   ```sh
+   rcm setup --role client --server http://127.0.0.1:8787 --yes
+   export RCM_TOKEN=<그 토큰>       # 또는 ~/.config/rcm/client.toml 에 token = "…" (모드 600)
+   ```
+
+5. **확인한다.** `rcm doctor --role coordinator-worker` 는 서비스가 도는 환경에서 이 머신이 무엇을
+   빌드하고 시험할 수 있는지, 먼저 무엇을 깔아야 하는지 알려 준다. 종료 0 은 준비됨, 1 은 빠진
+   것이 있음(설치 안내가 같이 찍힌다), 3 은 판정하지 못함(토큰 없음, 서버 꺼짐)이다. 역할을 꼭
+   준다. 이 머신은 이제 역할이 둘이라 `--role` 없는 `rcm doctor` 는 종료 2 로 멈춘다. 그다음
+   `rcm check` 의 행이 모두 `ok` 여야 한다(`warn` 행이 있어도 종료 0 이다).
+6. **첫 작업을 보낸다.** 아무 디렉터리에서 `rcm run ok` 를 치면 그 디렉터리를 올리고, 템플릿에
+   든 무해한 `ok` 프리셋을 돌리고, stdout 에 JSON 한 줄을 찍고 종료 0 으로 끝난다. 돌려 두고
+   나중에 돌아오려면 이렇게 한다.
+
+   ```sh
+   rcm run ok --no-wait             # 작업 번호를 찍고 바로 돌아온다
+   rcm wait --job N --notify        # 작업 N 을 따라간다. 끝나면 데스크톱 알림이 뜬다
+   ```
+
+   기다림은 작업이 어디서 어떻게 돌았는지 말하는 한 줄로 끝난다. 예를 들면
+   `#1 succeeded on macmini · 1s` 이고 머신 이름은 내 머신의 것이다. 산출물을 선언한 프리셋이면 그
+   상태가 붙고, 산출물 수집이 실패했으면 경고 줄이 붙는다. JSON 에는 같은 머신이 `ran_on` 으로
+   실린다. 종료 코드는 작업의 것이다. 0 성공, 1 실패, 2 취소나 시간 초과, 3 모름이고 3 은 실패가
+   아니다([Exit codes](../README.ko.md#exit-codes)).
+7. **내 것으로 만든다.** `server.toml` 의 예시 프리셋을 팀이 실제로 돌리는 명령으로 바꾼다
+   ([Configuration](configuration.md)). 프리셋을 바꾼 뒤에는 `rcm reload` 가 재시작 없이
+   적용한다. 파일 끝에는 주석으로 단 툴체인 카탈로그가 있다. Flutter, Xcode, Android, Node,
+   Python 의 프로브와 [설치 안내](configuration.md#install-hints-tools)다. 다른 컴퓨터에서
+   돌면 안 되는 릴리스 · 배포 프리셋에는
+   [`local_only = true`](configuration.md#keeping-a-preset-on-the-server-local_only) 를 단다.
+
+`rcm setup` 이 쓰는 것, 거절하는 것, 찍는 것은
+[Set a machine up](operating.md#set-a-machine-up-rcm-setup)에 있다. 진단표의 행과 종료
+코드는 [rcm doctor](operating.md#check-a-machine-before-you-use-it-rcm-doctor)에 있다.
+
+### 머신 더 붙이기
+
+- **워커.** 코디네이터에서 setup 이 찍은 둘째 줄
+  `<rcm> token --config ~/.config/rcm/server.toml add mbp --worker` 로 워커 토큰을 만든다. 새
+  컴퓨터에서는 이렇게 친다.
+
+  ```sh
+  rcm setup --role worker --server http://macmini.local:8787 --pool default --lanes 1 --yes
+  ```
+
+  서비스를 띄우기 전에 워커 토큰을 setup 이 쓴 `worker.toml` 에 `token = "…"` 으로 넣는다.
+  서비스는 내 셸의 `RCM_WORKER_TOKEN` 을 보지 못한다. 그다음 setup 이 찍은 시작 줄을 치고
+  `rcm doctor --role worker` 를 돌린다. 이 머신에 올 프리셋이 하나도 없으면 doctor 가 종료 1 로
+  알린다. `--pool default` 면 코디네이터의 기본 풀 프리셋을 받는다. 다른 풀이면 그 풀의 프리셋과
+  `placement = "any-capable"` 프리셋만 받는다. `local_only` 프리셋은 워커에 가지 않는다.
+  `rcm machines` 가 머신 목록을 보여 준다. 나머지는 [11. 두 번째 컴퓨터](#11-두-번째-컴퓨터)에
+  있다.
+- **다른 클라이언트.** 그 컴퓨터에서
+  `rcm setup --role client --server http://macmini.local:8787 --yes` 를 치고 그 컴퓨터만의
+  클라이언트 토큰을 쓴다.
+- **아무것도 돌리지 않는 코디네이터.** `rcm setup --role coordinator --bind <address> --yes` 는
+  [`lanes = 0`](configuration.md#a-server-that-only-hands-out-jobs-lanes--0) 을 쓴다. 워커가
+  붙을 때까지 작업은 ETA 없이 기다리고, `local_only` 프리셋은 제출할 때 거절된다.
+
+### 도는 설치 옆의 시험 설치
+
+rcm 이 이미 서비스로 도는 머신에서 `rcm setup` 은 그 서비스의 설정 파일, 서비스 파일, 라벨에 쓰지
+않는다. 그 서비스의 `data_dir`, venv, 체크아웃 안에도 쓰지 않는다. 그런 대상이면
+`this is <label>'s config — refusing` 처럼 말하고 종료 1 로 멈추며, 이 거절을 넘기는 플래그는
+없다. 시험용이나 잠깐 쓸 설치는 포트 · 라벨 · 설정 · 데이터 폴더를 따로 두고, 네트워크에 자기를
+알리지 않고, 서비스 대신 터미널에서 띄운다. 먼저 셸의 `RCM_*` 를 지워서 도는 설치를 가리키는
+값이 없게 한다.
+
+```sh
+rcm setup --role coordinator-worker --bind 127.0.0.1 --port 8790 --no-advertise --label com.example.rcm-test --config ~/rcm-test/server.toml --data-dir ~/rcm-test/data --yes
+rcm serve --config ~/rcm-test/server.toml      # 따로 연 터미널에서. Ctrl-C 로 멈춘다
+rcm token --config ~/rcm-test/server.toml add test
+RCM_SERVER=http://127.0.0.1:8790 RCM_TOKEN=<그 토큰> rcm check --config ~/rcm-test/server.toml
+RCM_SERVER=http://127.0.0.1:8790 RCM_TOKEN=<그 토큰> rcm run ok
+```
+
+시험 빌드에 도는 설치의 `--config` 나 `--data-dir` 을 주지 않는다. DB 를 여는 rcm 은 그 DB 를 자기
+판으로 마이그레이션한다.
+
+### 되돌리기와 제거
+
+setup 은 마지막 줄 바로 앞에 자기 경로가 든 `to remove: …` 줄을 찍는다. 이 줄은 남겨 둔다. 그대로
+치면 서비스를 내리고, 설치된 서비스 파일이 setup 이 쓴 것일 때만 지우고, setup 이 쓴 설정 파일과
+서비스 파일을 지운다. DB · 작업 로그 · 작업 공간이 든 `data_dir` 은 직접 지울 때까지 남는다. 토큰
+하나는 `rcm token revoke NAME` 으로 폐기한다. rcm 자체는 `pipx uninstall remote-ci-monitor` 로
+지운다.
 
 ## 1. 준비물
 
@@ -53,8 +190,8 @@ rcm serve      # http://127.0.0.1:8787 · Ctrl-C 로 깨끗이 멈춘다
 쓰고, `~/.config/rcm/service/` 아래에 launchd 나 systemd 파일도 쓴다. 그리고 그 서비스를 설치하고
 띄우는 줄과 토큰을 만드는 줄을 찍는다. 그 줄은 setup 이 직접 실행하지 않는다. 서비스가 돌고 이
 머신에 클라이언트 토큰이 있으면 `rcm doctor --role coordinator-worker` 가 이 머신이 무엇을 빌드하고
-시험할 수 있는지, 먼저 무엇을 깔아야 하는지 알려 준다. 차례는 README 의
-[처음 설정](../README.ko.md#first-run-pick-a-role-and-set-it-up)에 있다.
+시험할 수 있는지, 먼저 무엇을 깔아야 하는지 알려 준다. 차례는
+[처음 설정](#처음-설정-역할을-고르고-설정한다)에 있다.
 
 ## 3. 내 컴퓨터
 
@@ -138,6 +275,47 @@ chmod 600 ~/.config/rcm/client.toml
 5. **stdout 에 JSON 한 줄** — 작업에 대한 전부다. 상태 · 시간 · 단계 · 실패한 단계. 위의 것들은
    전부 stderr 였으니 `rcm run … | jq` 는 이 줄만 받는다.
 6. **종료 코드.** 스크립트가 분기해야 하는 값이다. 0 이면 통과다.
+
+### 게이트 한 바퀴
+
+**게이트**는 머지 전에 빌드 머신이 돌리는 프리셋이다 — 분석 · 테스트 · 린트를 스크립트 하나로,
+보통 전체와 빠른 통과를 고르는 `scope` 입력과 함께. 여기에는 그림이 없다. 아래가 내 머신의
+프로젝트 디렉터리에서 도는 전체 흐름이고, 터미널 · CI 래퍼 · 에이전트 세션 어디서든 명령은 같다.
+
+1. **한 번 확인.** `rcm check` — `python` · `server` · `token` · `presets` · `timezone` · `client` ·
+   `cancel` 이 전부 `ok` 여야 한다. `presets` 에 `gate` 가 없으면 서버 쪽에서 아직 정의하지 않은
+   것이다([Configuration](configuration.md)). `rcm presets` 가 프리셋과 입력을 전부 보여
+   준다.
+2. **줄 서기 전에 본다.** `rcm eta gate -f scope=full` 은 아무것도 제출하지 않고 내 순번 · 앞 작업
+   수 · 대기 시간 · 예상 소요 · 끝나는 시각 · 그 추정의 `confidence` 를 찍는다.
+3. **저장소 루트에서 제출.** `rcm run gate -f scope=full --by "$(whoami)@$(hostname -s)"` 은
+   현재 디렉터리를 스냅샷하고(추적 파일 + 무시되지 않은 미추적 파일, `.rcmignore` 제외), 같은
+   작업이 이미 대기·실행 중이면 합류하고, 서버에 없는 파일만 올리고, 기다린다. 진행은 stderr 로
+   `::rcm::step::` 마다 한 줄, 결과는 stdout 에 JSON 한 줄. 입력은 `-f 이름=값`, `--by` 는
+   큐에 보이는 이름(기본 `user@host`). git 이력이 필요한 게이트는 푸시된 ref 로 돈다 —
+   `rcm run gate --source git_ref --ref my-branch` 는 아무것도 올리지 않으니 먼저 푸시한다.
+4. **종료 코드로 분기.** 0 성공 · 1 실패 · 2 취소나 시간 초과 · 3 모름 — 3 은 실패가 아니다
+   ([Exit codes](../README.ko.md#exit-codes)). JSON 에는 `job_id` · `url` · `state` · `exit_code` ·
+   `summary` · `failed_step`(스크립트가 선언했을 때만) · `last_step` · `failures`(스크립트가 보고한
+   이름마다 이 프리셋의 최근 실행에서 몇 번 빨갰는지) · `step_timeline` 이 실린다.
+   `examples/session/ci-gate.sh` 가 완성된 래퍼다(`jq` 필요).
+5. **빨갈 때.** `rcm logs N` 이 로그를 보여 준다(도는 중이면 `--follow`). 판정 줄은 스크립트가
+   선언한 실패 단계를, 선언이 없으면 `last step …` 을 말한다. `rcm artifacts N --fetch` 는
+   프리셋이 낸 보고서를 가져온다. 종료 3 은 rcm 이 모른다는 뜻이다 — 서버가 재시작됐거나 경로가
+   끊긴 것 — 다시 돌리기 전에 `rcm jobs` 를 본다.
+6. **떼어 놓고 나중에.** `--no-wait` 는 작업 번호 · 순번 · ETA 를 찍고 돌아온다. `rcm wait --job N`
+   으로 다시 붙는다. `rcm run` 중 Ctrl-C 도 떼어 놓기다 — 작업은 계속 돈다.
+7. **취소.** `rcm cancel N` 은 내 작업을 멈춘다(`rcm run` 이 제출의 취소 토큰을
+   `~/.local/state/rcm/submissions.json` 에 저장해 둔다). 남의 작업에 합류만 했다면 목록에서
+   나만 빠지고 작업은 계속 돈다. 관리자 토큰은 무엇이든 취소한다.
+8. **두 세션, 한 커밋.** 같은 프리셋 · 입력 · 트리로 두 번째 `rcm run` 을 하면 첫 작업에 합류해
+   같은 결과를 받는다. `--no-join` 은 따로 돌린다.
+9. **빠른 통과.** 프리셋에 가벼운 scope(`-f scope=fast` · `commit`)가 있으면 반복할 땐 그걸
+   쓰고 머지에는 `full` 을 쓴다. 지금 각각 얼마나 걸리는지는 `rcm eta` 가 말해 준다.
+10. **클라이언트를 맞춘다.** 0.8.0 부터 설치한 `rcm` 은 서버 버전을 따라간다.
+    [3. 내 컴퓨터](#3-내-컴퓨터)와
+    [keeping clients on the server's version](operating.md#keeping-clients-on-the-servers-version)을
+    본다.
 
 ## 5. 기다리지 않기
 
@@ -533,10 +711,73 @@ curl "http://macmini.local:8787/api/shelf/latest/app-map-shots?branch=dev"   # �
 
 1. 워커, 2. 요약, 3. 카드가 된 작업, 4. 그 단계, 5. 버튼. 한 열에, 같은 정보를, 가로 스크롤 없이.
 
+### 스토어 탭: 비밀 설정, 버전, 드래프트
+
+`server.toml` 의 저장소에 `[repos.<name>.release]` 프로파일이 있으면 머리에 **Queue | Store**
+전환이 생기고 `#/store/<name>` 이 스토어 탭을 연다. 프로파일이 없으면 탭도 없다. 스토어 앞에는
+**설정 관문**이 있다: 필수 비밀이 전부 있고 검증되기 전에는 설정 화면이다 — 빨간 띠
+`n of m secrets set · k verified`, 프로파일이 선언한 비밀마다 한 행(파일은 끌어다 놓고, 값은
+password 칸에 한 번 입력), **Verify all**, 비활성 **Enter Store** — 그리고 브라우저는 값을 보지
+않는다. `present` · 지문 · 검증 시각뿐이다.
+
+관문을 지나면 탭은 **버전 목록**이다. 한 줄짜리 상태 띠가 «지금 이 앱을 올릴 수 있는가» 에만
+답하고(자격 증명 · 소스 · 스토어 · 막힘) 하나라도 빨가면 띠가 빨개진다. 띠를 누르면
+`#/store/<name>/status` 가 열리는데, 접히는 행 넷(Setup, Source, Build · upload, Store)과 심사
+패널이 거기 그대로 있다 — 패널은 이제 **Validate listing** 과 **Plan review** 만 누를 수 있는
+읽기 전용이다. `status` 프리셋이 있으면 패널에 두 스토어의 심사 상태도 나온다. 상태는 여덟 낱말
+가운데 하나이고 그 밖의 값은 `unknown` 으로 그린다. 스토어의 원래 낱말을 옆에 두고 몇 분 전에
+조회했는지와 그것이 `plan_max_age_minutes` 보다 오래됐는지를 보인다. **새로 조회**는 그 프리셋을
+한 번 더 돌린다. 띠 아래에는 **+ 새 버전 만들기**, 그리고 열려 있는 드래프트마다 상태 · 만든 지 ·
+바꾼 필드 수 · 빌드 유무 · 만료 여부가 한 행씩, 그 아래 라이브 버전과 제출한 지난 버전 20개가 있다.
+
+**+ 새 버전 만들기**는 **이름만** 묻는다. 스토어마다 체크박스와 칸이 있고 칸에는 다음 이름이
+미리 들어간다 — 플랜의 `next_version_hint`, 없으면 라이브 이름의 마지막 숫자 +1. 체크를 끄면 그
+스토어는 요청에서 빠지고, 이름이 `major.minor.patch` 꼴이면서 라이브보다 커지기 전까지
+**만들기**는 닫혀 있으며 이유가 칸 아래에 뜬다. 이미 열린 드래프트가 쓰는 이름이면 그 드래프트로
+가는 링크가 돌아온다. 두 스토어는 **서로 다른** 이름을 가질 수 있고(App Store 1.1.1 ·
+Google Play 1.0.1) rcm 은 둘을 끝까지 따로 옮긴다.
+
+드래프트에는 자기 주소가 있다 — `#/store/<name>/v/<id>`. 두 스토어를 심사 패널과 같은 그룹
+순서로 나란히 놓고, **문안 칸은 전부 편집할 수 있으며 이전 버전 값으로 채워져 있다**. 칸마다 그
+값이 어디서 왔는지 적힌다(«이전 버전 그대로» · «내가 고친 것» · «파일에서»). 글자 수는 스토어
+상한에 대고 세고, 달라지는 순간 «바뀜» 칩과 **되돌리기**가 붙고, 타이핑을 멈추고 800 ms 뒤 바뀐
+키만 실어 저절로 저장한다. 배지는 «자동 저장 · 12s 전», 실패하면 사유와 **다시 저장**을 보이고,
+어느 쪽이든 입력한 글은 화면에 남는다. 상한을 넘겨도 저장은 되고 카운터가 빨개진다 — 최종 판정은
+스토어의 몫이다. 스크린샷 · 빌드 · 출시 설정 · 심사 정보는 보여 주기만 하고, rcm 은 스크린샷
+파일을 건드리지 않는다. admin 토큰이 없거나 제출·폐기된 드래프트면 화면 전체가 읽기 전용이 되고
+한 문장이 이유를 말한다.
+
+그 페이지 맨 아래에는 **바텀시트**가 붙는다 — 제품에서 하나뿐이고, 진행과 남은 것과 **심사
+제출** 버튼을 들고 있다. 접히면 한 줄이다: «심사 전에 남은 것 3 · 빌드 아직 없음», «S5 시나리오
+QA · 10단계 중 7번째 · 66% · 경과 38m · 예상 21:40», «제출 준비됨 · 심사 플랜 4m 전 · 빌드 181»,
+«제출됨 21:52 · 심사 대기». 펼치면 막대, 단계 칩(프로파일에 드라이버가 있으면 `V S0…S8`, 없으면
+이번 회차의 작업들), 근거 문장, 그리고 두 열 — **심사 전에 남은 것** 과 **이전 버전과 달라진 것**
+— 이 붙는다. 앞 열의 각 줄은 고치는 곳의 이름이고, 누르면 그리로 간다. 제출 조건도 여기 있다:
+스토어 체크박스, 제출마다 새로 체크하고 기억하지 않는 관리형 게시 칸, 그리고 빌드 번호(**자동**
+이면 플랜의 번호, **직접 입력**이면 그 번호와 정확히 같아야 한다). 퍼센트는 분모를 미리 선언한
+경우에만 나오고, 아니면 막대에 빗금이 그어지고 그 사실을 적는다. 승인됐다고 저절로 출시되지
+않는다. 출시는 사람이 버전과 빌드 번호와 시각을 적어 요청할 때만 돈다. 그 자리는 버전 페이지의
+「출시 예약」이고, 그 스토어가 승인했다고 말한 뒤에만 열린다. `unsafe_release_type` 판정은 닫을 수
+없는 빨간 띠가 된다.
+
+드래프트는 쌓이지도, 모르는 새 사라지지도 않는다. 아무도 손대지 않은 것은 `version_ttl_hours`
+(기본 24)가 지나면 버려진다 — 프로파일에 `version` 프리셋이 있으면 스토어까지, 없으면 rcm 안에서만.
+반대로 **고친 적이 있는** 드래프트는 «만료»로 표시만 하고 사람이 정리할 때까지 기다린다. 그리고
+심사 작업 · 업로드 작업 · 드라이버 회차 중 하나라도 살아 있으면 그 드래프트는 버릴 수 없고, 행이
+무엇이 붙잡고 있는지 말한다.
+
+상태 화면에서, 프로파일에 드라이버가 있으면 Build · upload 행에 회차의 스테퍼 S0~S8 이 드라이버의
+상태 줄에서 읽혀 붙는다(도는 것이 없으면 버전 · Android 트랙 · dry-run 의 Start 폼, 도는 중엔
+**Abort**, exit 1 뒤엔 **Retry same version**, exit 3 은 «결과 모름 — 다시 올리지 않음», exit 4 는
+스토어 드리프트). S2 대화상자는 빌드 번호를 다시 타이핑해야 `confirm` 을 보내고(**빌드 번호:
+자동** 이면 서버가 플랜의 번호로 스스로 확인해 회차가 멈추지 않는다), **Rehearsal (no upload)**
+버튼은 업로드 프리셋을 예행으로만 돌린다 — 진짜 업로드는 드라이버의 S7 이고 업로드 버튼은 없다.
+Source 행에는 미러의 최근 커밋 다섯 · 태그 · «PR list: next» 가 있다.
+
 ### 스토어 탭: 심사 상태와 출시
 
-릴리스 프로파일이 있는 저장소는 **Queue** 옆에 **Store** 탭(스토어 탭)이 생긴다. 이 탭이 무엇이고 프로젝트를
-어떻게 잇는지는 [README](../README.ko.md#스토어-탭--프로젝트의-릴리스-흐름-연결)와
+프로젝트를 스토어 탭에 어떻게 잇는지는
+[README](../README.ko.md#스토어-탭--프로젝트의-릴리스-흐름-연결)와
 [릴리스 계약](release-contract.md)에 있다. 빌드가 심사에 들어간 뒤에는 두 곳을 보면 된다. 아래
 그림은 예시 데이터(앱 이름 `app`, 버전 1.0.x)로 그렸다.
 

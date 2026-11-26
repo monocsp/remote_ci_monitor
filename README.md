@@ -16,6 +16,7 @@
 <p align="center">
   <a href="#install">Install</a> ·
   <a href="#first-run-pick-a-role-and-set-it-up">First run</a> ·
+  <a href="docs/usage.md#a-test-install-next-to-one-that-runs">Test install</a> ·
   <a href="#build-machine-3-commands">Quick start</a> ·
   <a href="docs/usage.md">Usage guide</a> ·
   <a href="docs/configuration.md">Configuration</a> ·
@@ -49,8 +50,8 @@ or just slow, is the machine on fire, did it pass? rcm answers that in one scree
 Build machines run macOS (Apple Silicon or Intel) and Linux. Windows is out of scope; sessions on
 Windows submit through WSL.
 
-Status: **M0–M5 done (v0.2.3)**. There is no GitHub backend and none is planned. `PLAN.md` (Korean)
-is the plan of record; `CHANGELOG.md` is what changed.
+Status: **v0.10.x, M5t-a in progress**. There is no GitHub backend and none is planned. `PLAN.md`
+(Korean) is the plan of record; `CHANGELOG.md` is what changed.
 
 ## Install
 
@@ -79,124 +80,26 @@ Every machine that uses rcm has a role. `rcm setup` writes the files for one:
 | `coordinator` | keeps the queue and hands jobs to workers; runs none itself (`lanes = 0`) | `server.toml` and a server service file |
 | `coordinator-worker` | keeps the queue and runs jobs too — one machine does everything | `server.toml` (`lanes = 1`) and a server service file |
 
-Start with `coordinator-worker` on the machine that builds, and make the same machine a `client`
-so you can send it a job. Add a `worker` for each further computer that should build, and a
-`client` for each one that only sends work. A machine may have several roles; rcm reads them back
-from the config files that exist, and writes no role anywhere.
+**If this machine already runs rcm as a service**, read
+[a test install next to one that runs](docs/usage.md#a-test-install-next-to-one-that-runs) first:
+`rcm setup` refuses the running install's files, and a test install gets its own port, label,
+config and data folder.
 
-### On one machine
-
-1. **Write the config.** In a terminal on a machine with no rcm config yet, `rcm` with no
-   arguments asks `No rcm config on this machine yet. Set it up now? (y/n) [y]` and walks you
-   through `rcm setup`. Or give every answer at once:
-
-   ```sh
-   rcm setup --role coordinator-worker --bind 127.0.0.1 --yes
-   ```
-
-   `--bind` is the address the server listens on. `127.0.0.1` keeps it on this machine; for other
-   computers give this machine's Tailscale or LAN address, or `0.0.0.0`, and read the warning
-   setup prints about who can then read the queue. setup writes `~/.config/rcm/server.toml` and a
-   service file under `~/.config/rcm/service/`, then prints the lines to run next. It registers
-   nothing, starts nothing, makes no token and opens no database. A file that is already there is
-   kept (exit 1) unless you pass `--force`. On a machine where rcm already runs as a service,
-   follow [a test install next to one that runs](#a-test-install-next-to-one-that-runs)
-   instead.
-2. **Install and start the service.** Run the lines setup printed under `next —`, exactly as
-   printed: on macOS a `mkdir -p`, a `cp -n` into `~/Library/LaunchAgents/` and a
-   `cmp -s … && launchctl bootstrap gui/$(id -u) …`; on Linux `sudo loginctl enable-linger $USER`
-   (so the service outlives your login) and `systemctl --user … enable --now`. Then
-   `curl http://127.0.0.1:8787/api/health` answers. The log is
-   `~/Library/Logs/rcm/server.log` on macOS and `~/.local/state/rcm/server.log` on Linux.
-3. **Make a token.** Run the first line setup printed under `tokens —`,
-   `<rcm> token --config ~/.config/rcm/server.toml add CLIENT_NAME`, with a name of your choice
-   in place of `CLIENT_NAME`. It prints the token once. Use that line's `rcm`, the one the service
-   runs: another build of rcm would open the database and migrate it.
-4. **Make this machine a client too.**
-
-   ```sh
-   rcm setup --role client --server http://127.0.0.1:8787 --yes
-   export RCM_TOKEN=<the token>     # or token = "…" in ~/.config/rcm/client.toml (mode 600)
-   ```
-
-5. **Check it.** `rcm doctor --role coordinator-worker` says what this machine can build and test
-   the way the service will run it, and what to install first: exit 0 ready, 1 something is
-   missing (with the install line), 3 it could not decide (no token, the server is down). Name the
-   role: this machine now has two, and `rcm doctor` without `--role` stops with exit 2. Then
-   `rcm check`: every row says `ok` (a `warn` row still exits 0).
-6. **Send the first job.** From any directory, `rcm run ok` uploads that directory, runs the
-   harmless `ok` preset the template ships and exits 0 with one JSON line on stdout. To leave it
-   running and come back later:
-
-   ```sh
-   rcm run ok --no-wait             # prints the job number and returns
-   rcm wait --job N --notify        # follows job N; a desktop notification when it ends
-   ```
-
-   The wait ends with one line that says where the job ran and how it went,
-   `#1 succeeded on macmini · 1s` (your machine's name), plus the artifact state for a preset that
-   declares artifacts, and a warning line when collecting them failed. The JSON carries the same
-   machine as `ran_on`. The exit code is the job's: 0 succeeded, 1 failed, 2 cancelled or timed
-   out, 3 unknown, which is never a failure ([Exit codes](#exit-codes)).
-7. **Make it yours.** Replace the example presets in `server.toml` with the commands your team runs
-   ([Configuration](docs/configuration.md)); `rcm reload` applies preset changes without a restart.
-   The file ends with a commented toolchain catalog: probes and
-   [install hints](docs/configuration.md#install-hints-tools) for Flutter, Xcode, Android, Node
-   and Python. Mark a release or deploy preset that must never run on another computer
-   [`local_only = true`](docs/configuration.md#keeping-a-preset-on-the-server-local_only).
-
-Everything `rcm setup` writes, refuses and prints is in
-[Set a machine up](docs/operating.md#set-a-machine-up-rcm-setup); every row of the report and its
-exit codes are in [rcm doctor](docs/operating.md#check-a-machine-before-you-use-it-rcm-doctor).
-
-### More machines
-
-- **A worker.** On the coordinator, make a worker token with the second line setup printed,
-  `<rcm> token --config ~/.config/rcm/server.toml add mbp --worker`. On the new computer:
-
-  ```sh
-  rcm setup --role worker --server http://macmini.local:8787 --pool default --lanes 1 --yes
-  ```
-
-  Put the worker token into the `worker.toml` it wrote as `token = "…"` before you start the
-  service: a service does not see the `RCM_WORKER_TOKEN` of your shell. Then run the start lines
-  it printed and `rcm doctor --role worker`, which exits 1 when no preset would come to this
-  machine. `--pool default` takes the coordinator's default-pool presets; another pool takes only
-  presets for that pool and `placement = "any-capable"` ones. A `local_only` preset never goes to
-  a worker. `rcm machines` lists every machine.
-- **Another client.** `rcm setup --role client --server http://macmini.local:8787 --yes` there,
-  with its own client token.
-- **A coordinator that runs nothing.** `rcm setup --role coordinator --bind <address> --yes`
-  writes [`lanes = 0`](docs/configuration.md#a-server-that-only-hands-out-jobs-lanes--0): jobs
-  wait with no ETA until a worker joins, and a `local_only` preset is refused at submit.
-
-### A test install next to one that runs
-
-On a machine that already runs rcm as a service, `rcm setup` refuses to write that service's
-config file, service file or label, and anything inside its `data_dir`, venv or checkout. It stops
-with exit 1 (`this is <label>'s config — refusing`), and no flag overrides that. A test or
-throwaway install gets its own port, label, config and data folder, does not advertise itself on
-the network, and runs in a terminal instead of as a service. Clear `RCM_*` from your shell first,
-so nothing points at the running install:
+On a fresh machine the shortest path makes it a `coordinator-worker` and a `client` at once. setup
+registers nothing and starts nothing: the lines it prints under `next —` install and start the
+service, and the first line under `tokens —` makes the token.
 
 ```sh
-rcm setup --role coordinator-worker --bind 127.0.0.1 --port 8790 --no-advertise --label com.example.rcm-test --config ~/rcm-test/server.toml --data-dir ~/rcm-test/data --yes
-rcm serve --config ~/rcm-test/server.toml      # in a terminal of its own; Ctrl-C stops it
-rcm token --config ~/rcm-test/server.toml add test
-RCM_SERVER=http://127.0.0.1:8790 RCM_TOKEN=<the token> rcm check --config ~/rcm-test/server.toml
-RCM_SERVER=http://127.0.0.1:8790 RCM_TOKEN=<the token> rcm run ok
+rcm setup --role coordinator-worker --bind 127.0.0.1 --yes   # server.toml and a service file
+rcm setup --role client --server http://127.0.0.1:8787 --yes
+export RCM_TOKEN=<the token>
+rcm doctor --role coordinator-worker && rcm check
+rcm run ok                                                   # exit 0 and one JSON line
 ```
 
-Never give a test build the running install's `--config` or `--data-dir`: any rcm that opens a
-database migrates it to its own version.
-
-### Undo and uninstall
-
-setup prints a `to remove: …` line with its own paths, just before its last line. Keep it. Run as
-it is, it unloads the service and deletes the installed service file (only when it is the one
-setup wrote), then deletes the config and service files setup wrote. The `data_dir` with the
-database, job logs and workspaces stays until you delete it. `rcm token revoke NAME` ends one token.
-`pipx uninstall remote-ci-monitor` removes rcm itself.
+Each step explained, adding workers and clients, a coordinator that runs nothing, `local_only`,
+and undo and uninstall are in the usage guide's
+[Getting started](docs/usage.md#getting-started-pick-a-role-and-set-it-up).
 
 ## Build machine (3 commands)
 
@@ -226,10 +129,8 @@ so the job URLs printed by `rcm run` open from other computers.
 Keep it running across logins and reboots with the launchd and systemd examples in
 [Operating the build machine](docs/operating.md#run-as-a-service).
 
-**A second machine** joins as a worker: `rcm token add mbp --worker` here, then `rcm init worker`
-and `rcm worker --check` there (it finds the server on the same network by itself). Each machine
-reports what it can run; `rcm machines` lists them, and a preset with
-`placement = "any-capable"` goes to any machine that has its tools —
+**A second machine** joins as a worker that takes jobs from the same queue:
+[more machines](docs/usage.md#more-machines),
 [Second build machine](docs/configuration.md#second-build-machine-remote-worker) and
 [Which machine runs a job](docs/configuration.md#which-machine-runs-a-job).
 
@@ -260,10 +161,6 @@ rcm top                    # queue, ETAs, recent results, host load
 ```
 <!-- smoke:end -->
 
-Then run real work from a project directory — `rcm run gate -f scope=full` — and branch on `$?`:
-0 succeeded · 1 failed · 2 cancelled or timed out · 3 unknown. `examples/session/ci-gate.sh` is a
-ready-made wrapper (needs `jq`).
-
 `rcm run` snapshots the **current directory** (git-tracked plus untracked-but-not-ignored files,
 minus `.rcmignore` patterns), uploads only what the server does not already have, waits, and prints
 one JSON line on stdout. Progress goes to stderr. Ctrl-C detaches: the job keeps running,
@@ -276,50 +173,25 @@ screenshots.**
 ## Running a gate from a session
 
 A **gate** is the preset your build machine runs before a merge — analysis, tests and lint in one
-script, usually with a `scope` input for a full or a quick pass. This is the whole loop from a
-project directory on your machine; every command works the same from a terminal, a CI wrapper or
-an agent session.
+script, usually with a `scope` input for a full or a quick pass. From the repository root:
 
-1. **Check once.** `rcm check` — `python`, `server`, `token`, `presets`, `timezone`, `client` and
-   `cancel` must all say `ok`. If `presets` does not list `gate`, the server owner has not defined
-   it yet ([Configuration](docs/configuration.md)); `rcm presets` shows every preset with its
-   inputs.
-2. **Look before you queue.** `rcm eta gate -f scope=full` prints your position, the jobs ahead,
-   the wait, the expected duration, the finish time and the `confidence` of that estimate —
-   without submitting anything.
-3. **Submit from the repository root.** `rcm run gate -f scope=full --by "$(whoami)@$(hostname -s)"`
-   snapshots the current directory (tracked files plus untracked files that are not ignored, minus
-   `.rcmignore`), joins an identical job that is already queued or running, uploads only the files
-   the server has not seen, and waits. Progress — one line per `::rcm::step::` — goes to stderr;
-   the result is one JSON line on stdout. Inputs are `-f name=value`; `--by` is the name the queue
-   shows (default `user@host`). A gate that needs git history runs from a pushed ref instead:
-   `rcm run gate --source git_ref --ref my-branch` uploads nothing, so push first.
-4. **Branch on the exit code.** 0 succeeded · 1 failed · 2 cancelled or timed out · 3 unknown,
-   which is never a failure ([Exit codes](#exit-codes)). The JSON carries `job_id`, `url`, `state`,
-   `exit_code`, `summary`, `failed_step` (only when the script declared it), `last_step`,
-   `failures` (each name the script reported, with how often it was red in the recent runs of this
-   preset) and `step_timeline`. `examples/session/ci-gate.sh` is a complete wrapper (needs `jq`).
-5. **When it is red.** `rcm logs N` shows the log (`--follow` while it runs); the verdict line
-   names the failed step when your script declared one and `last step …` otherwise;
-   `rcm artifacts N --fetch` brings back the reports the preset published. Exit 3 means rcm does
-   not know — the server restarted or you lost the route — so look at `rcm jobs` before you retry.
-6. **Detach and come back.** `--no-wait` prints the job number, its position and its ETA and
-   returns; `rcm wait --job N` follows it later. Ctrl-C during `rcm run` detaches too — the job
-   keeps running.
-7. **Cancel.** `rcm cancel N` stops your own job (`rcm run` saved the submission's cancel token in
-   `~/.local/state/rcm/submissions.json`); if you only joined someone else's job it removes you
-   from the list and the job goes on. Admin tokens cancel anything.
-8. **Two sessions, one commit.** A second `rcm run` with the same preset, inputs and tree joins
-   the first job and gets the same result; `--no-join` forces a separate run.
-9. **Faster passes.** If the preset defines a lighter scope (`-f scope=fast` · `commit`), use it
-   while iterating and keep `full` for the merge; `rcm eta` says what each costs right now.
-10. **Keep the client current.** From 0.8.0 the installed `rcm` follows the server: when the
-    server runs another version, the next command downloads the server's own client, checks its
-    sha256 and runs it (`RCM_CLIENT_VERSION=installed` turns that off). Use
-    `examples/session/update-client.sh` for the first install and to upgrade the installed `rcm`
-    itself ([keeping clients on the server's version](docs/operating.md#keeping-clients-on-the-servers-version)).
+```sh
+rcm check                    # once: every row ok, and gate among the presets
+rcm eta gate -f scope=full   # position, wait, duration and confidence; submits nothing
+rcm run gate -f scope=full   # snapshot, join or submit, upload, wait; one JSON line on stdout
+```
 
-The [usage guide](docs/usage.md) shows each of these with annotated screenshots.
+Branch on the exit code: 0 succeeded · 1 failed · 2 cancelled or timed out · 3 unknown, which is
+never a failure ([Exit codes](#exit-codes)). `rcm logs N` and `rcm artifacts N --fetch` show why a
+job was red, and `examples/session/ci-gate.sh` is a complete wrapper (needs `jq`). The whole loop
+step by step, with detaching, cancelling, joining and faster scopes, is in the usage guide's
+[a gate from start to finish](docs/usage.md#a-gate-from-start-to-finish).
+
+**Keep the client current.** From 0.8.0 the installed `rcm` follows the server: when the
+server runs another version, the next command downloads the server's own client, checks its
+sha256 and runs it (`RCM_CLIENT_VERSION=installed` turns that off). Use
+`examples/session/update-client.sh` for the first install and to upgrade the installed `rcm`
+itself ([keeping clients on the server's version](docs/operating.md#keeping-clients-on-the-servers-version)).
 
 ## Session commands
 
@@ -380,16 +252,12 @@ Your script reports progress by printing markers at the start of a line:
 ::rcm::action::login::Sign in on the build machine   # optional: a person has to act
 ```
 
-`::rcm::progress::<done>/<total>::<unit>::<state>[::<note>]` is for a long step — a chunk loop, a
-parallel set, a lock wait. Print only a denominator the script knows; the queue draws the bar from
-it and a grid of the units it has seen. Details in [Configuration](docs/configuration.md#progress-inside-a-step).
-
+`::rcm::progress::<done>/<total>::<unit>::<state>[::<note>]` draws a bar inside a long step
+from a denominator the script knows ([progress inside a step](docs/configuration.md#progress-inside-a-step)).
 `::rcm::action::<code>::<note>` says the job cannot go on without a person — a sign-in expired,
-say. `code` is `[a-z0-9_-]{1,32}`, `note` at most 200 characters and never personal details. The
-last one becomes the job's `action` and the running row's reason `needs_action`; `rcm wait`
-prints it on stderr, `rcm wait --return-on-action` returns with exit 4 while the job keeps running,
-and hooks get `RCM_ACTION_CODE` and `RCM_ACTION_NOTE`. Details in
-[Configuration](docs/configuration.md#when-a-person-has-to-act).
+say: the running row's reason becomes `needs_action`, `rcm wait` prints it on stderr, and
+`rcm wait --return-on-action` returns with exit 4 while the job keeps running
+([when a person has to act](docs/configuration.md#when-a-person-has-to-act)).
 
 A session can send a job to another pool with `--pool`, but only to a pool the preset lists in
 `pools`. Everything else the config can do — deploy presets that fetch a pushed ref, priorities,
@@ -413,84 +281,19 @@ without a successful response a **Lost connection** banner appears while the age
 The page never pretends to be current. `#/jobs/N` deep-links to a job.
 
 When a repository in `server.toml` has a `[repos.<name>.release]` profile, the header gains a
-**Queue | Store** switch and `#/store/<name>` opens the Store tab; without a profile there is no
-tab. The Store is behind a **settings gate**: until every required secret is present and verified
-you land on the Settings screen — a red banner with `n of m secrets set · k verified`, one row per
-secret from the profile (drop a file, or type a value once in a password box), **Verify all**, and
-a disabled **Enter Store** — and the browser never sees a value, only `present`, a fingerprint and
-the verification time.
-
-Past the gate the tab is a **list of versions**. A one-line status strip answers «can this app go
-up at all» — credentials, source, store, blockers — and turns red as soon as one of them is;
-clicking it opens `#/store/<name>/status`, which still carries the four collapsible rows (Setup,
-Source, Build · upload, Store) and the review panel, now read-only apart from **Validate listing**
-and **Plan review**. With a `status` preset the panel also shows each store's review state — one
-of eight words, `unknown` for anything else, the store's own word beside it, how long ago it was
-checked and whether that is older than `plan_max_age_minutes` — and **Check again** runs the
-preset once more. Under the strip: **+ New version**, then every open draft with its state, its
-age, how many fields you changed, whether a build exists and whether it has expired, then the live
-version and the last 20 submitted ones.
-
-**+ New version** asks for nothing but the names. Each store gets a checkbox and a field prefilled
-with the next name — the plan's `next_version_hint`, or the live name with its last number bumped;
-unticking a store leaves it out of the request, **Create** stays shut with the reason under the
-field until a name looks like `major.minor.patch` and beats the live one, and a name an open draft
-already carries comes back as a link to that draft. The two stores may take **different** names
-(App Store 1.1.1 · Google Play 1.0.1) and rcm carries both to the end.
-
-A draft has its own page, `#/store/<name>/v/<id>`: the two stores side by side, in the review
-panel's group order, with every copy field **editable and prefilled from the previous version**. A
-field says where its value came from — «same as the previous version», «your edit», «from the
-file» — counts characters against the store's limit, gets a «changed» chip and a **Revert** as soon
-as it differs, and saves itself 800 ms after you stop typing, sending only the keys that changed.
-The badge reads «autosaved · 12s ago», or why the save failed with a **Save again** that resends
-it; the text you typed stays on screen either way. A value over the limit is saved anyway and the
-counter turns red — the store has the last word. Screenshots, the build, the release settings and
-the review information are shown, not edited; rcm never touches screenshot files. Without an admin
-token, or on a submitted or discarded draft, the page is read-only and one sentence says why.
-
-That page ends in a **sheet**, the only one in the product, carrying the progress, what is still
-missing, and the only **Submit for review** button there is. Collapsed it is one line: «3 left
-before review · No build yet», «S5 scenario QA · stage 7 of 10 · 66% · elapsed 38m · finishes
-21:40», «ready to submit · review plan 4m ago · build 181», «submitted 21:52 · waiting for review».
-Expanded it adds the bar, the stage chips (`V S0…S8` when the profile names a driver, this round's
-jobs when it does not), the basis in words, and two columns — **Left before review** and
-**Different from the previous version** — where every line in the first names the place that fixes
-it and goes there when clicked. The submit conditions live here too: the store checkboxes, the
-managed-publishing box ticked for this submission and never remembered, and the build number,
-**Auto** (the plan's own) or typed to match it exactly. A percentage appears only against a
-denominator declared in advance; otherwise the bar is hatched and says so. Nothing goes live on
-approval by itself: a release runs only when a person asks for it with the version, the build
-number and a time — the version page's «Schedule go-live», open only once that store says
-approved. An `unsafe_release_type` verdict raises a red banner that cannot be dismissed.
-
-<p align="center">
-  <img src="https://raw.githubusercontent.com/monocsp/remote_ci_monitor/main/docs/images/ui/store-golive.png" alt="The version page's Schedule go-live area: iOS approved and Android in review, the read-only plan, the platform, a time, the approved build number typed by hand, the Book go-live button, and the rule that nothing goes live on approval by itself" width="820">
-</p>
-
-Drafts neither pile up nor vanish under you. One nobody edited is discarded after
-`version_ttl_hours` (default 24) — through the store when the profile has a `version` preset,
-inside rcm when it does not — while one you *did* edit is marked expired and waits for a person.
-And a draft cannot be discarded while a review job, an upload job or a driver round is alive for
-it; its row says which one holds it.
-
-On the status screen, when the profile names a driver, the Build · upload row carries the round's
-stepper S0–S8 read from the driver's own status lines (a Start form with version · Android track ·
-dry-run when nothing runs, **Abort** while it runs, **Retry same version** after exit 1, «result
-unknown — do not resubmit» after exit 3, store drift after exit 4); the S2 dialog asks for the
-build number typed again before `confirm` goes out — or, with **Build number: Auto**, the server
-confirms the plan's number by itself and the round does not stop — a **Rehearsal (no upload)**
-button runs the upload preset in rehearsal mode (the real upload is the driver's S7, and there is
-no upload button), and the Source row shows the mirror's last five commits, its tags and
-«PR list: next».
+**Queue | Store** switch and `#/store/<name>` opens the Store tab: a settings gate until its
+secrets are verified, then a list of versions with a status screen and its review panel, a page
+per draft with both stores' copy, and a sheet with the only **Submit for review** button. With a `status` preset the panel also shows each
+store's review state, and **Check again** runs the preset once more. Nothing goes live on approval
+by itself. Every screen of it is in the
+[usage guide](docs/usage.md#the-store-tab-secrets-versions-and-drafts).
 
 ### Store tab — connecting a project's release flow
 
 Beyond the queue, a repository can get a **Store tab**: fetch, store snapshot, gate, QA, upload,
 submit for review, each a button over the project's *own* release scripts. rcm draws the JSON
 those scripts write and runs the presets they declare; it never computes a build number or judges
-QA, and nothing goes live on approval by itself — a release runs only when a person asks for it
-with the version, the build number and a time. What a project must provide is written down in
+QA. What a project must provide is written down in
 [docs/release-contract.md](docs/release-contract.md); the fastest way to provide it is the skills
 rcm ships for a Claude Code session in that project:
 
@@ -501,18 +304,9 @@ rcm skills install --into ~/src/app               # copies them to ~/src/app/.cl
 /rcm-connect                                      # asks project · repo name · platforms · optional tiers
 ```
 
-`/rcm-connect` runs `rcm-store-connect` (required: profile block, secrets list, `plan` / `upload`
-/ `review` presets and script skeletons, each with a `--selftest`) and, if chosen, the optional
-`rcm-gate-connect`, `rcm-qa-connect` and `rcm-release-driver`. Skills write only into the
-project (`scripts/rcm/presets.release.toml`, `scripts/rcm/profile.release.toml`, scripts, a report
-in `docs/rcm-connect.md`) and verify with `rcm check` on a candidate copy of `server.toml`; the
-live server file, secrets and the stores are never touched. The profile keys are in
-[Configuration](docs/configuration.md#release-profile).
-
-The same `rcm skills install` also brings **`rcm-ci-connect`**, which runs a repository's CI on
-the build machine: a watcher submits each pull request head and posts a `rcm/ci` commit status,
-with GitHub Actions as an optional fallback. How it works and what the owner sets up is in
-[Configuration](docs/configuration.md#release-profile) (the paragraph after the connect skills).
+The skills write only into the project and never touch the live server file, secrets or the
+stores. The same install brings **`rcm-ci-connect`**, which runs a repository's CI on the build
+machine and posts a `rcm/ci` commit status ([Configuration](docs/configuration.md#release-profile)).
 
 ## Exit codes
 
