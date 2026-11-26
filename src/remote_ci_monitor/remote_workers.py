@@ -268,6 +268,27 @@ class RemoteWorkersMixin:
         # heartbeat 이 없다(커밋만 보이고 기록은 안 보이면 다시 lost 다)
         self._fresh_claims: dict[str, set[int]] = {}
         self._fresh_claims_lock = threading.Lock()
+        self._synthetic_said: set[str] = set()  # 합성 그룹 로그는 프리셋마다 한 번(결정 330)
+
+    def _sync_irreversible(self) -> None:
+        """설정의 표식 프리셋 표를 저장소에 넣는다(M5t-b 결정 257 · 330). 기동과 reload 마다 부른다.
+
+        claim 이 이 표로 `jobs.irreversible` 을 얼리고 그룹 NULL 인 옛 대기 잡의 유효 그룹을 정한다.
+        레거시 잡의 표식 판정은 「설정에 있는 프리셋 이름」도 본다 — 없으면 모름이고 닫힌 쪽이다."""
+        presets = self.config.presets
+        self.store.irreversible = {
+            p.name: (p.concurrency_group or f"irreversible:{p.name}", p.concurrency_scope)
+            for p in presets
+            if p.irreversible
+        }
+        self.store.known_presets = frozenset(p.name for p in presets)
+        for p in presets:
+            if p.irreversible and p.group_synthetic and p.name not in self._synthetic_said:
+                self._synthetic_said.add(p.name)
+                self.log(
+                    f"preset {p.name}: irreversible without concurrency_group — using group "
+                    f"{p.concurrency_group} ({p.concurrency_scope})"
+                )
 
     # ── 인증 ────────────────────────────────────────────────────────────────
 

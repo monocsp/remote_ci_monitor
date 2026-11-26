@@ -32,6 +32,7 @@ from remote_ci_monitor.core.model import (
     PLACEMENT_CAPABLE,
     PLACEMENT_POOL,
     PRIORITY_NAMES,
+    SCOPE_GLOBAL,
     SCOPE_POOL,
     SCOPES,
     SOURCE_MODES,
@@ -672,6 +673,7 @@ _PRESET_KEYS = {
     "start_deadline_seconds",
     "retry",
     "local_only",
+    "irreversible",
 }
 #: `[presets.retry]` 의 키(M5s 결정 210). 값을 안 적으면 요청서의 기본값이다(75 · 600 · 12)
 _RETRY_KEYS = {"on_exit", "interval_seconds", "max_attempts"}
@@ -951,6 +953,14 @@ def parse_preset(raw: Any) -> Preset:
             f'{where}: local_only needs pool = "{DEFAULT_POOL}" — the server\'s local lanes take '
             f"only the {DEFAULT_POOL} pool, not {pool!r}"
         )
+    irreversible = raw.get("irreversible", False)
+    if not isinstance(irreversible, bool):
+        raise ConfigError(f"{where}: irreversible must be true or false")
+    synthetic = False
+    if irreversible and not group:  # mutcheck: synthetic-group-missing
+        # 홀드할 그룹이 없으면 안전이 설정의 빈칸에 기댄다 — rcm 이 고정 그룹을 채운다(결정 330 ·
+        # 5차 (a)). 범위는 가장 넓은 global 이다. 다른 범위를 원하면 사람이 그룹을 적는다
+        group, scope, synthetic = f"irreversible:{name}", SCOPE_GLOBAL, True
     return Preset(
         name=name,
         argv=argv,
@@ -980,6 +990,8 @@ def parse_preset(raw: Any) -> Preset:
         start_deadline_seconds=start_deadline,
         retry=retry,
         local_only=local_only,
+        irreversible=irreversible,
+        group_synthetic=synthetic,
     )
 
 

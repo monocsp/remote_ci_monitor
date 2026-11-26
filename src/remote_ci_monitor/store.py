@@ -85,7 +85,7 @@ from remote_ci_monitor.core.supersede import SUPERSEDED, branch_of, repo_of, sup
 #: (M5j G4 · `tool_missing`). 취소·유실처럼 스크립트에 대해 아무 말도 못 한 잡이다.
 WINDOW_EXCLUDED_CODES: tuple[str, ...] = ("tool_missing",)
 
-DB_VERSION = 25
+DB_VERSION = 26
 #: 제출 capability 의 역할(M5j G5 · 결정 87). 요청자는 잡을 취소하고, 합류자는 자기 참여만 뺀다.
 ROLE_CANCEL_JOB = "cancel_job"
 ROLE_LEAVE_SUBMISSION = "leave_submission"
@@ -131,6 +131,13 @@ VERSION_UPDATABLE = frozenset(
 )
 EVENT_STATE = "state"
 EVENT_MARKER = "marker"
+#: 그룹 홀드 만들기 · 풀기 사건(M5t-b 결정 330). events 의 스키마는 그대로다
+EVENT_HOLD = "hold"
+#: 홀드를 푸는 쪽(M5t-b §4.9). `worker` 는 인증된 워커의 확인, `admin` 은 `rcm release-hold`
+RELEASE_WORKER = "worker"
+RELEASE_ADMIN = "admin"
+#: 그룹 없는 표식 프리셋의 합성 그룹 접두어(M5t-b 결정 330 · 5차 (a))
+SYNTHETIC_GROUP_PREFIX = "irreversible:"
 #: 정지 행 — `get_paused` 와 claim 트랜잭션이 같은 문장으로 본다
 _PAUSED_SQL = "SELECT value FROM server_state WHERE key='paused'"
 
@@ -246,7 +253,16 @@ CREATE TABLE IF NOT EXISTS jobs (
   retry_on_exit INTEGER,
   retry_interval_seconds INTEGER,
   retry_max_attempts INTEGER,
-  retry_disabled INTEGER NOT NULL DEFAULT 0
+  retry_disabled INTEGER NOT NULL DEFAULT 0,
+  -- v26(M5t-b §4.9): claim 한 워커 세션 · claim 때 얼린 표식과 유예 · 워커의 claim 순번 · 로그
+  -- 오프셋(PR2 가 쓴다). 마이그레이션과 같은 차례로 맨 끝이다. 옛 행은 NULL = 로컬 또는 레거시
+  worker_session_id TEXT,
+  irreversible INTEGER,
+  disconnect_grace_seconds INTEGER,
+  claim_seq INTEGER,
+  log_offset INTEGER,
+  log_file_bytes INTEGER,
+  log_complete INTEGER
 );
 CREATE INDEX IF NOT EXISTS jobs_state ON jobs(state, id);
 CREATE INDEX IF NOT EXISTS jobs_worker ON jobs(worker_name, state);
@@ -419,6 +435,34 @@ CREATE INDEX IF NOT EXISTS machine_checks_key ON machine_checks(worker, preset, 
 CREATE INDEX IF NOT EXISTS jobs_check ON jobs(worker_name, preset, fingerprint_hash, id);
 """
 _SCHEMA_V1 += f"{_SHELF_ITEMS_SQL};\n{_SHELF_STATE_INDEX_SQL};\n{_SHELF_LATEST_INDEX_SQL};\n"
+
+#: v26(M5t-b §4.9) — 워커 프로세스 한 번 = 세션 하나(결정 265). 현재 세션은 그 이름에서
+#: `fenced_at IS NULL` 인 행이고 등록 트랜잭션이 많아야 하나로 지킨다.
+_WORKER_SESSIONS_SQL = (
+    "CREATE TABLE IF NOT EXISTS worker_sessions (id TEXT PRIMARY KEY, worker_name TEXT NOT NULL, "
+    "registered_at REAL NOT NULL, fenced_at REAL, fenced_by TEXT, "
+    "orphan_unverified INTEGER NOT NULL DEFAULT 0)"
+)
+_WORKER_SESSIONS_INDEX_SQL = (
+    "CREATE INDEX IF NOT EXISTS worker_sessions_name ON worker_sessions(worker_name, fenced_at)"
+)
+#: v26(M5t-b 결정 330 · 339-d) — 표식 잡이 확인 없이 닫히면 그 그룹을 잡아 둔다. 잡 하나에 행
+#: 하나이고 풀어도 지우지 않는다(감사 이력). 그룹 · 범위 · 풀 · 호스트는 닫는 트랜잭션에서 잡 행을
+#: 복사한다 — 지금 설정은 읽지 않는다.
+_IRREVERSIBLE_HOLDS_SQL = (
+    "CREATE TABLE IF NOT EXISTS irreversible_holds (job_id INTEGER PRIMARY KEY, "
+    "concurrency_group TEXT NOT NULL, concurrency_scope TEXT NOT NULL, pool TEXT NOT NULL, "
+    "host_key TEXT, worker_name TEXT, cause TEXT NOT NULL, created_at REAL NOT NULL, "
+    "released_at REAL, release_kind TEXT, released_by TEXT, release_reason TEXT)"
+)
+_IRREVERSIBLE_HOLDS_INDEX_SQL = (
+    "CREATE INDEX IF NOT EXISTS irreversible_holds_open ON irreversible_holds(concurrency_group) "
+    "WHERE released_at IS NULL"
+)
+_SCHEMA_V1 += (
+    f"{_WORKER_SESSIONS_SQL};\n{_WORKER_SESSIONS_INDEX_SQL};\n"
+    f"{_IRREVERSIBLE_HOLDS_SQL};\n{_IRREVERSIBLE_HOLDS_INDEX_SQL};\n"
+)
 
 _BLOBS_SQL = (
     "CREATE TABLE IF NOT EXISTS blobs (sha256 TEXT PRIMARY KEY, size INTEGER NOT NULL, "
@@ -670,6 +714,22 @@ _MIGRATIONS: dict[int, tuple[str, ...]] = {
         "ALTER TABLE jobs ADD COLUMN retry_max_attempts INTEGER",
         "ALTER TABLE jobs ADD COLUMN retry_disabled INTEGER NOT NULL DEFAULT 0",
         "CREATE INDEX IF NOT EXISTS jobs_chain ON jobs(chain_id)",
+    ),
+    # v25 → v26(M5t-b · docs/m5tb-workplan.md §4.9): 워커 세션 표 · 잡의 세션 · 얼린 표식과
+    # 유예 · claim 순번 · 로그 오프셋 열(PR2 가 쓴다) · 그룹 홀드 표. 옛 행은 전부 NULL 이다 —
+    # 로컬 잡이거나 레거시 잡이라는 뜻이다(T11). v25 백업은 `migrate()` 경계에서 먼저 남는다.
+    26: (
+        _WORKER_SESSIONS_SQL,
+        _WORKER_SESSIONS_INDEX_SQL,
+        "ALTER TABLE jobs ADD COLUMN worker_session_id TEXT",
+        "ALTER TABLE jobs ADD COLUMN irreversible INTEGER",
+        "ALTER TABLE jobs ADD COLUMN disconnect_grace_seconds INTEGER",
+        "ALTER TABLE jobs ADD COLUMN claim_seq INTEGER",
+        "ALTER TABLE jobs ADD COLUMN log_offset INTEGER",
+        "ALTER TABLE jobs ADD COLUMN log_file_bytes INTEGER",
+        "ALTER TABLE jobs ADD COLUMN log_complete INTEGER",
+        _IRREVERSIBLE_HOLDS_SQL,
+        _IRREVERSIBLE_HOLDS_INDEX_SQL,
     ),
 }
 
@@ -1158,6 +1218,20 @@ def _shelf_item(row: sqlite3.Row) -> ShelfItem:
 JOINABLE_STATES = ACTIVE_STATES - {CANCELLING}
 
 
+def _open_hold_sql(host_key: str | None, pool: str) -> tuple[str, list[Any]]:
+    """후보 잡 `c`(유효 그룹 `eg` · 범위 `es`)를 막는 열린 그룹 홀드가 없다는 조건(결정 330).
+
+    범위는 넓게 본다: 어느 한쪽이 `global` 이면 막고, 어느 한쪽이 `host` 면 호스트가 같거나 모를
+    때 막고, 풀이 같으면 막는다. 좁게 봐서 놓치면 확인 없이 그룹이 열린다(fail-open)."""
+    return (
+        "NOT EXISTS (SELECT 1 FROM irreversible_holds h WHERE h.released_at IS NULL "
+        "AND h.concurrency_group = c.eg AND (h.concurrency_scope = ? OR c.es = ? "
+        "OR ((h.concurrency_scope = ? OR c.es = ?) "
+        "AND (? IS NULL OR h.host_key IS NULL OR h.host_key = ?)) OR h.pool = ?))",
+        [SCOPE_GLOBAL, SCOPE_GLOBAL, SCOPE_HOST, SCOPE_HOST, host_key, host_key, pool],
+    )
+
+
 class Store:
     """SQLite 저장소. 한 프로세스 안에서 여러 스레드가 같이 쓴다."""
 
@@ -1173,6 +1247,12 @@ class Store:
         self.shelf_enabled = False
         #: 보관함 폴더를 쓸 수 있나 — 기동 화해(`reconcile_shelf_on_start`)가 정한다(§5.3).
         self.shelf_available = True
+        #: 표식 프리셋 → (유효 그룹, 범위)(M5t-b 결정 330). App 이 설정을 읽을 때마다 넣는다.
+        #: claim 이 그룹 NULL 인 옛 대기 잡의 유효 그룹을 이 표로 정하고 표식을 얼린다
+        self.irreversible: dict[str, tuple[str, str]] = {}
+        #: 설정에 있는 프리셋 이름. 레거시 잡(얼린 값 없음)의 표식 판정에 쓴다 — 설정에 없으면
+        #: 「모름」이고 닫힌 쪽으로 본다(결정 339-d). None 이면 설정을 모르는 저장소다(시험 · 사본)
+        self.known_presets: frozenset[str] | None = None
         #: 마지막 `recover_on_start` 가 정리한 예약 — `(expired, promoted)`(M5s)
         self.schedule_recovered: tuple[list[int], list[int]] = ([], [])
         # 경고 한 줄을 어디에 쓰나(백업 정리 실패 같은, 멈출 일은 아닌 것). 기본은 stderr.
@@ -1386,6 +1466,10 @@ class Store:
             retry_interval_seconds=row["retry_interval_seconds"],
             retry_max_attempts=row["retry_max_attempts"],
             retry_disabled=bool(row["retry_disabled"]),
+            worker_session_id=row["worker_session_id"],
+            irreversible=None if row["irreversible"] is None else bool(row["irreversible"]),
+            disconnect_grace_seconds=row["disconnect_grace_seconds"],
+            claim_seq=row["claim_seq"],
         )
 
     @staticmethod
@@ -1741,7 +1825,11 @@ class Store:
                     # M5s: 사슬이 살아 있으면 뿌리를 남긴다 — 취소 capability 가 뿌리에
                     # 있다(결정 228)
                     f"AND id NOT IN (SELECT chain_id FROM jobs WHERE chain_id IS NOT NULL "
-                    f"AND state NOT IN ({marks}))",
+                    f"AND state NOT IN ({marks})) "
+                    # M5t-b: 열린 그룹 홀드의 잡은 지우지 않는다 — 지우면 홀드가 근거를 잃는다
+                    # mutcheck: hold-row-deleted-by-gc
+                    "AND id NOT IN (SELECT job_id FROM irreversible_holds "
+                    "WHERE released_at IS NULL)",
                     (*sorted(TERMINAL_STATES), _ts(cutoff), *sorted(TERMINAL_STATES)),
                 ).fetchall()
             ]
@@ -1753,6 +1841,8 @@ class Store:
                 conn.execute(f"DELETE FROM submissions WHERE job_id IN ({id_marks})", ids)
                 conn.execute(f"DELETE FROM job_artifacts WHERE job_id IN ({id_marks})", ids)
                 conn.execute(f"DELETE FROM job_failures WHERE job_id IN ({id_marks})", ids)
+                # 남는 것은 풀린 홀드뿐이다 — 잡 행과 함께 감사 이력도 보존 기간을 따른다
+                conn.execute(f"DELETE FROM irreversible_holds WHERE job_id IN ({id_marks})", ids)
                 conn.execute(f"DELETE FROM jobs WHERE id IN ({id_marks})", ids)
             conn.execute("COMMIT")
         except Exception:
@@ -3270,8 +3360,17 @@ class Store:
         *,
         claimant: Claimant | None = None,
         now_fn: Callable[[], datetime] | None = None,
+        session_id: str | None = None,
+        claim_seq: int | None = None,
+        grace_seconds: int | None = None,
     ) -> Job | None:
         """대기 잡 하나를 원자적으로 running 으로.
+
+        M5t-b(결정 257 · 330 · 339-a): 같은 UPDATE 에서 `irreversible`(프리셋이 `self.irreversible`
+        에 드나)과, 원격 claim 이면 세션 · `claim_seq` · 유예(`grace_seconds`)를 얼린다. 그룹이 NULL
+        인 표식 프리셋 대기 잡(표식을 달기 전에 제출됨)은 그 유효 그룹 · 범위를 잡 행에 적고, 후보를
+        고를 때의 그룹 배제도 그 유효 그룹으로 한다. 열린 그룹 홀드(`irreversible_holds`)의 그룹은
+        범위 규칙대로 집지 않는다.
 
         시작 마감(`start_deadline`, M5s 결정 208)이 지난 잡은 집지 않는다 — 두 SQL 갈래 모두. 그
         잡을 `expired` 로 닫는 것은 주기 판정(`expire_overdue`)의 몫이다. `now_fn` 을 주면 마감과
@@ -3313,18 +3412,31 @@ class Store:
                 if taken is not None:
                     conn.execute("ROLLBACK")
                     raise LaneBusy(f"lane {lane} already has job #{int(taken['id'])}")
+            eff = self._effective_jobs_sql()
             if claimant is None:
+                hold_sql, hold_params = _open_hold_sql(None, pool)
                 row = conn.execute(
-                    "SELECT id FROM jobs WHERE state=? AND pool=? "
-                    "AND (start_deadline IS NULL OR start_deadline >= ?) "
-                    "AND (concurrency_group IS NULL "
-                    "OR concurrency_group NOT IN (SELECT concurrency_group FROM jobs "
-                    f"WHERE state IN ({busy}) AND pool=? "
-                    "AND concurrency_group IS NOT NULL)) ORDER BY priority DESC, id LIMIT 1",
-                    (QUEUED, pool, ts, *busy_states, pool),
+                    f"SELECT c.id, c.preset, c.eg, c.es, c.concurrency_group AS g0 FROM {eff[0]} c "
+                    "WHERE c.state=? AND c.pool=? "
+                    "AND (c.start_deadline IS NULL OR c.start_deadline >= ?) "
+                    "AND (c.eg IS NULL OR NOT EXISTS (SELECT 1 FROM jobs b "
+                    f"WHERE b.state IN ({busy}) AND b.concurrency_group = c.eg "
+                    "AND (b.pool=? OR c.es=? OR b.concurrency_scope=?))) "
+                    f"AND {hold_sql} ORDER BY c.priority DESC, c.id LIMIT 1",
+                    (
+                        *eff[1],
+                        QUEUED,
+                        pool,
+                        ts,
+                        *busy_states,
+                        pool,
+                        SCOPE_GLOBAL,
+                        SCOPE_GLOBAL,
+                        *hold_params,
+                    ),
                 ).fetchone()
             else:
-                row = self._claimable(conn, claimant, busy, busy_states, ts)
+                row = self._claimable(conn, claimant, busy, busy_states, ts, eff)
             if row is None:
                 conn.execute("COMMIT")
                 return None
@@ -3355,6 +3467,16 @@ class Store:
                 # 대기 중 보이던 풀은 남기고, 잡은 「실제로 돈 풀」로 옮긴다(§5.2 · 뮤테이션 ⑥)
                 sets += ", display_pool=COALESCE(display_pool, pool), pool=?"
                 params.append(pool)
+            # 얼림(M5t-b 결정 257): reload 나 재시작이 바꾼 값은 다음 claim 부터다
+            sets += ", irreversible=?"
+            params.append(1 if row["preset"] in self.irreversible else 0)
+            if row["g0"] is None and row["eg"] is not None:
+                # 표식 전에 제출된 잡의 유효 그룹 — 홀드도 이 값을 잡 행에서 읽는다(결정 339-d)
+                sets += ", concurrency_group=?, concurrency_scope=?"
+                params += [row["eg"], row["es"]]
+            if worker_name is not None:
+                sets += ", worker_session_id=?, claim_seq=?, disconnect_grace_seconds=?"
+                params += [session_id, claim_seq, grace_seconds]
             cur = conn.execute(
                 f"UPDATE jobs SET {sets} WHERE id=? AND state=?", (*params, job_id, QUEUED)
             )
@@ -3370,9 +3492,36 @@ class Store:
             raise
         return self.get_job(job_id)
 
+    def _effective_jobs_sql(self) -> tuple[str, list[Any]]:
+        """잡 표에 유효 그룹 `eg` · 범위 `es` 를 붙인 파생 표(M5t-b 결정 330 · RL48).
+
+        그룹이 NULL 인 표식 프리셋 잡은 `self.irreversible` 의 (그룹, 범위)다. 그 밖에는 잡 행의 값
+        그대로다. 표식 프리셋은 몇 개뿐이라 `CASE` 로 충분하다. SQLite 는 이 파생 표를 바깥 질의에
+        펼쳐 넣으므로 색인을 그대로 쓴다."""
+        irr = sorted(self.irreversible.items())
+        if not irr:
+            return (
+                "(SELECT j.*, j.concurrency_group AS eg, j.concurrency_scope AS es FROM jobs j)",
+                [],
+            )
+        whens = " ".join("WHEN ? THEN ?" for _ in irr)
+        group_params = [x for name, (grp, _sc) in irr for x in (name, grp)]
+        scope_params = [x for name, (_grp, sc) in irr for x in (name, sc)]
+        sql = (
+            f"(SELECT j.*, COALESCE(j.concurrency_group, CASE j.preset {whens} END) AS eg, "
+            f"CASE WHEN j.concurrency_group IS NULL THEN CASE j.preset {whens} "
+            "ELSE j.concurrency_scope END ELSE j.concurrency_scope END AS es FROM jobs j)"
+        )
+        return sql, [*group_params, *scope_params]
+
     @staticmethod
     def _claimable(
-        conn: sqlite3.Connection, c: Claimant, busy: str, busy_states: list[str], ts: float
+        conn: sqlite3.Connection,
+        c: Claimant,
+        busy: str,
+        busy_states: list[str],
+        ts: float,
+        eff: tuple[str, list[Any]],
     ) -> sqlite3.Row | None:
         """M5n 의 후보 잡 하나 — 세 갈래 · (우선순위, id) · 후보 잡의 범위로 그룹 배제.
 
@@ -3400,11 +3549,11 @@ class Store:
             )
             params += [PLACEMENT_CAPABLE, *known]
         group_sql = (
-            "(c.concurrency_group IS NULL OR NOT EXISTS (SELECT 1 FROM jobs b "
-            f"WHERE b.state IN ({busy}) AND b.concurrency_group = c.concurrency_group AND ("
-            "c.concurrency_scope = ? "
-            "OR (c.concurrency_scope = ? AND (? IS NULL OR b.host_key IS NULL OR b.host_key = ?)) "
-            "OR (c.concurrency_scope NOT IN (?, ?) AND b.pool = ?))))"
+            "(c.eg IS NULL OR NOT EXISTS (SELECT 1 FROM jobs b "
+            f"WHERE b.state IN ({busy}) AND b.concurrency_group = c.eg AND ("
+            "c.es = ? "
+            "OR (c.es = ? AND (? IS NULL OR b.host_key IS NULL OR b.host_key = ?)) "
+            "OR (c.es NOT IN (?, ?) AND b.pool = ?))))"
         )
         params_group = [
             *busy_states,
@@ -3420,13 +3569,18 @@ class Store:
         # 갈래마다 따로 달면 새 갈래가 생길 때 빠진다(5라운드의 HIGH 셋이 그런 경우였다)
         excluded = tuple(c.excluded)
         excluded_sql = f" AND c.preset NOT IN ({','.join('?' * len(excluded))})" if excluded else ""
+        hold_sql, hold_params = _open_hold_sql(c.host_key, c.pool)
         sql = (
-            "SELECT c.id, c.placement FROM jobs c WHERE c.state = ? "
+            "SELECT c.id, c.placement, c.preset, c.eg, c.es, c.concurrency_group AS g0 "
+            f"FROM {eff[0]} c WHERE c.state = ? "
             "AND (c.start_deadline IS NULL OR c.start_deadline >= ?) AND ("
             + " OR ".join(clauses)
-            + f"){excluded_sql} AND {group_sql} ORDER BY c.priority DESC, c.id LIMIT 1"
+            + f"){excluded_sql} AND {group_sql} AND {hold_sql} "
+            "ORDER BY c.priority DESC, c.id LIMIT 1"
         )
-        return conn.execute(sql, (QUEUED, ts, *params, *excluded, *params_group)).fetchone()
+        return conn.execute(
+            sql, (*eff[1], QUEUED, ts, *params, *excluded, *params_group, *hold_params)
+        ).fetchone()
 
     def concurrent_at_start(self, job_id: int) -> int | None:
         """그 잡이 시작할 때 같은 풀에서 돌던 잡 수(자기 포함). **모르면 None** — 0 이 아니다.
@@ -3600,8 +3754,12 @@ class Store:
         only_from: Iterable[str] | None = None,
         bundle: Any | None = None,
         ttl_hours: int = 24,
+        hold_cause: str | None = None,
     ) -> bool:
         """종료 상태로. `only_from` 을 주면 그 상태에서만 바뀐다(경쟁 방지).
+
+        `hold_cause` 는 프로세스 죽음 확인이 **없는** 닫힘이라는 뜻이다(M5t-b 결정 330). 표식 잡이면
+        같은 트랜잭션에서 그 그룹의 홀드를 넣는다 — 닫힘과 홀드 사이에 claim 이 끼지 못한다(R15).
 
         `bundle`(`collect.CollectResult`)을 주면 산출물 묶음을 **같은 트랜잭션**에 쓴다 — 거절된
         finish 는 묶음도 안 남긴다(§5). 잡의 요약은 건드리지 않는다: 「테스트가 깨졌다」와
@@ -3657,6 +3815,8 @@ class Store:
                 lane=None,
                 phase=None,
             )
+            if hold_cause is not None:
+                self._hold_tx(conn, job_id, hold_cause, ts)
             # 증거와 결과는 **같은 커밋**이다 — 거절된 finish 는 대장도 안 남긴다.
             for seq, name in enumerate(fail_names, start=1):
                 conn.execute(
@@ -3890,6 +4050,8 @@ class Store:
         ts = _ts(now)
         when = now.astimezone(UTC).strftime("%Y-%m-%d %H:%M:%SZ")
         recover_state = LOST  # mutcheck: restart-lost — 조용히 succeeded/queued 로 되돌리지 않는다
+        # 서버가 강제로 죽었으면 로컬 표식 잡의 명령은 감독자가 끊었을 수도, 아닐 수도 있다 — 확인할
+        # 길이 없으므로 그 그룹을 홀드한다(M5t-b F76 · 결정 330)
         lost: list[int] = []
         cancelled: list[int] = []
         conn.execute("BEGIN IMMEDIATE")
@@ -3908,6 +4070,7 @@ class Store:
                     lane=None,
                     phase=None,
                 )
+                self._hold_tx(conn, int(row["id"]), "server_restarted", ts)
                 lost.append(int(row["id"]))
             for row in conn.execute(
                 "SELECT id FROM jobs WHERE state=? ORDER BY id", (UPLOADING,)
@@ -4745,6 +4908,162 @@ class Store:
             conn.execute("ROLLBACK")
             raise
         return lost
+
+    # ── 그룹 홀드 (M5t-b 결정 330 · 339-d) ────────────────────────────────────
+
+    def _is_irreversible_row(self, row: sqlite3.Row) -> bool:
+        """그 잡이 표식 잡인가. claim 때 얼린 값이 있으면 그것이다. 레거시 잡(얼린 값 없음)은 닫는
+        때 그 프리셋이 표식이거나 설정에 없으면 참이다 — 모름은 닫힌 쪽이다(결정 339-d)."""
+        if row["irreversible"] is not None:
+            return bool(row["irreversible"])
+        if row["preset"] in self.irreversible:
+            return True
+        return self.known_presets is not None and row["preset"] not in self.known_presets
+
+    def _hold_tx(self, conn: sqlite3.Connection, job_id: int, cause: str, ts: float) -> bool:
+        """표식 잡이면 그 그룹의 홀드 행을 넣는다(호출자가 닫는 트랜잭션을 연다). 넣었으면 참.
+
+        그룹 · 범위 · 풀 · 호스트는 잡 행을 복사한다. 표식 잡의 그룹 NULL 은 claim 이 이미 유효
+        그룹으로 채웠다. 남는 NULL 은 레거시 잡이고 `irreversible:<프리셋>` · `global` 이다 — 아무
+        잡도 막지 않는 `unknown:<job>` 같은 그룹은 만들지 않는다(열리는 쪽 금지)."""
+        row = conn.execute(
+            "SELECT preset, irreversible, concurrency_group, concurrency_scope, pool, host_key, "
+            "worker_name FROM jobs WHERE id=?",
+            (job_id,),
+        ).fetchone()
+        if row is None or not self._is_irreversible_row(row):  # mutcheck: hold-not-created
+            return False
+        group, scope = row["concurrency_group"], row["concurrency_scope"] or SCOPE_POOL
+        if group is None:
+            group, scope = SYNTHETIC_GROUP_PREFIX + row["preset"], SCOPE_GLOBAL
+        cur = conn.execute(
+            "INSERT OR IGNORE INTO irreversible_holds (job_id, concurrency_group, "
+            "concurrency_scope, pool, host_key, worker_name, cause, created_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                job_id,
+                group,
+                scope,
+                row["pool"] or DEFAULT_POOL,
+                row["host_key"],
+                row["worker_name"],
+                cause,
+                ts,
+            ),
+        )
+        if cur.rowcount != 1:
+            return False
+        self._event(conn, job_id, EVENT_HOLD, {"action": "created", "cause": cause}, ts)
+        return True
+
+    def _release_hold_tx(
+        self,
+        conn: sqlite3.Connection,
+        job_id: int,
+        *,
+        kind: str,
+        by: str,
+        reason: str | None,
+        ts: float,
+    ) -> bool:
+        cur = conn.execute(
+            "UPDATE irreversible_holds SET released_at=?, release_kind=?, released_by=?, "
+            "release_reason=? WHERE job_id=? AND released_at IS NULL",
+            (ts, kind, by, reason, job_id),
+        )
+        if cur.rowcount != 1:
+            return False
+        self._event(
+            conn,
+            job_id,
+            EVENT_HOLD,
+            {"action": "released", "release_kind": kind, "released_by": by, "reason": reason},
+            ts,
+        )
+        return True
+
+    def release_hold(
+        self, job_id: int, *, kind: str, by: str, reason: str | None, now: datetime
+    ) -> dict[str, Any] | None:
+        """열린 홀드를 푼다 — 행 갱신과 사건이 한 트랜잭션이다. 열린 홀드가 없으면 None."""
+        conn = self._conn()
+        ts = _ts(now)
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            done = self._release_hold_tx(conn, job_id, kind=kind, by=by, reason=reason, ts=ts)
+            row = conn.execute(
+                "SELECT * FROM irreversible_holds WHERE job_id=?", (job_id,)
+            ).fetchone()
+            conn.execute("COMMIT")
+        except Exception:
+            conn.execute("ROLLBACK")
+            raise
+        if not done or row is None:
+            return None
+        return {
+            "job_id": job_id,
+            "group": row["concurrency_group"],
+            "released_at": _dt(row["released_at"]),
+            "released_by": row["released_by"],
+            "release_kind": row["release_kind"],
+        }
+
+    def has_open_hold(self, job_id: int) -> bool:
+        return (
+            self._conn()
+            .execute(
+                "SELECT 1 FROM irreversible_holds WHERE job_id=? AND released_at IS NULL",
+                (job_id,),
+            )
+            .fetchone()
+            is not None
+        )
+
+    def open_holds(self) -> list[dict[str, Any]]:
+        """열린 홀드(만든 순서). 칸은 `/api/status` 의 `irreversible_holds` 항목과 같다(§4.8)."""
+        rows = self._conn().execute(
+            "SELECT h.*, j.preset FROM irreversible_holds h LEFT JOIN jobs j ON j.id = h.job_id "
+            "WHERE h.released_at IS NULL ORDER BY h.created_at, h.job_id"
+        )
+        return [
+            {
+                "job_id": int(r["job_id"]),
+                "preset": r["preset"],
+                "group": r["concurrency_group"],
+                "scope": r["concurrency_scope"],
+                "pool": r["pool"],
+                "host_key": r["host_key"],
+                "worker": r["worker_name"],
+                "cause": r["cause"],
+                "since": _dt(r["created_at"]),
+            }
+            for r in rows
+        ]
+
+    def hold_of(self, job_id: int) -> dict[str, Any] | None:
+        """잡 문서의 `hold`(§4.8) — 열렸든 풀렸든 그 잡의 홀드와 사건 이력. 없으면 None."""
+        conn = self._conn()
+        row = conn.execute("SELECT * FROM irreversible_holds WHERE job_id=?", (job_id,)).fetchone()
+        if row is None:
+            return None
+        history = [
+            {"at": _dt(e["at"]), **json.loads(e["payload"] or "{}")}
+            for e in conn.execute(
+                "SELECT at, payload FROM events WHERE job_id=? AND kind=? ORDER BY id",
+                (job_id, EVENT_HOLD),
+            )
+        ]
+        return {
+            "group": row["concurrency_group"],
+            "scope": row["concurrency_scope"],
+            "cause": row["cause"],
+            "created_at": _dt(row["created_at"]),
+            "released_at": _dt(row["released_at"]),
+            "release_kind": row["release_kind"],
+            "released_by": row["released_by"],
+            "release_reason": row["release_reason"],
+            "history": history,
+        }
 
     # ── 서버 상태 ────────────────────────────────────────────────────────────
 

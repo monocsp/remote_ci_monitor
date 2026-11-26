@@ -618,6 +618,7 @@ class App(RemoteWorkersMixin, CapabilitiesMixin, ShelfAppMixin):
         # 재고 health 가 그대로 싣는다 — `shutil.which` 를 요청마다 돌리지는 않는다.
         self.preset_env: dict[str, dict[str, Any]] = {}
         self._remote_init()
+        self._sync_irreversible()
         self._capabilities_init()
         self._shelf_init()  # 보관함(M5p) — 전용 전송 슬롯 · zip hold · manifest 캐시
 
@@ -5204,6 +5205,8 @@ class App(RemoteWorkersMixin, CapabilitiesMixin, ShelfAppMixin):
         # 거절하므로 `data_dir` 도 바이트 상한도 옛 객체와 새 객체가 같다 — 잡 하나가 두 객체에
         # 걸쳐 읽어도 같은 값을 본다. 다른 구역까지 갈아 끼우려면 이 보장이 먼저 필요하다.
         self.config = fresh
+        # 표식 프리셋 표 — claim 이 다음 잡부터 새 값을 얼린다(M5t-b 결정 257)
+        self._sync_irreversible()
         for worker in self.workers:
             worker.config = fresh
         if self.retention is not None:

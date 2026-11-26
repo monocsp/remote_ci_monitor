@@ -236,6 +236,11 @@ class Preset:
     #: 원격 금지(M5t-a 결정 254). 참이면 이 프리셋에게 서버의 머신 목록은 `@local` 하나뿐이다 —
     #: 원격 워커는 집지도, 후보로 보이지도 않는다. 비밀을 쓰는 release · deploy 프리셋에 단다
     local_only: bool = False
+    #: 되돌릴 수 없음(M5t-b 결정 257). 참이면 claim 때 잡에 얼리고, 감독자 아래에서 돌고(331),
+    #: 프로세스 죽음 확인 없이 닫히면 그룹을 홀드한다(330). 그룹이 없으면 합성 그룹을 쓴다
+    irreversible: bool = False
+    #: `concurrency_group` 을 설정이 아니라 rcm 이 채웠다(`irreversible:<이름>`, 결정 330)
+    group_synthetic: bool = False
 
     def input_spec(self, name: str) -> InputSpec | None:
         for spec in self.inputs:
@@ -388,6 +393,14 @@ class Job:
     retry_interval_seconds: int | None = None
     retry_max_attempts: int | None = None
     retry_disabled: bool = False
+    #: M5t-b(v26) — claim 한 워커 세션(결정 265). 로컬 잡과 v26 이전 레거시 잡은 None
+    worker_session_id: str | None = None
+    #: claim 때 얼린 「되돌릴 수 없음」(결정 257). None 은 claim 전 · 레거시다
+    irreversible: bool | None = None
+    #: claim 때 얼린 끊김 유예(초). 원격 잡에만 있다 — 로컬 잡은 None
+    disconnect_grace_seconds: int | None = None
+    #: 그 잡을 돌려준 claim 요청의 워커 순번(결정 339-a). 로컬 · 레거시는 None
+    claim_seq: int | None = None
 
     @property
     def chain_root(self) -> int:
