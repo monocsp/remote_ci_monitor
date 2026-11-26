@@ -5,18 +5,21 @@
 **구현보다 먼저 썼다** — 구현 전에는 빨갛다. 새 이름(`ran_on` · `LocalMachine`)은 시험 안에서
 찾는다. 모듈 import 가 깨져 수집에서 죽으면 「무엇이 틀렸나」가 아니라 「없다」만 말하기 때문이다.
 
-세 가지 방식으로 잰다:
+네 가지 방식으로 잰다:
 
 - `ran_on` 계산은 순수 함수와 잡 문서 빌더를 `jobfactory.job` 으로 직접 부른다.
 - 서버가 그 값을 싣는지는 진짜 in-process 서버(`test_server.Server`)의 `GET /jobs/<id>` 와
   `/api/status` 로 본다. 원격 잡은 store 의 claim 에 워커 이름을 줘서 만든다.
-- 끝줄은 `cli.wait_for_job` 을 대본으로 갈아 끼우고 `cli._wait` 을 부른다(`test_cli_m5h` 방식).
-  `--notify` 는 가짜 HTTP 서버(`fake_rcm_http.FakeRcm`)와 `rcm wait` 전체를 돌리고, PATH 를 스텁
-  폴더 하나로 바꿔 진짜 OS 알림을 띄우지 않는다.
+- 끝줄은 `cli.wait_for_job` 을 대본으로 갈아 끼우고 `rcm wait` 의 명령 함수(`cli.cmd_wait`)를
+  부른다. 끝줄은 `rcm wait` 의 것이다 — `rcm run` 의 기다림은 골든(`test_nowait_resilience`)이
+  잠근 그대로다.
+- `--notify` 는 가짜 HTTP 서버(`fake_rcm_http.FakeRcm`)와 `rcm wait` 전체를 돌린다. PATH 를
+  스텁 폴더 하나로 바꿔 진짜 OS 알림을 띄우지 않는다.
 """
 
 from __future__ import annotations
 
+import argparse
 import json
 import socket
 import sys
@@ -242,6 +245,7 @@ def test_tn5_the_server_hook_gets_this_machine_for_a_local_lane_job(tmp_path):
         fake = FakeRun()
         srv.app.notifier.run = fake
         srv.cfg.notify = (NotifyRule(name="done", argv=("true",)),)
+        srv.app.notifier.start()  # 규칙이 없던 서버는 알림 스레드를 띄우지 않았다
         status, body = srv.submit()
         jid = body["job_id"]
         assert srv.upload(jid)[0] == 200
@@ -299,8 +303,11 @@ def artifacts(state: str, **over: Any) -> dict[str, Any]:
 
 
 def wait_once(monkeypatch, capsys, *, code: int, doc: dict[str, Any]):
+    """`rcm wait --job 381` 의 명령 함수 — 서버 대신 대본 문서 하나를 받는다."""
+    monkeypatch.setattr(cli, "_client", lambda *a, **kw: object())
     monkeypatch.setattr(cli, "wait_for_job", lambda client, job_id, **kw: (code, doc, None))
-    rc = cli._wait(object(), JOB_ID, timeout=None, joined=False, use_sse=False)
+    args = argparse.Namespace(job=JOB_ID, timeout=None, poll=True, return_on_action=False)
+    rc = cli.cmd_wait(args)
     cap = capsys.readouterr()
     return rc, cap.out, cap.err
 

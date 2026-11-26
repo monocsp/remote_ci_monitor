@@ -179,4 +179,6 @@ def notify_env(
         # 「사람이 할 일」 표식(M5s 결정 213): 잡이 찍은 마지막 것. 없으면 둘 다 빈 값이다
         "RCM_ACTION_CODE": sanitize_text(action.get("code")),
         "RCM_ACTION_NOTE": sanitize_text(action.get("note")),
+        # 잡이 돈 머신(M5t-a 결정 248 f) — 잡 행의 `ran_on`. 시작하지 못했거나 모르면 빈 값이다
+        "RCM_MACHINE": sanitize_text(job_row.get("ran_on")),
     }
