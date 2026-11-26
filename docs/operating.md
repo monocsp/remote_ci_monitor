@@ -684,16 +684,28 @@ anywhere, or where the word after rcm is something the shell builds (`${S}tup`, 
 `s{e,}tup`) — is refused with "run `rcm setup` as one plain command: no ; & | $ ` ( ) < > or
 backslash, absolute or ~ paths only". So are `cd /x && rcm setup …`, `env rcm setup …`, a
 command line setup would reject, and a failure of the hook itself. So is any command that holds
-both a word that could be rcm (`rcm`, a path ending in `/rcm`, `remote_ci_monitor`, a `$`
-variable, a glob such as `r?m`) and, anywhere in it, a launcher that feeds arguments (`xargs`,
-`parallel`, `find … -exec`, `fd -x`, `entr`, `rush`, `xe`), whose arguments come from input the
-hook cannot read, or one that gives a terminal (`script`, `unbuffer`, `expect`, `socat`, `tmux`,
-`screen`, `ssh -t`, Python's `pty`), where the first-run question would start setup. The hook
-does not look at where the words stand — `<f xargs rcm` and `2>/dev/null xargs rcm` are refused
-like `xargs rcm` — so `git ls-files | xargs grep -n rcm` is refused too; search text with a tool
-that is not a launcher. Text that
+both a word that could be rcm (`rcm`, a path ending in `/rcm`, the module word
+`remote_ci_monitor[.cli]`, a glob such as `r?m`, or — after the launcher — a `$` variable or
+`` `…` `` whose last path part is not a plain other name) and, anywhere in it, a launcher that
+feeds arguments (`xargs`, `parallel`, `find … -exec`, `fd -x`, `entr`, `rush`, `xe`), whose
+arguments come from input the hook cannot read, or one that gives a terminal (`script`,
+`unbuffer`, `expect`, `socat`, `tmux`, `screen`, `ssh -t`, Python's `pty`), where the first-run
+question would start setup. The refusal names the launcher and the word, and says to split the
+command into two Bash calls. The hook does not look at where the launcher stands — `<f xargs rcm`
+and `2>/dev/null xargs rcm` are refused like `xargs rcm` — so `git ls-files | xargs grep -n rcm`
+is refused too; search text with a tool that is not a launcher. A path through the source tree
+(`src/remote_ci_monitor/…`) is not an rcm word, and a variable before the launcher or one that
+ends in a plain name (`xargs ruff check "$PWD/x"`) is not either, so `find src/remote_ci_monitor
+-name '*.py' -exec ruff check {} +` and `git ls-files src/remote_ci_monitor | xargs ruff check`
+pass. Text that
 only mentions it, such as `git commit -m "… rcm setup …"`, is refused too: put the text in a file
 (`git commit -F <file>`, `gh pr create --title "$(cat <file>)"`).
+
+The hook is the first line, not the last. It judges shell text, and every closed list it keeps
+(launchers, shell metacharacters, where a word stands) has an outside: a variable where the
+command goes, `sed … | sh`, an interpreter that builds the command, a glob or `r(c)m` in the
+command word, a launcher it does not list. Those are left to setup itself, which refuses a
+production service's files before it writes (see **What it refuses or warns about** above).
 
 The *service virtualenv* is the one whose editable install (`direct_url.json`) points at the
 primary checkout — not whatever `rcm` is first on `PATH`, which in a shell with a worktree's
@@ -710,7 +722,7 @@ directory the command would *actually* open, in the CLI's own order: `--data-dir
 So a **copy of the production config** that only changes `port` is refused too — its `data_dir`
 is still the production one — and so is a test config run with `RCM_SERVER_DATA_DIR` pointing at
 production. `cd <dir> && rcm …` is judged in `<dir>`; `env -i`, `env -u NAME`, `env -S '…'`, `exec`,
-`nohup`, `time`, `nice`, `timeout <duration>`, `command` and a `( … )` or `{ … }` group do not hide the command. The hook does not look
+`nohup`, `time`, `nice`, `timeout <duration>` (`30`, `1.5m`, `.5`, `1e1`, `inf`), `command` and a `( … )` or `{ … }` group do not hide the command. The hook does not look
 inside `bash -c '…'`, `xargs`, `uv run` or `$(…)`, and does not resolve symlinks.
 
 ## Keeping clients on the server's version
