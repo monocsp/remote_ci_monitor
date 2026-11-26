@@ -2518,3 +2518,42 @@ PR #284 본문의 「Differs from the spec」 과 같은 목록이다. 항목은
 | 31 | register answer key `fenced_sessions` (not in §4.2's key list): P6 GAP8 added it as an int; P6-2 #2 makes it `null` when a server restarted less than worker_timeout_seconds ago has not yet heard a fenced session; the worker logs one 'cannot tell' line on null and nothing when the key is absent |
 | 32 | the narrow confirm (lost + worker_replaced) that a fenced session sends for a finish of any outcome omits `group_gone` when the worker does not know whether the group is gone (it carries `group_gone` only when known); the server then holds an irreversible job's group (`group_not_gone`) instead of rejecting the confirm |
 | 33 | Job.retries_on is false for a job claimed as irreversible (P6-2 #1): a job submitted with [retry] before the mark closes `failed` on its retry exit code, no next attempt, on both lanes |
+
+### PR2 로그 오프셋 · 잡별 디스크 큐 · 늦은 결과 (#286)
+
+PR #286 본문의 「Differs from the spec」 과 같은 목록이다. 항목은 구현 라운드(batch-1~8, P6-1)에서 적은 것을 옮겼다.
+
+| # | 명세와 다름 / 명세에 없음 |
+|---|---|
+| 1 | 로그 조각 경계를 넘는 표식: 서버가 커밋된 파일의 열린 마지막 줄(4 KiB 이하)을 읽어 새 조각과 함께 표식을 풉니다. 메모리 조각 없이 기존 표식 이어 붙이기 시험 둘을 지키려는 선택입니다. |
+| 2 | 오프셋 없이 부르는 `WorkerClient.log`: 세션이 있는 클라이언트는 그 잡에서 마지막으로 돌려받은 오프셋을 보냅니다. `RemoteWorker` 는 늘 자기 오프셋을 넘깁니다(§13 PR1 2번과 같은 선례). |
+| 3 | `late_result_recorded` 는 lost 잡만이 아니라 모든 `409 job_closed` finish 응답에 붙습니다(lost 가 아니면 false). 워커가 받는 응답 꼴을 하나로 둡니다. |
+| 4 | 서버 재시작으로 lost 가 된 로컬 레인 잡의 `log_complete` 는 NULL 입니다. 죽은 서버가 로컬 로그 꼬리도 잃었을 수 있기 때문입니다. 명세는 로컬 잡을 늘 true 로 적었습니다. |
+| 5 | `snapshot_unreachable` 는 `SnapshotUnreachable(MaterializeError)` 하위 클래스로 냅니다. tests/test_worker.py 가 모든 `MaterializeError` 발생 자리에 PREFLIGHT 코드를 요구합니다. |
+| 6 | 끝나지 않은 죽은 세션 잡의 큐는 남은 로그만 보내고 멈춥니다. 등록이 그 잡을 restarted-without-job 으로 닫습니다. |
+| 7 | `_closed_answer` 는 finish 본문을 요청 스레드별 저장소에서 읽습니다. PR1 변이 둘의 앵커를 지키려는 것입니다. |
+| 8 | RL5 · RL8 의 PR2 몫(late_result)은 서버 쪽 단위 시험만 있습니다. e2e 는 유예 만료(90초)와 늦은 finish 가 필요해서 이번에는 넣지 않았습니다. |
+| 9 | RL18 e2e 는 서버 log.txt(가린 출력과 바이트 단위로 같음), `rcm logs`, 잡 문서를 봅니다. SSE 와 웹 로그는 같은 log.txt 를 내므로 따로 보지 않았습니다. |
+| 10 | RL18 e2e 는 진짜 `rcm worker` 를 작은 감싸개로 띄워 조각 크기를 200바이트로 줄입니다(시험 전용). |
+| 11 | 명세 §7.3 이 적지 않은 tests/test_worker_m5q_drain.py 의 시험 이름과 계약을 바꿨습니다(위 「범위 정정」). |
+| 12 | PR1 변이 `narrow-confirm-without-keep` 를 지웠습니다. 가리키던 `report()` 가 사라졌고, 같은 규칙은 `unsent-finish-folder-dropped` 가 잡습니다. |
+| 13 | 24시간 버림은 죽은 세션 큐에도 같게 적용됩니다. 같은 보내기 고리를 쓰기 때문입니다. |
+| 14 | 줄 가운데서 끝난 조각의 가리기: 서버가 커밋된 열린 마지막 줄(4 KiB 이하, 파일에서 읽음)을 보고, 두 조각에 걸친 값의 새 조각 쪽을 `****` 로 가립니다. 이미 커밋된 앞부분은 그대로 둡니다. 커밋한 바이트는 바뀌지 않는다는 규칙(결정 339-f) 때문입니다. 명세는 조각이 늘 줄바꿈에서 끝난다고 보았지만, kill -9 뒤 죽은 세션의 꼬리나 옛 워커에서는 그렇지 않습니다. |
+| 15 | 256 KiB 보다 긴 줄은 4 MiB(서버 본문 한도)까지 한 조각으로 보냅니다. 줄바꿈 없는 꼬리는 스트림이 더 자랄 수 없을 때(finish 기록 뒤, 죽은 세션)만 보냅니다. |
+| 16 | 스풀을 못 읽으면 물러서며 `#N report: cannot read the spooled log — retrying` 을 한 번 남기고, 그 시간은 죽은 세션의 300초에 셉니다. 명세에는 쓰기 실패만 정의돼 있습니다. 끝난 잡이면 300초 뒤 finish 를 먼저 보내고 `#N report: spooled log still unreadable 300s after the job ended — sending the finish first, the log stays incomplete` 를 남깁니다. 쓴 길이보다 짧은 스풀도 못 읽음으로 다룹니다. |
+| 17 | 서버의 열린 줄 창은 4 KiB 와 그 프리셋의 가장 긴 릴리스 값 가운데 큰 쪽입니다. 창 안에 줄 끝이 없으면 창 전체를 가리기의 머리로 씁니다. 표식은 머리가 온전한 줄일 때만 풉니다. |
+| 18 | 살아 있는 워커에서 보내는 스레드가 `done` 없이 끝나면 그 잡을 heartbeat 와 레인에 남기고 `#N report: <Error> — keeping the report on disk for the next worker process` 를 남깁니다. 서버는 워커가 다시 시작할 때까지 잡을 running 으로 둡니다. |
+| 19 | 드레인 한도(60초)가 지난 잡: 레인은 비우지만 보내는 스레드는 exec 까지 계속 보내고, 잡은 그 스레드가 끝날 때 heartbeat 목록에서 빠집니다. 명세 §4.5(F10)와 맞춘 결함 고침입니다. |
+| 20 | 죽은 세션의 300초는 큐마다 `answered` 표식 하나로 셉니다. 워커 전체 표식은 큐 사이에서 낡았습니다. |
+| 21 | 기존 시험 둘의 이름을 바꿨습니다: `test_job_log_memory_is_dropped_when_the_job_is_closed_as_lost`, `test_registering_again_waits_for_a_registration_already_running`. 같은 세션 재등록은 멱등이라(결정 260) 옛 계약이 사라졌고, 남은 규칙을 봅니다. |
+| 22 | 못 읽는 `outbox.json`: `dead session <id> job #N: outbox unreadable (<why>) — …` 한 줄, 스풀은 `<data_dir>/worker-sessions/unreadable-<D>-<id>/` 로 옮겨 7일 뒤 지웁니다. 명세에는 이 갈래가 없습니다. |
+| 23 | 워커의 JSON 파일(outbox · claim · proc · owner · ok_at)은 임시 파일 fsync → rename → 폴더 fsync 로 씁니다. 명세는 outbox 의 fsync 를 말하지 않았습니다. |
+| 24 | `outbox.json` 저장 실패: 실패 구간마다 `#N report: cannot save outbox.json (<error>) — the report is only in memory; …` 한 줄. |
+| 25 | 번들을 못 읽으면 `upload_failed`, 2xx 의 JSON 아닌 본문은 `ClientError` 502(register 는 종료 2, claim · heartbeat 는 다시 시도), 그 밖의 예외는 물러서며 다시 시도합니다. 명세의 응답 표는 HTTP 답과 연결 실패만 다룹니다. |
+| 26 | 409 의 `late_result_recorded` · `hold_released` 를 워커가 줄로 남깁니다. 명세는 워커 쪽 쓰임을 정하지 않았습니다. |
+| 27 | 4 MiB 넘는 한 줄의 가리기 한계를 문서에 적었습니다(§13 용). |
+| 28 | 끝난 잡이 phase 에만 막히면 로그 · 번들과 같은 규칙을 씁니다. 5xx 나 예상 못 한 예외가 300초 이어지면 finish 를 먼저 보내고 phase 를 버리며(`#N report: phase still not delivered 300s after the job ended — …`), 연결 실패면 24시간 뒤 phase 없이 보냅니다. 명세의 finish 상한(결정 324)과 재전송 창(결정 264)은 phase 를 말하지 않았습니다. |
+| 29 | 죽은 세션 큐의 등록 대기: 로컬 오류(못 읽는 스풀, 예상 못 한 예외)도 서버 오류처럼 300초에 셉니다. 결정 337 은 서버 응답 시간만 말했고, 연결 실패 시간은 지금도 세지 않습니다. 로컬 오류가 섞였으면 `dead session <id> queue not delivered after 300s of server errors or local errors — …` 줄을 씁니다. |
+| 30 | 300초 상한에 닿아도, 한 번도 보내 보지 않은 끝난 잡의 finish 는 서버나 로컬 오류로 막혀 있을 때 한 번 보내 봅니다(잡이 끝난 지 300초 뒤). 그 대기는 상한 뒤 실제 시간 60초(물러섬 30초 + 요청 시한 15초 둘)를 넘지 않고, 끝난 시각이 벽시계보다 앞이면(시계가 뒤로 감) 빚진 finish 로 보지 않습니다. 결정 337 은 상한에서 등록하고 나머지는 디스크에 둔다고만 했습니다. |
+| 31 | 다시 시작한 큐의 오프셋 질의를 막힌 로그 단계로 셉니다(결정 324 는 로그 · 산출물만 말했습니다). |
+| 32 | finish 가 먼저 가면서 남기는 것(phase, 로그 꼬리, 묶음)이 있으면 큐마다 한 번 `#N report: the finish goes first 300s after the job ended; not sent: …` 를 남깁니다. |
