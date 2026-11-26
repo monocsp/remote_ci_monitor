@@ -2193,3 +2193,27 @@ def test_b10_m3_a_unit_with_lines_setup_does_not_follow_closes(cfg, home, tmp_pa
     err = fake.err.getvalue()
     assert str(unit) in err and "refusing" in err, err
     _nothing_written(cfg, tmp_path / "data")
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root reads a file whatever its mode")
+@pytest.mark.parametrize("where", ["file", "folder"])
+def test_b10_l1_a_service_file_setup_may_not_read_closes_without_a_traceback(
+    cfg, home, tmp_path, where
+):
+    # batch 10 L1(v1-9): 스캔의 `is_file()` · 읽기에서 난 PermissionError 는 traceback 이 아니라
+    # 닫는 쪽이다 — 그 파일 이름을 대고 거절한다(그 안이 rcm 서비스인지 모른다)
+    agents = home / "Library" / "LaunchAgents"
+    agents.mkdir(parents=True)
+    plist = agents / "com.example.thing.plist"
+    plist.write_bytes(plistlib.dumps({"Label": "com.example.thing", "ProgramArguments": ["x"]}))
+    locked = plist if where == "file" else agents
+    locked.chmod(0o000 if where == "file" else 0o600)  # 폴더: 목록은 읽고 stat 은 못 한다
+    try:
+        fake = Fake()
+        code = go(fake, *coordinator_args(tmp_path / "data"))
+    finally:
+        locked.chmod(0o644 if where == "file" else 0o755)
+    err = fake.err.getvalue()
+    assert code == 1, fake.text
+    assert str(plist) in err and "refusing" in err and "unexpected" not in err, err
+    _nothing_written(cfg, tmp_path / "data")
