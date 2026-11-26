@@ -13,8 +13,10 @@ import json
 import os
 import plistlib
 import re
+import shutil
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 import pytest
@@ -608,6 +610,33 @@ def test_tr16_main_stops_before_anything_on_a_production_port_or_folder(
     assert r.returncode == 2, r.stderr
     assert says in r.stderr
     assert _tree(home) == before
+
+
+def test_tr16_main_refuses_a_new_base_under_tmp() -> None:
+    # 없는 폴더라도 /tmp 아래면 거절한다 — 「이미 있다」를 먼저 보게 바꾼 뒤에도 이 거절이 남는다.
+    # 가짜 홈을 직접 /tmp 아래에 두므로 pytest 임시 폴더가 어디든 같은 길을 탄다
+    home = Path(tempfile.mkdtemp(prefix="m5t-live-tmpcheck-", dir="/tmp"))
+    try:
+        base = home / ".local" / "share" / "rcm-devtest" / "m5t-live-ab12cd34"
+        env = {
+            "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
+            "HOME": str(home),
+            "M5T_PY": sys.executable,
+            "M5T_PORT": "8897",
+            "M5T_PORT2": "8898",
+            "M5T_BASE": str(base),
+        }
+        r = subprocess.run(
+            ["bash", str(SCRIPT)], capture_output=True, text=True, env=env, timeout=15, check=False
+        )
+        if "is in use" in r.stderr:
+            pytest.skip(r.stderr)
+        assert r.returncode == 2, r.stderr
+        assert "is under /tmp" in r.stderr
+        assert not base.exists()
+        assert _tree(home) == []
+    finally:
+        shutil.rmtree(home, ignore_errors=True)
 
 
 def test_tr16_job_lookup_keeps_the_token_out_of_argv(tmp_path: Path) -> None:

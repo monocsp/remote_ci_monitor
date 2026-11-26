@@ -401,8 +401,10 @@ main() {
     B="$real_home/.local/share/rcm-devtest/m5t-live-$RID"
   fi
   is_test_base "$B" "$real_home" || die "base $B is not ~/.local/share/rcm-devtest/<name> or ~/.local/share/rcm-devtest-<name>"
-  if is_inside "$B" /tmp || is_inside "$B" /private/tmp; then die "base $B is under /tmp"; fi
+  # 둘 다 종료 2 다 — 「이미 있다」를 먼저 본다(빌드 머신은 임시 폴더가 /private/tmp 아래라
+  # 시험이 만든 폴더가 늘 /tmp 아래이므로, 순서가 바뀌면 시험이 기대한 거절이 가려진다)
   [ ! -e "$B" ] || die "$B exists — pick a new name (this harness never reuses or deletes a folder)"
+  if is_inside "$B" /tmp || is_inside "$B" /private/tmp; then die "base $B is under /tmp"; fi
   [ -x "$RCM" ] || die "no $RCM — make the worktree's .venv first"
   [ "$(uname -s)" = Darwin ] || die "this harness drives launchd: macOS only"
   command -v launchctl >/dev/null || die "no launchctl"
