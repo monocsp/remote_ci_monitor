@@ -10,25 +10,27 @@ of a key bumps that number and is listed here.
 ### Breaking changes
 - **Worker protocol 2: upgrade the server and every `rcm worker` together.** Each worker process
   now opens a session when it registers, numbers its claims and heartbeats, and the server checks
-  that session on every `/worker/*` request. A new server refuses an older worker
-  (`worker protocol 2 required: upgrade rcm on this worker`, the worker exits 3 and its service
-  starts it again), and a new worker stops with exit 3 against an older server. A worker that
-  follows the server's version upgrades itself; pin nothing across this release.
+  that session on every `/worker/*` request. The server checks the version first, so an older
+  worker follows the server's version and upgrades itself, or stops with exit 2 and its service
+  starts it again; pin nothing across this release. A new worker that meets an older server of
+  the same version string stops before it registers
+  (`the server speaks worker protocol 1 — upgrade rcm on the server (this worker needs protocol 2)`,
+  exit 3).
   ([#284](https://github.com/monocsp/remote_ci_monitor/pull/284))
 - **Database v26.** The server migrates on its first start (worker sessions, the values a job's
   claim freezes, and the new group-hold table). An older rcm refuses the migrated database.
+  ([#284](https://github.com/monocsp/remote_ci_monitor/pull/284))
 
 ### Changed
-  ([#284](https://github.com/monocsp/remote_ci_monitor/pull/284))
 - **A remote job outlives a short loss of contact.** A worker the server has not heard for
   `worker_timeout_seconds` still shows `down`, but its running jobs keep running and become
   `lost` only after `[server] disconnect_grace_seconds` (default 600, at least
   `max(worker_timeout_seconds, 2 × worker_heartbeat_seconds + 50) + 35`). Time the server was
   stopped does not count. A second worker process with the same token replaces the first, which
   stops its jobs, reports them `lost` (`worker_replaced`) and exits 0.
+  ([#284](https://github.com/monocsp/remote_ci_monitor/pull/284))
 
 ### Added
-  ([#284](https://github.com/monocsp/remote_ci_monitor/pull/284))
 - **`irreversible = true` for presets whose work must not run twice at once.** The worker stops
   such a job itself before the grace runs out (`worker_self_stopped`), the command runs under a
   supervisor that ends its process group when the worker is killed, and a close without a

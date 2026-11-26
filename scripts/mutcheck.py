@@ -6230,6 +6230,17 @@ MUTANTS = (
             "test_rl44_a_finish_without_group_gone_keeps_the_folder_for_the_next_process",
         ),
     ),
+    # ── M5t-b P3 1라운드 MED — 문서의 「옛 워커 exit 3」 ──
+    Mutant(
+        # 옛 워커가 protocol_required 로 종료 3 을 낸다고 문서가 다시 말한다(실제는 옛 등록 길의 2)
+        name="docs-old-worker-exit-3",
+        path="docs/operating.md",
+        old="and also stops\nwith exit 2. A new worker",
+        new="and exit 3. A new worker",
+        tests=(
+            "tests/test_docs_m5tb.py::test_rl25_rl32_the_worker_exits_of_protocol_2_are_documented",
+        ),
+    ),
 )
 
 

@@ -1007,11 +1007,16 @@ exit 0 and stayed down. A worker that follows a much older server reads its `wor
 version's code, so a key that version does not know (for example `server_name` on a server before
 0.5.0) stops it with exit 2.
 
-Two more exits matter to a service manager. A worker that does not speak the server's worker
-protocol stops before it registers with `worker protocol 2 required: upgrade rcm on this worker`
-and exit 3, so it is started again once rcm is upgraded. A worker replaced by a second process
-with the same token stops its jobs, reports them `lost` and exits 0, so it is not started again
-and the two processes do not take turns. Restarting a worker no longer closes its running jobs
+Worker protocol 2 adds two exits a service manager sees. The server checks a worker's version
+before its protocol, so an older worker meets the version refusal above: it follows the server's
+version, or it stops with exit 2. An older worker that reports the same version string (a source
+checkout) is refused with `worker protocol 2 required: upgrade rcm on this worker` and also stops
+with exit 2. A new worker that finds a server of its own version that does not speak protocol 2
+stops before it registers with
+`the server speaks worker protocol 1 — upgrade rcm on the server (this worker needs protocol 2)`
+and exit 3, so the service manager starts it again until the server is upgraded. A worker
+replaced by a second process with the same token stops its jobs, reports them `lost` and exits 0,
+so it is not started again and the two processes do not take turns. Restarting a worker no longer closes its running jobs
 at once: the server waits the [disconnect grace](configuration.md#a-lost-connection-disconnect_grace_seconds),
 and the new process checks what its last process left behind.
 

@@ -79,10 +79,24 @@ def test_the_hold_release_section_says_what_to_check_and_the_exit_codes():
     assert "irreversible_holds" in body and "needs_action" in body
 
 
-def test_the_worker_exits_of_protocol_2_are_documented():
+def test_rl25_rl32_the_worker_exits_of_protocol_2_are_documented():
+    """P3 1라운드 MED: 서버는 버전을 먼저 본다. 옛 워커는 버전 거절을 받아 따라가거나 종료 2 이고,
+    같은 버전 문자열의 옛 워커가 받는 `protocol_required` 도 종료 2 다(옛 등록 길). 종료 3 은 새
+    워커가 프로토콜 2 를 모르는 같은 버전의 서버를 만났을 때뿐이고 그 문구는 워커의 것이다."""
+    from remote_ci_monitor.remote_worker import EXIT_PROTOCOL, PROTOCOL_OLD_SERVER
+    from remote_ci_monitor.remote_workers import PROTOCOL_REQUIRED
+
+    assert EXIT_PROTOCOL == 3
+    changelog = flat((ROOT / "CHANGELOG.md").read_text())
+    for name, text in (("operating", flat(OPERATING)), ("configuration", flat(CONFIGURATION))):
+        assert f"`{PROTOCOL_OLD_SERVER}` and exit 3" in text, name
+        assert f"`{PROTOCOL_REQUIRED}` and exit 3" not in text, name
     text = flat(OPERATING)
-    assert "`worker protocol 2 required: upgrade rcm on this worker` and exit 3" in text
+    assert f"`{PROTOCOL_REQUIRED}` and also stops with exit 2" in text
+    assert "The server checks a worker's version before its protocol" in text
     assert "exits 0, so it is not started again" in text
+    assert f"`{PROTOCOL_OLD_SERVER}`, exit 3" in changelog
+    assert "the worker exits 3 and its service starts it again" not in changelog
 
 
 def test_every_hold_env_key_of_a_notification_is_documented():

@@ -1468,8 +1468,11 @@ heartbeat finishes its jobs and restarts the same way, without losing one. `RCM_
 registers. When a second process starts with the same token, it becomes the worker: the first
 one's next request is refused, it stops its running jobs, reports them `lost`
 (`worker build-02 was replaced by a newer process`) and exits 0, so a service manager does not
-start it again. A worker older than the server's worker protocol stops before it registers with
-`worker protocol 2 required: upgrade rcm on this worker` and exit 3.
+start it again. An older worker is refused on its version first and follows the server or stops
+with exit 2. A new worker that meets a server of its own version without worker protocol 2 stops
+before it registers with
+`the server speaks worker protocol 1 — upgrade rcm on the server (this worker needs protocol 2)`
+and exit 3 ([remote workers](operating.md#remote-workers)).
 
 ### A lost connection: `disconnect_grace_seconds`
 
