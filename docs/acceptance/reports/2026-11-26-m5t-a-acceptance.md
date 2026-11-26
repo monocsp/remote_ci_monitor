@@ -2,8 +2,10 @@
 
 - 날짜: 2026-11-26
 - 대상: `dev` 의 `e4b37c9e1bba8f6f6f39dd17fb1f2e879f74b6b4`. M5t-a 의 PR1~PR6 과 #274 가 머지된 뒤의 판이다.
-  실기 하네스는 PR #276 의 head `dd06ccd9106162362f298ac846a4a3aac85b3cc9` 를 썼다. 그 뒤 `f9c6f77` 에서
-  하네스는 pipefail 아래의 세 줄(`head -1` → `sed -n 1p`)만 바뀌었고 판정 논리는 그대로였다.
+  실기 검증자 둘은 PR #276 의 head `dd06ccd9106162362f298ac846a4a3aac85b3cc9` 를 돌렸다. 그 뒤 `f9c6f77` 에서
+  pipefail 아래의 세 줄(`head -1` → `sed -n 1p`)이, `568a3c1306dc3ee2d69f61094e0a9b8308b9ba99` 에서 P3 지적
+  (TD24 판정 문구, 표와 `--json` 비교의 빈 절, 격리 함수와 그 잠금, 토큰을 헤더 파일로)이 바뀌었다.
+  `568a3c1` 로 다시 돌린 결과는 같았다(TR16 · TL12 · TD24 PASS, 나머지 UNKNOWN, 5.2초).
 - 명세: `docs/m5t-workplan.md` §5 의 PR7 행, §7 의 실기 행 TR16 · TD24 · TD25 · TL12 · TN8, 결정 352. M5t-a 는
   명세 제목대로 머신 역할, 첫 실행 설정, 분배 전용 코디네이터, 환경 진단, 요청자 알림을 들인 작업이다.
 - 다시 돌리는 법: 2부는 워크트리에서 `bash scripts/acceptance/m5t_live.sh` 를 돌린다. 포트는 `M5T_PORT` ·
