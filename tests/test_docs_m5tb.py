@@ -108,10 +108,6 @@ def test_every_hold_env_key_of_a_notification_is_documented():
     assert "group held — run rcm release-hold <job>" in text
 
 
-# ── README 두 언어의 명령 표(P2-4 · §4.12) ───────────────────────────────────
-
-
-#: 명령 표에 둘 `rcm release-hold` 행의 첫 칸 — 표의 다른 admin 명령처럼 잡 번호는 `N`
 def _unreleased() -> str:
     text = (ROOT / "CHANGELOG.md").read_text()
     start = text.index("## [Unreleased]")
@@ -142,6 +138,9 @@ def test_operating_says_what_an_upgrade_does_to_a_job_an_old_worker_claimed():
     assert "[`rcm release-hold`](#when-a-group-is-held-rcm-release-hold)" in text
 
 
+# ── README 두 언어의 명령 표(P2-4 · §4.12) ───────────────────────────────────
+
+#: 명령 표에 둘 `rcm release-hold` 행의 첫 칸 — 표의 다른 admin 명령처럼 잡 번호는 `N`
 RELEASE_HOLD_CELL = "`rcm release-hold N [--reason TEXT] [--json]`"
 #: 그 행이 가리키는 절 — docs/operating.md 의 「When a group is held: `rcm release-hold`」
 RELEASE_HOLD_LINK = "docs/operating.md#when-a-group-is-held-rcm-release-hold"
