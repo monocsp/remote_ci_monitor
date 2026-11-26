@@ -3387,6 +3387,18 @@ MUTANTS = (
         ),
     ),
     Mutant(
+        # 체크아웃 안의 venv 는 서비스가 실행해도 운영에서 뺀다 — 서비스가 워크트리의 `.venv` 를
+        # 실행하는 머신에서 운영 보호가 꺼진다(P6 재확인 2 · v2-2)
+        name="guard-service-venv-inside-checkout-dropped",
+        path="tools/guard_production.py",
+        old="        if checkout is None or (inside(venv, checkout) and not runs):\n",
+        new="        if checkout is None or inside(venv, checkout):\n",
+        tests=(
+            "tests/test_guard_production_setup.py::"
+            "test_b8_2_a_service_that_runs_the_venv_inside_its_checkout_is_production",
+        ),
+    ),
+    Mutant(
         # 감싸기를 이름(basename)이 아니라 글자로 본다 — `/usr/bin/env rcm token --config <운영>`
         # · `/usr/bin/nohup rcm serve` 가 지나간다(P3 5라운드 v2-1)
         name="guard-wrapper-path-missed",

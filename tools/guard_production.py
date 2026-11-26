@@ -8,7 +8,8 @@ stdin 으로 받아 판정 JSON 을 stdout 으로 낸다.
 (2026-09-10 의 사고 모양, 리뷰 #89 B-1). 서비스 venv 는 **editable 설치(`direct_url.json`)가
 본 체크아웃(링크된 워크트리가 아닌 것)을 가리키고 그 체크아웃 밖에 있는 venv** 다. 후보는
 문서의 자리(`~/.local/share/rcm-venv`) → 설치된 서비스 유닛이 적은 `rcm` → PATH 의 `rcm`
-전부의 순서로 보고 첫 것을 잡는다. 그 원본 폴더가 「운영 체크아웃」이다. 그런 설치가 없는
+전부의 순서로 보고 첫 것을 잡는다. 앞의 둘은 서비스가 실행하는 것이라 링크된 워크트리나
+체크아웃 안의 `.venv` 여도 운영이다. 그 원본 폴더가 「운영 체크아웃」이다. 그런 설치가 없는
 컴퓨터(이 레포를 clone 한 다른 사람)에서는 아무것도 막지 않는다.
 
 판정 `decide()` 는 운영 설치를 인자(`Production`)로, 환경을 인자(`environ`)로 받는다 — 시계도
@@ -1512,14 +1513,15 @@ def _is_linked_worktree(checkout: Path) -> bool:
 
 
 def _service_install() -> tuple[Path | None, Path | None]:
-    """(서비스 venv, 운영 체크아웃). editable 원본이 있고 venv 가 그 밖에 있는 첫 후보 — 워크트리
-    `.venv` 는 venv 가 원본 안에 있어 빠진다. 원본이 링크된 워크트리면 서비스가 그 venv 를
-    실행한다는 근거(문서의 자리 · 설치된 유닛)가 있을 때만 운영이다: 서비스를 워크트리
-    (`remote_ci_monitor-service`)에서 돌리는 머신이 있다(P3 5라운드 v1-3). PATH 에서만 찾은
-    venv 의 원본이 링크된 워크트리면 개발 빌드로 본다."""
+    """(서비스 venv, 운영 체크아웃). editable 원본이 있는 첫 후보다. 서비스가 그 venv 를 실행한다는
+    근거(문서의 자리 · 설치된 유닛, `runs`)가 있으면 자리와 상관없이 운영이다 — 서비스가 체크아웃
+    안의 `.venv` 를 실행하는 꼴도 있다(P6 재확인 2 · v2-2). 근거가 없는 후보(PATH)는 venv 가 원본
+    밖에 있고 원본이 링크된 워크트리가 아닐 때만 운영이다: 개발자 자신의 워크트리 `.venv` 는
+    venv 가 원본 안에 있어 빠지고, 링크된 워크트리를 설치한 venv 는 개발 빌드다. 서비스를
+    워크트리(`remote_ci_monitor-service`)에서 돌리는 머신이 있다(P3 5라운드 v1-3)."""
     for venv, runs in _venv_candidates():
         checkout = _editable_source(venv)
-        if checkout is None or inside(venv, checkout):
+        if checkout is None or (inside(venv, checkout) and not runs):
             continue
         if _is_linked_worktree(checkout) and not runs:
             continue

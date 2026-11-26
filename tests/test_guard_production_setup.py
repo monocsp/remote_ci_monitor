@@ -1105,3 +1105,46 @@ def test_b8_1_an_rcm_word_beside_a_launcher_is_denied_wherever_it_stands(command
     # 차단 — batch 7 의 G1 · G2 통과 칸이었다). 운영 설치가 없는 컴퓨터에서는 그물도 없다
     assert denied(command, environ=TEST_XDG), command
     assert judge(command, prod=guard.Production()) is None, command
+
+
+# ── P6 재확인(batch 8) 2: 서비스가 체크아웃 안의 `.venv` 를 실행한다 ──
+
+
+@pytest.mark.parametrize("linked", [True, False])
+def test_b8_2_a_service_that_runs_the_venv_inside_its_checkout_is_production(
+    tmp_path, monkeypatch, linked
+):
+    # v2-2: 설치된 유닛이 체크아웃 안의 `.venv/bin/rcm` 을 실행하면 그 venv 와 체크아웃이 운영이다
+    # — 서비스로 도는 venv 는 자리와 상관없이 운영 뿌리다
+    home = tmp_path / "home"
+    checkout = home / "src" / "remote_ci_monitor-service"
+    checkout.mkdir(parents=True)
+    if linked:
+        main = home / "src" / "remote_ci_monitor"
+        (main / ".git" / "worktrees" / "service").mkdir(parents=True)
+        (checkout / ".git").write_text(f"gitdir: {main}/.git/worktrees/service\n")
+    else:
+        (checkout / ".git").mkdir()
+    venv = _service_venv(checkout / ".venv", checkout)
+    unit = home / "Library" / "LaunchAgents" / "com.remote-ci-monitor.server.plist"
+    unit.parent.mkdir(parents=True)
+    unit.write_text(f"<array><string>{venv}/bin/rcm</string><string>serve</string></array>")
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("PATH", "/usr/bin:/bin")
+    prod = guard.find_production()
+    assert prod.checkout == checkout and prod.venv == venv, prod
+    edit = guard.decide("Edit", {"file_path": str(checkout / "src" / "x.py")}, prod, tmp_path)
+    assert edit is not None and edit.decision == "deny", edit
+
+
+def test_b8_2_a_developer_worktree_venv_on_path_is_still_free(tmp_path, monkeypatch):
+    # 경계: 개발자 자신의 워크트리 `.venv`(PATH 에서만 찾은 것)는 운영이 아니다
+    home = tmp_path / "home"
+    worktree = home / "src" / "remote_ci_monitor-x"
+    worktree.mkdir(parents=True)
+    (worktree / ".git").mkdir()
+    venv = _service_venv(worktree / ".venv", worktree)
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("PATH", f"{venv}/bin:/usr/bin:/bin")
+    prod = guard.find_production()
+    assert prod.checkout is None and prod.venv is None, prod

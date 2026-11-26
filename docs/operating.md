@@ -672,10 +672,11 @@ The *service virtualenv* is the one whose editable install (`direct_url.json`) p
 primary checkout — not whatever `rcm` is first on `PATH`, which in a shell with a worktree's
 `.venv` activated is the worktree's build. The hook looks at `~/.local/share/rcm-venv`, then at
 the `rcm` named by the installed launchd or systemd unit, then at every `rcm` on `PATH`, and
-takes the first whose editable source lies outside the virtualenv. A source that is a linked
-worktree counts only for the first two, which the service runs (a service run from a worktree,
-such as `remote_ci_monitor-service`); an `rcm` found only on `PATH` that installs a linked
-worktree is a development build. What counts is the data
+takes the first with an editable source. The first two are what the service runs, so they count
+wherever they sit — a service run from a worktree, such as `remote_ci_monitor-service`, or one
+that runs the `.venv` inside its checkout. An `rcm` found only on `PATH` counts only when its
+virtualenv lies outside its source and the source is not a linked worktree, so your own
+worktree's `.venv` is a development build. What counts is the data
 directory the command would *actually* open, in the CLI's own order: `--data-dir`, then
 `RCM_SERVER_DATA_DIR`, then the `data_dir` of the config it would pick (`--config`,
 `$RCM_CONFIG`, `./rcm.toml`, `$XDG_CONFIG_HOME/rcm/server.toml`, `~/.config/rcm/server.toml`).
