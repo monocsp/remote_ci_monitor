@@ -1060,3 +1060,34 @@ def test_rl56_a_heard_that_rises_between_the_judgement_and_the_lock_keeps_the_jo
     monkeypatch.setattr(srv.app, "_session_lock", lock_after_a_heartbeat)
     assert srv.app.mark_lost_workers(srv.clock.now) == []
     assert fired and srv.store.get_job(a).state == RUNNING
+
+
+# ── RL5: 분단 중에도 펌프가 돈다 — 로그 전송이 러너를 막지 않는다 ─────────────────────
+
+
+def test_rl5_a_hanging_log_post_does_not_stall_the_runner_pump(tmp_path, monkeypatch):
+    """분단 중 로그 전송 한 번은 요청 시한(60초 이상)까지 매달린다. 그 전송이 러너의 펌프 스레드에서
+    돌면 펌프가 멈춰 워커 로컬 `log.txt` 가 자라지 않고 취소 · 시간초과 · 자기 멈춤 점검도 멈춘다
+    (P2-5 에서 e2e RL5 가 찾았다). `output()` 은 전송을 기다리지 않고 돌아와야 하고, 끝의
+    `final_flush` 는 모든 바이트를 순서대로 보낸다."""
+    monkeypatch.setattr(rw, "LOG_FLUSH_SECONDS", 0)
+    w, fake, _clocks, _logs = make_worker(tmp_path)
+    gate = threading.Event()
+    sent: list[bytes] = []
+
+    def hanging_log(job_id, chunk):
+        sent.append(chunk)
+        gate.wait(10)  # 분단 — 시한까지 매달린다
+        return {}
+
+    fake.log = hanging_log
+    obs = rw._RemoteObserver(w, 7)
+    began = time.monotonic()
+    for line in (b"a\n", b"b\n", b"c\n"):
+        obs.output(line)
+    took = time.monotonic() - began
+    gate.set()
+    obs.final_flush()
+    # 펌프에서 보냈다면 한 줄마다 10초를 기다린다(기준선 30초)
+    assert took < 3, took
+    assert b"".join(sent) == b"a\nb\nc\n"  # 빠짐 · 겹침 · 뒤바뀜 없이

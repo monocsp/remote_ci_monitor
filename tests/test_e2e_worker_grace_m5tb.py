@@ -41,6 +41,7 @@ G = 90
 SELF_STOP = G - (15 + 2 + 10)  # 63 — 감시 스레드의 문턱(§4.3)
 LONG = f"{PID_LINE}; exec sleep 400"
 SHORT = f"{PID_LINE}; sleep 22"
+TICK = f"{PID_LINE}; while :; do echo tick; sleep 1; done"  # 로그가 자라는 일반 잡(RL5)
 DAEMON_PY = """\
 import os, sys, time
 mark = sys.argv[1]
@@ -66,6 +67,14 @@ RCM_MARK_DIR = "{marks}"
 name = "plain"
 pool = "linux"
 argv = ["sh", "-c", '{long}']
+timeout_seconds = 900
+[presets.env]
+RCM_MARK_DIR = "{marks}"
+
+[[presets]]
+name = "plaintick"
+pool = "linux"
+argv = ["sh", "-c", '{tick}']
 timeout_seconds = 900
 [presets.env]
 RCM_MARK_DIR = "{marks}"
@@ -152,6 +161,7 @@ class Grace:
                 EXTRA_TOML.format(
                     long=LONG,
                     short=SHORT,
+                    tick=TICK,
                     marks=self.marks,
                     python=sys.executable,
                     daemon=daemon,
@@ -298,7 +308,7 @@ def test_rl1_rl5_rl42_rl3_a_partition_past_g(grace):
     w2, w3 = grace.start("build-02", "build-03", relay=True)
     x = grace.submit("ship")
     px = grace.pid(x)
-    y = grace.submit("plain")
+    y = grace.submit("plaintick")
     py = grace.pid(y)
     grace.relay.pause()
     cut = time.monotonic()
@@ -312,6 +322,11 @@ def test_rl1_rl5_rl42_rl3_a_partition_past_g(grace):
     assert lx["state"] == ly["state"] == "lost"
     assert lx["summary_code"] == ly["summary_code"] == "worker_unreachable"
     assert alive(py)  # RL5 — 일반 잡은 워커가 죽이지 않는다
+    assert grace.wait_exit(y, 10) == 3  # RL5 — lost 는 종료 3(1 이 아니다)
+    (local_log,) = list(grace.tmp.glob(f"wdata-*/**/jobs/{y}/log.txt"))
+    grown = local_log.stat().st_size
+    time.sleep(3)
+    assert local_log.stat().st_size > grown  # 워커 로컬 log.txt 는 계속 자란다
     assert grace.holds() == [x]  # RL42 — 표식 잡만 홀드, 일반 잡은 0
     z = grace.submit("ship")  # 같은 그룹 — 홀드에 막힌다
     time.sleep(3)
