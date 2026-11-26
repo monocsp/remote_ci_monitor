@@ -192,10 +192,21 @@ class JobOutbox:
     메모리에만 둔다. 쓰기에 실패하면 「스풀 깨짐」이고 그 뒤 바이트는 세기만 한다(§4.6
     `log_bytes`)."""
 
-    def __init__(self, folder: Path | None, *, log: Callable[[str], None] | None = None):
+    def __init__(
+        self,
+        folder: Path | None,
+        *,
+        log: Callable[[str], None] | None = None,
+        label: str | None = None,
+        on_dir_error: Callable[[OSError], None] | None = None,
+    ):
         self.folder = folder
         # 저장 실패를 말할 곳(워커 로그). 없으면(시험의 맨 큐) 말하지 않는다(P6-1 G2)
         self.log = log
+        # 줄 머리 — 죽은 세션 D 의 큐는 `dead session <D> #N` 이다(batch-5 #5). 없으면 `#N`
+        self.label = label
+        # 이름 바꾸기 뒤 폴더 fsync 가 실패했을 때 부를 것(워커가 프로세스마다 한 번 말한다)
+        self.on_dir_error = on_dir_error
         self._save_failed_said = False
         self._mem = bytearray()
         self._fh: Any = None
@@ -217,12 +228,19 @@ class JobOutbox:
     # ── 디스크 ──
 
     @classmethod
-    def load(cls, folder: Path, *, log: Callable[[str], None] | None = None) -> JobOutbox | None:
+    def load(
+        cls,
+        folder: Path,
+        *,
+        log: Callable[[str], None] | None = None,
+        label: str | None = None,
+        on_dir_error: Callable[[OSError], None] | None = None,
+    ) -> JobOutbox | None:
         """죽은 세션 · exec 전 이미지가 남긴 큐. `outbox.json` 이 없거나 깨졌으면 None."""
         data = _read_json(folder / OUTBOX_FILE)
         if data is None:
             return None
-        ob = cls(folder, log=log)
+        ob = cls(folder, log=log, label=label, on_dir_error=on_dir_error)
         try:
             size = (folder / STREAM_FILE).stat().st_size
         except OSError:
@@ -262,7 +280,7 @@ class JobOutbox:
                     "length": self.length,
                 }
             try:
-                _write_json(self.folder / OUTBOX_FILE, data)
+                unsynced = _write_json(self.folder / OUTBOX_FILE, data)
             except OSError as e:
                 # 다음 저장이 다시 쓴다 — 디스크의 `acked` 는 하한일 뿐이다. 그 사이 재시작하면
                 # 디스크에 없는 finish 는 잃는다 — 내구성 약속이 깨졌다고 한 번 말한다(P6-1 G2).
@@ -270,13 +288,16 @@ class JobOutbox:
                 if not self._save_failed_said:  # mutcheck: outbox-save-failure-silent
                     self._save_failed_said = True
                     if self.log is not None:
+                        who = self.label or f"#{self.folder.name}"  # mutcheck: dead-save-unlabelled
                         self.log(
-                            f"#{self.folder.name} report: cannot save {OUTBOX_FILE}"
+                            f"{who} report: cannot save {OUTBOX_FILE}"
                             f" ({e.strerror or type(e).__name__}) — the report is only in memory;"
                             " a restart before it is sent loses it"
                         )
                 return
             self._save_failed_said = False
+        if unsynced is not None and self.on_dir_error is not None:
+            self.on_dir_error(unsynced)
 
     # ── 스트림 ──
 
@@ -1069,10 +1090,11 @@ def _group_alive(pgid: int) -> bool:
     return True
 
 
-def _write_json(path: Path, data: dict[str, Any]) -> None:
+def _write_json(path: Path, data: dict[str, Any]) -> OSError | None:
     """임시 파일에 쓰고 fsync 한 뒤 rename, 그 폴더도 fsync — 읽는 쪽이 반쯤 쓴 파일을 보지 않고,
     OS 가 죽은 뒤에도 빈 파일이 남지 않는다(P6-1 G1). 실패하면 임시 파일을 지우고 다시 던진다 —
-    가득 찬 디스크에 `.<이름>.<hex>` 가 쌓이지 않게(G2)."""
+    가득 찬 디스크에 `.<이름>.<hex>` 가 쌓이지 않게(G2). 저장은 됐는데 폴더 fsync 만 실패하면 그
+    오류를 돌려준다 — 부른 쪽이 말한다(batch-5 #5)."""
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_name(f".{path.name}.{secrets.token_hex(4)}")
     try:
@@ -1085,7 +1107,7 @@ def _write_json(path: Path, data: dict[str, Any]) -> None:
         with contextlib.suppress(OSError):
             tmp.unlink(missing_ok=True)  # mutcheck: failed-save-leaves-temp
         raise
-    _fsync_dir(path.parent)
+    return _fsync_dir(path.parent)
 
 
 def _write_json_unsynced(path: Path, data: dict[str, Any]) -> None:
@@ -1102,19 +1124,21 @@ def _write_json_unsynced(path: Path, data: dict[str, Any]) -> None:
         raise
 
 
-def _fsync_dir(folder: Path) -> None:
-    """이름 바꾸기를 디스크에 남긴다. 폴더를 열거나 fsync 할 수 없는 파일 시스템(일부 네트워크
-    파일 시스템)에서는 건너뛴다 — 내용은 이미 fsync 했고, 이름 바꾸기는 끝났다."""
+def _fsync_dir(folder: Path) -> OSError | None:
+    """이름 바꾸기를 디스크에 남긴다. 폴더를 열 수 없는 파일 시스템에서는 건너뛴다 — 내용은 이미
+    fsync 했고, 이름 바꾸기는 끝났다. 연 폴더의 fsync 가 실패하면(일부 네트워크 파일 시스템) 그
+    오류를 돌려준다 — 삼키지 않고 워커가 한 번 말한다(batch-5 #5)."""
     try:
         fd = os.open(folder, os.O_RDONLY)
     except OSError:
-        return
+        return None
     try:
         os.fsync(fd)
-    except OSError:
-        pass
+    except OSError as e:
+        return e  # mutcheck: dir-sync-error-swallowed
     finally:
         os.close(fd)
+    return None
 
 
 def _read_json(path: Path) -> dict[str, Any] | None:
@@ -1414,6 +1438,7 @@ class RemoteWorker:
         self.session_dir: Path | None = None
         self._session_fd: int | None = None
         self._ok_written = 0.0
+        self._dir_sync_said = False  # 폴더 fsync 실패는 프로세스마다 한 번 말한다(batch-5 #5)
         self.previous_sessions: list[str] = []
         self.unverified_sessions: list[str] = []
         self.dead_sessions: list[DeadSession] = []
@@ -1496,7 +1521,7 @@ class RemoteWorker:
         if fd is None:
             raise WorkerExit(2, f"cannot lock the worker session folder {own}")
         self._session_fd = fd
-        _write_json(own / "owner.json", owner)
+        self._save_json(own / "owner.json", owner)
         self.session_dir = own
         for entry in sorted(base.iterdir()):
             if entry == own or not entry.is_dir() or not re.fullmatch(r"[0-9a-f]{32}", entry.name):
@@ -1608,7 +1633,7 @@ class RemoteWorker:
         d = self._job_dir(job_id)
         if d is not None:
             data = {"irreversible": irreversible, "disconnect_grace_seconds": grace}
-            _write_json(d / "claim.json", data)
+            self._save_json(d / "claim.json", data)
 
     def _write_proc(self, job_id: int, pid: int | None) -> None:
         """`proc.json` 두 번 쓰기(결정 333): 띄우기 직전 `{pgid: null}`, 띄운 뒤 `{pgid, start}`."""
@@ -1616,7 +1641,24 @@ class RemoteWorker:
         if d is None:
             return
         start = process_start(pid) if pid is not None else None
-        _write_json(d / "proc.json", {"pgid": pid, "start": start})
+        self._save_json(d / "proc.json", {"pgid": pid, "start": start})
+
+    def _save_json(self, path: Path, data: dict[str, Any]) -> None:
+        """세션 폴더의 파일을 `_write_json` 으로 쓰고, 폴더 fsync 실패는 `_dir_not_synced` 로."""
+        unsynced = _write_json(path, data)
+        if unsynced is not None:
+            self._dir_not_synced(unsynced)
+
+    def _dir_not_synced(self, e: OSError) -> None:
+        """이름 바꾸기 뒤 폴더 fsync 가 실패했다. 저장은 됐지만 OS 가 죽으면 마지막 저장을 잃을 수
+        있다 — 프로세스마다 한 줄이다(그런 파일 시스템이면 모든 저장이 그렇다, batch-5 #5)."""
+        with self._ok_lock:
+            said, self._dir_sync_said = self._dir_sync_said, True
+        if not said:
+            self.log(
+                f"session folder: cannot sync a folder to disk ({e.strerror or type(e).__name__})"
+                " — an OS crash may lose the last saved report"
+            )
 
     def _forget_job_dir(self, job_id: int) -> None:
         if job_id in self._group_unconfirmed:
@@ -1803,7 +1845,12 @@ class RemoteWorker:
             for job_dir in sorted(jobs.iterdir()) if jobs.is_dir() else ():
                 if not job_dir.name.isdigit():
                     continue
-                ob = JobOutbox.load(job_dir, log=self.log)
+                ob = JobOutbox.load(
+                    job_dir,
+                    log=self.log,
+                    label=f"dead session {dead.session_id[:8]} #{job_dir.name}",
+                    on_dir_error=self._dir_not_synced,
+                )
                 if ob is None:
                     self._set_aside(dead, job_dir)  # mutcheck: unreadable-outbox-silent
                     continue
@@ -2595,7 +2642,7 @@ class RemoteWorker:
             self.running[job.id] = lane
         self.log(f"lane {lane}: claimed #{job.id} {job.preset}")
         # 그 잡의 보고 큐와 보내는 스레드(§4.5) — claim 뒤에 시작해 큐가 끝나면 끝난다
-        outbox = JobOutbox(self._job_dir(job.id), log=self.log)
+        outbox = JobOutbox(self._job_dir(job.id), log=self.log, on_dir_error=self._dir_not_synced)
         sender = _JobSender(self, job.id, outbox)
         with self._lock:
             self._senders[job.id] = sender

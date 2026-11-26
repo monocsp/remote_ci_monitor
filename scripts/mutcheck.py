@@ -7590,8 +7590,8 @@ MUTANTS = (
         # 이름 바꾸기 뒤 폴더를 fsync 하지 않는다 — 충돌 뒤 옛 outbox.json(P6-1 G1)
         name="json-folder-not-synced",
         path="src/remote_ci_monitor/remote_worker.py",
-        old="    _fsync_dir(path.parent)\n",
-        new="    pass\n",
+        old="    return _fsync_dir(path.parent)\n",
+        new="    return None\n",
         tests=(
             "tests/test_worker_outbox_m5tb.py::"
             "test_p6_1_g1_c_the_outbox_is_synced_to_disk_before_and_after_the_rename",
@@ -7762,6 +7762,31 @@ MUTANTS = (
         tests=(
             "tests/test_worker_outbox_m5tb.py::"
             "test_b5_2_a_a_dead_queue_stuck_on_a_local_error_is_not_counted_as_server_errors",
+        ),
+    ),
+    Mutant(
+        # 죽은 세션 큐의 저장 실패 줄에 `dead session` 접두사가 없다(batch-5 #5)
+        name="dead-save-unlabelled",
+        path="src/remote_ci_monitor/remote_worker.py",
+        old=(
+            '                        who = self.label or f"#{self.folder.name}"'
+            "  # mutcheck: dead-save-unlabelled\n"
+        ),
+        new='                        who = f"#{self.folder.name}"\n',
+        tests=(
+            "tests/test_worker_outbox_m5tb.py::"
+            "test_b5_5_a_a_failed_save_of_a_dead_queue_names_the_dead_session",
+        ),
+    ),
+    Mutant(
+        # 폴더 fsync 실패를 조용히 삼킨다(batch-5 #5)
+        name="dir-sync-error-swallowed",
+        path="src/remote_ci_monitor/remote_worker.py",
+        old="        return e  # mutcheck: dir-sync-error-swallowed\n",
+        new="        return None\n",
+        tests=(
+            "tests/test_worker_outbox_m5tb.py::"
+            "test_b5_5_b_a_folder_that_cannot_be_synced_is_said_once",
         ),
     ),
 )
