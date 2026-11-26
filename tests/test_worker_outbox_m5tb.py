@@ -1478,3 +1478,48 @@ def test_p6_1_g2_a_failed_outbox_save_says_so_once_and_leaves_no_temp_file(tmp_p
     assert said[0].startswith("#7 report: cannot save outbox.json")
     assert "a restart before it is sent loses it" in said[0]
     assert sorted(p.name for p in folder.iterdir()) == [rw.OUTBOX_FILE], list(folder.iterdir())
+
+
+@pytest.mark.parametrize(
+    ("code", "args"),
+    [("worker_self_stopped", {"seconds": 75}), ("snapshot_unreachable", {}), (None, None)],
+    ids=["self_stopped", "snapshot_unreachable", "no_code"],
+)
+def test_p6_1_g3_a_resent_copy_of_the_workers_own_lost_finish_is_not_a_late_result(srv, code, args):
+    """# P6-1 G3 워커가 스스로 `lost` 로 보고한 finish 가 기록되고 2xx 만 잃었다. 같은 finish 를
+    다시 보내면 잡은 `lost` · 같은 세션 · 펜싱 아님이라 지금까지 `late_result` 로 남았다 — 그 `lost`
+    는 서버가 닫은 것이 아니라 이 finish 가 만든 것이다. 명세(중복 finish, RL21 a)는 409 이고
+    기록하지 않는다. `log_complete` 도 다시 쓰지 않는다."""
+    jid = running(srv)
+    assert post_log(srv, jid, b"one\n", 0)[0] == 200
+    body: dict[str, Any] = {"exit_code": None, "log_bytes": 4, "group_gone": True}
+    if code is not None:
+        body.update(summary_code=code, summary_args=args)
+    status, first = fin(srv, jid, LOST, **body)
+    assert status == 200, first
+    assert job_doc(srv, jid)["log_complete"] is True
+    srv.clock.advance(5)
+    status, again = fin(srv, jid, LOST, **{**body, "log_bytes": 40})
+    assert status == 409 and again["code"] == "job_closed" and again["state"] == LOST, again
+    assert again["late_result_recorded"] is False, again
+    assert late_events(srv, jid) == []
+    doc = job_doc(srv, jid)
+    assert doc["late_result"] is None and doc["log_complete"] is True, doc
+
+
+def test_p6_1_g3_b_a_lost_close_by_the_server_still_takes_the_workers_lost_finish_late(srv):
+    """# P6-1 G3 서버가 먼저 닫은 `lost`(유예 만료) 뒤에 온 워커의 자기 멈춤 finish 는 여전히 늦은
+    결과다 — 중복 판정은 그 잡을 닫은 것이 이 세션의 finish 였을 때만이다."""
+    jid = running(srv)
+    close_lost(srv, jid)
+    status, body = fin(
+        srv,
+        jid,
+        LOST,
+        exit_code=None,
+        summary_code="worker_self_stopped",
+        summary_args={"seconds": 75},
+        group_gone=True,
+    )
+    assert status == 409 and body["late_result_recorded"] is True, body
+    assert len(late_events(srv, jid)) == 1

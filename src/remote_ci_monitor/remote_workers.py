@@ -1432,6 +1432,7 @@ class RemoteWorkersMixin:
             only_from=only_from,
             hold_cause=hold_cause,
             log_bytes=log_bytes,
+            finish_session=session,
             **fields,
         ):
             current = self.store.get_job(job.id)
@@ -1451,6 +1452,7 @@ class RemoteWorkersMixin:
                 only_from=(CANCELLING,),
                 hold_cause=hold_cause,
                 log_bytes=log_bytes,
+                finish_session=session,
                 **fields,
             ):
                 current = self.store.get_job(job.id)

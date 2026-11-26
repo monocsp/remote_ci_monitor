@@ -2710,7 +2710,14 @@ class Store:
         )
 
     def _set_state(
-        self, conn: sqlite3.Connection, job_id: int, state: str, at: float, **cols: Any
+        self,
+        conn: sqlite3.Connection,
+        job_id: int,
+        state: str,
+        at: float,
+        *,
+        finish_session: str | None = None,
+        **cols: Any,
     ) -> None:
         """상태 전이 + 열 갱신 + 전이 이벤트를 한 번에(호출자가 트랜잭션을 연다).
 
@@ -2727,7 +2734,12 @@ class Store:
                 "UPDATE shelf_items SET job_state=?, job_finished_at=? WHERE job_id=?",
                 (state, cols.get("finished_at", at), job_id),
             )
-        self._event(conn, job_id, EVENT_STATE, {"state": state}, at)
+        payload: dict[str, Any] = {"state": state}
+        if finish_session is not None:
+            # 이 전이를 만든 것이 그 세션의 finish 다(P6-1 G3) — 늦은 결과와 그 finish 의 다시 보낸
+            # 사본을 가른다. 읽는 쪽(`transitions`)은 `state` 만 본다
+            payload["finish_session"] = finish_session
+        self._event(conn, job_id, EVENT_STATE, payload, at)
 
     def create_job(
         self,
@@ -3835,8 +3847,12 @@ class Store:
         ttl_hours: int = 24,
         hold_cause: str | None = None,
         log_bytes: int | None = None,
+        finish_session: str | None = None,
     ) -> bool:
         """종료 상태로. `only_from` 을 주면 그 상태에서만 바뀐다(경쟁 방지).
+
+        `finish_session` 은 이 닫힘이 그 워커 세션의 finish 라는 표시다(P6-1 G3). 전이 사건에
+        남겨, 같은 finish 를 다시 보낸 사본이 늦은 결과로 기록되지 않게 한다.
 
         `log_complete`(M5t-b §4.6)도 같은 트랜잭션에서 쓴다: 이미 0 으로 고정됐으면(T16) 0, 로컬
         레인 잡은 서버가 직접 쓰므로 참, 워커가 `log_bytes` 를 보냈으면 `log_offset ≥ log_bytes`,
@@ -3903,6 +3919,7 @@ class Store:
                 lane=None,
                 phase=None,
                 log_complete=_log_complete(row, log_bytes),
+                finish_session=finish_session,
             )
             if hold_cause is not None:
                 self._hold_tx(conn, job_id, hold_cause, ts)
@@ -5472,6 +5489,20 @@ class Store:
             ):
                 conn.execute("ROLLBACK")
                 return None
+            # 그 잡을 `lost` 로 닫은 것이 이 세션의 finish 였다(자기 멈춤 · `snapshot_unreachable`
+            # 처럼 워커가 스스로 보고한 lost) — 2xx 를 잃고 다시 보낸 사본이다. 늦은 결과가 아니라
+            # 중복 finish 다(§4.6 RL21 a): 기록하지 않고 `log_complete` 도 다시 쓰지 않는다(P6-1 G3)
+            last = conn.execute(
+                "SELECT payload FROM events WHERE job_id=? AND kind=? ORDER BY id DESC LIMIT 1",
+                (job_id, EVENT_STATE),
+            ).fetchone()
+            closer = json.loads(last["payload"]).get("finish_session") if last else None
+            if closer == session:  # mutcheck: own-lost-finish-recorded-late
+                released = gone is True and self._release_hold_tx(
+                    conn, job_id, kind=RELEASE_WORKER, by=by, reason=None, ts=ts
+                )
+                conn.execute("COMMIT")
+                return False, bool(released)
             recorded = False
             seen = conn.execute(
                 "SELECT 1 FROM events WHERE job_id=? AND kind=?", (job_id, EVENT_LATE_RESULT)

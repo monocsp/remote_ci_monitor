@@ -7636,6 +7636,17 @@ MUTANTS = (
             "test_p6_1_g2_a_failed_outbox_save_says_so_once_and_leaves_no_temp_file",
         ),
     ),
+    Mutant(
+        # 워커가 스스로 보고한 lost finish 의 다시 보낸 사본을 늦은 결과로 남긴다(P6-1 G3)
+        name="own-lost-finish-recorded-late",
+        path="src/remote_ci_monitor/store.py",
+        old="            if closer == session:  # mutcheck: own-lost-finish-recorded-late\n",
+        new="            if False:\n",
+        tests=(
+            "tests/test_worker_outbox_m5tb.py::"
+            "test_p6_1_g3_a_resent_copy_of_the_workers_own_lost_finish_is_not_a_late_result",
+        ),
+    ),
 )
 
 
