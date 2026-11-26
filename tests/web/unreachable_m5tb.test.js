@@ -206,14 +206,11 @@ const I18N = require(I18N_PATH);
 describe("RL28 — 끊긴 워커 띠는 지금 동작을 말한다(유예 동안 이어 감)", () => {
   // 옛 띠는 「돌던 잡의 결과를 잃는다」고 했다. M5t-b(결정 253 · 256)부터 원격 잡은 끊김 유예 동안
   // 계속 돌고, 유예가 지나야 lost 로 닫힌다. 유예 값은 /api/status 에 없어서 숫자를 넣지 않는다.
-  const ONE_EN = "Worker macmini unreachable — its running jobs go on if it is back within the grace period."
-    + " Past that they end as lost, and an irreversible job can hold its group.";
-  const MANY_EN = "3 workers unreachable — their running jobs go on if the worker is back within the grace period."
-    + " Past that they end as lost, and an irreversible job can hold its group.";
-  const ONE_KO = "워커 macmini 연결 끊김 — 진행 중이던 작업은 유예 시간 안에 워커가 돌아오면 이어집니다."
-    + " 유예를 넘기면 결과를 잃음으로 닫히고 되돌릴 수 없는 작업은 그룹이 막힐 수 있습니다.";
-  const MANY_KO = "워커 3대 연결 끊김 — 진행 중이던 작업은 유예 시간 안에 워커가 돌아오면 이어집니다."
-    + " 유예를 넘기면 결과를 잃음으로 닫히고 되돌릴 수 없는 작업은 그룹이 막힐 수 있습니다.";
+  // 띠 높이(390px 에서 80px 이하, tests/test_web_readability_r1.py)가 글 길이를 묶는다.
+  const ONE_EN = "Worker macmini unreachable — its jobs go on if back within the grace period, else end as lost";
+  const MANY_EN = "3 workers unreachable — their jobs go on if back within the grace period, else end as lost";
+  const ONE_KO = "워커 macmini 연결 끊김 — 유예 시간 안에 돌아오면 작업이 이어지고 넘기면 결과를 잃음";
+  const MANY_KO = "워커 3대 연결 끊김 — 유예 시간 안에 돌아오면 작업이 이어지고 넘기면 결과를 잃음";
 
   test("rl28 banner — 한 대 · 여러 대, 두 언어", () => {
     assert.equal(rcm.unreachableNote(["macmini"], "en").text, ONE_EN);

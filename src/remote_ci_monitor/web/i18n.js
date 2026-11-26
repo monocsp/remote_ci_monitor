@@ -1459,11 +1459,14 @@
     "workers.band": function (a) { return a.n + " workers — scroll with the arrow keys"; },
     "workers.more": function (a) { return "Show " + a.n + " off-screen"; },
     "workers.hidden_list": function (a) { return a.n + " off-screen:"; },
+    // M5t-b(결정 253 · 256) — 원격 잡은 끊김 유예 동안 계속 돈다. 유예 값은 /api/status 에 없어서
+    // 숫자를 넣지 않는다(지어내지 않는다). 띠는 390px 에서 80px 를 넘지 않는다(가독성 R1 7번) — 그룹
+    // 홀드는 「확인이 필요한 작업」이 따로 말하므로 띠에 넣지 않는다
     "header.workers_unreachable_one": function (a) {
-      return "Worker " + a.name + " unreachable — the results of its running jobs are lost";
+      return "Worker " + a.name + " unreachable — its jobs go on if back within the grace period, else end as lost";
     },
     "header.workers_unreachable_many": function (a) {
-      return a.n + " workers unreachable — the results of their running jobs are lost";
+      return a.n + " workers unreachable — their jobs go on if back within the grace period, else end as lost";
     },
     "header.workers_names": "Show names",
     "queue.show_fewer": "show fewer"
@@ -2690,10 +2693,10 @@
     "workers.more": function (a) { return "화면 밖 " + a.n + "개 보기"; },
     "workers.hidden_list": function (a) { return "화면 밖 " + a.n + "개:"; },
     "header.workers_unreachable_one": function (a) {
-      return "워커 " + a.name + " 연결 끊김 — 진행 중이던 작업의 결과를 알 수 없습니다";
+      return "워커 " + a.name + " 연결 끊김 — 유예 시간 안에 돌아오면 작업이 이어지고 넘기면 결과를 잃음";
     },
     "header.workers_unreachable_many": function (a) {
-      return "워커 " + a.n + "대 연결 끊김 — 진행 중이던 작업의 결과를 알 수 없습니다";
+      return "워커 " + a.n + "대 연결 끊김 — 유예 시간 안에 돌아오면 작업이 이어지고 넘기면 결과를 잃음";
     },
     "header.workers_names": "이름 보기",
     "queue.show_fewer": "적게 보기"
