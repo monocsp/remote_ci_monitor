@@ -439,7 +439,7 @@ def test_operating_drain_paragraph_follows_spec_4_5_and_has_the_300_second_cap()
     assert "for at most 300 seconds of server error answers" in body
     assert "connection failures do not count" in body
     assert (
-        "`dead session <id> queue not delivered after 300s of server errors — registering;"
+        "`dead session <session> queue not delivered after 300s of server errors — registering;"
         " job #<id> will close as restarted-without-job`" in body
     )
     assert "`worker_restarted_without_job`" in body
@@ -487,3 +487,22 @@ def test_operating_doctor_json_key_table_has_irreversible_holds():
     assert len(rows) == 1, rows
     row = rows[0]
     assert "`worker`" in row and "`coordinator-worker`" in row and "`null`" in row
+
+
+def test_operating_dead_session_placeholder_is_not_the_job_number():
+    """P3 r2 — 드레인 문단의 `dead session …` 자리 표시자는 잡 번호 `<id>` 와 다른 이름이다. PR2 는
+    세션 id 앞 8자(`s.dead.session_id[:8]`)를 찍으므로 그 뜻을 한 마디로 적는다."""
+    body = flat(OPERATING)
+    assert "`dead session <id>" not in body
+    assert "`<session>` is the first 8 characters of the old worker session's id" in body
+
+
+def test_rl28_operating_says_a_waiter_behind_an_unreachable_job_has_no_eta_and_takes_no_lane():
+    """# RL28 P3 r2 — 끊긴 잡 뒤에서 같은 그룹으로 기다리는 잡은 ETA 가 「—」이고 레인을 차지하지
+    않는다. 그래서 같은 레인의 뒤 잡 ETA 는 그 대기 잡이 레인을 쓰지 않는다고 보고 계산되고, 워커가
+    돌아오면 늦어질 수 있다(지어낸 숫자가 아니라 가정이 있는 ETA)."""
+    body = flat(section(OPERATING, UNREACHABLE))
+    assert "A job waiting in the same concurrency group behind it has no ETA either (`—`)" in body
+    assert "takes no lane in the estimate" in body
+    assert "assume that waiting job does not use the lane" in body
+    assert "may come later than shown once the worker is back" in body

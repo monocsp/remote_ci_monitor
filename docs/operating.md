@@ -978,8 +978,9 @@ drain the worker waits up to a minute for that queue; then it logs
 worker sends it before it registers again, so the new registration does not close that job as
 lost. The restarted worker waits for that queue for at most 300 seconds of server error answers
 (connection failures do not count, because the server is not answering then). After that it logs
-`dead session <id> queue not delivered after 300s of server errors — registering; job #<id> will
-close as restarted-without-job`, registers and takes jobs again, and that job ends `lost`
+`dead session <session> queue not delivered after 300s of server errors — registering; job #<id>
+will close as restarted-without-job` (`<session>` is the first 8 characters of the old worker
+session's id), registers and takes jobs again, and that job ends `lost`
 (`worker_restarted_without_job`). The log and the artifacts are sent again for up to 24 hours
 after the job ends. When that window has passed, the worker gives them up and sends the finish
 alone, with the size of the log it had (`log_bytes`), logging
@@ -1193,8 +1194,11 @@ and set `RCM_TOKEN` on a server with `read_auth = "basic"`. `pipx` users run
 A remote job keeps running while the server waits the
 [disconnect grace](configuration.md#a-lost-connection-disconnect_grace_seconds) for its worker.
 The worker shows `down`, and the job is still `running`, with reason `worker_unreachable_grace`
-in `/api/status`. Its finish time is unknown, so its ETA is `—`. People see it in words, never
-the code:
+in `/api/status`. Its finish time is unknown, so its ETA is `—`. A job waiting in the same
+concurrency group behind it has no ETA either (`—`), and it takes no lane in the estimate: it
+cannot start before the group is free. So the ETAs of later jobs on that lane assume that waiting
+job does not use the lane, and they may come later than shown once the worker is back. People
+see it in words, never the code:
 
 | where | what it says |
 |---|---|
