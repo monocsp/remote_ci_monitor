@@ -305,3 +305,21 @@ def test_p63_3_the_irreversible_section_says_a_late_cancel_keeps_the_failed_clos
     body = flat(section(CONFIGURATION, IRREVERSIBLE))
     assert "A cancel that has not stopped the command yet does not change that" in body
     assert "the job ends `failed`, as any job that does not retry does" in body
+
+
+PR2_LINK = "([#286](https://github.com/monocsp/remote_ci_monitor/pull/286))"
+PR2_ENTRIES = (
+    "**A remote job's log arrives whole, once, after any drop.**",
+    "**A snapshot download cut off by a lost connection closes the job `lost`**",
+    "**An artifact bundle is `ready` only when the server has it.**",
+    "**`log_complete` and `late_result`.**",
+)
+
+
+def test_every_pr2_changelog_entry_links_its_pr():
+    """P3 1라운드 MED: M5t-b PR2 의 `[Unreleased]` 항목마다 그 PR 링크가 있다(PR1 의 #284 꼴)."""
+    entries = re.split(r"\n(?=- )", _unreleased())
+    for head in PR2_ENTRIES:
+        found = [e for e in entries if e.startswith(f"- {head}")]
+        assert len(found) == 1, head
+        assert PR2_LINK in flat(found[0]), head

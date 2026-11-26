@@ -41,11 +41,14 @@ of a key bumps that number and is listed here.
   without the server the finish goes without the rest of the log; a finish that still cannot go
   then is dropped with one log line
   ([report queue](docs/configuration.md#the-workers-log-and-its-report-queue)).
+  ([#286](https://github.com/monocsp/remote_ci_monitor/pull/286))
 - **A snapshot download cut off by a lost connection closes the job `lost`**
   (`snapshot_unreachable`, exit 3), not `failed`; a missing snapshot is still `failed`.
+  ([#286](https://github.com/monocsp/remote_ci_monitor/pull/286))
 - **An artifact bundle is `ready` only when the server has it.** A finish that says `ready`
   without the uploaded bundle (row, same hash, file) records `failed` (`upload_failed`, or
   `hash_mismatch`).
+  ([#286](https://github.com/monocsp/remote_ci_monitor/pull/286))
 
 ### Added
 - **`irreversible = true` for presets whose work must not run twice at once.** The worker stops
@@ -83,6 +86,7 @@ of a key bumps that number and is listed here.
   `false`, or `null` when it cannot tell). A finish that arrives after the server closed the job as
   `lost` leaves the job as it is and shows up once as `late_result`; a worker finish's
   `finished_at` is kept between the job's start and the moment the server received it.
+  ([#286](https://github.com/monocsp/remote_ci_monitor/pull/286))
 
 ### Fixed
 - **`/api/status` no longer answers 500 when its queue section fails.** That section is `null`
