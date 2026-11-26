@@ -3,7 +3,8 @@
 # 한 줄(setup 이 운영 설정 자리를 거절한다)을 진짜 프로세스로 돌린다. pytest 가 부르지 않는다
 # (순수 검사 함수만 tests/test_acceptance_m5t_live.py 가 source 해서 부른다).
 #
-#   bash scripts/acceptance/m5t_live.sh                  # 포트 8794 · 8795, 약 1~2분
+#   bash scripts/acceptance/m5t_live.sh                  # 포트 8794 · 8795, Docker 없이 약 5초
+#                                                        # (2026-11-26 Apple Silicon Mac, real 5.16)
 #   M5T_PORT=8796 M5T_PORT2=8797 bash scripts/acceptance/m5t_live.sh
 #   RCM_LIVE_PROD_CONFIG=<운영 server.toml 절대 경로> bash scripts/acceptance/m5t_live.sh
 #                                                        # 결정 352 줄도 돈다(없으면 UNKNOWN)

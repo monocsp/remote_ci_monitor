@@ -2,23 +2,25 @@
 
 - 날짜: 2026-11-26
 - 대상: `dev` 의 `e4b37c9e1bba8f6f6f39dd17fb1f2e879f74b6b4`. M5t-a 의 PR1~PR6 과 #274 가 머지된 뒤의 판이다.
-  실기 하네스는 PR #276 의 head `dd06ccd9106162362f298ac846a4a3aac85b3cc9` 를 썼다.
+  실기 하네스는 PR #276 의 head `dd06ccd9106162362f298ac846a4a3aac85b3cc9` 를 썼다. 그 뒤 `f9c6f77` 에서
+  하네스는 pipefail 아래의 세 줄(`head -1` → `sed -n 1p`)만 바뀌었고 판정 논리는 그대로였다.
 - 명세: `docs/m5t-workplan.md` §5 의 PR7 행, §7 의 실기 행 TR16 · TD24 · TD25 · TL12 · TN8, 결정 352. M5t-a 는
   명세 제목대로 머신 역할, 첫 실행 설정, 분배 전용 코디네이터, 환경 진단, 요청자 알림을 들인 작업이다.
 - 다시 돌리는 법: 2부는 워크트리에서 `bash scripts/acceptance/m5t_live.sh` 를 돌린다. 포트는 `M5T_PORT` ·
   `M5T_PORT2`, 시험 폴더는 `M5T_BASE`, 컨테이너 이미지는 `M5T_DOCKER_IMAGE` 로 바꾸고, 결정 352 줄은
-  `RCM_LIVE_PROD_CONFIG` 를 줄 때만 돈다. Docker 없이 5초쯤 걸린다. 1부는 스크립트가 없다 — 같은 지시를 새
+  `RCM_LIVE_PROD_CONFIG` 를 줄 때만 돈다. Docker 없이 5초쯤 걸린다(`time` 으로 잰 real 5.16초). 1부는 스크립트가 없다 — 같은 지시를 새
   격리 에이전트에게 다시 준다.
 
 이 보고서는 두 부분으로 나뉜다. 1부는 오너가 요구한 시험이다. 서로 모르는 격리 에이전트 둘이 README 만 읽고
 이 Mac 에 rcm 을 처음 설정했다. 둘 다 잡을 끝까지 돌렸고 더 나아가지 못하게 막힌 곳(BLOCKER)은 없었다.
 헷갈리거나 사소하게 걸린 곳은 여덟 건이고 OB1~OB8 로 적었다. 2부는 명세의 실기 행을 하네스와 실기 검증자
-둘로 확인했다. TR16 · TL12 · TD24 와 실패 경로는 통과했다. TD25 · TN8 · 결정 352 는 이번에 판정하지 못했고
-행마다 이유를 표에 적었다.
+둘로 확인했다. TR16 · TL12 와 실패 경로는 통과했다. TD24 는 서비스 파일 없는 시험 워커에서 사람용 표와
+`--json` 이 일치하는 것까지 확인했고, 명세 행이 말하는 실제 워커 서비스 환경은 재지 않았다. TD25 · TN8 · 결정
+352 는 이번에 판정하지 못했고 행마다 이유를 표에 적었다.
 
 시험은 모두 Apple Silicon Mac 한 대(macOS 27.2)에서 했다. 이 Mac 에는 운영 rcm 이 서비스로 돌며 포트 8787 을
-쓴다. 그래서 모든 시험은 그 옆에 따로 만든 시험 설치로 했다. 운영에 쓴 흔적은 없다. 도구가 운영 쪽 파일을
-읽은 곳은 1부 끝에 적었다.
+쓴다. 그래서 모든 시험은 그 옆에 따로 만든 시험 설치로 했다. 운영 쪽 파일을 시험 전후로 비교하지는
+않았다. 도구가 운영 쪽 파일을 읽은 곳은 1부 끝에 적었다.
 
 ## 1부 README 만으로 처음 설정
 
@@ -71,7 +73,7 @@ A 는 `--in 30s` 로 시작을 늦춘 잡 #3 도 돌렸고 결과는 같았다. 
 이와 따로 A 에서 훅 거절이 한 번 있었다. A 가 `cd … && rcm setup … ; echo` 꼴로 명령을 이어 붙였을 때다.
 문서에 적힌 줄을 그대로 치면 평범한 한 명령이라 훅을 통과한다.
 
-운영에 쓴 흔적은 없다. 도구가 운영 쪽을 읽은 곳은 셋이다. `rcm version` 은 클라이언트 캐시를, `rcm doctor` 는
+운영 쪽 파일을 시험 전후로 비교하지는 않았다. 도구가 운영 쪽을 읽은 곳은 셋이다. `rcm version` 은 클라이언트 캐시를, `rcm doctor` 는
 서비스 파일을 읽었다. `rcm setup` 은 worker.toml 이 있는지 봤다. 이 셋은 OB4, OB2, OB1 과 같은 곳이다.
 
 OB1~OB8 은 별도 PR `fix/setup-test-install-onboarding-findings` 로 고친다. 이 보고서를 쓰는 지금 그 PR 이
@@ -105,14 +107,16 @@ trap 이 그 라벨을 내린다. 운영 경로인 `~/.config/rcm`, `~/.local/sh
 |---|---|---|---|
 | TR16 | PASS | PASS | plist 를 `plutil -p` 로: Label 시험 라벨, ProgramArguments 는 워크트리 rcm serve --config <시험>/server.toml, HOME · 로그 · WorkingDirectory 모두 시험 폴더. server.toml: 시험 포트, bind 127.0.0.1, advertise false, data_dir 시험 폴더. launchd state running. rcm check ok 14~16행 · warn 1(public url) · FAIL 0. 끝난 뒤 `launchctl list \| grep m5t-live` 0, `~/Library/LaunchAgents` 에 m5t 파일 없음 |
 | TL12 | PASS | PASS | lanes = 0 서버(로컬 레인 없음)의 잡 #1: succeeded, exit 0, worker = ran_on = m5t-tl12-worker; `rcm wait` exit 0, 끝 줄 `#1 succeeded on m5t-tl12-worker · 0s` |
-| TD24 | PASS | PASS | doctor 사람용 표와 `--json` 을 손으로 행마다 대조 — 같은 판정, 측정 PATH `/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin` 양쪽, exit 0 양쪽. 검증자 2 메모: 시험 워커에 서비스 파일이 없어 「no service file found — measured with the default worker PATH」 — 명세 행의 「실제 워커 서비스 환경」 은 재지 않았다 |
+| TD24 | PASS(서비스 파일 없는 시험 워커) | PASS(서비스 파일 없는 시험 워커) | 서비스 파일 없는 시험 워커에서 표와 `--json` 일치. doctor 사람용 표와 `--json` 을 손으로 행마다 대조 — 같은 판정, 측정 PATH `/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin` 양쪽, exit 0 양쪽. 검증자 2 메모: 시험 워커에 서비스 파일이 없어 「no service file found — measured with the default worker PATH」 — 명세 행의 「실제 워커 서비스 환경」 은 재지 않았다 |
 | TD25 | UNKNOWN | UNKNOWN | 이 Mac 에 Docker 가 없다 |
 | TN8 | UNKNOWN | UNKNOWN | 잡 #2 succeeded, `rcm wait --notify` exit 0, `warning: --notify` 줄 없음, osascript 감싸기 로그 exit 0. 배너는 사람이 화면에서 봐야 한다 — 기계는 볼 수 없다 |
 | D352 | UNKNOWN | UNKNOWN | 하네스는 운영 설정 경로를 스스로 찾지 않고 `RCM_LIVE_PROD_CONFIG` 로만 받는다. 운영을 건드리지 않으려고 일부러 주지 않았다. 같은 규칙은 단위 시험(PR4)이 잠근다 |
 | 실패 경로 | — | PASS | 8798 을 `python3 -m http.server` 가 잡은 채 하네스 실행 → exit 2 `port 8798 is in use`, 시험 폴더를 만들지 않음, 라벨 없음, 남은 프로세스 없음 |
 
-TD24 는 두 검증자 모두 통과로 판정했다. 다만 검증자 2 의 메모대로 시험 워커에는 서비스 파일이 없었다. 그래서
-명세 행이 말하는 「실제 워커 서비스 환경」은 이번에 재지 않았다.
+TD24 의 PASS 는 서비스 파일 없는 시험 워커에서 표와 `--json` 이 일치한다는 뜻이다. 검증자 2 의 메모대로 시험
+워커에는 서비스 파일이 없었고 doctor 는 기본 워커 PATH 를 쟀다. 그래서 명세 행이 말하는 「실제 워커 서비스
+환경」은 이번에 재지 않았다. P3 뒤의 하네스는 이 구분을 판정 줄에 직접 적는다(`PASS (no service file —
+default worker PATH measured)`).
 
 검증자 1 은 하네스 스크립트를 읽고 운영에 닿을 수 있는 경로를 찾았다. 기본 경로, 비어 있는 변수가 진짜 경로로
 펼쳐지는 경우, 시험 라벨이 아닌 bootout, HOME 을 바꾸지 않은 rcm 호출을 봤고 그런 경로는 없다고 판정했다.
