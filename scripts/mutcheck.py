@@ -3922,7 +3922,7 @@ MUTANTS = (
         path="src/remote_ci_monitor/setup.py",
         old=(
             "        raws += [raw for raw in (sf.env.get(env_name), "
-            'sf.launch.get("data_dir")) if raw]\n'
+            'launch.get("data_dir")) if raw]\n'
         ),
         new="        raws += []\n",
         tests=("tests/test_setup.py::test_b10_m1_every_data_dir_a_unit_can_use_is_protected",),
@@ -3934,6 +3934,26 @@ MUTANTS = (
         old='    ("data_dirs", "data_dir"),\n',
         new="",
         tests=("tests/test_setup.py::test_b10_m1_every_data_dir_a_unit_can_use_is_protected",),
+    ),
+    Mutant(
+        # `bin/python` 의 심볼릭 링크를 따라간다 — `python -m` 유닛의 venv 를 놓친다(batch 10 M2)
+        name="setup-scan-python-symlink-followed",
+        path="src/remote_ci_monitor/setup.py",
+        old="    for exe in (Path(os.path.abspath(found)), Path(os.path.realpath(found))):\n",
+        new="    for exe in (Path(os.path.realpath(found)),):\n",
+        tests=(
+            "tests/test_setup.py::test_b10_m2_a_python_m_unit_names_the_venv_its_python_sits_in",
+        ),
+    ),
+    Mutant(
+        # `python -m remote_ci_monitor` 꼴을 rcm 의 하위 명령으로 풀지 않는다(batch 10 M2)
+        name="setup-scan-package-module-unread",
+        path="src/remote_ci_monitor/setup.py",
+        old="        if argv[1:3] == _PACKAGE_MODULE:\n",
+        new="        if False:\n",
+        tests=(
+            "tests/test_setup.py::test_b10_m2_a_python_m_unit_names_the_venv_its_python_sits_in",
+        ),
     ),
     Mutant(
         # 읽지 못한 rcm 같은 파일을 rcm 이 아닌 것으로 본다(결정 352, 닫는 쪽)

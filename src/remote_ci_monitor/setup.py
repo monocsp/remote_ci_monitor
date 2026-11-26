@@ -291,15 +291,40 @@ def _editable_checkout(venv: Path) -> Path | None:
 
 
 def _venv_of(program: str | None, env: Mapping[str, str]) -> Path | None:
-    """서비스가 실행하는 파일의 venv — 심볼릭 링크(`~/.local/bin/rcm`)를 푼 `…/bin/x` 의 위에
-    `pyvenv.cfg` 가 있으면 그 폴더. 이름만 적혀 있으면 서비스의 PATH 로 찾는다."""
+    """서비스가 실행하는 파일의 venv. 먼저 링크를 따라가지 않은 `…/bin/x` 의 위를 본다 —
+    `<venv>/bin/python -m remote_ci_monitor` 의 `bin/python` 은 시스템 파이썬으로 가는 링크라
+    따라가면 venv 를 놓친다(batch 10 M2). 거기에 `pyvenv.cfg` 가 없으면 링크를 푼 자리를 본다
+    (`~/.local/bin/rcm` → `<venv>/bin/rcm`). 이름만 적혀 있으면 서비스의 PATH 로 찾는다."""
     if not program:
         return None
     found = program if os.path.isabs(program) else shutil.which(program, path=env.get("PATH"))
     if not found:
         return None
-    venv = Path(os.path.realpath(found)).parent.parent
-    return venv if (venv / "pyvenv.cfg").is_file() else None
+    for exe in (Path(os.path.abspath(found)), Path(os.path.realpath(found))):
+        venv = exe.parent.parent
+        if (venv / "pyvenv.cfg").is_file():
+            return real_path(venv)
+    return None
+
+
+#: 띄우는 명령이 `python -m remote_ci_monitor` 인가 — 패키지 이름만 준 꼴(batch 10 M2)
+_PACKAGE_MODULE = ["-m", "remote_ci_monitor"]
+
+
+def _launch(sf: Any) -> dict[str, Any] | None:
+    """서비스가 rcm 을 띄우는 인자 — doctor 가 푼 것. doctor 가 풀지 않는
+    `python -m remote_ci_monitor …` 는 `.cli` 꼴로 바꿔 같은 파서로 푼다."""
+    from remote_ci_monitor import doctor
+
+    if sf.launch is not None:
+        return dict(sf.launch)
+    argv = list(sf.argv)
+    if sf.program and os.path.basename(sf.program).startswith("python"):
+        if argv[1:3] == _PACKAGE_MODULE:
+            return doctor.rcm_launch(
+                sf.program, [argv[0], "-m", "remote_ci_monitor.cli", *argv[3:]]
+            )
+    return None
 
 
 def _service_path(raw: str, *, home: str | None, workdir: str) -> Path | None:
@@ -339,7 +364,8 @@ def _rcm_service(path: Path, *, home: Path, root: bool) -> core.RcmService | Non
     def problem(why: str) -> core.RcmService:
         return core.RcmService(name, file, names, data=data, problem=why)
 
-    if sf.launch is None:
+    launch = _launch(sf)
+    if launch is None:
         if not doctor.looks_like_rcm(sf):
             return None
         return problem("setup cannot tell which rcm command it starts")
@@ -354,8 +380,8 @@ def _rcm_service(path: Path, *, home: Path, root: bool) -> core.RcmService | Non
         workdir = "/" if path.suffix == ".plist" or root else (service_home or "/")
     venv = _venv_of(sf.program, sf.env)
     checkout = _editable_checkout(venv) if venv is not None else None
-    command = sf.launch.get("command")
-    raw_config = sf.launch.get("config") or sf.env.get("RCM_CONFIG")
+    command = launch.get("command")
+    raw_config = launch.get("config") or sf.env.get("RCM_CONFIG")
     config = None
     if raw_config:
         config = _service_path(str(raw_config), home=service_home, workdir=workdir)
@@ -378,7 +404,7 @@ def _rcm_service(path: Path, *, home: Path, root: bool) -> core.RcmService | Non
         # 설정의 data_dir(없으면 기본값), env, 유닛의 `--data-dir` — 우선순위를 흉내 내지 않고
         # 모두 지킨다(batch 10 M1). 이긴 쪽만 고르면 진 쪽의 진짜 DB 를 놓친다
         raws = [declared if isinstance(declared, str) else default]
-        raws += [raw for raw in (sf.env.get(env_name), sf.launch.get("data_dir")) if raw]
+        raws += [raw for raw in (sf.env.get(env_name), launch.get("data_dir")) if raw]
         dirs: list[Path] = []
         for raw_data in raws:
             resolved = _service_path(str(raw_data), home=service_home, workdir=workdir)
