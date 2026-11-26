@@ -56,6 +56,9 @@ SSE_IDLE_TIMEOUT_SECONDS = 30.0
 SSE_TICK_SECONDS = 5.0
 REFETCH_MIN_SECONDS = 1.0
 SSE_WAKE_KINDS = frozenset({"hello", "job_changed", "job_finished", "marker", "reset", "lag"})
+#: 워커 클라이언트 요청 하나의 소켓 시한(`WorkerClient` 의 기본값). 워커의 등록 대기가 빚진
+#: finish 를 기다리는 상한이 이 값으로 정해진다(remote_worker `OWED_FINISH_WAIT_SECONDS`)
+WORKER_REQUEST_TIMEOUT_SECONDS = 15.0
 
 
 @dataclass(frozen=True)
@@ -75,13 +78,23 @@ class ClientError(Exception):
         self.body = body or {}
 
 
+def _answer(status: int, raw: bytes) -> Any:
+    """2xx 본문을 JSON 으로 읽는다. JSON 이 아니면(앞의 프록시 · 잘린 응답) 서버는 답했지만
+    알아들을 수 없다 — 502 `ClientError` 로 바꿔 부르는 쪽이 다시 해 보게 한다(M5t-b P6-1 G4).
+    `json.loads` 의 예외가 그대로 나가면 보내는 스레드가 죽는다."""
+    try:
+        return json.loads(raw)  # mutcheck: worker-2xx-not-json-escapes
+    except ValueError as e:
+        raise ClientError(502, f"HTTP {status} with an answer that is not JSON") from e
+
+
 class WorkerClient:
     """원격 워커가 서버에 말하는 쪽(M5b-3) — `/worker/*` 만. 재시도는 없다(정책은 워커 루프가).
 
     `Client` 와 같은 `_request` 규칙: Bearer 토큰 · JSON 오류 본문의 `error` → `ClientError`.
     """
 
-    def __init__(self, server: str, token: str, *, timeout: float = 15.0):
+    def __init__(self, server: str, token: str, *, timeout: float = WORKER_REQUEST_TIMEOUT_SECONDS):
         self._inner = Client(server, token, timeout=timeout)
         self.server = self._inner.server
         self.token = token
@@ -94,6 +107,7 @@ class WorkerClient:
         # 안 주면 이 클라이언트가 센다 — 호출이 차례로 끝나므로 마지막 claim 번호가 끝난 claim 이다
         self._claim_seq = 0
         self._hb_seq = 0
+        self._log_offsets: dict[int, int] = {}  # 잡마다 서버가 받은 로그 오프셋(결정 329)
 
     def _session_headers(self) -> dict[str, str] | None:
         return {"X-RCM-Worker-Session": self.session_id} if self.session_id else None
@@ -104,7 +118,7 @@ class WorkerClient:
         status, _, raw = self._inner._request("POST", path, json_body=body, timeout=timeout)
         if status == 204 or not raw:
             return None
-        return json.loads(raw)
+        return _answer(status, raw)
 
     def register(
         self,
@@ -223,7 +237,16 @@ class WorkerClient:
     def phase(self, job_id: int, phase: str) -> dict[str, Any]:
         return self._post(f"/worker/jobs/{job_id}/phase", {"phase": phase}) or {}
 
-    def log(self, job_id: int, data: bytes) -> dict[str, Any]:
+    def log(self, job_id: int, data: bytes, offset: int | None = None) -> dict[str, Any]:
+        """로그 조각 하나. `offset` 은 조각의 첫 바이트가 그 잡 스트림의 몇째 바이트인가(M5t-b
+        결정 329) — 세션이 있으면 서버가 요구한다. 빈 본문은 오프셋 질의다(응답의 `offset`).
+        주지 않으면 이 클라이언트가 그 잡에서 받은 마지막 `offset` 에 잇는다(덧붙임과 같은 뜻 —
+        `RemoteWorker` 는 늘 준다)."""
+        headers = dict(self._session_headers() or {})
+        if offset is None and self.session_id is not None:
+            offset = self._log_offsets.get(job_id, 0)
+        if offset is not None:
+            headers["X-RCM-Log-Offset"] = str(int(offset))
         status, _, raw = self._inner._request(
             "POST",
             f"/worker/jobs/{job_id}/log",
@@ -231,9 +254,13 @@ class WorkerClient:
             content_length=len(data),
             content_type="application/octet-stream",
             timeout=max(self.timeout, 60.0),
-            extra_headers=self._session_headers(),
+            extra_headers=headers or None,
         )
-        return json.loads(raw) if raw else {}
+        out = _answer(status, raw) if raw else {}
+        got = out.get("offset") if isinstance(out, dict) else None
+        if isinstance(got, int) and not isinstance(got, bool):
+            self._log_offsets[job_id] = got
+        return out
 
     def finish(
         self,
@@ -247,8 +274,12 @@ class WorkerClient:
         summary_code: str | None = None,
         summary_args: dict[str, Any] | None = None,
         group_gone: bool | None = None,
+        log_bytes: int | None = None,
     ) -> dict[str, Any]:
         body: dict[str, Any] = {"outcome": outcome, "exit_code": exit_code}
+        if log_bytes is not None:
+            # 그 잡이 낸 스트림 전체 바이트(M5t-b §4.6) — 서버가 `log_complete` 를 정한다
+            body["log_bytes"] = log_bytes
         if group_gone is not None:
             # 그 잡의 프로세스 그룹이 사라졌다는 확인(M5t-b 결정 330) — 모르면 싣지 않는다
             body["group_gone"] = group_gone
@@ -274,7 +305,7 @@ class WorkerClient:
         """
         size = tar_path.stat().st_size
         with tar_path.open("rb") as fh:
-            _status, _headers, raw = self._inner._request(
+            status, _headers, raw = self._inner._request(
                 "PUT",
                 f"/worker/jobs/{job_id}/artifacts",
                 data=fh,
@@ -283,14 +314,14 @@ class WorkerClient:
                 timeout=max(self.timeout, 300.0),
                 extra_headers=self._session_headers(),
             )
-        return json.loads(raw) if raw else {}
+        return _answer(status, raw) if raw else {}
 
     def bundle_status(self, job_id: int) -> dict[str, Any]:
         """`GET /worker/jobs/{id}/artifacts` — 모호한 finish 응답을 푼다(M5e §6)."""
-        _status, _headers, raw = self._inner._request(
+        status, _headers, raw = self._inner._request(
             "GET", f"/worker/jobs/{job_id}/artifacts", extra_headers=self._session_headers()
         )
-        return json.loads(raw) if raw else {}
+        return _answer(status, raw) if raw else {}
 
     def health(self) -> dict[str, Any]:
         return self._inner.health()

@@ -211,7 +211,10 @@ def test_p62_3_a_narrow_confirm_that_cannot_be_sent_is_retried_and_keeps_the_job
     `worker_unreachable` 로 닫히며 표식 잡의 그룹은 홀드된다."""
     import types
 
-    monkeypatch.setattr(rw, "REPORT_RETRIES", (0.0, 0.0, 0.0))
+    # M5t-b PR2: 보고는 잡마다 보내는 스레드의 백오프로 다시 보내고 멈추는 중에는 정한 창까지 한다
+    monkeypatch.setattr(rw, "BACKOFF_START_SECONDS", 0.01)
+    monkeypatch.setattr(rw, "BACKOFF_MAX_SECONDS", 0.01)
+    monkeypatch.setattr(rw, "STOP_REPORT_SECONDS", 0.3)
     srv.registered("build-02")
     jid = running(srv, preset="ship")
     old = srv.new_process("build-02")
@@ -256,7 +259,9 @@ def test_p63_1_an_unsent_finish_while_stopping_keeps_the_job_folder_and_parks_no
     보낸다. 지우면 확인이 사라지고 표식 잡의 그룹은 G 뒤 홀드된다."""
     import types
 
-    monkeypatch.setattr(rw, "REPORT_RETRIES", (0.0, 0.0, 0.0))
+    monkeypatch.setattr(rw, "BACKOFF_START_SECONDS", 0.01)
+    monkeypatch.setattr(rw, "BACKOFF_MAX_SECONDS", 0.01)
+    monkeypatch.setattr(rw, "STOP_REPORT_SECONDS", 0.3)
     srv.registered("build-02")
     jid = running(srv, preset="ship")
     url = f"http://127.0.0.1:{srv.port}"
@@ -283,7 +288,7 @@ def test_p63_1_an_unsent_finish_while_stopping_keeps_the_job_folder_and_parks_no
     w._finish(jid, SUCCEEDED, 0, "done", observer, group_gone=True)
     assert not w.fenced.is_set()
     assert sent and set(sent) == {SUCCEEDED}  # 결과를 보내려 했고 좁은 확인으로 바꾸지 않았다
-    assert w._unreported == {}  # 멈추는 프로세스에는 미룰 곳이 없다
+    assert w._senders == {}  # 멈추는 프로세스는 메모리에 남기지 않는다 — 큐는 디스크에 있다
     assert jid not in w.running
     assert (folder / "claim.json").is_file()  # 보내지 못했다 — 다음 프로세스가 판정한다
     assert job_of(srv, jid).state == RUNNING
@@ -981,6 +986,31 @@ def test_rl44_a_late_finish_with_group_gone_releases_the_hold(srv):
         json_body={"outcome": "lost", "exit_code": None, "group_gone": True},
     )
     assert status == 409 and body["hold_released"] is True and body["state"] == LOST
+    assert hold_rows(srv)[0]["release_kind"] == "worker"
+
+
+def test_rl44_a_b_late_finish_after_an_unconfirmed_cancel_releases_the_hold_only_with_group_gone(
+    srv,
+):
+    """확인 없이 `cancelled` 로 닫힌 표식 잡(취소가 워커에 닿지 않았다)의 홀드도 같은 세션의 늦은
+    finish 가 `group_gone: true` 일 때만 푼다(§4.12 표의 1). `lost` 로 닫힌 잡은 M5t-b PR2 부터
+    `late_result` 트랜잭션(`record_late_result`)에서 풀므로 rl44_a 는 이 갈래에 닿지 않는다 — 이
+    시험이 `lost` 아닌 닫힘의 갈래를 본다."""
+    srv.registered("build-02")
+    jid = running(srv, preset="ship")
+    assert srv.store.finish(
+        jid, "cancelled", now=srv.clock(), summary="x", hold_cause="cancel_unconfirmed"
+    )
+    status, body = srv.finish("build-02", jid, "lost")  # group_gone 없음 — 그대로
+    assert status == 409 and body["code"] == "job_closed" and body["hold_released"] is False
+    assert hold_rows(srv)[0]["release_kind"] is None
+    status, body = srv.req(
+        "POST",
+        f"/worker/jobs/{jid}/finish",
+        token="build-02",
+        json_body={"outcome": "lost", "exit_code": None, "group_gone": True},
+    )
+    assert status == 409 and body["hold_released"] is True and body["state"] == "cancelled"
     assert hold_rows(srv)[0]["release_kind"] == "worker"
 
 
@@ -1721,7 +1751,7 @@ class _Runs(_Who):
     def phase(self, job_id: int, phase: str) -> dict:
         return {}
 
-    def log(self, job_id: int, chunk: bytes) -> dict:
+    def log(self, job_id: int, chunk: bytes, offset: int | None = None) -> dict:
         return {}
 
     def finish(self, job_id: int, outcome: str, rc: Any, summary: Any, **extra: Any) -> dict:
@@ -2494,5 +2524,6 @@ def test_rl6_a_an_unbroken_remote_job_keeps_its_exit_code_and_the_wait_json_keys
     failing = outcome in ("failed", "timed_out")
     base = BASE_TERMINAL_DOC_KEYS | (BASE_FAILURE_KEYS if failing else frozenset())
     assert base - keys == set()  # 기존 키 불변
-    assert keys - base == {"hold"}  # 더한 키만 있다
+    # 더한 키만 있다 — PR2 가 `late_result` · `log_complete` 를 더했다(M5t-b §4.6)
+    assert keys - base == {"hold", "late_result", "log_complete"}
     assert got["hold"] is None

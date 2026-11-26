@@ -224,9 +224,11 @@ from remote_ci_monitor.release_state import (
 )
 from remote_ci_monitor.release_verify import run_verify
 from remote_ci_monitor.remote_workers import (
+    LOG_OFFSET_HEADER,
     MAX_WORKER_LOG_BODY,
     SESSION_HEADER,
     RemoteWorkersMixin,
+    log_offset_arg,
 )
 from remote_ci_monitor.shelf_copier import ShelfCopier
 from remote_ci_monitor.shelf_server import ShelfAppMixin, ShelfHandlerMixin, is_shelf_path
@@ -667,6 +669,8 @@ class App(RemoteWorkersMixin, CapabilitiesMixin, ShelfAppMixin):
         else:
             step("client wheel", "unavailable")
         lost, cancelled = self.store.recover_on_start(self.now_fn())
+        # 원격 잡 로그의 커밋된 길이와 파일을 맞춘다(M5t-b §4.5 · 결정 338) — 레인 · 워커 전
+        self.check_logs_on_start()
         expired, promoted = self.store.schedule_recovered
         if lost or cancelled:
             self.log(f"recovered on start: lost={lost} cancelled_uploads={cancelled}")
@@ -3865,17 +3869,28 @@ class App(RemoteWorkersMixin, CapabilitiesMixin, ShelfAppMixin):
         )
         tails: dict[int, list[str]] = {}
         if queue and token is not None:
-            for row in queue:
-                if row.job.state in BUSY_STATES and self.can_read_log(row.job, token):
-                    t = tail_lines(self.log_path(row.job.id), DEFAULT_TAIL)
-                    if t is not None:
-                        tails[row.job.id] = t
+            readable = [
+                row.job.id
+                for row in queue
+                if row.job.state in BUSY_STATES and self.can_read_log(row.job, token)
+            ]
+            # 원격 잡은 커밋된 길이까지만(M5t-b 결정 339-f) — 로컬 · 레거시는 파일 길이까지
+            committed = self.store.log_file_bytes_for(readable) if readable else {}
+            for job_id in readable:
+                t = tail_lines(self.log_path(job_id), DEFAULT_TAIL, end=committed.get(job_id))
+                if t is not None:
+                    tails[job_id] = t
         doc = status_json(model, log_tails=tails)
         self._inject_artifacts(doc, model)
+        recent_ids = [
+            int(row["id"]) for pool in doc.get("pools", []) for row in pool.get("recent") or []
+        ]
+        complete = self.store.log_complete_for(recent_ids) if recent_ids else {}
         for pool in doc.get("pools", []):
             # 최근 행의 표식(M5s) — 순수 층은 마커를 모른다. 큐 행은 진행(마커)에서 이미 왔다
             for row in pool.get("recent") or []:
                 row["action"] = action_json(snap.recent_actions.get(row.get("id")))
+                row["log_complete"] = complete.get(int(row["id"]))  # M5t-b §4.6
             # 예약 행(M5s 결정 233) — 반복의 다음 시도가 사슬의 표식을 이어받는다
             for row in pool.get("scheduled") or []:
                 scheduled_action(row, snap.chain_actions.get(row.get("id")))
@@ -3930,7 +3945,8 @@ class App(RemoteWorkersMixin, CapabilitiesMixin, ShelfAppMixin):
             return self._with_hold(self._terminal_view(job, host), job.id)
         log_tail = None
         if tail > 0 and row.job.state in BUSY_STATES and self.can_read_log(row.job, token):
-            log_tail = tail_lines(self.log_path(job_id), min(tail, MAX_TAIL))
+            end = self.store.log_file_bytes_for((job_id,)).get(job_id)  # 결정 339-f
+            log_tail = tail_lines(self.log_path(job_id), min(tail, MAX_TAIL), end=end)
         doc = queue_row_json(
             row, base_url=self.base_url(host), log_tail=log_tail, local=self.local_machine()
         )
@@ -3948,7 +3964,10 @@ class App(RemoteWorkersMixin, CapabilitiesMixin, ShelfAppMixin):
             base_url=self.base_url(host),
             action=self._last_action(job.id),
             local=self.local_machine(),
+            log_complete=self.store.log_complete_for((job.id,)).get(job.id),
         )
+        # 유예 · 취소로 닫힌 원격 잡에 같은 세션의 결과가 늦게 왔으면 그 내용(M5t-b §4.6). 키 추가만
+        doc["late_result"] = self.store.late_result_of(job.id)
         step_names = self._with_step_timeline(self._with_artifacts(doc, job, host), job)
         return self._with_failures(doc, job, step_names=step_names)
 
@@ -5349,10 +5368,16 @@ class App(RemoteWorkersMixin, CapabilitiesMixin, ShelfAppMixin):
         if not self.can_read_log(job, token):
             raise ApiError(403, "not your job")
         path = self.log_path(job_id)
+        want = 4 * 1024 * 1024
+        # 원격 잡은 커밋된 길이까지만 읽는다(M5t-b 결정 339-f). 쓰고 커밋하기 전의 바이트와 커밋이
+        # 실패해 되자를 바이트를 보이지 않는다. 그 길이까지는 바뀌지 않는다(쓰기는 늘 그 뒤)
+        committed = self.store.log_file_bytes_for((job_id,)).get(job_id)
+        if committed is not None:  # mutcheck: log-read-past-committed
+            want = max(0, min(want, committed - max(0, offset)))
         try:
             with path.open("rb") as fh:
                 fh.seek(max(0, offset))
-                data = fh.read(4 * 1024 * 1024)
+                data = fh.read(want)
                 next_offset = fh.tell()
         except FileNotFoundError:
             if not job.is_terminal:
@@ -6440,6 +6465,8 @@ class Handler(ShelfHandlerMixin, BaseHTTPRequestHandler):
             return
         self._only(method, "POST")
         if what == "log":
+            # 오프셋 헤더(M5t-b §4.5 step 1) — 모양이 틀리면 본문을 읽기 전에 400
+            offset = log_offset_arg(self.headers.get(LOG_OFFSET_HEADER))
             ctype = (self.headers.get("Content-Type") or "").split(";")[0].strip().lower()
             if ctype != "application/octet-stream":
                 raise ApiError(415, "log body must be application/octet-stream")
@@ -6453,7 +6480,7 @@ class Handler(ShelfHandlerMixin, BaseHTTPRequestHandler):
                 self.connection.settimeout(REQUEST_TIMEOUT)
             if len(data) < n:
                 raise ApiError(400, "log body interrupted")
-            self._send_json(200, self.app.worker_log(t, job_id, data, session))
+            self._send_json(200, self.app.worker_log(t, job_id, data, session, offset))
             return
         body = self._json_body()
         if what == "phase":

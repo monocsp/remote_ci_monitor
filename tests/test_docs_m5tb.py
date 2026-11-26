@@ -274,6 +274,55 @@ def test_gap5_operating_says_a_worker_whose_job_holds_a_group_is_not_forgotten()
     assert "confirm the job's processes are gone and release the hold" in text
 
 
+def test_rl19_the_configuration_says_how_the_report_queue_retries_and_gives_up():
+    """M5t-b PR2(§4.5 · 결정 264 · 324 · 337): 300초 · 24시간 · 등록 대기 줄이 코드와 같다."""
+    from remote_ci_monitor import remote_worker as rw
+
+    body = flat(section(CONFIGURATION, "The worker's log and its report queue"))
+    assert rw.FINISH_HOLD_SECONDS == 300 and rw.DEAD_SESSION_WAIT_SECONDS == 300
+    assert rw.RETRANSMIT_SECONDS == 24 * 3600
+    assert "got HTTP 5xx for 300 s | sends the finish first" in body
+    assert "24 hours after the job ended" in body
+    assert "`#N report: finish not delivered in 24h — dropping the report`" in body
+    assert "`X-RCM-Log-Offset`" in body and "`409 log_gap`" in body
+    assert (
+        "dead session <id> queue not delivered after 300s of server errors — registering;"
+        " job #N will close as restarted-without-job"
+    ) in body
+    assert (
+        "`late_result` (`outcome`, `exit_code`, `finished_at`, `received_at`, `log_complete`)"
+        in (body)
+    )
+
+
+def test_p3r1_the_report_queue_section_says_long_lines_split_secrets_and_unreadable_spools():
+    """P3 1라운드: 긴 줄은 한 조각(4 MiB 안), 조각에 걸친 비밀도 가림, 못 읽는 스풀의 한 줄."""
+    from remote_ci_monitor import remote_worker as rw
+
+    body = flat(section(CONFIGURATION, "The worker's log and its report queue"))
+    assert rw.LOG_PIECE_MAX_BYTES == 4 * 1024 * 1024
+    assert "a longer line goes whole in one piece of up to 4 MiB" in body
+    assert "also a value split across two pieces" in body
+    assert "`#N report: cannot read the spooled log — retrying`" in body
+
+
+def test_p3r2_the_report_queue_section_says_when_a_lane_claims_and_the_unreadable_limit():
+    """P3 2라운드: 못 읽는 스풀의 300초 규칙과 그 줄, 드레인 한도 · 취소 · 멈춘 보내기 뒤의 레인."""
+    from remote_ci_monitor import remote_worker as rw
+
+    body = flat(section(CONFIGURATION, "The worker's log and its report queue"))
+    assert rw.DRAIN_REPORT_SECONDS == 60 and rw.FINISH_HOLD_SECONDS == 300
+    assert (
+        "300 s after the job ended it sends the finish first and the job's `log_complete` is"
+        " `false` (`#N report: spooled log still unreadable 300s after the job ended — sending"
+        " the finish first, the log stays incomplete`)"
+    ) in body
+    assert "or is shorter than what was written" in body
+    assert "waits at most 60 s for a job's queue, then restarts anyway" in body
+    assert "If the drain is cancelled first, the lane still waits for that queue" in body
+    assert "the job stays listed and its lane takes no job until the worker restarts" in body
+
+
 def test_p63_2_the_irreversible_section_says_its_job_shows_no_retry_limit():
     """# P6-3 #2 표식 잡으로 claim 된 잡은 반복하지 않는다 — 잡 문서의
     `max_attempts` 가 null 이다."""
@@ -574,3 +623,150 @@ def test_p6_2_operating_quotes_the_late_cancel_line_and_the_still_progress_bar()
     assert f"`#812 {unreachable_cancel_text()}`" in body
     assert "never `overdue` or `stuck` in that time, nor `quiet`" in body
     assert "no time scale (`progress —`)" in body
+
+
+PR2_LINK = "([#286](https://github.com/monocsp/remote_ci_monitor/pull/286))"
+PR2_ENTRIES = (
+    "**A remote job's log arrives whole, once, after any drop.**",
+    "**A snapshot download cut off by a lost connection closes the job `lost`**",
+    "**An artifact bundle is `ready` only when the server has it.**",
+    "**`log_complete` and `late_result`.**",
+)
+
+
+def test_every_pr2_changelog_entry_links_its_pr():
+    """P3 1라운드 MED: M5t-b PR2 의 `[Unreleased]` 항목마다 그 PR 링크가 있다(PR1 의 #284 꼴)."""
+    entries = re.split(r"\n(?=- )", _unreleased())
+    for head in PR2_ENTRIES:
+        found = [e for e in entries if e.startswith(f"- {head}")]
+        assert len(found) == 1, head
+        assert PR2_LINK in flat(found[0]), head
+
+
+def test_p6_1_the_report_queue_section_says_the_masking_limit_and_the_new_lines():
+    """# P6-1 G1 · G2 · G3 · G4 · G5 · G6 못 읽는 outbox 의 줄과 격리 폴더, 저장 실패의 줄, 없는
+    번들 · 예상 못 한 오류, 4 MiB 넘는 한 줄에 걸친 비밀의 앞부분, 늦은 결과의 워커 줄."""
+    from remote_ci_monitor import remote_worker as rw
+    from remote_ci_monitor import runner
+
+    body = flat(section(CONFIGURATION, "The worker's log and its report queue"))
+    assert rw.LOG_PIECE_MAX_BYTES == 4 * 1024 * 1024 and runner.MAX_LINE_BYTES == 64 * 1024
+    assert (
+        "The worker cuts a line only when it is longer than 4 MiB; a job's own output never gets"
+        " there, because the runner breaks output without a line end every 64 KiB. If a secret"
+        " straddles such a cut, its first part stays in `log.txt`."
+    ) in body
+    assert (
+        "`dead session <id> job #N: outbox unreadable (<why>) — the job will close as"
+        " restarted-without-job; spool kept in <folder>`"
+    ) in body
+    assert "`<data_dir>/worker-sessions/unreadable-<session>-<id>/`" in body
+    assert (
+        "`#N report: cannot save outbox.json (<error>) — the report is only in memory; a restart"
+        " before it is sent loses it`"
+    ) in body
+    assert (
+        "`#N artifacts: cannot read the bundle (<error>) — the finish reports upload_failed`"
+    ) in body
+    assert "`#N <step>: unexpected <Error> — retrying`" in body
+    assert (
+        "`#N report: still failing with an unexpected error 300s after the job ended — sending"
+        " the finish first`"
+    ) in body
+    assert "A resent copy of the finish that closed the job is not a late result" in body
+    assert "`#N late result recorded`" in body and "`#N hold released`" in body
+    assert "`#N late result not recorded — the server keeps the result it already has`" in body
+
+
+def test_b5_the_report_queue_section_says_ok_at_local_errors_and_a_2xx_that_is_not_json():
+    """# batch-5 #1 · #2 · #4 · #5 `ok_at.json` 은 fsync 하지 않는다, 폴더 fsync 실패의 줄, JSON 이
+    아닌 2xx 에 register 는 종료 2, 죽은 세션 큐의 저장 실패 줄. #2 의 등록 대기 문장은 batch-7 에서
+    바뀌었다(`test_b7_...` 이 본다)."""
+    body = flat(section(CONFIGURATION, "The worker's log and its report queue"))
+    assert "`ok_at.json`" in body and "is replaced the same way but not synced" in body
+    assert (
+        "`session folder: cannot sync a folder to disk (<error>) — an OS crash may lose the last"
+        " saved report`"
+    ) in body
+    assert (
+        "The report queue, claim and heartbeat try again; register stops the worker with exit 2,"
+        " and the service manager starts it again."
+    ) in body
+    assert "the worker sends the same item again" not in body
+    assert "time the spooled log cannot be read does" not in body
+    assert "for a queue a stopped process left, the line starts with `dead session <id>`" in body
+
+
+def test_b6_the_report_queue_section_says_a_stuck_phase_does_not_hold_the_finish():
+    """# batch-6 #1 끝난 잡의 밀린 phase 는 finish 를 막지 않는다 — 5xx · 예상 못 한 예외면 300초,
+    연결 실패면 24시간 뒤 finish 가 가고 phase 는 버린다. 죽은 세션 큐도 그 큐를 기다린다."""
+    from remote_ci_monitor import remote_worker as rw
+
+    body = flat(section(CONFIGURATION, "The worker's log and its report queue"))
+    hold = rw.FINISH_HOLD_SECONDS
+    assert (
+        f"`#N report: phase still not delivered {hold}s after the job ended — sending the finish"
+        " first, the phase is dropped`"
+    ) in body
+    assert "`#N report: phase not delivered in 24h — sending the finish without it`" in body
+    assert "When only the log or the bundle of a job that ended fails that way" not in body
+
+
+def test_b7_the_report_queue_section_says_local_errors_count_and_what_a_finish_leaves_behind():
+    """# batch-7 #1 · #2 · #3 죽은 세션 큐의 로컬 오류는 서버 오류와 같은 300초 상한 안에서 다시
+    해 보고, 섞였으면 줄이 그렇게 말한다. 연결 실패 시간은 세지 않는다. 끝난 잡의 finish 는 그
+    전에 한 번은 가 본다. finish 가 먼저 가며 남긴 것을 한 줄로 말하고, phase 행은 phase 만
+    남지 않은 경우도 말한다."""
+    from remote_ci_monitor import remote_worker as rw
+
+    body = flat(section(CONFIGURATION, "The worker's log and its report queue"))
+    hold = rw.FINISH_HOLD_SECONDS
+    assert (
+        "`dead session <id> queue not delivered after 300s of server errors or local errors —"
+        " registering; job #N will close as restarted-without-job`"
+    ) in body
+    assert "Time without a connection does not count toward the 300 s." in body
+    assert "A local error (the spooled log cannot be read, an unexpected error) counts" in body
+    # batch-9 #1 로그 · 번들 요청에 묶인 큐의 finish 는 가 보지 못한다 — 「한 번은」은 거짓이다
+    assert "tried at least once" not in body
+    assert "stopped on a local error" not in body
+    assert "Only time the server answers counts toward the 300 s" not in body
+    assert (
+        f"`#N report: the finish goes first {hold}s after the job ended; not sent: <what is left>`"
+    ) in body
+    assert "the job ended and only its phase is left" not in body
+    assert (
+        "| the job ended and its phase fails with HTTP 5xx or an unexpected error for 300 s |"
+    ) in body
+
+
+def test_b8_the_report_queue_section_gives_the_worst_wait_for_an_owed_finish():
+    """# batch-8 #1 등록이 빚진 finish 를 기다리는 최악의 시간을 숫자로 적는다 — 300초 상한 뒤
+    60초(백오프 한 번 · 요청 두 번). 벽시계가 뒤로 가 끝난 시각이 미래인 잡은 기다리지 않는다.
+    batch-9 #1 · #3: 그 60초 안에 finish 를 못 해 보는 갈래와 단조 시계를 적는다."""
+    from remote_ci_monitor import remote_worker as rw
+    from remote_ci_monitor.client import WORKER_REQUEST_TIMEOUT_SECONDS
+
+    body = flat(section(CONFIGURATION, "The worker's log and its report queue"))
+    extra = int(rw.OWED_FINISH_WAIT_SECONDS)
+    backoff = int(rw.BACKOFF_MAX_SECONDS)
+    req = int(WORKER_REQUEST_TIMEOUT_SECONDS)
+    assert (
+        f"registration waits for that finish no more than {extra} s past its 300 s"
+        f" (one {backoff} s backoff and two {req} s requests)"
+    ) in body
+    # batch-9 #1 그 60초 안에 finish 를 못 해 보는 갈래도 적는다 — 보내는 스레드가 로그 POST
+    # (시한 60초) · 번들 PUT(시한 300초)에 묶여 있으면 등록은 기다리지 않는다
+    assert (
+        "when the queue is held by a log request (up to 60 s) or a bundle upload (up to 300 s),"
+        " the finish is not tried and the job closes as restarted-without-job"
+    ) in body
+    assert "registration waits for that try at most" not in body
+    # batch-9 #3 두 대기는 단조 시계로 잰다(§4.1.3 「D 큐 등록 대기(3판)」)
+    assert (
+        "Registration counts both waits on the monotonic clock, so setting the wall clock forward"
+        " or back does not shorten or stall them"
+    ) in body
+    assert "A job whose end time is ahead of the clock (the clock went back) is not waited for" in (
+        body
+    )
