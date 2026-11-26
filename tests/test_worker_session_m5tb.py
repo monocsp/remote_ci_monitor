@@ -1725,6 +1725,52 @@ def test_rl44_c_a_finish_racing_the_janitor_close_gets_job_closed_and_releases(s
     assert h["released_at"] is not None and h["release_kind"] == "worker"
 
 
+def test_rl44_c_a_preflight_finish_racing_a_cancel_and_then_the_janitor_gets_job_closed(
+    srv, monkeypatch
+):
+    """두 번째 경합 닫기 자리(P3 2라운드 LOW). 시작 전 실패의 finish(`only_from=running`)를 취소가
+    이겨 재시도(`only_from=cancelling`)하는데, 그 사이 janitor 가 잡을 닫았다. 그 응답도 늦은
+    보고와 같다 — 409 `code: job_closed`, `group_gone: true` 면 방금 걸린 홀드를 푼다."""
+    srv.registered("build-02")
+    jid = running(srv, preset="ship")
+    real_finish = srv.store.finish
+    calls: list[Any] = []
+
+    def racing(job_id: int, *args: Any, **kw: Any):
+        calls.append(kw.get("only_from"))
+        if len(calls) == 1:  # 취소가 끼어든다 — 첫 닫기는 거절된다
+            assert srv.store.request_cancel(job_id, "alice-laptop", srv.clock(), 10) == CANCELLING
+        elif len(calls) == 2:  # 재시도 직전에 janitor 가 닫는다
+            assert real_finish(
+                job_id,
+                LOST,
+                now=srv.clock(),
+                summary="x",
+                only_from=(CANCELLING,),
+                hold_cause="worker_unreachable",
+            )
+        return real_finish(job_id, *args, **kw)
+
+    monkeypatch.setattr(srv.store, "finish", racing)
+    status, body = srv.req(
+        "POST",
+        f"/worker/jobs/{jid}/finish",
+        token="build-02",
+        json_body={
+            "outcome": "failed",
+            "exit_code": None,
+            "summary_code": "launch_failed",
+            "summary_args": {"error": "OSError"},
+            "group_gone": True,
+        },
+    )
+    assert calls == [(RUNNING,), (CANCELLING,)]
+    assert (status, body.get("code"), body.get("hold_released")) == (409, "job_closed", True), body
+    assert job_of(srv, jid).state == LOST
+    (h,) = hold_rows(srv)
+    assert h["released_at"] is not None and h["release_kind"] == "worker"
+
+
 def test_rl45_the_job_document_carries_the_hold_and_its_release(srv):
     srv.registered("build-02")
     plain = running(srv, preset="ok")

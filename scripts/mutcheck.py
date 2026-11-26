@@ -6437,6 +6437,33 @@ MUTANTS = (
             "test_rl8_a_a_partition_shorter_than_worker_timeout_starts_the_cancel_window_again",
         ),
     ),
+    # ── M5t-b P3 2라운드 LOW — 두 번째 경합 닫기 자리 · 상태 문서의 빈 절 ──
+    Mutant(
+        # 취소에 진 시작 전 실패의 재시도 직전에 janitor 가 닫으면 409 에 job_closed 가 없다
+        name="race-closed-retry",
+        path="src/remote_ci_monitor/remote_workers.py",
+        old=(
+            "                    # 재시도 직전에 janitor 가 닫았다 — 위와 같은 답 · mutcheck: "
+            "race-closed-retry\n"
+            "                    raise self._closed_answer(token, current, session, gone)\n"
+        ),
+        new='                    raise _api_error(409, f"job #{job.id} is {st}", state=st)\n',
+        tests=(
+            "tests/test_worker_session_m5tb.py::"
+            "test_rl44_c_a_preflight_finish_racing_a_cancel_and_then_the_janitor_gets_job_closed",
+        ),
+    ),
+    Mutant(
+        # 큐 절이 실패해 null 인 풀에서 /api/status 가 500 이 된다
+        name="status-null-queue-500",
+        path="src/remote_ci_monitor/server.py",
+        old='            for row in [*(pool.get("queue") or []), *(pool.get("recent") or [])]:\n',
+        new='            for row in [*pool.get("queue"), *(pool.get("recent") or [])]:\n',
+        tests=(
+            "tests/test_worker_session_m5tb.py::"
+            "test_rl45_status_says_null_not_empty_when_the_holds_cannot_be_read",
+        ),
+    ),
 )
 
 

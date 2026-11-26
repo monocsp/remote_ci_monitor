@@ -1144,6 +1144,7 @@ class RemoteWorkersMixin:
                 current = self.store.get_job(job.id)
                 st = current.state if current else "unknown"
                 if current is not None and st not in BUSY_STATES:
+                    # 재시도 직전에 janitor 가 닫았다 — 위와 같은 답 · mutcheck: race-closed-retry
                     raise self._closed_answer(token, current, session, gone)
                 raise _api_error(409, f"job #{job.id} is {st}", state=st)
         if hold_cause is not None and self.store.has_open_hold(job.id):
