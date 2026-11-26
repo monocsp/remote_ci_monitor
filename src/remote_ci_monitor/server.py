@@ -714,6 +714,8 @@ class App(RemoteWorkersMixin, CapabilitiesMixin, ShelfAppMixin):
             now_fn=self.now_fn,
             admit=self._admit_local,
             claimant=self.local_claimant,
+            # 로컬 레인이 확인 없이 닫은 표식 잡의 홀드도 알린다(§4.12 확인 표 4행)
+            on_hold=self._hold_created,
         )
         step("lanes", f"{self.config.server.lanes}")
         self.start_capabilities()
@@ -4655,6 +4657,7 @@ class App(RemoteWorkersMixin, CapabilitiesMixin, ShelfAppMixin):
                     summary_code=code,
                     summary_args=args,
                     cancelled_by="server",
+                    only_from=(UPLOADING,),  # 돈 적 없는 잡만 — 홀드를 판단할 그룹이 없다
                 )
                 self._publish_job(None, job_id)
                 raise ApiError(413, f"{summary} — exclude build outputs via .rcmignore") from e
@@ -5032,6 +5035,7 @@ class App(RemoteWorkersMixin, CapabilitiesMixin, ShelfAppMixin):
                 summary_code=code,
                 summary_args=args,
                 cancelled_by="server",
+                only_from=(UPLOADING,),  # 돈 적 없는 잡만 — 홀드를 판단할 그룹이 없다
             )
             self._publish_job(None, job_id)
             raise ApiError(413, f"{summary} — exclude build outputs via .rcmignore")

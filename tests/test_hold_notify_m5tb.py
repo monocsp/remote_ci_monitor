@@ -437,3 +437,129 @@ def test_rl54_on_accepts_irreversible_hold_and_the_default_leaves_it_out():
     assert "irreversible_hold" not in rule("d").on
     with pytest.raises(ConfigError):
         rule("bad", on=("held",))
+
+
+# ── 로컬 레인도 러너의 `group_gone` 을 읽는다(P3 2라운드 HIGH · §4.12 확인 표 4행) ────────
+
+
+def _local_lane_run(tmp_path, monkeypatch, how: str, gone: bool | None):
+    """로컬 레인 하나가 표식 잡 하나를 가짜 러너로 돌린다. 러너는 `how` 대로 끝난다 — 결과
+    (`result`) · `RunnerError`(`runner_error`) · 관찰자 예외(`crash`), 그리고 띄우기 전의 같은
+    둘(`*_before_spawn`, `spawning` 을 부르지 않는다). 홀드 · 버스 사건을 돌려준다."""
+    import time
+
+    from remote_ci_monitor import worker as worker_mod
+    from remote_ci_monitor.runner import RunnerError, RunResult
+    from test_worker_api import WorkerServer, sh
+
+    def fake_run_job(spec, observer, **_kw):
+        assert spec.irreversible is True
+        if not how.endswith("_before_spawn"):
+            spawning = getattr(observer, "spawning", None)
+            if callable(spawning):
+                spawning()
+        at = datetime.now(UTC)
+        if how == "result":
+            return RunResult(rc=0, started=at, finished=at, group_gone=gone)
+        err: Exception = (
+            RunnerError("launch_failed", error="OSError")
+            if how.startswith("runner_error")
+            else RuntimeError("observer broke")
+        )
+        if gone is not None:
+            err.group_gone = gone  # type: ignore[attr-defined]
+        raise err
+
+    monkeypatch.setattr(worker_mod, "run_job", fake_run_job)
+    # 서버가 제 레인을 띄운다(`App.start`) — 홀드 알림을 넘기는 배선까지 본다
+    srv = WorkerServer(tmp_path, workers=True, presets=[sh("ship", "echo ship", irreversible=True)])
+    try:
+        sub = srv.app.bus.subscribe()
+        jid = srv.queued_job(preset="ship")
+        deadline = time.monotonic() + 10
+        while not srv.store.get_job(jid).is_terminal:
+            assert time.monotonic() < deadline, "the local lane did not close the job"
+            time.sleep(0.02)
+        return jid, srv.store.has_open_hold(jid), hold_events(sub)
+    finally:
+        srv.close()
+
+
+@pytest.mark.parametrize(
+    "how, gone, held",
+    [
+        ("result", False, True),  # SIGKILL 2초 뒤에도 그룹이 살아 있다(`_reap_group`)
+        ("result", None, True),  # 모름
+        ("result", True, False),
+        ("runner_error", False, True),
+        ("runner_error", None, True),
+        ("runner_error", True, False),
+        ("crash", False, True),  # `_abandon` 이 그룹을 못 끝냈다
+        ("crash", None, True),
+        ("crash", True, False),
+        ("runner_error_before_spawn", None, False),  # 띄운 적 없다 — 확인된 것이다
+        ("crash_before_spawn", None, False),
+    ],
+)
+def test_rl54_a_local_lane_irreversible_job_holds_unless_its_group_is_gone(
+    tmp_path, monkeypatch, how, gone, held
+):
+    """§4.12 확인 표 4행: 로컬 레인은 러너가 돌아온 뒤 `group_gone` 을 서버가 직접 본다. 사라졌음이
+    확인되지 않은 닫힘은 그 그룹을 홀드하고 한 번 알린다. 확인됐으면 홀드도 알림도 없다."""
+    jid, has_hold, events = _local_lane_run(tmp_path, monkeypatch, how, gone)
+    assert has_hold is held
+    assert events == ([jid] if held else [])
+
+
+def test_rl54_the_server_hands_its_hold_announcer_to_the_local_lanes(tmp_path, monkeypatch):
+    """서버가 로컬 레인을 띄울 때 홀드 알림(`_hold_created`)을 넘긴다 — 안 넘기면 위 홀드가
+    알림 없이 남는다."""
+    from remote_ci_monitor import server as server_mod
+    from test_worker_api import WorkerServer, sh
+
+    seen: dict[str, Any] = {}
+
+    def fake_start_workers(*_a: Any, **kw: Any) -> list[Any]:
+        seen.update(kw)
+        return []
+
+    monkeypatch.setattr(server_mod, "start_workers", fake_start_workers)
+    srv = WorkerServer(tmp_path, presets=[sh("ship", "echo ship", irreversible=True)])
+    try:
+        srv.app.start()
+        assert seen.get("on_hold") == srv.app._hold_created
+    finally:
+        srv.close()
+
+
+#: 홀드 판단 없이 잡을 닫아도 되는 `store.finish` — 프로세스가 돈 적 없는 상태에서만 닫는다
+PRE_RUN_ONLY = {"(UPLOADING,)"}
+
+
+def test_rl54_every_finish_outside_the_store_decides_the_hold():
+    """P2-9 의 짝 맞추기는 `hold_cause=` 를 **넘긴** 호출만 봤다 — 넘기지 않은 호출은 홀드를 만들지
+    않으니 알림을 빠뜨릴 수도 없어서 보이지 않았다(로컬 레인이 그 길이었다). 그래서 반대쪽도
+    잠근다: store 밖의 모든 `store.finish` 는 `hold_cause=` 를 넘겨(None 이어도 판단한 것이다)
+    확인 없는 닫힘인지 정하거나, 프로세스가 돈 적 없는 상태(`only_from=(UPLOADING,)`)에서만
+    닫는다."""
+    import ast
+    from pathlib import Path
+
+    import remote_ci_monitor
+
+    root = Path(remote_ci_monitor.__file__).parent
+    problems: list[str] = []
+    for path in sorted(root.rglob("*.py")):
+        if path.name == "store.py":
+            continue
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        for call in _calls(tree, "finish"):
+            if not (isinstance(call.func.value, ast.Attribute) and call.func.value.attr == "store"):
+                continue
+            kw = {k.arg: k.value for k in call.keywords}
+            if "hold_cause" in kw:
+                continue
+            if "only_from" in kw and ast.unparse(kw["only_from"]) in PRE_RUN_ONLY:
+                continue
+            problems.append(f"{path.name}:{call.lineno}")
+    assert problems == []

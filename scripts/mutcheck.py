@@ -6338,6 +6338,21 @@ MUTANTS = (
             "test_rl34_f_the_worker_hands_its_monotonic_clock_to_the_runner",
         ),
     ),
+    # ── M5t-b P3 2라운드 HIGH — 로컬 레인이 러너의 group_gone 을 읽지 않는다 ──
+    Mutant(
+        # 로컬 레인이 그룹이 사라졌다는 확인 없이 표식 잡을 닫고 그룹을 연다(§4.12 확인 표 4행)
+        name="local-lane-group-unchecked",
+        path="src/remote_ci_monitor/worker.py",
+        old=(
+            "        if job.irreversible is True and gone is not True:  # mutcheck: "
+            "local-lane-group-unchecked\n"
+        ),
+        new="        if False:\n",
+        tests=(
+            "tests/test_hold_notify_m5tb.py::"
+            "test_rl54_a_local_lane_irreversible_job_holds_unless_its_group_is_gone",
+        ),
+    ),
 )
 
 
