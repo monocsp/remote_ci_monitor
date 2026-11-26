@@ -1277,3 +1277,113 @@ def test_b10_l3_a_cli_py_path_run_of_setup_passes_the_hook_by_design(command):
     # tests/test_setup.py::test_b9_352_setup_refuses_a_production_target_whatever_shell_built_it 의
     # config 칸). 이 시험이 빨개지면 훅이 다시 경로 조각을 세는 것이다 — 354 의 과잉 차단이다
     assert judge(command, environ=TEST_XDG) is None, command
+
+
+# ── m5t-a-w3 F: setup 그물의 과잉 차단(2026-11-26, PR #272 머지 뒤 이 Mac 에서 막힌 꼴) ──
+
+#: 관찰 1 의 꼴 — 제목 변수와 `$(…)` · `tar -x` 가 한 명령에 있다. 낱말 setup 은 없다
+OBSERVED_PR = (
+    "cd /home/op/src/remote_ci_monitor-x && H=/home/op/src/remote_ci_monitor-x/.verify/h && "
+    "T='feat(cli): rcm wait 이 잡을 돌린 머신과 산출물 상태를 알려 준다 — --notify 로 알림' && "
+    'python3 tools/guard_naming.py pr "$T" && GH_TOKEN=$(gh auth token --user u) gh pr create '
+    '--base dev --title "$T" --body-file "$H/pr-body.md"; S=$(git rev-parse HEAD); '
+    "mkdir -p $H/snap-1 && git archive $S | tar -x -C $H/snap-1"
+)
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        OBSERVED_PR,
+        # 관찰 2: 제목을 파일로 넘기고 `"$(cat …)"` 로 읽는다
+        "printf '%s' 'feat(cli): rcm wait 이 잡을 돌린 머신을 알려 준다' > /tmp/title.txt && "
+        'python3 tools/guard_naming.py pr "$(cat /tmp/title.txt)"',
+        # 관찰 3: 본문 안의 「rcm (…)」
+        'gh pr comment 273 --body "verify-round: 3 · rcm/ci green · rcm (job 3712) 끝"',
+        'T="docs(wait): rcm wait 안내"; gh pr create --title "$T" --body-file "$H/pr.md"',
+        'git commit -m \'fix(cli): rcm wait 이 (#273) 을 고친다\' && git log -1 "$A" "$B"',
+    ],
+)
+def test_f2_rcm_words_inside_quoted_text_do_not_arm_the_net(command):
+    # m5t-a-w3 F2: 따옴표로 감싼 인자 하나 안의 「rcm …」 글자(제목 · 커밋 메시지 · 본문)는 셸이
+    # 명령으로 실행하지 않는다 — 그 글이 그물을 켜면 `"$T"` 뒤의 `"$H/…"` · `"$(…)"` 를 「rcm 다음
+    # 하위 명령 자리」로 읽어 막았다
+    assert judge(command, environ=TEST_XDG) is None, command
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "fd -e py src | wc -l; git archive HEAD | tar -x -C /tmp/snap; rcm status",
+        "fd -e md docs > /tmp/l; unzip -x a.zip b; rcm wait --job 5 --timeout 60",
+        "grep -x foo /tmp/a && fd -e md; rcm status",
+        "grep -n expect docs/operating.md; rcm status",
+        "git log --grep xargs -1 && rcm status",
+        "find . -name '*.md' > /tmp/l; grep -n -- -exec /tmp/l; rcm status",
+    ],
+)
+def test_f1_a_launcher_word_that_is_not_in_a_command_place_is_not_a_launcher(command):
+    # m5t-a-w3 F1: 런처는 명령 자리의 런처만이다 — `tar -x` · `unzip -x` · `grep -x` 의 `-x` 는
+    # fd 의 실행 플래그가 아니고(fd 가 그 명령일 때만), `-exec` 는 find 가 그 명령일 때만, 인자로
+    # 쓴 `expect` · `xargs` 는 명령을 실행하지 않는다
+    assert judge(command, environ=TEST_XDG) is None, command
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        # 따옴표 안이 실행되는 꼴은 지금처럼 센다
+        "sh -c 'rcm $SUB'",
+        'bash -c "rcm ${S}tup --role worker"',
+        "zsh -c 'cd /tmp && rcm --no-follow $SUB'",
+        "eval 'rcm \"$SUB\"'",
+        "T='rcm $SUB'; eval \"$T\"",
+        "xargs -I{} sh -c 'rcm {}' < /tmp/a",
+        "find /tmp/a -exec sh -c 'rcm \"$1\"' _ {} \\;",
+        "python3 -c 'import pty; pty.spawn([\"rcm\"])'",
+        # 명령 자리의 런처는 리다이렉션 · 감싸기 뒤에서도 런처다
+        "< /tmp/args.txt nice -n 5 xargs rcm",
+        "2>&1 fd x /tmp/a -x rcm",
+        "nice find /tmp/a -exec rcm {} +",
+        "echo a | sudo xargs rcm",
+        "xargs -a <(printf x) rcm",
+        # 경로로 부른 rcm 은 rcm 이다
+        "<f xargs /abs/.venv/bin/rcm",
+        "/abs/.venv/bin/rcm ${S}tup",
+    ],
+)
+def test_f2_quoted_text_that_runs_and_launchers_in_a_command_place_are_still_denied(command):
+    # m5t-a-w3 F: 줄인 것은 실행되지 않는 따옴표 글과 명령 자리가 아닌 런처 낱말뿐이다
+    verdict = judge(command, environ=TEST_XDG)
+    assert verdict is not None and verdict.decision == "deny", command
+    assert PLAIN_MESSAGE in verdict.reason, command
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        'gh pr comment 273 --body "verify-round: 3 · rcm/ci green"',
+        "git ls-files | xargs grep -l rcm/ci",
+        "find docs -name '*.md' -exec grep -l rcm/ci {} +",
+    ],
+)
+def test_f3_a_slash_joined_word_like_rcm_ci_is_not_the_rcm_executable(command):
+    # m5t-a-w3 F3: `rcm/ci`(상태 이름 · 경로)는 rcm 실행 파일이 아니다. 경로의 끝 이름이 rcm 인
+    # `…/bin/rcm` 은 rcm 이다 — test_f2_quoted_text_that_runs_… 의 칸
+    assert judge(command, environ=TEST_XDG) is None, command
+
+
+@pytest.mark.parametrize(
+    ("command", "launcher", "word"),
+    [
+        ("fd x /tmp/a -x rcm", "-x", "rcm"),
+        ("find /tmp/a -exec rcm {} +", "-exec", "rcm"),
+        ("< /tmp/a xargs $R", "xargs", "$R"),
+    ],
+)
+def test_f1_the_deny_still_names_the_launcher_in_its_command_place(command, launcher, word):
+    # m5t-a-w3 F1: 거절은 원인(명령 자리의 런처 + 그 낱말)과 「두 Bash 호출로 나눠라」를 말한다
+    verdict = judge(command, environ=TEST_XDG)
+    assert verdict is not None and verdict.decision == "deny", command
+    assert f"`{launcher}`" in verdict.reason and f"`{word}`" in verdict.reason, verdict.reason
+    assert "two Bash calls" in verdict.reason, verdict.reason
