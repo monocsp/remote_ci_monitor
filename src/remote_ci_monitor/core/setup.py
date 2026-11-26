@@ -536,6 +536,11 @@ def replace_commands(manager: str, *, staged: Path, installed: Path, label: str)
     ]
 
 
+#: 제거 줄 바로 앞에 찍는 줄 — 그 줄이 내리기의 실패와 상관없이 설치 파일을 지운다는 것
+#: (batch 10 L2). 빈 틀 — 아직 찍지 않는다
+REMOVE_NOTE = ""
+
+
 def remove_line(
     manager: str | None,
     *,

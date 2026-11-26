@@ -2217,3 +2217,19 @@ def test_b10_l1_a_service_file_setup_may_not_read_closes_without_a_traceback(
     assert code == 1, fake.text
     assert str(plist) in err and "refusing" in err and "unexpected" not in err, err
     _nothing_written(cfg, tmp_path / "data")
+
+
+@pytest.mark.parametrize("platform", ["darwin", "linux"])
+def test_b10_l2_the_remove_line_says_it_deletes_even_when_the_unload_fails(cfg, tmp_path, platform):
+    # batch 10 L2: 제거 줄은 내리기가 실패해도 설치 파일을 지운다 — 바로 앞 줄이 그것을 말하고,
+    # 서비스가 아직 돌고 있으면 먼저 멈추라고 한다. 제거 줄 자체는 셸에 그대로 붙일 수 있게 둔다
+    fake = Fake(platform=platform)
+    assert go(fake, *coordinator_args(tmp_path / "data")) == 0
+    lines = _lines(fake)
+    assert lines[-2].startswith("to remove: "), lines[-3:]
+    assert lines[-3] == core.REMOVE_NOTE, lines[-3:]
+    assert "even when the unload fails" in core.REMOVE_NOTE
+    assert "stop it first" in core.REMOVE_NOTE
+    fake = Fake()
+    assert go(fake, "--role", "client", "--server", "http://10.0.0.5:1", "--yes") == 0
+    assert core.REMOVE_NOTE not in _lines(fake)
