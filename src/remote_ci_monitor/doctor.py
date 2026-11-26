@@ -432,6 +432,9 @@ class ServiceFile:
     workdir_unknown: bool = False
     #: 사용자 유닛인 것을 안다(`~/.config/systemd/user/` · setup 자리) — `%h` 가 그 홈이다
     user_unit: bool = False
+    #: 띄우는 명령 줄에 systemd 가 서비스의 환경으로 펼치는 `$VAR` · `${VAR}` 가 있다 — rcm 은
+    #: 펼치지 않으므로 그 인자의 값(`--config` · `--data-dir` …)은 모른다(batch 11 L4)
+    launch_vars: bool = False
     #: 시스템 자리(`/etc/systemd/system` · `/Library/LaunchDaemons`)의 파일 — 관리자가 root 로
     #: 읽고 `run_user`(없으면 root)로 띄운다
     system: bool = False
@@ -586,6 +589,24 @@ def _read_plist(p: Path) -> ServiceFile:
     )
 
 
+#: systemd 가 ExecStart 에서 펼치는 변수의 머리 — `$NAME` · `${NAME}`(`$$` 는 글자 `$`)
+_EXEC_VARIABLE = re.compile(r"\$(?:\{|[A-Za-z_])")
+
+
+def has_exec_variable(word: str) -> bool:
+    """ExecStart 의 낱말 하나에 systemd 가 펼치는 변수가 있나(systemd.service 「Command lines」).
+    `$$` 는 글자 `$` 라서 건너뛴다."""
+    i = word.find("$")
+    while i >= 0:
+        if word.startswith("$$", i):
+            i = word.find("$", i + 2)
+            continue
+        if _EXEC_VARIABLE.match(word, i):
+            return True
+        i = word.find("$", i + 1)
+    return False
+
+
 def unit_lines(text: str) -> list[tuple[int, str]]:
     """systemd 유닛의 논리 줄 — (첫 줄 번호, 앞뒤 빈칸을 뗀 줄). systemd 처럼 읽는다
     (systemd.syntax(7)): 주석 줄(`#` · `;`)은 줄 잇기보다 먼저 버리고, 홀수 개의 역슬래시로 끝나는
@@ -650,6 +671,7 @@ def read_service_file(
     path_unknown = False
     argv: list[str] = []
     unexpanded = False
+    exec_vars = False
     workdir: str | None = None
     workdir_unknown = False
     user: str | None = None
@@ -679,6 +701,7 @@ def read_service_file(
                     env[k] = expanded
             elif key == "ExecStart":
                 argv = shlex.split(value)
+                exec_vars = any(has_exec_variable(a) for a in argv)
                 expanded_argv = [expand_specifiers(a, home) for a in argv]
                 unexpanded = any(a is None for a in expanded_argv)
                 if unexpanded:
@@ -722,6 +745,7 @@ def read_service_file(
         path_unknown,
         launch,
         launch_unexpanded=unexpanded,
+        launch_vars=exec_vars,
         label=p.stem,
         argv=argv,
         workdir=None if workdir_unknown else workdir,

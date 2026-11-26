@@ -422,6 +422,8 @@ def _rcm_service(path: Path, *, home: Path, root: bool) -> core.RcmService | Non
         return problem("setup cannot tell which rcm command it starts")
     if sf.launch_unexpanded:
         return problem("its command line has a systemd specifier setup does not expand")
+    if sf.launch_vars:  # systemd 는 펼치고 setup 은 펼치지 않는다(batch 11 L4)
+        return problem("its command line uses $VARIABLES setup does not expand")
     skipped = [*sf.unfollowed, *sf.unreadable_lines]
     if skipped:  # 그 줄에 data_dir · 설정이 있을 수 있다 — 닫는 쪽이다(batch 10 M3)
         return problem(f"setup does not follow some of its lines ({'; '.join(skipped)})")

@@ -2552,6 +2552,7 @@ def test_b11_l4_an_execstart_with_variables_setup_cannot_expand_closes(
     data = tmp_path / "prod-data"
     data.mkdir()
     flag = spelled if spelled.startswith("--") else f"--data-dir {spelled}"
+    flag = flag.replace("{", "{{").replace("}", "}}")  # `_hand_unit` 이 str.format 으로 채운다
     hub = _hand_unit(
         home,
         tmp_path,
