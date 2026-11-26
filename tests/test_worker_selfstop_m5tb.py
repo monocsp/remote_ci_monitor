@@ -435,7 +435,7 @@ class FakeClient:
     def phase(self, job_id, phase):
         return {}
 
-    def log(self, job_id, chunk):
+    def log(self, job_id, chunk, offset=None):
         if self.log_error is not None:
             raise self.log_error
         return {}
@@ -1632,7 +1632,7 @@ def test_rl5_a_hanging_log_post_does_not_stall_the_runner_pump(tmp_path, monkeyp
     gate = threading.Event()
     sent: list[bytes] = []
 
-    def hanging_log(job_id, chunk):
+    def hanging_log(job_id, chunk, offset=None):
         sent.append(chunk)
         gate.wait(10)  # 분단 — 시한까지 매달린다
         return {}

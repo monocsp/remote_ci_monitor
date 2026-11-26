@@ -60,6 +60,8 @@ OCTET = {"Content-Type": "application/octet-stream"}
 WORKER_TOKEN_REQUIRED = "worker token required"
 NOT_CLIENT = "worker tokens cannot use the client API"
 MAX_LOG_BODY = 4 * 1024 * 1024
+#: 헤더 값으로 주면 도우미가 그 헤더를 싣지 않는다(M5t-b — 오프셋 헤더 없는 로그 요청)
+OMIT = "-omit-"
 
 #: `ok`·`bad`·`slow`·`gate`(기본 풀) 에 풀·그룹·git_ref 프리셋을 더한다.
 #: 로컬 워커는 안 띄우므로 어느 것도 실행되지 않는다.
@@ -266,6 +268,15 @@ class WorkerServer:
                 json_body.setdefault("claims_settled", self.settled.get(worker, 0))
         elif json_body is None:
             headers.setdefault("X-RCM-Worker-Session", sid)
+            m = re.fullmatch(r"/worker/jobs/(\d+)/log", path)
+            if m and headers.get("X-RCM-Worker-Session"):
+                # 프로토콜 2 의 로그 조각은 오프셋을 싣는다(M5t-b 결정 329). 시험이 따로 주지 않으면
+                # 서버가 커밋한 길이에 이어 붙인다 — 오늘의 「덧붙임」과 같은 뜻이다
+                logged = self.store.log_row(int(m.group(1)))
+                offset = (logged or {}).get("log_offset") or 0
+                headers.setdefault("X-RCM-Log-Offset", str(offset))
+                if headers["X-RCM-Log-Offset"] == OMIT:
+                    del headers["X-RCM-Log-Offset"]  # 헤더 없는 요청을 보는 시험
         return json_body
 
     # ── HTTP ──
@@ -1615,10 +1626,11 @@ def test_partial_log_line_is_dropped_when_the_job_is_closed_as_lost(srv):
     남기지 않는다(늦은 보고는 409 라 다시 쓰일 일이 없다)."""
     jid = running_job(srv)
     assert srv.log("build-02", jid, b"::rcm::st")[0] == 200
-    assert jid in srv.app._log_partial
+    # M5t-b 프로토콜 2: 잘린 줄은 커밋된 파일에서 다시 읽는다. 메모리에는 잡별 로그 잠금이 남는다
+    assert jid in srv.app._job_log_locks
     srv.restarted("build-02")  # 새 프로세스가 옛 세션을 이어받음 = 옛 잡 lost
     assert srv.store.get_job(jid).state == "lost"
-    assert jid not in srv.app._log_partial
+    assert jid not in srv.app._log_partial and jid not in srv.app._job_log_locks
     jid2 = running_job(srv)
     assert srv.log("build-02", jid2, b"partial")[0] == 200
     srv.clock.advance(600 + 1)  # M5t-b: timeout 이 아니라 끊김 유예(기본 600) 뒤에 닫힌다
@@ -1693,26 +1705,27 @@ def test_worker_log_writes_all_markers_in_one_call_and_publishes_after(srv):
     jid = running_job(srv)
     order: list[str] = []
     batched: list[list[tuple[str, str]]] = []
-    real_many, real_one = srv.app.store.add_markers, srv.app.store.add_marker
+    # M5t-b 프로토콜 2: 마커는 오프셋 커밋과 같은 트랜잭션(`commit_log`, 결정 323)에 든다
+    real_many, real_one = srv.app.store.commit_log, srv.app.store.add_marker
     real_pub = srv.app._on_marker
 
-    def spy_many(job_id, items, at):
-        items = list(items)
+    def spy_many(job_id, **kw):
+        items = list(kw["markers"])
         batched.append(items)
         order.append("write")
-        return real_many(job_id, items, at)
+        return real_many(job_id, **kw)
 
     def spy_one(*a, **kw):
         order.append("write-one")
         return real_one(*a, **kw)
 
-    srv.app.store.add_markers = spy_many
+    srv.app.store.commit_log = spy_many
     srv.app.store.add_marker = spy_one
     srv.app._on_marker = lambda j, k, v: (order.append(f"pub:{v}"), real_pub(j, k, v))[1]
     try:
         status, _ = srv.log("build-02", jid, b"::rcm::steps::3\n::rcm::step::a\n::rcm::step::b\n")
     finally:
-        srv.app.store.add_markers, srv.app.store.add_marker = real_many, real_one
+        srv.app.store.commit_log, srv.app.store.add_marker = real_many, real_one
         srv.app._on_marker = real_pub
     assert status == 200
     assert batched == [[("steps", "3"), ("step", "a"), ("step", "b")]]  # 한 번에 셋
@@ -1728,14 +1741,12 @@ def test_worker_log_without_markers_writes_no_markers(srv):
     """마커가 없는 본문은 빈 배치를 넘기고, 배치는 빈 목록에 트랜잭션을 안 연다(test_store)."""
     jid = running_job(srv)
     seen: list[list[tuple[str, str]]] = []
-    real = srv.app.store.add_markers
-    srv.app.store.add_markers = lambda j, items, at: (seen.append(list(items)), real(j, items, at))[
-        1
-    ]
+    real = srv.app.store.commit_log  # M5t-b — 마커는 오프셋 커밋과 한 트랜잭션
+    srv.app.store.commit_log = lambda j, **kw: (seen.append(list(kw["markers"])), real(j, **kw))[1]
     try:
         status, _ = srv.log("build-02", jid, b"plain line\nanother\n")
     finally:
-        srv.app.store.add_markers = real
+        srv.app.store.commit_log = real
     assert status == 200 and seen == [[]] and srv.app.store.markers(jid) == []
 
 

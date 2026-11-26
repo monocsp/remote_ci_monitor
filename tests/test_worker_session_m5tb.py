@@ -1721,7 +1721,7 @@ class _Runs(_Who):
     def phase(self, job_id: int, phase: str) -> dict:
         return {}
 
-    def log(self, job_id: int, chunk: bytes) -> dict:
+    def log(self, job_id: int, chunk: bytes, offset: int | None = None) -> dict:
         return {}
 
     def finish(self, job_id: int, outcome: str, rc: Any, summary: Any, **extra: Any) -> dict:

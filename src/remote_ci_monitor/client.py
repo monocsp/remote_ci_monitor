@@ -94,6 +94,7 @@ class WorkerClient:
         # 안 주면 이 클라이언트가 센다 — 호출이 차례로 끝나므로 마지막 claim 번호가 끝난 claim 이다
         self._claim_seq = 0
         self._hb_seq = 0
+        self._log_offsets: dict[int, int] = {}  # 잡마다 서버가 받은 로그 오프셋(결정 329)
 
     def _session_headers(self) -> dict[str, str] | None:
         return {"X-RCM-Worker-Session": self.session_id} if self.session_id else None
@@ -223,7 +224,16 @@ class WorkerClient:
     def phase(self, job_id: int, phase: str) -> dict[str, Any]:
         return self._post(f"/worker/jobs/{job_id}/phase", {"phase": phase}) or {}
 
-    def log(self, job_id: int, data: bytes) -> dict[str, Any]:
+    def log(self, job_id: int, data: bytes, offset: int | None = None) -> dict[str, Any]:
+        """로그 조각 하나. `offset` 은 조각의 첫 바이트가 그 잡 스트림의 몇째 바이트인가(M5t-b
+        결정 329) — 세션이 있으면 서버가 요구한다. 빈 본문은 오프셋 질의다(응답의 `offset`).
+        주지 않으면 이 클라이언트가 그 잡에서 받은 마지막 `offset` 에 잇는다(덧붙임과 같은 뜻 —
+        `RemoteWorker` 는 늘 준다)."""
+        headers = dict(self._session_headers() or {})
+        if offset is None and self.session_id is not None:
+            offset = self._log_offsets.get(job_id, 0)
+        if offset is not None:
+            headers["X-RCM-Log-Offset"] = str(int(offset))
         status, _, raw = self._inner._request(
             "POST",
             f"/worker/jobs/{job_id}/log",
@@ -231,9 +241,13 @@ class WorkerClient:
             content_length=len(data),
             content_type="application/octet-stream",
             timeout=max(self.timeout, 60.0),
-            extra_headers=self._session_headers(),
+            extra_headers=headers or None,
         )
-        return json.loads(raw) if raw else {}
+        out = json.loads(raw) if raw else {}
+        got = out.get("offset") if isinstance(out, dict) else None
+        if isinstance(got, int) and not isinstance(got, bool):
+            self._log_offsets[job_id] = got
+        return out
 
     def finish(
         self,

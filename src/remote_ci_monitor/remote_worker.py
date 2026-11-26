@@ -176,6 +176,7 @@ class _RemoteObserver:
         self.proc = proc
         self.job_id = job_id
         self._buf = bytearray()
+        self._buf_start = 0  # `_buf[0]` 의 스트림 오프셋(M5t-b 결정 329)
         self._last_flush = time.monotonic()
         self._lock = threading.Lock()
         self._pending_failures = 0
@@ -226,15 +227,20 @@ class _RemoteObserver:
         닿으면 되돌려 두고 다음 배치와 함께 다시 보낸다(`LOG_KEEP_BYTES` 까지; 넘치면 오래된 쪽을
         버린다 — 워커 로컬 `log.txt` 에는 남는다). 409 는 서버가 잡을 닫은 것."""
         with self._lock:
-            if not self._buf:
+            if not self._buf or self.closed_by_server:
                 return
             chunk = bytes(self._buf)
+            start = self._buf_start
             self._buf.clear()
+            self._buf_start += len(chunk)
             self._last_flush = time.monotonic()
         sent = self.proc._sent_at()
         try:
-            self.proc.client.log(self.job_id, chunk)
+            self.proc.client.log(self.job_id, chunk, offset=start)
         except ClientError as e:
+            if e.status == 409 and e.body.get("code") == "log_gap":
+                self._log_gap(e)
+                return
             if e.status == 409:
                 self.proc.log(f"#{self.job_id} log: server says {e.message}")
                 self.closed_by_server = True
@@ -245,14 +251,25 @@ class _RemoteObserver:
                 return
             with self._lock:
                 self._buf[:0] = chunk  # 되돌린다
+                self._buf_start = start
                 if len(self._buf) > LOG_KEEP_BYTES:
-                    del self._buf[: len(self._buf) - LOG_KEEP_BYTES]
+                    drop = len(self._buf) - LOG_KEEP_BYTES
+                    del self._buf[:drop]
+                    self._buf_start += drop
                 self._pending_failures += 1
             if self._pending_failures in (1, 10) or self._pending_failures % 60 == 0:
                 self.proc.log(f"#{self.job_id} log: {e.message} — keeping {len(self._buf)} bytes")
             return
         self.proc.mark_ok(*sent)
         self._pending_failures = 0
+
+    def _log_gap(self, e: ClientError) -> None:
+        """409 `log_gap` — 서버가 받은 곳보다 앞의 바이트를 버렸다(메모리 상한). 그 바이트는 더
+        보낼 수 없으므로 이 잡의 로그 전송을 멈춘다 — 프로세스는 죽이지 않는다."""
+        self.proc.log(f"#{self.job_id} log: {e.message} — log incomplete, stopped sending")
+        with self._lock:
+            self.closed_by_server = True
+            self._buf.clear()
 
     def final_flush(self) -> None:
         """종료 직전 — 남은 로그는 재시도까지 해서 보낸다(그 뒤 finish 가 간다). 매달린 배치
@@ -264,10 +281,12 @@ class _RemoteObserver:
         self.flush()
         with self._lock:
             chunk = bytes(self._buf)
+            start = self._buf_start
             self._buf.clear()
+            self._buf_start += len(chunk)
         if chunk and not self.closed_by_server:
             ok = self.proc.report(
-                lambda: self.proc.client.log(self.job_id, chunk),
+                lambda: self.proc.client.log(self.job_id, chunk, offset=start),
                 f"#{self.job_id} log",
                 job_id=self.job_id,
             )

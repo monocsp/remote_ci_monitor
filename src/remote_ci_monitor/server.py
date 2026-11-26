@@ -224,9 +224,11 @@ from remote_ci_monitor.release_state import (
 )
 from remote_ci_monitor.release_verify import run_verify
 from remote_ci_monitor.remote_workers import (
+    LOG_OFFSET_HEADER,
     MAX_WORKER_LOG_BODY,
     SESSION_HEADER,
     RemoteWorkersMixin,
+    log_offset_arg,
 )
 from remote_ci_monitor.shelf_copier import ShelfCopier
 from remote_ci_monitor.shelf_server import ShelfAppMixin, ShelfHandlerMixin, is_shelf_path
@@ -667,6 +669,8 @@ class App(RemoteWorkersMixin, CapabilitiesMixin, ShelfAppMixin):
         else:
             step("client wheel", "unavailable")
         lost, cancelled = self.store.recover_on_start(self.now_fn())
+        # 원격 잡 로그의 커밋된 길이와 파일을 맞춘다(M5t-b §4.5 · 결정 338) — 레인 · 워커 전
+        self.check_logs_on_start()
         expired, promoted = self.store.schedule_recovered
         if lost or cancelled:
             self.log(f"recovered on start: lost={lost} cancelled_uploads={cancelled}")
@@ -6438,6 +6442,8 @@ class Handler(ShelfHandlerMixin, BaseHTTPRequestHandler):
             return
         self._only(method, "POST")
         if what == "log":
+            # 오프셋 헤더(M5t-b §4.5 step 1) — 모양이 틀리면 본문을 읽기 전에 400
+            offset = log_offset_arg(self.headers.get(LOG_OFFSET_HEADER))
             ctype = (self.headers.get("Content-Type") or "").split(";")[0].strip().lower()
             if ctype != "application/octet-stream":
                 raise ApiError(415, "log body must be application/octet-stream")
@@ -6451,7 +6457,7 @@ class Handler(ShelfHandlerMixin, BaseHTTPRequestHandler):
                 self.connection.settimeout(REQUEST_TIMEOUT)
             if len(data) < n:
                 raise ApiError(400, "log body interrupted")
-            self._send_json(200, self.app.worker_log(t, job_id, data, session))
+            self._send_json(200, self.app.worker_log(t, job_id, data, session, offset))
             return
         body = self._json_body()
         if what == "phase":
