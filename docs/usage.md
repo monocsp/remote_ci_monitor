@@ -75,20 +75,25 @@ from the config files that exist, and writes no role anywhere.
    missing (with the install line), 3 it could not decide (no token, the server is down). Name the
    role: this machine now has two, and `rcm doctor` without `--role` stops with exit 2. Then
    `rcm check`: every row says `ok` (a `warn` row still exits 0).
-6. **Send the first job.** From any directory, `rcm run ok` uploads that directory, runs the
-   harmless `ok` preset the template ships and exits 0 with one JSON line on stdout. To leave it
-   running and come back later:
+6. **Send the first job.** `rcm run ok` uploads the directory you are in, so run it from a small
+   folder rather than your home folder. It runs the harmless `ok` preset the template ships and
+   exits 0. While it waits, `rcm run` prints a status line on stderr that starts `#1 succeeded`
+   once the job is done, then one JSON line on stdout. To leave it running and come back later:
 
    ```sh
    rcm run ok --no-wait             # prints the job number and returns
    rcm wait --job N --notify        # follows job N; a desktop notification when it ends
    ```
 
-   The wait ends with one line that says where the job ran and how it went,
+   `rcm wait` ends with one line that says where the job ran and how it went,
    `#1 succeeded on macmini · 1s` (your machine's name), plus the artifact state for a preset that
-   declares artifacts, and a warning line when collecting them failed. The JSON carries the same
-   machine as `ran_on`. The exit code is the job's: 0 succeeded, 1 failed, 2 cancelled or timed
-   out, 3 unknown, which is never a failure ([Exit codes](../README.md#exit-codes)).
+   declares artifacts, and a warning line when collecting them failed; `rcm run` does not print
+   that line. The JSON carries the same machine as `ran_on`. The exit code is the job's: 0
+   succeeded, 1 failed, 2 cancelled or timed out, 3 unknown, which is never a failure
+   ([Exit codes](../README.md#exit-codes)). `--notify` prints nothing when it works: only the OS
+   notification appears, and when it cannot send one it prints one warning line. The `ok` job ends
+   within a second, so to see the notification, wait for a job that starts later:
+   `rcm run ok --in 30s --no-wait`, then `rcm wait --job N --notify`.
 7. **Make it yours.** Replace the example presets in `server.toml` with the commands your team runs
    ([Configuration](configuration.md)); `rcm reload` applies preset changes without a restart.
    The file ends with a commented toolchain catalog: probes and
@@ -146,12 +151,23 @@ rcm serve --config ~/rcm-test/server.toml      # in a terminal of its own; Ctrl-
 (umask 077 && rcm token --config ~/rcm-test/server.toml add test > ~/rcm-test/token) && chmod 600 ~/rcm-test/token
 export RCM_TOKEN="$(cat ~/rcm-test/token)"
 RCM_SERVER=http://127.0.0.1:8790 rcm check --config ~/rcm-test/server.toml
+mkdir -p ~/rcm-test/job && cd ~/rcm-test/job   # an empty folder: rcm run uploads the one you are in
 RCM_SERVER=http://127.0.0.1:8790 rcm run ok
 unset RCM_TOKEN                                # the test token does not stay exported
 ```
 
 The `umask 077` runs in a subshell, so the token file is created readable by you alone from the
-first byte instead of by whatever the shell's umask allows until `chmod` runs.
+first byte instead of by whatever the shell's umask allows until `chmod` runs. `rcm run` uploads the
+current folder, so the block makes a small empty one and runs the job from there (or give
+`--dir <folder>`); run from your home folder, it would upload all of it. `export RCM_TOKEN` and
+`unset RCM_TOKEN` last only in the shell that runs them, so type the block's lines one after
+another in the same terminal; only `rcm serve` gets a terminal of its own.
+
+In a test install, `rcm version`, `rcm doctor` and `rcm setup` can still show the running
+install's default config, service or cache: they look in the default places too. `rcm doctor`
+then says the service it found starts rcm with another install's config, and `rcm setup` names
+that install's `worker.toml` as separate from this config. What ties a test client to the test
+server is `RCM_SERVER` and `RCM_TOKEN` (or `--server`), as in the block above.
 
 Never give a test build the running install's `--config` or `--data-dir`: any rcm that opens a
 database migrates it to its own version.

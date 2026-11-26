@@ -178,6 +178,17 @@ of a key bumps that number and is listed here.
   ([#268](https://github.com/monocsp/remote_ci_monitor/pull/268))
 
 ### Fixed
+- **A test install next to a running one no longer reads as if the running install were its
+  own.** `rcm setup` with a `--config` outside the folder of an existing `worker.toml` names that
+  file as another rcm install's, separate from this config, instead of saying this machine
+  already has one. `rcm doctor --config FILE` whose service starts rcm with another config says
+  no service starts rcm with `FILE` and names that service by label and file with the config it
+  uses; the exit code and the `--json` keys are unchanged. The `launchctl` lines `rcm setup`
+  prints (`next —`, the swap order, `to remove:`) carry your numeric user id, `gui/501`, instead
+  of `gui/$(id -u)`. The usage guide's test install runs its job from a small empty folder, keeps
+  its commands in one terminal and says which commands still show the running install; its first
+  job step tells the short `rcm run` line from the `rcm wait` end line and how to see a
+  `--notify` notification.
 - **`rcm init worker --service-file` writes a systemd unit whose paths hold a space, `%` or `$`
   the way systemd reads them**, quoted, `%%` and `$$`, and refuses a path with a line break or
   another control character with exit 2 instead of writing a broken unit.
