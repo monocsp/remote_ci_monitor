@@ -138,6 +138,15 @@ def test_operating_says_what_an_upgrade_does_to_a_job_an_old_worker_claimed():
     assert "[`rcm release-hold`](#when-a-group-is-held-rcm-release-hold)" in text
 
 
+def test_operating_says_a_job_of_a_preset_no_longer_configured_counts_as_irreversible():
+    """P3 3라운드 LOW(B4 제안): 업그레이드 전에 집힌 잡의 프리셋이 설정에서 빠졌으면 그 잡은 표식
+    잡으로 센다(모름은 닫힌 쪽, 결정 339-d · `Store._is_irreversible_row`). 확인 없이 닫히면
+    `irreversible:<preset>` 그룹을 홀드한다 — 업그레이드 단락이 그것을 말한다."""
+    text = flat(section(OPERATING, "Upgrade"))
+    assert "no longer in the configuration" in text
+    assert "`irreversible:<preset name>`" in text
+
+
 # ── README 두 언어의 명령 표(P2-4 · §4.12) ───────────────────────────────────
 
 #: 명령 표에 둘 `rcm release-hold` 행의 첫 칸 — 표의 다른 admin 명령처럼 잡 번호는 `N`

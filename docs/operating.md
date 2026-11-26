@@ -674,7 +674,9 @@ the job's processes are gone, so a job of an
 [`irreversible`](configuration.md#jobs-that-must-not-run-twice-irreversible) preset closed that
 way holds its concurrency group until you check the machine and run
 [`rcm release-hold`](#when-a-group-is-held-rcm-release-hold). Upgrade the workers right after
-the server.
+the server. A job claimed before the upgrade whose preset is no longer in the configuration
+counts as `irreversible`, because the server cannot tell: closed that way it holds its
+`concurrency_group`, or `irreversible:<preset name>` when it had none.
 
 A copy you make yourself, with the server running, must use SQLite's own backup — `cp` misses
 the write-ahead log:
