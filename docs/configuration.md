@@ -1533,9 +1533,9 @@ a line end every 64 KiB. If a secret straddles such a cut, its first part stays 
 | when | what the worker does |
 |---|---|
 | the job is still running | retries every failure with backoff (1 s doubling to 30 s), with no limit |
-| the job ended and the log or bundle got HTTP 5xx for 300 s | sends the finish first; the bundle becomes `failed` (`upload_failed`) and the job's `log_complete` is `false` |
+| the job ended and the log or bundle got HTTP 5xx for 300 s | sends the finish first; the bundle becomes `failed` (`upload_failed`) and the job's `log_complete` is `false`. Whenever the finish goes first 300 s after the job ended while log bytes or the bundle are still waiting, the worker names what it does not send (`#N report: the finish goes first 300s after the job ended; not sent: <what is left>`) |
 | the job ended and the server cannot be reached | keeps the order and resends from the confirmed offset when the server is back |
-| the job ended and only its phase is left, failing with HTTP 5xx or an unexpected error for 300 s | sends the finish first and drops the phase (`#N report: phase still not delivered 300s after the job ended — sending the finish first, the phase is dropped`); a phase that cannot reach the server holds the finish until 24 hours after the job ended (`#N report: phase not delivered in 24h — sending the finish without it`) |
+| the job ended and its phase fails with HTTP 5xx or an unexpected error for 300 s | sends the finish first and drops the phase. When only the phase is left, the line is `#N report: phase still not delivered 300s after the job ended — sending the finish first, the phase is dropped`; when log bytes or the bundle wait behind the phase, they are not sent either, and the `not sent` line above names them and the phase. A phase that cannot reach the server holds the finish until 24 hours after the job ended (`#N report: phase not delivered in 24h — sending the finish without it`) |
 | `stream.log` cannot be read, or is shorter than what was written | retries with backoff and logs `#N report: cannot read the spooled log — retrying` once; 300 s after the job ended it sends the finish first and the job's `log_complete` is `false` (`#N report: spooled log still unreadable 300s after the job ended — sending the finish first, the log stays incomplete`) |
 | 24 hours after the job ended | sends the finish without the rest of the log; a finish that still cannot go is dropped with a log line (`#N report: finish not delivered in 24h — dropping the report`) |
 | the bundle file in the queue is gone or cannot be read | logs `#N artifacts: cannot read the bundle (<error>) — the finish reports upload_failed` and sends the finish; the bundle is `failed` (`upload_failed`) |
@@ -1550,11 +1550,13 @@ A worker restarted on the same data folder with the same token and server sends 
 process left, with that process's session, before it registers; a server that keeps answering
 with errors for 300 s makes it register anyway
 (`dead session <id> queue not delivered after 300s of server errors — registering; job #N will close as restarted-without-job`).
-Only time the server answers counts toward the 300 s: not time without a connection, and not a
-local error (the spooled log cannot be read, an unexpected error). When only the phase, the
-log or the bundle of a job that ended fails that way, the finish still goes first 300 s after the
-job ended. Any other queue stopped by a local error is not waited for
-(`dead session <id> job #N: stopped on a local error (<what>) — registering without waiting; job #N will close as restarted-without-job`).
+Time without a connection does not count toward the 300 s. A local error (the spooled log
+cannot be read, an unexpected error) counts like a server error, because it may pass on the next
+try; when one was among the 300 s, the line says so
+(`dead session <id> queue not delivered after 300s of server errors or local errors — registering; job #N will close as restarted-without-job`).
+The finish of a job that ended is tried at least once before that: when a server error or a
+local error holds the queue, the finish goes first 300 s after the job ended, and registration
+waits for that try.
 A job folder whose `outbox.json` is missing,
 empty or not JSON while its `stream.log` is there cannot be sent: the worker logs
 `dead session <id> job #N: outbox unreadable (<why>) — the job will close as restarted-without-job; spool kept in <folder>`

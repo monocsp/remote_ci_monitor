@@ -389,9 +389,9 @@ def test_p6_1_the_report_queue_section_says_the_masking_limit_and_the_new_lines(
 
 
 def test_b5_the_report_queue_section_says_ok_at_local_errors_and_a_2xx_that_is_not_json():
-    """# batch-5 #1 · #2 · #4 · #5 `ok_at.json` 은 fsync 하지 않는다, 폴더 fsync 실패의 줄, 등록
-    대기 300초는 서버의 응답만 센다(결정 337), JSON 이 아닌 2xx 에 register 는 종료 2, 죽은 세션
-    큐의 저장 실패 줄."""
+    """# batch-5 #1 · #2 · #4 · #5 `ok_at.json` 은 fsync 하지 않는다, 폴더 fsync 실패의 줄, JSON 이
+    아닌 2xx 에 register 는 종료 2, 죽은 세션 큐의 저장 실패 줄. #2 의 등록 대기 문장은 batch-7 에서
+    바뀌었다(`test_b7_...` 이 본다)."""
     body = flat(section(CONFIGURATION, "The worker's log and its report queue"))
     assert "`ok_at.json`" in body and "is replaced the same way but not synced" in body
     assert (
@@ -403,12 +403,7 @@ def test_b5_the_report_queue_section_says_ok_at_local_errors_and_a_2xx_that_is_n
         " and the service manager starts it again."
     ) in body
     assert "the worker sends the same item again" not in body
-    assert "Only time the server answers counts toward the 300 s" in body
     assert "time the spooled log cannot be read does" not in body
-    assert (
-        "`dead session <id> job #N: stopped on a local error (<what>) — registering without"
-        " waiting; job #N will close as restarted-without-job`"
-    ) in body
     assert "for a queue a stopped process left, the line starts with `dead session <id>`" in body
 
 
@@ -424,5 +419,31 @@ def test_b6_the_report_queue_section_says_a_stuck_phase_does_not_hold_the_finish
         " first, the phase is dropped`"
     ) in body
     assert "`#N report: phase not delivered in 24h — sending the finish without it`" in body
-    assert "When only the phase, the log or the bundle of a job that ended fails that way" in body
     assert "When only the log or the bundle of a job that ended fails that way" not in body
+
+
+def test_b7_the_report_queue_section_says_local_errors_count_and_what_a_finish_leaves_behind():
+    """# batch-7 #1 · #2 · #3 죽은 세션 큐의 로컬 오류는 서버 오류와 같은 300초 상한 안에서 다시
+    해 보고, 섞였으면 줄이 그렇게 말한다. 연결 실패 시간은 세지 않는다. 끝난 잡의 finish 는 그
+    전에 한 번은 가 본다. finish 가 먼저 가며 남긴 것을 한 줄로 말하고, phase 행은 phase 만
+    남지 않은 경우도 말한다."""
+    from remote_ci_monitor import remote_worker as rw
+
+    body = flat(section(CONFIGURATION, "The worker's log and its report queue"))
+    hold = rw.FINISH_HOLD_SECONDS
+    assert (
+        "`dead session <id> queue not delivered after 300s of server errors or local errors —"
+        " registering; job #N will close as restarted-without-job`"
+    ) in body
+    assert "Time without a connection does not count toward the 300 s." in body
+    assert "A local error (the spooled log cannot be read, an unexpected error) counts" in body
+    assert "The finish of a job that ended is tried at least once before that" in body
+    assert "stopped on a local error" not in body
+    assert "Only time the server answers counts toward the 300 s" not in body
+    assert (
+        f"`#N report: the finish goes first {hold}s after the job ended; not sent: <what is left>`"
+    ) in body
+    assert "the job ended and only its phase is left" not in body
+    assert (
+        "| the job ended and its phase fails with HTTP 5xx or an unexpected error for 300 s |"
+    ) in body
