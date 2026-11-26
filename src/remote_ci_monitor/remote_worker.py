@@ -694,6 +694,9 @@ class RemoteWorker:
         self.unverified_sessions: list[str] = []
         self.dead_sessions: list[DeadSession] = []
         self._rechecks: list[threading.Timer] = []
+        # 그룹이 사라졌음을 확인하지 못하고 끝난 표식 잡 — 그 폴더(`proc.json`)는 다음 프로세스가
+        # 다시 판정하도록 남긴다(서버는 그 잡에 홀드를 건다)
+        self._group_unconfirmed: set[int] = set()
 
     @property
     def client(self) -> Any:
@@ -864,6 +867,8 @@ class RemoteWorker:
         _write_json(d / "proc.json", {"pgid": pid, "start": start})
 
     def _forget_job_dir(self, job_id: int) -> None:
+        if job_id in self._group_unconfirmed:
+            return  # 다음 프로세스가 `proc.json` 으로 그룹을 다시 판정해 홀드를 푼다
         d = self._job_dir(job_id)
         if d is not None:
             shutil.rmtree(d, ignore_errors=True)
@@ -2000,6 +2005,8 @@ class RemoteWorker:
             self._observers.pop(job_id, None)  # 프로세스는 끝났다 — 감시할 것이 없다
         if outcome == LOST and self.fenced.is_set():
             summary, summary_code, summary_args = None, "worker_replaced", {}
+        if getattr(observer, "irreversible", False) and group_gone is not True:
+            self._group_unconfirmed.add(job_id)  # mutcheck: unconfirmed-group-folder-dropped
         # 서버가 이 세션의 finish 를 이미 기록했다고 알렸으면(W4 표 첫 행) 다시 보내지 않는다.
         # 서버가 닫은 다른 끝 상태(lost · cancelled)에는 보낸다 — 확인 · 홀드 풀기로 쓰인다
         if getattr(observer, "closed_state", None) not in FINISH_RECORDED:

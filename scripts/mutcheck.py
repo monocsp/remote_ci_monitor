@@ -6215,6 +6215,21 @@ MUTANTS = (
             "tests/test_hold_notify_m5tb.py::test_rl54_a_cancel_unconfirmed_hold_is_announced_once",
         ),
     ),
+    # ── M5t-b P3 1라운드 MED — group_gone: false 뒤 잡 폴더 삭제 ──
+    Mutant(
+        # 그룹 소멸을 확인하지 못한 표식 잡의 폴더를 지운다 — 다음 프로세스가 다시 판정할 수 없다
+        name="unconfirmed-group-folder-dropped",
+        path="src/remote_ci_monitor/remote_worker.py",
+        old=(
+            "            self._group_unconfirmed.add(job_id)  # mutcheck: "
+            "unconfirmed-group-folder-dropped"
+        ),
+        new="            pass",
+        tests=(
+            "tests/test_worker_session_m5tb.py::"
+            "test_rl44_a_finish_without_group_gone_keeps_the_folder_for_the_next_process",
+        ),
+    ),
 )
 
 

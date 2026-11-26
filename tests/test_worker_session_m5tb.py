@@ -1331,6 +1331,49 @@ def test_rl31_c_an_irreversible_job_whose_spawning_record_fails_starts_nothing(
     assert body["outcome"] == SUCCEEDED and ran.exists() and w.running == {}
 
 
+def test_rl44_a_finish_without_group_gone_keeps_the_folder_for_the_next_process(
+    tmp_path, monkeypatch
+):
+    """`group_gone: false`(SIGKILL 뒤 2초 안에 그룹이 안 사라짐)면 서버는 홀드를 건다. 그 잡 폴더를
+    지우면 다음 프로세스가 다시 판정할 `proc.json` 이 없어 「돌아온 워커가 그룹이 사라졌음을
+    확인하면 홀드를 푼다」가 거짓이 된다(P3 1라운드 MED). 폴더를 남기고, 다음 프로세스는 그
+    그룹이 사라졌음을 확인해 D 를 `previous_sessions` 로 넘긴다. 확인된 잡 · 일반 잡은 지운다."""
+    from remote_ci_monitor.runner import RunResult
+
+    gone = subprocess.Popen(["true"])
+    gone.wait()
+    answers = {7: False, 8: True, 9: False}
+
+    def fake_run(spec, observer, **kw):
+        observer.spawning()
+        observer.spawned(gone.pid)
+        at = kw["now_fn"]()
+        return RunResult(rc=0, started=at, finished=at, group_gone=answers[spec.job_id])
+
+    monkeypatch.setattr(rw, "run_job", fake_run)
+    fake = _Runs()
+    w = _worker(tmp_path, fake)
+    w.prepare_sessions()
+    _run_claimed(w, _claim_of(7, ["true"], irreversible=True))
+    _run_claimed(w, _claim_of(8, ["true"], irreversible=True))
+    _run_claimed(w, _claim_of(9, ["true"], irreversible=False))
+    assert [(jid, body["group_gone"]) for _, jid, body in fake.finished] == [
+        (7, False),
+        (8, True),
+        (9, False),
+    ]
+    jobs = w.session_dir / "jobs"
+    assert sorted(p.name for p in jobs.iterdir()) == ["7"]
+    assert json.loads((jobs / "7" / "proc.json").read_text())["pgid"] == gone.pid
+    os.close(w._session_fd)  # 이 프로세스가 죽었다
+    w2 = _worker(tmp_path, _Who())
+    w2.prepare_sessions()
+    assert [(d.session_id, d.verdicts) for d in w2.dead_sessions] == [
+        (w.session_id, {7: rw.CONFIRMED})
+    ]
+    assert w2.previous_sessions == [w.session_id]
+
+
 @pytest.mark.parametrize("irreversible", [False, True])
 def test_rl43_any_observer_error_after_popen_stops_the_job_and_reports_it(
     tmp_path, monkeypatch, irreversible
