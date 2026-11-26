@@ -7116,6 +7116,18 @@ MUTANTS = (
             "test_rl28_a_waiter_behind_an_unreachable_job_leaves_its_lane_to_the_next_job",
         ),
     ),
+    Mutant(
+        # 「확인이 필요한 작업」 띠가 넷째 줄부터 잘라 버리고도 「그 밖에 없음」이라고 한다(P6-1 G1)
+        name="stuck-band-overflow-all-clear",
+        path="src/remote_ci_monitor/web/app.js",
+        old=(
+            '    else if (more <= 0) tail.push(T(lang, "summary.nothing_else_stuck"));'
+            "   // mutcheck: stuck-band-overflow-all-clear"
+        ),
+        new='    else tail.push(T(lang, "summary.nothing_else_stuck"));',
+        tests=("tests/web/unreachable_m5tb.test.js",),
+        runner="node",
+    ),
 )
 
 

@@ -314,3 +314,42 @@ describe("RL45 — 홀드 칩의 모양(P3 r1)", () => {
     assert.match(css, /\.chip\.hold\s*\{[^}]*cursor:\s*default/);
   });
 });
+
+// ── P6-1: P5 엣지 감사의 확인된 GAP ──────────────────────────────────────────────────
+const APP_SRC = () => fs.readFileSync(require("./helpers").APP_PATH, "utf8");
+
+describe("G1 — 「확인이 필요한 작업」 띠가 넘치면 「그 밖에 없음」이라 하지 않는다", () => {
+  // 띠는 세 줄까지 그린다. PR3 이 홀드마다 · 끊긴 잡마다 한 줄을 더해 넷째 줄이 생길 수 있다 —
+  // 그때 「그 밖에 확인할 것이 없음」은 거짓이다. 「yours」 띠처럼 「그 밖에 N개 더」.
+  const holds = (ids) => ids.map((id) => Object.assign({}, HOLD_A, { job_id: id }));
+  test("g1 — 홀드 4개: 세 줄 + 「and 1 more」, 「nothing else」 없음", () => {
+    assert.equal(typeof rcm.stuckBand, "function");
+    const nm = rcm.notMoving(status([], { irreversible_holds: holds([812, 813, 814, 815]) }), null, "en");
+    const v = rcm.stuckBand(nm, "en");
+    assert.deepEqual(v.lines.map((l) => l.jobId), [812, 813, 814]);
+    assert.deepEqual(v.tail, ["and 1 more"]);
+  });
+  test("g1 — 홀드 2 + 끊긴 잡 2, 한국어", () => {
+    assert.equal(typeof rcm.stuckBand, "function");
+    const st = status([running(901), running(902)], { irreversible_holds: holds([812, 813]) });
+    const v = rcm.stuckBand(rcm.notMoving(st, null, "ko"), "ko");
+    assert.equal(v.lines.length, 3);
+    assert.deepEqual(v.tail, ["1개 더"]);
+  });
+  test("g1 — 세 줄 이하면 오늘 그대로 「그 밖에 없음」", () => {
+    assert.equal(typeof rcm.stuckBand, "function");
+    const nm = rcm.notMoving(status([], { irreversible_holds: holds([812, 813, 814]) }), null, "en");
+    assert.deepEqual(rcm.stuckBand(nm, "en").tail, ["nothing else needs a look"]);
+  });
+  test("g1 — 넘치고 일부를 모르면 「N개 더」와 「모름」 둘 다", () => {
+    assert.equal(typeof rcm.stuckBand, "function");
+    const st = status([running(901), running(902), running(903), running(904)], { irreversible_holds: null });
+    const v = rcm.stuckBand(rcm.notMoving(st, null, "en"), "en");
+    assert.deepEqual(v.tail, ["and 1 more", "unknown — group holds unavailable"]);
+  });
+  test("g1 — renderSummary 가 stuckBand 로 그린다(배선)", () => {
+    const src = APP_SRC();
+    assert.ok(src.indexOf("stuckBand(nm, L())") !== -1, "renderSummary 가 stuckBand 를 부르지 않는다");
+    assert.ok(src.indexOf("nm.lines.slice(0, 3)") === -1, "renderSummary 가 아직 직접 자른다");
+  });
+});

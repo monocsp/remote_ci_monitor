@@ -615,6 +615,20 @@
     if (lines.length) return { kind: "list", lines: lines };
     return { kind: "ok", lines: [] };
   }
+  /** 「확인이 필요한 작업」 띠가 그릴 줄(세 줄까지)과 꼬리 글. 넘치면 「그 밖에 N개 더」 —
+   *  「그 밖에 없음」은 정말 다 그렸고 모르는 것도 없을 때만이다(P6-1 G1, fail-open 금지). */
+  var STUCK_BAND_MAX = 3;
+  function stuckBand(nm, lang) {
+    var lines = (nm && nm.lines) || [];
+    var shown = lines.slice(0, STUCK_BAND_MAX);
+    var more = lines.length - shown.length;
+    var tail = [];
+    if (more > 0) tail.push(T(lang, "summary.and_more", { n: more }));
+    // 예약 · 홀드를 못 읽었으면 「그 밖에 없다」고 말하지 않는다 — 모르는 것이 남아 있다
+    if (nm && nm.partial) tail.push(T(lang, nm.why === "holds" ? "summary.holds_unknown" : "summary.scheduled_unknown"));
+    else if (more <= 0) tail.push(T(lang, "summary.nothing_else_stuck"));   // mutcheck: stuck-band-overflow-all-clear
+    return { lines: shown, tail: tail };
+  }
 
   function isMine(row, me) {
     if (!me || !row) return false;
@@ -3605,7 +3619,7 @@
     ordinal: ordinal, truncate: truncate, stateWord: stateWord, stateGlyph: stateGlyph, personLabel: personLabel,
     reasonText: reasonText, confidenceBadge: confidenceBadge, etaText: etaText,
     elapsedText: elapsedText, notMoving: notMoving, yourJobs: yourJobs, isMine: isMine,
-    holdChip: holdChip, logCompleteNote: logCompleteNote,
+    holdChip: holdChip, logCompleteNote: logCompleteNote, stuckBand: stuckBand,
     scheduledOf: scheduledOf, scheduledRowModel: scheduledRowModel, notifyFailuresBadge: notifyFailuresBadge, cancelLocked: cancelLocked, hostPressure: hostPressure,
     jobStorageLine: jobStorageLine, hostRunsNoJobs: hostRunsNoJobs, hostFacts: hostFacts,
     queueHeader: queueHeader, sortQueue: sortQueue, workerPills: workerPills, workersCrowded: workersCrowded, workerName: workerName, hostCards: hostCards, headerNote: headerNote, progressHead: progressHead, progressHeadHtml: progressHeadHtml, queueGroups: queueGroups, runningStep: runningStep,
@@ -4049,9 +4063,13 @@
     else if (nm.kind === "ok") s = lost
       ? '<span class="muted">' + esc(tr("summary.last_known") + tr("summary.nothing_stuck")) + "</span>"
       : '<span class="ok">' + esc(tr("summary.nothing_stuck")) + "</span>";
-    else s = nm.lines.slice(0, 3).map(function (l) { return '<span class="sl" data-cut="sl" title="#' + l.jobId + " " + esc(l.text) + '">' + jl(l.jobId, "#" + l.jobId) + ' <span class="warn">' + esc(l.text) + "</span></span>"; }).join("")
-      // 예약을 못 읽었으면 「그 밖에 없다」고 말하지 않는다 — 모르는 것이 남아 있다
-      + '<span class="sl muted">' + esc(tr(nm.partial ? (nm.why === "holds" ? "summary.holds_unknown" : "summary.scheduled_unknown") : "summary.nothing_else_stuck")) + "</span>";
+    else {
+      // 세 줄까지 그리고, 넘치면 「그 밖에 N개 더」 — 「그 밖에 없음」은 다 그렸을 때만(stuckBand)
+      var band = stuckBand(nm, L());
+      s = band.lines.map(function (l) { return '<span class="sl" data-cut="sl" title="#' + l.jobId + " " + esc(l.text) + '">' + jl(l.jobId, "#" + l.jobId) + ' <span class="warn">' + esc(l.text) + "</span></span>"; }).join("")
+        // 꼬리는 한 줄이다 — 「N개 더」와 「모름」이 함께여도 띠 높이를 한 줄만 쓴다
+        + '<span class="sl muted">' + esc(band.tail.join(" · ")) + "</span>";
+    }
     $("[data-stuck]").innerHTML = (lost && nm.kind === "list" ? '<span class="muted">' + esc(tr("summary.last_known")) + "</span><br>" : "") + s;
     // 25
     var host = p && Array.isArray(p.hosts) ? p.hosts[0] : null;
