@@ -6,6 +6,9 @@
 못 찾으면 그 자체로 실패다(코드가 바뀌어 감시가 풀린 것).
 
 변이 목록(개수는 `MUTANTS` 가 정본이다 — 문서의 숫자는 머지마다 썩는다):
+  M5t-a PR7 — `m5t-live-port-check-takes-8787` · `m5t-live-plist-home-unchecked`: 실기 하네스의
+     bootstrap 전 검사가 운영 포트를 받음 · plist 의 HOME 을 안 봄
+     (`scripts/acceptance/m5t_live.sh`, `docs/m5t-workplan.md` §7 · TR16)
   M5t-a PR6 — `m5t-core-names-a-catalog-tool`: 코어가 툴체인 카탈로그의 도구 이름을 상수로 가짐
      (`hostsample.py`, `docs/m5t-workplan.md` §4.5 · TD23)
   M5t-a PR5 — `m5t-ran-on-*` 둘(시작 전 잡 · 다른 머신의 로컬 잡에 이름을 지음) ·
@@ -4643,6 +4646,27 @@ MUTANTS = (
             "tests/test_guard_production_setup.py::"
             "test_pr274_a_crash_inside_the_net_is_a_deny_from_the_hook",
         ),
+    ),
+    Mutant(
+        # 실기 하네스의 포트 검사가 8787(운영) · 8788 을 받는다 — 시험 서버가 운영 포트에 뜬다
+        # (M5t-a PR7, 명세 §7 · TR16)
+        name="m5t-live-port-check-takes-8787",
+        path="scripts/acceptance/m5t_live.sh",
+        old='  [ "$1" -ge 8790 ] && [ "$1" -le 8899 ]\n',
+        new='  [ "$1" -ge 8787 ] && [ "$1" -le 8899 ]\n',
+        tests=(
+            "tests/test_acceptance_m5t_live.py::"
+            "test_tr16_port_check_refuses_production_and_out_of_range_ports",
+        ),
+    ),
+    Mutant(
+        # 실기 하네스가 plist 의 HOME 을 보지 않는다 — 진짜 홈으로 도는 시험 서비스를 bootstrap 한다
+        # (M5t-a PR7, 명세 §7 · TR16)
+        name="m5t-live-plist-home-unchecked",
+        path="scripts/acceptance/m5t_live.sh",
+        old='  { [ "$v" = "$th" ] && is_test_path "$v" "$base" "$home"; } || {\n',
+        new="  true || {\n",
+        tests=("tests/test_acceptance_m5t_live.py::test_tr16_plist_check_takes_test_values_only",),
     ),
 )
 
