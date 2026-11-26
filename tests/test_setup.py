@@ -2168,3 +2168,28 @@ def test_b10_m2_a_python_m_unit_names_the_venv_its_python_sits_in(
     assert go(fake, *coordinator_args(tmp_path / "data", "--config", str(target))) == 1, fake.text
     assert f"this is {name}'s venv — refusing" in fake.err.getvalue(), fake.text
     assert not target.exists()
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        "EnvironmentFile=/etc/rcm/env",
+        "Environment=RCM_SERVER_DATA_DIR=%S/rcm",
+        'Environment="RCM_SERVER_DATA_DIR=/srv/rcm',
+    ],
+    ids=["environment-file", "specifier", "unreadable-line"],
+)
+def test_b10_m3_a_unit_with_lines_setup_does_not_follow_closes(cfg, home, tmp_path, line):
+    # batch 10 M3(v1-6): 펼치지 못한 env(EnvironmentFile= · 지정자) · 읽지 못한 줄이 있는 rcm
+    # 유닛은 그 안에 data_dir 이 있을 수 있다 — 닫는 쪽이다(거절 + 파일 이름)
+    config = tmp_path / "unit" / "server.toml"
+    config.parent.mkdir()
+    config.write_text(f'[server]\ndata_dir = "{tmp_path / "unit-data"}"\n')
+    unit = home / ".config" / "systemd" / "user" / "rcm-server.service"
+    unit.parent.mkdir(parents=True)
+    unit.write_text(f"[Service]\n{line}\nExecStart=/opt/v/bin/rcm serve --config {config}\n")
+    fake = Fake(platform="linux")
+    assert go(fake, *coordinator_args(tmp_path / "data")) == 1, fake.text
+    err = fake.err.getvalue()
+    assert str(unit) in err and "refusing" in err, err
+    _nothing_written(cfg, tmp_path / "data")
