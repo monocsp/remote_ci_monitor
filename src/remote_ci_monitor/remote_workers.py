@@ -558,7 +558,8 @@ class RemoteWorkersMixin:
         session = self._session_arg(body.get("worker_session_id"))
         previous = self._session_list(body, "previous_sessions")
         unverified = self._session_list(body, "unverified_sessions")
-        if version != self.version:  # mutcheck: register-session-before-version
+        # mutcheck: register-session-before-version
+        if version != self.version:
             # 이 검사는 아래의 lost 처리보다 먼저다 — 따라가기 전의 409 가 도는 잡을 닫으면 안 된다.
             # `server_version` 은 M5q 의 워커가 따라갈 버전이다(키 추가뿐 — 옛 워커는 무시한다)
             raise _api_error(
