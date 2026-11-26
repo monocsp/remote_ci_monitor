@@ -217,18 +217,13 @@ of a key bumps that number and is listed here.
   did. The `server: found …` line and the "several rcm servers" messages of every command clean
   the name and address found on the network to one line.
   ([#268](https://github.com/monocsp/remote_ci_monitor/pull/268))
-- **`tools/guard_production.py` lets a few ordinary commands through that its `rcm setup` net
-  refused.** The net of #272 still decides; it now lets a command through only when every
-  command in it is on a closed list of plain commands (`cd`, `git` with a plain subcommand, `gh`,
-  `python3 tools/guard_naming.py`, `tar`, `grep`, `fd` and `find` without their exec flags,
-  `rcm`, …) and its rcm words stand only in text: a `gh pr create|edit|comment|review` title or
-  body, a `gh api -f body=` value, a `git commit -m` message, the text given to
-  `tools/guard_naming.py`, `printf '%s' … > file.txt`, or a one-letter variable used only there.
-  `tar -x`, `unzip -x`, `grep -x`, `grep -n expect` and `git log --grep xargs` in such a command
-  are not launchers. Anything else the old net refused is still refused: `trap`, `eval`, git
-  aliases and `-c`, environment-variable commands such as `GIT_SSH_COMMAND`, a wrapper such as
-  `taskset`, a function, `coproc`, a command named by a variable or a path, a `#` comment, a
-  heredoc, and text naming both rcm and `setup`.
+- **`tools/guard_production.py`: the `rcm setup` net now refuses when it crashes instead of
+  allowing.** An error inside the net used to leave only a warning and let the Bash command run;
+  now the hook refuses that command, as it already did for an error while judging `rcm setup`
+  itself. The net of #272 is otherwise unchanged, and so is its over-blocking: a command that
+  names rcm in quoted text (a PR title, a commit message, a comment body) next to `$`, `(` or a
+  launcher word such as the `-x` of `tar -x` is still refused. Pass such text through a file
+  (`gh pr create --body-file`, `git commit -F <file>`) and keep the rcm word out of the command.
   ([#274](https://github.com/monocsp/remote_ci_monitor/pull/274))
 
 ## [0.10.0] - 2026-11-23
