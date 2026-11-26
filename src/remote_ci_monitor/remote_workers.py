@@ -28,6 +28,7 @@ import sqlite3
 import tarfile
 import threading
 import time
+from collections.abc import Iterable
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -65,7 +66,7 @@ from remote_ci_monitor.core.model import (
 from remote_ci_monitor.core.progress import parse_marker
 from remote_ci_monitor.core.status import iso, source_json
 from remote_ci_monitor.materialize import MaterializeError, assemble_tar_from_manifest
-from remote_ci_monitor.release_secrets import mask_bytes
+from remote_ci_monitor.release_secrets import MASK, mask_bytes
 from remote_ci_monitor.store import (
     RELEASE_WORKER,
     LaneBusy,
@@ -125,6 +126,73 @@ _BUSY_MARKERS = ("locked", "busy")
 
 def _is_busy_error(e: sqlite3.OperationalError) -> bool:
     return any(m in str(e).lower() for m in _BUSY_MARKERS)
+
+
+#: 오프셋 헤더(M5t-b §4.5 · 결정 329) — 조각의 첫 바이트가 그 잡 스트림(가리기 전)의 몇째 바이트인가
+LOG_OFFSET_HEADER = "X-RCM-Log-Offset"
+_OFFSET_RE = re.compile(r"[0-9]{1,18}")
+
+
+def log_offset_arg(raw: str | None) -> int | None:
+    """`X-RCM-Log-Offset` 의 값. 없으면 None, 0 이상의 정수가 아니면 400(`error` 만)."""
+    if raw is None:
+        return None
+    if not _OFFSET_RE.fullmatch(raw):
+        raise _api_error(400, f"{LOG_OFFSET_HEADER} must be a non-negative integer")
+    return int(raw)
+
+
+def _write_at(fh: Any, pos: int, data: bytes) -> None:
+    """로그 쓰기 절차 step 7 — 커밋된 길이 자리에 쓰고 그 뒤를 자른다. 덧붙이지 않는다: 앞 요청이
+    남긴 미커밋 꼬리나 부분 쓰기가 남지 않는다(V1-3)."""
+    fh.seek(pos)  # mutcheck: log-append-not-positioned
+    fh.write(data)
+    fh.truncate(pos + len(data))
+    fh.flush()
+
+
+#: 앞 조각이 줄 끝 없이 남긴 열린 줄을 볼 창의 바닥(마커 한 줄에 넉넉하다)
+OPEN_LINE_BYTES = 4096
+
+
+def _open_line(fh: Any, pos: int, window: int) -> tuple[bytes, bool]:
+    """파일의 `pos` 앞에서 줄 끝 없이 열려 있는 마지막 줄의 꼬리(많아야 `window` 바이트)와, 그것이
+    줄 전체인지. 창 안에 줄 끝이 없으면 창 전체가 그 줄의 꼬리다 — 빈 머리로 두면 창보다 긴 줄
+    끝에서 두 조각에 걸친 비밀을 못 가린다(P3 2라운드). 가리기는 꼬리를, 마커 파싱은 줄 전체일
+    때만 쓴다."""
+    start = max(0, pos - window)
+    fh.seek(start)
+    head = fh.read(pos - start)
+    cut = head.rfind(b"\n")
+    if cut >= 0:
+        return head[cut + 1 :], True
+    return head, start == 0  # mutcheck: open-line-tail-dropped
+
+
+def _mask_piece(head: bytes, rest: bytes, values: Iterable[bytes]) -> bytes:
+    """조각 하나를 가린다(F14). `head` 는 앞 조각이 줄 끝 없이 남긴 커밋된 열린 줄이다. 그 줄과 이
+    조각에 걸친 값은 이 조각 쪽 뒷부분을 가린다 — 서버는 워커의 줄 맞춤에 기대지 않는다(P3
+    1라운드). 커밋된 앞부분은 바꾸지 않는다: 읽는 쪽이 이미 봤을 수 있고 그 길이까지는 바뀌지
+    않는다(결정 339-f). 그래서 걸친 값의 앞부분은 남지만 온전한 값은 파일에 남지 않는다."""
+    vals = tuple(v for v in values if v)
+    cut = 0
+    if head:
+        joined = head + rest
+        for v in vals:
+            i = joined.find(v, max(0, len(head) - len(v) + 1))
+            while 0 <= i < len(head):
+                cut = max(cut, i + len(v) - len(head))
+                i = joined.find(v, i + 1)
+    masked = mask_bytes(rest[cut:], vals)
+    return MASK + masked if cut else masked  # mutcheck: straddling-secret-unmasked
+
+
+def _truncate_quietly(fh: Any, pos: int) -> None:
+    try:
+        fh.truncate(pos)
+        fh.flush()
+    except OSError:
+        pass
 
 
 def _api_error_type() -> type[Exception]:
@@ -283,6 +351,23 @@ def _manifest_from_tar(path: Path, max_files: int) -> list[BundleFile] | None:
     return files
 
 
+def _log_bytes(body: dict[str, Any]) -> int | None:
+    """finish 의 `log_bytes`(M5t-b §4.6) — 그 잡이 낸 스트림 전체 바이트. 없으면 None(레거시)."""
+    if body.get("log_bytes") is None:
+        return None
+    return _int_field(body, "log_bytes", 0, MAX_SEQ)
+
+
+def _clamp(at: datetime, started: datetime | None, received: datetime) -> datetime:
+    """워커가 보낸 끝난 시각을 `[started_at, 수신 시각]` 안으로(결정 277) — `job_seconds` 가 음수가
+    되지 않는다."""
+    if at > received:  # mutcheck: finished-at-unclamped
+        return received
+    if started is not None and at < started:
+        return started
+    return at
+
+
 def _parse_iso(raw: Any) -> datetime | None:
     """워커가 보낸 ISO Z 시각. 이상하면 None — 조용히 수신 시각으로 물러선다."""
     if not isinstance(raw, str) or not raw:
@@ -335,6 +420,11 @@ class RemoteWorkersMixin:
         self._resumed: dict[str, list[tuple[datetime, float]]] = {}
         self._session_locks: dict[str, threading.Lock] = {}
         self._synthetic_said: set[str] = set()  # 합성 그룹 로그는 프리셋마다 한 번(결정 330)
+        # 잡별 로그 잠금(§4.5 step 3) — 사전 접근은 `_remote_lock` 아래, 잡이 끝나면 지운다
+        self._job_log_locks: dict[int, threading.Lock] = {}
+        # 요청 스레드가 처리 중인 finish 본문 — 닫힌 잡의 답(`_closed_answer`)이 늦은 결과를 남길 때
+        # 읽는다(M5t-b §4.6)
+        self._finish_body = threading.local()
 
     def _sync_irreversible(self) -> None:
         """설정의 표식 프리셋 표를 저장소에 넣는다(M5t-b 결정 257 · 330). 기동과 reload 마다 부른다.
@@ -892,6 +982,45 @@ class RemoteWorkersMixin:
         with self._remote_lock:
             for job_id in job_ids:
                 self._log_partial.pop(job_id, None)
+                self._job_log_locks.pop(job_id, None)
+
+    def _job_log_lock(self, job_id: int) -> threading.Lock:
+        with self._remote_lock:
+            lock = self._job_log_locks.get(job_id)
+            if lock is None:
+                lock = self._job_log_locks[job_id] = threading.Lock()
+            return lock
+
+    def _before_log_commit(self, job_id: int) -> None:
+        """시험 훅 — 로그 조각을 파일에 쓴 뒤 · 커밋 전(§7.5 「쓰기와 커밋 사이 멈춤」)."""
+
+    def check_logs_on_start(self) -> None:
+        """기동 정리(§4.5 · 결정 338). busy 원격 잡의 `log.txt` 가 커밋된 길이보다 길면 그 길이로
+        자른다 — 쓰고 커밋하기 전에 서버가 죽어 남은 조각이다. 짧으면 `log_complete = 0` 을 고정하고
+        한 줄. 끝난 원격 잡(완전하다고 적힘)은 짧을 때만 0 으로 고친다 — 파일이 없으면(gc) 그대로,
+        길면 자르지 않는다(끝난 잡의 파일에는 커밋 뒤 쓰기가 없다)."""
+        for row in self.store.remote_log_rows():
+            job_id, committed = int(row["id"]), int(row["log_file_bytes"])
+            busy = row["state"] in BUSY_STATES
+            if not busy and row["log_complete"] != 1:  # mutcheck: finished-log-not-checked
+                continue
+            path = self.log_path(job_id)
+            try:
+                size = path.stat().st_size
+            except OSError:
+                if busy and committed > 0:
+                    self.store.pin_log_incomplete(job_id)
+                    self.log(f"log gap: job #{job_id} log.txt is missing, committed {committed}")
+                continue
+            if size < committed:
+                self.store.pin_log_incomplete(job_id)
+                self.log(f"log gap: job #{job_id} log.txt is {size} bytes, committed {committed}")
+            elif size > committed and busy:
+                try:
+                    with path.open("r+b") as fh:
+                        fh.truncate(committed)
+                except OSError as e:
+                    self.log(f"job #{job_id} log.txt: cannot trim ({type(e).__name__})")
 
     def _session_job(self, token: TokenInfo, job_id: int, session: str | None) -> Job:
         """세션 판정 뒤 이 세션이 claim 한 잡(끝났어도). 남의 잡 · 다른 세션의 잡은 403."""
@@ -945,10 +1074,132 @@ class RemoteWorkersMixin:
         return {"job_id": job.id, "phase": phase}
 
     def worker_log(
-        self, token: TokenInfo, job_id: int, data: bytes, session: str | None = None
+        self,
+        token: TokenInfo,
+        job_id: int,
+        data: bytes,
+        session: str | None = None,
+        offset: int | None = None,
     ) -> dict[str, Any]:
-        """raw 바이트를 `log.txt` 에 붙이고 줄 단위로 마커를 파싱한다. 잘린 마지막 줄은 다음
-        요청과 이어 붙인다. PR1 은 세션 헤더만 보고 오프셋 헤더는 읽지 않는다(§4.5 PR 경계)."""
+        """로그 조각 하나(§4.5 의 서버 로그 쓰기 절차 1~9, 결정 323 · 338). 세션이 없으면 오늘의
+        덧붙이는 레거시 길이다(T11)."""
+        if session is None:
+            return self._legacy_log(token, job_id, data)
+        if offset is None:
+            raise _api_error(400, f"{LOG_OFFSET_HEADER} is required with {SESSION_HEADER}")
+        job = self._owned_active(token, job_id, session)  # step 2
+        with self._job_log_lock(job.id):  # step 3 · mutcheck: log-write-unlocked
+            answer, parsed = self._write_log(job, session, offset, data)
+        # step 9 — 커밋 뒤 잠금을 놓고 마커를 발행한다
+        for kind, value in parsed:
+            self._on_marker(job.id, kind, value)
+        if answer["bytes"]:
+            self._mark_dirty()
+        return answer
+
+    def _write_log(
+        self, job: Job, session: str, offset: int, data: bytes
+    ) -> tuple[dict[str, Any], list[tuple[str, str]]]:
+        """잡별 로그 잠금 안의 step 4~8. 실패하면 파일을 커밋된 길이로 되자른다."""
+        row = self.store.log_row(job.id)  # step 4
+        if row is None:
+            raise _api_error(404, "no such job")
+        if row["state"] not in BUSY_STATES:
+            raise _api_error(
+                409, f"job #{job.id} is {row['state']}", state=row["state"], code="job_closed"
+            )
+        committed = int(row["log_offset"] or 0)
+        file_bytes = int(row["log_file_bytes"] or 0)
+        if offset > committed:  # step 5 · mutcheck: log-offset-ignored
+            raise _api_error(
+                409,
+                f"log gap: the server has {committed} bytes of job #{job.id}",
+                code="log_gap",
+                expected_offset=committed,
+            )
+        rest = data[committed - offset :]
+        if not rest:
+            return {"job_id": job.id, "bytes": 0, "markers": 0, "offset": committed}, []
+        # step 6 — 원격 워커의 stdout 도 서버의 릴리스 비밀 규칙으로 가린다(F14)
+        values = self.mask_for_preset(job.preset)
+        path = self.log_path(job.id)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            fh = path.open("r+b")
+        except FileNotFoundError:
+            fh = path.open("w+b")
+        with fh:
+            size = fh.seek(0, 2)
+            pos = file_bytes
+            if size < file_bytes:
+                # OS 충돌로 fsync 되지 않은 꼬리를 잃었다(T16) — 빈 바이트 구멍을 만들지 않는다
+                self.store.pin_log_incomplete(job.id)
+                self.log(f"log gap: job #{job.id} log.txt is {size} bytes, committed {file_bytes}")
+                pos = size
+            # 앞 조각이 줄 끝 없이 남긴 커밋된 열린 줄. 창은 가장 긴 값 이상이다 — 그보다 짧은
+            # 값은 어디서 끊겨도 창 안에서 시작한다(릴리스 값은 64 KiB 까지)
+            window = max(OPEN_LINE_BYTES, max((len(v) for v in values), default=0))
+            head, whole = _open_line(fh, pos, window)  # mutcheck: open-line-window-fixed
+            masked = _mask_piece(head, rest, values)
+            try:
+                _write_at(fh, pos, masked)  # step 7
+            except OSError as e:
+                _truncate_quietly(fh, pos)
+                raise _api_error(
+                    503, f"cannot write the log ({type(e).__name__})", code="log_write_failed"
+                ) from e
+            # 마커는 끝난 줄에서만 찾는다. 앞 조각이 줄 끝 없이 끝났으면(러너가 64 KiB 마다 끊은
+            # 줄 · 옛 시험) 파일의 그 꼬리를 앞에 붙인다 — 메모리 조각(`_log_partial`)이 아니라
+            # 커밋된 파일에서 읽으므로 재시작을 넘어도 같다
+            lines = ((head if whole else b"") + masked).split(b"\n")[:-1]
+            parsed = [
+                p for raw in lines if (p := parse_marker(raw.decode("utf-8", errors="replace")))
+            ]
+            self._before_log_commit(job.id)
+            try:  # step 8 — 「세션이 아직 현재」도 같은 UPDATE 가 본다(결정 338)
+                ok = self.store.commit_log(
+                    job.id,
+                    session=session,
+                    expect_offset=committed,
+                    new_offset=committed + len(rest),
+                    file_bytes=pos + len(masked),
+                    markers=parsed,
+                    at=self.now_fn(),
+                )
+            except sqlite3.OperationalError as e:
+                _truncate_quietly(fh, pos)
+                if not _is_busy_error(e):
+                    raise
+                raise _api_error(
+                    503, "database is busy", code="database_busy", retry_after=1
+                ) from e
+            except BaseException:
+                _truncate_quietly(fh, pos)
+                raise
+            if not ok:
+                _truncate_quietly(fh, pos)
+                raise self._log_refused(job.id, session)
+        answer = {
+            "job_id": job.id,
+            "bytes": len(rest),
+            "markers": len(parsed),
+            "offset": committed + len(rest),
+        }
+        return answer, parsed
+
+    def _log_refused(self, job_id: int, session: str) -> Exception:
+        """커밋이 0행이었다 — 펜싱됐으면 `session_fenced`, 닫혔으면 `job_closed`."""
+        srow = self.store.get_session(session)
+        if srow is None or srow.fenced_at is not None:
+            return _api_error(409, SESSION_FENCED, code="session_fenced")
+        current = self.store.get_job(job_id)
+        st = current.state if current is not None else "unknown"
+        return _api_error(409, f"job #{job_id} is {st}", state=st, code="job_closed")
+
+    def _legacy_log(self, token: TokenInfo, job_id: int, data: bytes) -> dict[str, Any]:
+        """옛 워커(프로토콜 1)의 잡 — raw 바이트를 `log.txt` 에 붙이고 줄 단위로 마커를 파싱한다.
+        잘린 마지막 줄은 다음 요청과 이어 붙인다. 오프셋은 없다(`log_offset` NULL = 모름)."""
+        session = None
         job = self._owned_active(token, job_id, session)
         now = self.now_fn()
         # 릴리스 비밀은 서버에 있다 — 원격 워커의 stdout 도 같은 규칙으로 지운다. 요청 하나가
@@ -1066,6 +1317,13 @@ class RemoteWorkersMixin:
         return 201, {"job_id": job.id, "bundle_sha256": digest, "bytes": length}
 
     def worker_finish(self, token: TokenInfo, job_id: int, body: Any) -> dict[str, Any]:
+        self._finish_body.value = body
+        try:
+            return self._worker_finish(token, job_id, body)
+        finally:
+            self._finish_body.value = None
+
+    def _worker_finish(self, token: TokenInfo, job_id: int, body: Any) -> dict[str, Any]:
         from remote_ci_monitor.worker import outcome_for
 
         if not isinstance(body, dict):
@@ -1090,10 +1348,12 @@ class RemoteWorkersMixin:
             raise _api_error(400, "summary must be a string")
         lost_coded = _lost_summary(body, reported, token.name)
         preflight = None if lost_coded is not None else _preflight_summary(body, reported, rc)
+        log_bytes = _log_bytes(body)
         now = self.now_fn()
         # 실행 종료 시각(선택). 수집·업로드가 끼어도 v1 의 `finished_at`·`job_seconds` 가
-        # 밀리지 않게 워커가 실어 보낸다(§10). 이상하면 조용히 수신 시각으로 물러선다.
-        ended = _parse_iso(body.get("finished_at")) or now
+        # 밀리지 않게 워커가 실어 보낸다(§10). 이상하면 조용히 수신 시각으로 물러선다. 워커 시계가
+        # 어긋났으면 `[started_at, 수신 시각]` 의 가까운 끝으로 자른다(M5t-b 결정 277)
+        ended = _clamp(_parse_iso(body.get("finished_at")) or now, job.started_at, now)
         disposition = body.get("artifacts")
         if disposition is not None and not isinstance(disposition, dict):
             raise _api_error(400, "artifacts must be an object")
@@ -1167,7 +1427,13 @@ class RemoteWorkersMixin:
         # 반복(M5s 결정 225)의 `retried` 는 `store.finish` 가 스스로 `running` 에서만 받는다 — 그
         # 사이 취소가 들어왔으면 거절되고, 아래 대체 경로가 `cancelled` 로 닫는다(다음 시도 없음)
         if not self.store.finish(
-            job.id, now=ended, only_from=only_from, hold_cause=hold_cause, **fields
+            job.id,
+            now=ended,
+            only_from=only_from,
+            hold_cause=hold_cause,
+            log_bytes=log_bytes,
+            finish_session=session,
+            **fields,
         ):
             current = self.store.get_job(job.id)
             st = current.state if current else "unknown"
@@ -1181,7 +1447,13 @@ class RemoteWorkersMixin:
             # 대체 경로가 없으면 잡은 종료 상태에 못 가고 heartbeat 시한까지 `running` 이다.
             state, fields = _fields(current, CANCELLED, None)
             if not self.store.finish(
-                job.id, now=ended, only_from=(CANCELLING,), hold_cause=hold_cause, **fields
+                job.id,
+                now=ended,
+                only_from=(CANCELLING,),
+                hold_cause=hold_cause,
+                log_bytes=log_bytes,
+                finish_session=session,
+                **fields,
             ):
                 current = self.store.get_job(job.id)
                 st = current.state if current else "unknown"
@@ -1200,8 +1472,27 @@ class RemoteWorkersMixin:
         self, token: TokenInfo, job: Job, session: str | None, gone: bool | None
     ) -> Exception:
         """이미 닫힌 잡에 온 finish(T14)의 답 — 409 `code: job_closed`. 같은 세션의 `group_gone:
-        true` 는 그 잡의 열린 홀드를 푼다 — 확인은 뒤에 와도 참이다(§4.12 표의 1). `late_result`
-        기록은 PR2 다. 앞에서 닫혀 있었든 확인과 닫기 사이에 닫혔든 같은 답이다."""
+        true` 는 그 잡의 열린 홀드를 푼다 — 확인은 뒤에 와도 참이다(§4.12 표의 1). 잡이 `lost` 면
+        늦은 결과를 한 번 남긴다(§4.6 · 결정 256 · 274) — 기록과 홀드 풀기는 한 트랜잭션이다. 앞에서
+        닫혀 있었든 확인과 닫기 사이에 닫혔든 같은 답이다."""
+        late = None
+        body = getattr(self._finish_body, "value", None)  # 이 스레드가 받은 finish 본문
+        if job.state == LOST and session is not None and isinstance(body, dict):
+            late = self._record_late(token, job, session, gone, body)
+        if late is not None:
+            recorded, released = late
+            if released:
+                self.log(f"job #{job.id}: hold released — the worker confirmed the group is gone")
+                self._publish_job(None, job.id)
+                self.wake.set()
+            return _api_error(
+                409,
+                f"job #{job.id} is {job.state}",
+                state=job.state,
+                code="job_closed",
+                late_result_recorded=recorded,
+                hold_released=released,
+            )
         released = (
             gone is True  # mutcheck: hold-released-without-group-gone
             and session is not None
@@ -1219,7 +1510,37 @@ class RemoteWorkersMixin:
             f"job #{job.id} is {job.state}",
             state=job.state,
             code="job_closed",
+            late_result_recorded=False,
             hold_released=released,
+        )
+
+    def _record_late(
+        self, token: TokenInfo, job: Job, session: str, gone: bool | None, body: dict[str, Any]
+    ) -> tuple[bool, bool] | None:
+        """늦은 finish 의 본문을 검사하고 `late_result` 를 남긴다. 펜싱된 세션은 None(2차 Q-B)."""
+        reported = body.get("outcome")
+        if reported not in WORKER_OUTCOMES:
+            raise _api_error(400, f"outcome must be one of {', '.join(WORKER_OUTCOMES)}")
+        rc = body.get("exit_code")
+        if rc is not None and (isinstance(rc, bool) or not isinstance(rc, int)):
+            raise _api_error(400, "exit_code must be an integer or null")
+        log_bytes = _log_bytes(body)
+        now = self.now_fn()
+        ended = _clamp(_parse_iso(body.get("finished_at")) or now, job.started_at, now)
+        payload = {
+            "outcome": reported,
+            "exit_code": rc,
+            "finished_at": iso(ended),
+            "received_at": iso(now),
+        }
+        return self.store.record_late_result(
+            job.id,
+            session=session,
+            payload=payload,
+            log_bytes=log_bytes,
+            gone=gone,
+            by=token.name,
+            now=now,
         )
 
     def _narrow_confirm(
@@ -1277,6 +1598,16 @@ class RemoteWorkersMixin:
             raise _api_error(400, "artifacts.state is not a known state")
         row = self.store.get_bundle(job_id)
         if state == art.READY:
+            # `ready` 는 묶음이 서버에 실제로 있을 때만이다. 행 · 해시 · 파일을 모두 본다(M5t-b
+            # 결정 275 · F63). 업로드 없이 온 `ready` 를 적으면 내려받기가 없는 파일을 가리킨다
+            stored = (row or {}).get("bundle_sha256")
+            on_disk = (self.config.data_dir / "artifacts" / str(job_id) / "bundle.tar").is_file()
+            if not stored or not on_disk:  # mutcheck: artifact-ready-without-bundle
+                self.store.set_bundle_failed(job_id, art.FAILED, "upload_failed", None, now)
+                return
+            if reported.get("bundle_sha256") != stored:
+                self.store.set_bundle_failed(job_id, art.FAILED, "hash_mismatch", None, now)
+                return
             # 무엇을 모았는지는 **워커가** 안다. 서버는 자기가 받은 바이트를 안다 — 올라온 행이
             # 있으면 그 해시·바이트를 쓰고, 없으면 워커 말을 그대로 적는다. 파일이 실제로 없으면
             # 내려받기가 503 을 내고 재시작 화해가 `unavailable` 로 고친다(§3 · §9).

@@ -141,6 +141,8 @@ RECENT_KEYS = {
     "retry_of",
     "retried_as",
     "max_attempts",
+    # M5t-b — 서버가 그 잡의 로그를 빠짐없이 받았나(참 · 거짓 · 모름 null, 키 추가만)
+    "log_complete",
 }
 POOL_KEYS = {
     "name",

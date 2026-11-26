@@ -21,9 +21,11 @@
 
 from __future__ import annotations
 
+import contextlib
 import copy
 import dataclasses
 import fcntl
+import functools
 import hashlib
 import json
 import os
@@ -43,7 +45,7 @@ from pathlib import Path
 from typing import Any
 
 from remote_ci_monitor import __version__, follow
-from remote_ci_monitor.client import ClientError, WorkerClient
+from remote_ci_monitor.client import WORKER_REQUEST_TIMEOUT_SECONDS, ClientError, WorkerClient
 from remote_ci_monitor.collect import CollectResult, collect
 from remote_ci_monitor.config import WorkerConfig
 from remote_ci_monitor.core import artifacts as art
@@ -71,10 +73,11 @@ from remote_ci_monitor.worker import format_limit
 REGISTER_RETRY_SECONDS = 5.0
 CLAIM_MIN_INTERVAL = 1.0  # 빈 204 가 이보다 빨리 오면 이만큼 쉰다
 RETRY_WAIT_SECONDS = 2.0  # 503 · 연결 실패 뒤 다시 claim 하기까지
-REPORT_RETRIES = (1.0, 2.0, 4.0)
 LOG_FLUSH_SECONDS = 1.0
 LOG_BATCH_BYTES = 256 * 1024
-LOG_KEEP_BYTES = 4 * 1024 * 1024  # 서버에 못 보낸 로그를 메모리에 두는 상한
+#: 조각 하나의 상한 — 서버의 로그 본문 상한(`remote_workers.MAX_WORKER_LOG_BODY`)과 같다. 줄 끝이
+#: `LOG_BATCH_BYTES` 안에 없으면 그 줄 끝까지 이만큼 본다(한 줄은 조각 하나에, §4.5)
+LOG_PIECE_MAX_BYTES = 4 * 1024 * 1024
 WORKSPACE_KEEP_DAYS = 7
 STOP_SUMMARY = "worker stopped"
 #: 연결 실패가 이만큼 **연속**이면 같은 망에서 서버를 다시 찾는다(`server = "auto"` 일 때만, M5n §9)
@@ -91,12 +94,9 @@ HOST_KEYS = (
     "package_manager",
     "python",
 )
-#: 드레인 끝에 보고하지 못한 잡의 finish 를 다시 시도하는 상한(M5q §14 B질문11). 재실행 뒤의 등록은
-#: 그 워커의 도는 잡을 lost 로 닫으므로 바로 exec 하지 않는다
+#: 드레인 중인 레인이 제 잡의 보고 큐가 비기를 기다리는 상한(M5q §14 B질문11 · M5t-b §4.4). 넘으면
+#: 오늘처럼 exec 한다 — 큐는 디스크에 남아 새 이미지가 등록 전에 죽은 세션의 큐로 보낸다
 DRAIN_REPORT_SECONDS = 60
-DRAIN_REPORT_RETRY_SECONDS = 2.0
-#: 레인이 재등록하기 전에 다른 스레드의 다시 보고를 기다리는 상한
-REREGISTER_REPORT_WAIT_SECONDS = 10.0
 #: 드레인 중인 레인이 claim 없이 한 번 기다리는 시간(§14 B질문8). 드레인이 취소되면 다시 claim 한다
 DRAIN_WAIT_SECONDS = 1.0
 DRAINING = "draining: no new claims, restarting when running jobs finish"
@@ -121,6 +121,14 @@ SELF_STOP_SLACK_SECONDS = 10
 FINISH_RECORDED = frozenset({SUCCEEDED, FAILED, TIMED_OUT, RETRIED, EXHAUSTED})
 #: W4 표 마지막 행 — 원격 claim 된 잡이 될 수 없는 상태(서버 버그 신호)
 _NOT_CLAIMED_STATES = frozenset({"expired", "scheduled", "queued", "uploading"})
+
+
+class SnapshotUnreachable(MaterializeError):
+    """스냅샷을 받는 중 rcm 서버와 끊겼다(status 0 · 503) — 확정 결함이 아니라 `lost` +
+    `snapshot_unreachable` 이다(M5t-b 결정 259). 코드는 오늘의 다운로드 실패 그대로 들고 간다."""
+
+    def __init__(self, *, log: str = "") -> None:
+        super().__init__("snapshot_download_failed", log=log, status=0)
 
 
 def _utcnow() -> datetime:
@@ -157,8 +165,783 @@ def _fmt_seconds(seconds: float) -> str:
     return f"{s // 3600}h {(s % 3600) // 60:02d}m"
 
 
+#: 잡이 끝난 뒤 로그 · 산출물이 HTTP 5xx 로 막혀 있으면 이만큼 지나 finish 를 먼저 보낸다(결정 324)
+FINISH_HOLD_SECONDS = 300
+#: 잡이 끝난 뒤 로그 · 산출물을 다시 보내는 창(결정 264). 지나면 finish 만 보내고, 그것도 못
+#: 보내면 버린다
+RETRANSMIT_SECONDS = 24 * 3600
+#: 죽은 세션 D 의 큐가 서버 오류(HTTP 응답)를 받는 시간이 이만큼이면 큐를 디스크에 둔 채 등록한다
+#: (결정 337 · §4.4 의 7). 연결 실패 시간은 세지 않는다. 워커의 단조 시계(`mono_fn`)로 잰다(§4.1.3
+#: 「D 큐 등록 대기(3판)」) — 벽시계가 뛰면 일찍 등록하고, 서 있으면 끝없이 기다린다(batch-9 #3)
+DEAD_SESSION_WAIT_SECONDS = 300
+#: 잡마다 보내는 스레드의 백오프(§4.5) — 1초에서 두 배씩 30초까지. 도는 잡에는 횟수 상한이 없다
+BACKOFF_START_SECONDS = 1.0
+BACKOFF_MAX_SECONDS = 30.0
+#: D 의 등록 대기가 상한(`DEAD_SESSION_WAIT_SECONDS`)에 닿은 뒤 빚진 finish(`owes_finish`)를
+#: 기다리는 상한 — 백오프 한 번과 보통 요청 두 번(batch-8). 등록은 이보다 더 기다리지 않는다.
+#: 그동안 finish 를 한 번 보내 보지만, 그 큐의 보내는 스레드가 로그 POST(시한 60초) · 번들
+#: PUT(시한 300초)에 묶여 있으면 finish 를 해 보지 못하고 잡은 restarted-without-job 으로 닫힌다
+#: (batch-9 #1 — 등록이 그 요청을 기다리지 않는 것이 맞다). 단조 시계(`mono_fn`)로 잰다. 벽시계가
+#: 뒤로 가면 끝난 지 300초가 늦게 오니 이것이 대기를 끝낸다
+OWED_FINISH_WAIT_SECONDS = BACKOFF_MAX_SECONDS + 2 * WORKER_REQUEST_TIMEOUT_SECONDS
+#: 멈추는 중(신호 · 펜싱)이면 보내는 스레드가 이만큼 더 해 보고 나머지는 디스크에 남긴다 — 다음
+#: 프로세스가 죽은 세션의 큐로 보낸다(§4.4 의 7). 옛 `REPORT_RETRIES` 의 합(1 + 2 + 4)과 같다
+STOP_REPORT_SECONDS = 7.0
+STREAM_FILE = "stream.log"
+OUTBOX_FILE = "outbox.json"
+
+
+class JobOutbox:
+    """한 잡의 보고 큐(M5t-b §4.4 · §4.5, 결정 271 · 337). 세션 폴더의 `jobs/<id>/` 에 둔다.
+
+    `stream.log` 는 서버로 가는 스트림 바이트 그대로다(가리기 전, F14). 그 길이가 그 잡 스트림의
+    길이다. `outbox.json` 은 보낼 phase(마지막 하나), `acked`(서버가 2xx 로 확인한 오프셋 — 하한),
+    finish 기록, 끝난 시각, 산출물 묶음, `done` 을 담는다. 폴더가 없으면(세션 폴더 없이 도는 시험)
+    메모리에만 둔다. 쓰기에 실패하면 「스풀 깨짐」이고 그 뒤 바이트는 세기만 한다(§4.6
+    `log_bytes`)."""
+
+    def __init__(
+        self,
+        folder: Path | None,
+        *,
+        log: Callable[[str], None] | None = None,
+        label: str | None = None,
+        on_dir_error: Callable[[OSError], None] | None = None,
+    ):
+        self.folder = folder
+        # 저장 실패를 말할 곳(워커 로그). 없으면(시험의 맨 큐) 말하지 않는다(P6-1 G2)
+        self.log = log
+        # 줄 머리 — 죽은 세션 D 의 큐는 `dead session <D> #N` 이다(batch-5 #5). 없으면 `#N`
+        self.label = label
+        # 이름 바꾸기 뒤 폴더 fsync 가 실패했을 때 부를 것(워커가 프로세스마다 한 번 말한다)
+        self.on_dir_error = on_dir_error
+        self._save_failed_said = False
+        self._mem = bytearray()
+        self._fh: Any = None
+        self._lock = threading.Lock()
+        # 저장 하나(스냅숏 → 쓰기 → 이름 바꾸기)를 통째로 줄 세운다 — 레인(finish)과 보내는
+        # 스레드(acked)의 저장이 엇갈려 옛 스냅숏이 나중에 이름을 바꾸지 않게
+        self._save_lock = threading.Lock()
+        self.length = 0  # 그 잡이 낸 스트림 바이트(깨진 뒤에도 센다)
+        self.written = 0  # 스풀에 실제로 있는 바이트
+        self.broken = False
+        self.acked = 0
+        self.phase: str | None = None
+        self.finish: dict[str, Any] | None = None
+        self.ended_at: float | None = None
+        self.bundle: dict[str, Any] | None = None
+        self.log_stopped = False
+        self.done = False
+
+    # ── 디스크 ──
+
+    @classmethod
+    def load(
+        cls,
+        folder: Path,
+        *,
+        log: Callable[[str], None] | None = None,
+        label: str | None = None,
+        on_dir_error: Callable[[OSError], None] | None = None,
+    ) -> JobOutbox | None:
+        """죽은 세션 · exec 전 이미지가 남긴 큐. `outbox.json` 이 없거나 깨졌으면 None."""
+        data = _read_json(folder / OUTBOX_FILE)
+        if data is None:
+            return None
+        ob = cls(folder, log=log, label=label, on_dir_error=on_dir_error)
+        try:
+            size = (folder / STREAM_FILE).stat().st_size
+        except OSError:
+            size = 0
+        ob.broken = data.get("broken") is True
+        ob.written = size
+        counted = data.get("length")
+        ob.length = max(size, counted) if isinstance(counted, int) and ob.broken else size
+        acked = data.get("acked")
+        ob.acked = acked if isinstance(acked, int) and 0 <= acked <= ob.length else 0
+        phase = data.get("phase")
+        ob.phase = phase if isinstance(phase, str) else None
+        finish = data.get("finish")
+        ob.finish = finish if isinstance(finish, dict) else None
+        ended = data.get("ended_at")
+        ob.ended_at = float(ended) if isinstance(ended, (int, float)) else None
+        bundle = data.get("bundle")
+        ob.bundle = bundle if isinstance(bundle, dict) else None
+        ob.log_stopped = data.get("log_stopped") is True
+        ob.done = data.get("done") is True
+        return ob
+
+    def save(self) -> None:
+        if self.folder is None:
+            return
+        with self._save_lock:  # mutcheck: outbox-save-out-of-order
+            with self._lock:
+                data = {
+                    "acked": self.acked,
+                    "phase": self.phase,
+                    "finish": self.finish,
+                    "ended_at": self.ended_at,
+                    "bundle": self.bundle,
+                    "log_stopped": self.log_stopped,
+                    "done": self.done,
+                    "broken": self.broken,
+                    "length": self.length,
+                }
+            try:
+                unsynced = _write_json(self.folder / OUTBOX_FILE, data)
+            except OSError as e:
+                # 다음 저장이 다시 쓴다 — 디스크의 `acked` 는 하한일 뿐이다. 그 사이 재시작하면
+                # 디스크에 없는 finish 는 잃는다 — 내구성 약속이 깨졌다고 한 번 말한다(P6-1 G2).
+                # 저장이 다시 되면 다음 실패도 한 번 말한다
+                if not self._save_failed_said:  # mutcheck: outbox-save-failure-silent
+                    self._save_failed_said = True
+                    if self.log is not None:
+                        who = self.label or f"#{self.folder.name}"  # mutcheck: dead-save-unlabelled
+                        self.log(
+                            f"{who} report: cannot save {OUTBOX_FILE}"
+                            f" ({e.strerror or type(e).__name__}) — the report is only in memory;"
+                            " a restart before it is sent loses it"
+                        )
+                return
+            self._save_failed_said = False
+        if unsynced is not None and self.on_dir_error is not None:
+            self.on_dir_error(unsynced)
+
+    # ── 스트림 ──
+
+    def append(self, data: bytes) -> None:
+        """관찰자의 `output` — 펌프를 막지 않는다(네트워크는 보내는 스레드가)."""
+        if not data:
+            return
+        with self._lock:
+            self.length += len(data)
+            if self.broken:
+                return
+            if self.folder is None:
+                self._mem.extend(data)
+                self.written += len(data)
+                return
+            try:
+                if self._fh is None:
+                    self.folder.mkdir(parents=True, exist_ok=True)
+                    self._fh = (self.folder / STREAM_FILE).open("ab")
+                self._fh.write(data)
+                self._fh.flush()
+                self.written += len(data)
+            except OSError:
+                self.broken = True  # 그 뒤 바이트는 세기만 한다 — 서버는 log_complete 거짓
+        if self.broken:
+            self.save()
+
+    def read(self, start: int, limit: int) -> bytes | None:
+        """스풀의 `[start, start + limit)` 에서 있는 만큼. 파일을 못 읽으면 None(빈 바이트와
+        다르다)."""
+        with self._lock:
+            end = min(self.written, start + limit)
+            if start >= end:
+                return b""
+            if self.folder is None:
+                return bytes(self._mem[start:end])
+        try:
+            with (self.folder / STREAM_FILE).open("rb") as fh:
+                fh.seek(start)
+                data = fh.read(end - start)
+        except OSError:
+            return None
+        # 파일이 `written` 보다 짧다(잘렸다) — 앞부분이나 빈 바이트를 조각으로 보내면 `acked` 가
+        # 그대로인 채 쉬지 않고 돈다. 못 읽음과 같다(P3 2라운드)
+        if len(data) < end - start:  # mutcheck: short-spool-read-sent
+            return None
+        return data
+
+    def pending(self) -> int:
+        with self._lock:
+            return max(0, self.written - self.acked)
+
+    def close(self) -> None:
+        with self._lock:
+            if self._fh is not None:
+                try:
+                    self._fh.close()
+                except OSError:
+                    pass
+                self._fh = None
+
+
+class _JobSender:
+    """잡 하나의 보고를 순서대로 보내는 스레드(결정 337 · V1-10). phase → 로그(`acked` 부터 256 KiB
+    이하, 마지막 줄 끝에서 자름) → 산출물 → finish. 잡끼리는 서로 기다리지 않는다.
+
+    `dead` 가 있으면 죽은 세션 D 의 큐다(§4.4 의 7): D 의 세션 id 로 보내고, 응답 표가 다르며(W5 를
+    부르지 않고 D 로 재등록하지 않는다), 2xx 가 새 세션의 `ok_at` 을 올리지 않는다(V2-8)."""
+
+    def __init__(
+        self,
+        proc: RemoteWorker,
+        job_id: int,
+        outbox: JobOutbox,
+        *,
+        client: Any = None,
+        dead: DeadSession | None = None,
+        resumed: bool = False,
+    ):
+        self.proc = proc
+        self.job_id = job_id
+        self.ob = outbox
+        self._client = client
+        self.dead = dead
+        self.wake = threading.Event()
+        self.halt = threading.Event()
+        # 이 프로세스가 처음 보내는 로그가 디스크의 `acked` 에서 시작하면 먼저 묻는다(V2-13)
+        self.query_first = resumed
+        self.delay = 0.0
+        self.last_5xx = False  # 지금 막힌 항목의 마지막 시도가 HTTP 5xx 였다(결정 324)
+        # 마지막 시도가 서버의 오류 응답이나 로컬 오류(예상 못 한 예외 · 못 읽는 스풀)였다 — 죽은
+        # 세션 D 의 등록 대기 300초가 세는 시간(결정 337 은 연결 실패 시간을 세지 않는다). 로컬
+        # 오류도 한 번 지나가는 것일 수 있어 같은 상한 안에서 다시 해 본다(batch-7). 큐마다 두고
+        # 성공 · 연결 실패에 내린다(P3 1라운드). `answered_local` 은 그 시도가 로컬 오류였다는
+        # 표식이다 — 상한의 줄이 서버 탓만 하지 않게 한다
+        self.answered = False
+        self.answered_local = False
+        # 마지막 로그 시도가 스풀을 못 읽었다 — 끝난 잡이면 5xx 와 같은 300초 뒤 finish 가 먼저
+        # 간다(결정 324, P3 2라운드). 스풀을 다시 읽으면 내린다
+        self.spool_unreadable = False
+        self._read_failed_said = False
+        self._unreadable_first_said = False
+        # 마지막 시도가 예상 못 한 예외였다(P6-1 G4) — 못 읽는 스풀처럼 끝난 잡이면 300초 뒤
+        # finish 가 먼저 간다. 시도가 성공하거나 서버 · 연결 오류로 끝나면 내린다
+        self.local_error = False
+        # 이 큐의 finish 를 한 번이라도 보내 봤다 — D 의 등록 대기 상한은 끝난 잡의 finish 를 한
+        # 번은 가 보게 둔다(`owes_finish`, batch-7)
+        self.finish_tried = False
+        self._unexpected_said = False
+        self._local_first_said = False
+        self._phase_first_said = False
+        self._left_behind_said = False
+        self.failures = 0
+        # 펜싱 — 이 프로세스의 큐는 프로세스의 펜싱(W5)을, D 의 큐는 그 큐가 받은 409 를 본다
+        self.fenced = proc.fenced if dead is None else threading.Event()
+        self.narrow_sent = False
+        self.gave_up = False
+        self._stop_deadline: float | None = None
+        self._last_log = time.monotonic()
+        self._abandon_said = False
+        # 스레드가 끝나면 한 번 부를 것(`when_ended`) — 레인이 먼저 풀린 큐의 정리
+        self._end_lock = threading.Lock()
+        self._ended = False
+        self._on_end: Callable[[], None] | None = None
+        self.thread = threading.Thread(target=self.run, name=f"rcm-report-{job_id}", daemon=True)
+
+    @property
+    def client(self) -> Any:
+        return self._client if self._client is not None else self.proc.client
+
+    def start(self) -> _JobSender:
+        self.thread.start()
+        return self
+
+    def alive(self) -> bool:
+        return self.thread.is_alive()
+
+    def when_ended(self, fn: Callable[[], None]) -> None:
+        """보내는 스레드가 끝나면 `fn` 을 한 번 부른다. 이미 끝났으면 지금 이 스레드에서 부른다."""
+        with self._end_lock:
+            if not self._ended:
+                self._on_end = fn
+                return
+        fn()
+
+    def finished(self) -> bool:
+        """큐가 끝났다 — 보낼 것이 남지 않았다(`done`) 또는 끝나지 않은 잡의 로그를 다 보냈다(D)."""
+        return self.ob.done
+
+    # ── 고르기 ──
+
+    def _log_due(self) -> bool:
+        ob = self.ob
+        if ob.log_stopped:
+            return False
+        if self.query_first:
+            return True
+        pending = ob.pending()
+        if pending <= 0:
+            return False
+        if ob.finish is not None or self.dead is not None:
+            return True
+        due = pending >= LOG_BATCH_BYTES or time.monotonic() - self._last_log >= LOG_FLUSH_SECONDS
+        return due and self._chunk() != b""
+
+    def _art_due(self) -> bool:
+        b = self.ob.bundle
+        return self.ob.finish is not None and b is not None and b.get("state") == "pending"
+
+    def _finish_first(self) -> bool:
+        """finish 를 앞당길 때(결정 324 · 264). 잡이 끝났고 phase · 로그 · 산출물이 앞에 막혔을
+        때만 본다."""
+        ob = self.ob
+        if ob.finish is None or ob.ended_at is None:
+            return False
+        # 오프셋 질의도 막힌 로그다 — `acked == written` 이라도 질의가 끝나야 로그 단계가
+        # 끝난다(batch-7 #1). 빠뜨리면 질의만 막힌 끝난 잡의 finish 가 영원히 안 간다
+        log_left = ob.pending() > 0 or self.query_first  # mutcheck: stuck-query-holds-finish
+        blocked = (not ob.log_stopped and log_left) or self._art_due()
+        # phase 는 결과가 아니라 진행 표시다. 끝난 잡의 밀린 phase 도 로그 · 산출물과 같은 300초
+        # · 24시간 규칙을 따른다 — 아니면 phase 만 남은 끝난 잡의 finish 가 영원히 안 간다(batch-6)
+        phase = ob.phase is not None and not self.fenced.is_set()  # mutcheck: phase-holds-finish
+        if not (blocked or phase):
+            return False
+        age = self.proc._epoch() - ob.ended_at
+        if age >= RETRANSMIT_SECONDS:
+            if not self._abandon_said:
+                self._abandon_said = True
+                what = "log and artifacts" if blocked else "phase"
+                self.proc.log(
+                    f"#{self.job_id} report: {what} not delivered in 24h — sending the finish"
+                    f" without {'them' if blocked else 'it'}"
+                )
+            return True
+        if not blocked:
+            # 막힌 것이 phase 뿐이다. 5xx(서버에 닿았다)나 예상 못 한 예외(다시 해도 같다)면 300초
+            # 뒤 finish 를 먼저 보내고 phase 는 버린다. 연결 실패면 finish 도 못 가니 순서를 지킨다
+            # mutcheck: phase-local-error-holds-finish
+            if not (self.last_5xx or self.local_error) or age < FINISH_HOLD_SECONDS:
+                return False
+            if not self._phase_first_said:
+                self._phase_first_said = True
+                self.proc.log(
+                    f"#{self.job_id} report: phase still not delivered {FINISH_HOLD_SECONDS}s"
+                    " after the job ended — sending the finish first, the phase is dropped"
+                )
+            return True
+        # 못 읽는 스풀은 서버가 고칠 수 없다 — 5xx 와 같이 300초 뒤 finish 를 먼저 보내 잡을 진짜
+        # 결과로 닫는다. 남은 로그는 가지 않고 `log_complete` 는 거짓이다(P3 2라운드 MED)
+        unreadable = self.spool_unreadable  # mutcheck: unreadable-spool-holds-finish
+        if unreadable and age >= FINISH_HOLD_SECONDS:
+            if not self._unreadable_first_said:
+                self._unreadable_first_said = True
+                self.proc.log(
+                    f"#{self.job_id} report: spooled log still unreadable {FINISH_HOLD_SECONDS}s"
+                    " after the job ended — sending the finish first, the log stays incomplete"
+                )
+            return True
+        # 같은 결정적 원인(버그 · 로컬 고장)이 로그 · 산출물 단계를 계속 막아도 같다(P6-1 G4)
+        stuck = self.local_error  # mutcheck: unexpected-error-holds-finish
+        if stuck and age >= FINISH_HOLD_SECONDS:
+            if not self._local_first_said:
+                self._local_first_said = True
+                self.proc.log(
+                    f"#{self.job_id} report: still failing with an unexpected error"
+                    f" {FINISH_HOLD_SECONDS}s after the job ended — sending the finish first"
+                )
+            return True
+        # 5xx 는 서버에 닿았다는 뜻이다. 연결 실패면 finish 도 갈 수 없으니 순서를 지킨다
+        return age >= FINISH_HOLD_SECONDS and self.last_5xx  # mutcheck: finish-waits-forever
+
+    def _say_left_behind(self) -> None:
+        """finish 가 먼저 가면 남은 phase · 로그 · 산출물은 보내지 않는다(finish 2xx 뒤 큐가
+        끝난다). 무엇이 남았는지 한 번 말한다 — phase 와 로그가 함께 밀렸고 phase 가 5xx 면 한
+        번도 보내 보지 않은 로그 꼬리가 줄 없이 버려졌다(batch-7 #3). 24시간 창이 끝난 때는 그
+        줄(`... not delivered in 24h — sending the finish without ...`)이 이미 말한다."""
+        if self._left_behind_said or self._window_over():
+            return
+        ob = self.ob
+        parts: list[str] = []
+        if ob.phase is not None and not self.fenced.is_set():
+            parts.append("the phase")
+        pending = ob.pending()
+        if not ob.log_stopped and pending > 0:  # mutcheck: left-log-unsaid
+            parts.append(f"the last {pending} bytes of the log (log_complete is false)")
+        if self._art_due():  # mutcheck: left-bundle-unsaid
+            parts.append("the bundle (upload_failed)")
+        if parts in ([], ["the phase"]):
+            return  # phase 만 남았으면 phase 의 줄(`phase still not delivered ...`)이 말한다
+        self._left_behind_said = True
+        self.proc.log(
+            f"{self._label('report')}: the finish goes first {FINISH_HOLD_SECONDS}s after the job"
+            f" ended; not sent: {', '.join(parts)}"
+        )
+
+    def _window_over(self) -> bool:
+        """잡이 끝난 지 `RETRANSMIT_SECONDS` 가 지났다(디스크의 `ended_at`, 결정 264)."""
+        ob = self.ob
+        if ob.ended_at is None:
+            return False
+        return self.proc._epoch() - ob.ended_at >= RETRANSMIT_SECONDS
+
+    def next_step(self) -> str | None:
+        ob = self.ob
+        if ob.done:
+            return None
+        if ob.finish is not None and self._finish_first():
+            self._say_left_behind()  # mutcheck: left-behind-unsaid
+            return "finish"
+        if ob.phase is not None and not self.fenced.is_set():
+            return "phase"
+        if self._log_due():
+            return "query" if self.query_first else "log"
+        if ob.finish is None:
+            return None
+        if self._art_due():
+            return "artifacts"
+        return "finish"
+
+    def _chunk(self) -> bytes | None:
+        """`acked` 부터 256 KiB 이하, 마지막 `\\n` 에서 자른 조각 — 한 줄이 두 요청에 걸치지 않는다
+        (F34 · F35). 줄 끝이 256 KiB 안에 없으면 그 줄 끝까지(`LOG_PIECE_MAX_BYTES` 안에서) 한
+        조각이다. 서버는 조각마다 가리므로 줄 가운데서 자르면 두 조각에 걸친 비밀을 온전히 가리지
+        못한다(P3 1라운드). 줄 끝 없는 꼬리는 스트림이 더 자라지 않을 때(잡이 끝났거나 D)만 보낸다.
+        러너는 64 KiB 마다 줄 끝을 붙이므로 4 MiB 넘는 한 줄은 러너에서 오지 않는다. 스풀을 못
+        읽으면 None."""
+        ob = self.ob
+        # 스트림이 더 자라지 않는지는 읽기 **전에** 본다. 읽은 뒤에 보면 그 사이 줄 끝이 이어
+        # 쓰이고 잡이 끝난 경우 줄 끝 없는 조각을 보내 다음 조각이 줄 가운데서 시작한다(P3
+        # 2라운드). finish 는 레인이 출력을 다 쓴 뒤에 적는다
+        final = ob.finish is not None or self.dead is not None
+        data = ob.read(ob.acked, LOG_BATCH_BYTES)
+        if data is None:
+            return None
+        cut = data.rfind(b"\n")
+        if cut < 0 and len(data) >= LOG_BATCH_BYTES:  # mutcheck: long-line-cut-mid-line
+            data = ob.read(ob.acked, LOG_PIECE_MAX_BYTES)
+            if data is None:
+                return None
+            cut = data.find(b"\n")
+        if cut >= 0:
+            return data[: cut + 1]
+        if len(data) >= LOG_PIECE_MAX_BYTES or final:  # mutcheck: chunk-end-seen-after-read
+            return data
+        return b""
+
+    # ── 보내기 ──
+
+    def run(self) -> None:
+        try:
+            while not self.ob.done and not self.halt.is_set():
+                if self._stopping_past_deadline():
+                    self.gave_up = True
+                    break
+                step = self.next_step()
+                if step is None:
+                    if self.dead is not None and self.ob.finish is None:
+                        break  # D 의 끝나지 않은 잡 — 로그를 다 보냈다
+                    self.wake.wait(LOG_FLUSH_SECONDS)
+                    self.wake.clear()
+                    continue
+                try:
+                    ok = self.attempt(step)
+                except Exception as e:  # noqa: BLE001 — 한 단계의 예상 못 한 예외에 스레드를 잃지 않는다
+                    ok = self._unexpected(step, e)  # mutcheck: unexpected-error-kills-the-sender
+                if ok:
+                    self.delay = 0.0
+                    continue
+                if step == "finish" and self._window_over():  # mutcheck: finish-kept-past-24h
+                    # finish 마저 24시간 안에 못 보냈다 — 큐 항목을 버린다(§4.5 「재전송 창」)
+                    self.proc.log(
+                        f"#{self.job_id} report: finish not delivered in 24h — dropping the report"
+                    )
+                    self.ob.done = True
+                    self.ob.save()
+                    break
+                self.delay = min(BACKOFF_MAX_SECONDS, max(BACKOFF_START_SECONDS, self.delay * 2))
+                self.halt.wait(self.delay)
+        except Exception as e:  # noqa: BLE001 — 보내는 스레드가 죽으면 레인이 묶인다
+            self.proc.log(
+                f"#{self.job_id} report: {type(e).__name__} — keeping the report on disk for the"
+                " next worker process"
+            )
+            self.gave_up = True
+        finally:
+            self.ob.close()
+            with self._end_lock:
+                self._ended = True
+                fn, self._on_end = self._on_end, None
+            if fn is not None:
+                fn()
+
+    def _stopping_past_deadline(self) -> bool:
+        if self.dead is not None or not self.proc.stopping.is_set():
+            return False
+        now = time.monotonic()
+        if self._stop_deadline is None:
+            self._stop_deadline = now + STOP_REPORT_SECONDS
+        return now >= self._stop_deadline
+
+    def attempt(self, step: str) -> bool:
+        """한 번 보낸다. 진행했으면(받았거나 그 항목을 정리했으면) 참, 다시 해 볼 일이면 거짓."""
+        ob = self.ob
+        sent = self.proc._sent_at()
+        try:
+            if step == "phase":
+                phase = ob.phase
+                self.client.phase(self.job_id, phase)
+                if ob.phase == phase:
+                    ob.phase = None
+            elif step in ("query", "log"):
+                chunk = b"" if step == "query" else self._chunk()
+                if chunk is None:  # mutcheck: unreadable-spool-sent-empty
+                    return self._spool_unreadable()
+                self.spool_unreadable = False
+                out = self.client.log(self.job_id, chunk, offset=ob.acked)
+                got = out.get("offset") if isinstance(out, dict) else None
+                if isinstance(got, int) and not isinstance(got, bool):
+                    ob.acked = min(max(got, 0), ob.written)  # 2xx 의 `offset` 으로만 오른다
+                else:
+                    ob.acked += len(chunk)
+                self.query_first = False
+                self._last_log = time.monotonic()
+            elif step == "artifacts":
+                assert ob.bundle is not None
+                try:
+                    receipt = self.client.upload_bundle(self.job_id, Path(ob.bundle["path"]))
+                except OSError as e:
+                    # 네트워크 오류는 클라이언트가 `ClientError` 로 바꾼다 — 여기 오는 것은 큐의
+                    # 묶음 파일을 못 읽은 것이다(지워졌다). 다시 해도 같다(P6-1 G4)
+                    return self._bundle_unreadable(e)  # mutcheck: missing-bundle-kills-the-sender
+                ob.bundle = {
+                    **ob.bundle,
+                    "state": "uploaded",
+                    "sha256": (receipt or {}).get("bundle_sha256"),
+                }
+            else:
+                self.finish_tried = True
+                fenced = self.fenced.is_set()  # mutcheck: fenced-finish-keeps-its-outcome
+                self._send_finish(fenced)
+                ob.done = True
+        except ClientError as e:
+            done = self._refused(step, e)
+            if done:
+                # 그 항목은 정리됐다(4xx 버림 · 409 job_closed · log_gap). 앞 시도가 남긴 표식은
+                # 낡았다 — 남기면 끝난 지 300초 지난 잡에서 다음 항목(산출물)을 해 보지도 않고
+                # finish 가 먼저 간다(batch-5 #3)
+                self.local_error = False  # mutcheck: local-error-kept-after-a-drop
+                self.spool_unreadable = False
+                self.last_5xx = False
+            ob.save()
+            return done
+        ob.save()
+        if self.dead is None:
+            self.proc.mark_ok(*sent)
+        self.local_error = False
+        self.last_5xx = False
+        self.answered = False
+        self.answered_local = False
+        self.failures = 0
+        return True
+
+    def _label(self, step: str) -> str:
+        dead = self.dead
+        if dead is None:
+            return f"#{self.job_id} {step}"
+        return f"dead session {dead.session_id[:8]} #{self.job_id} {step}"
+
+    def _bundle_unreadable(self, e: OSError) -> bool:
+        """큐의 묶음 파일이 없거나 못 읽는다. 명세의 산출물 실패 갈래로 간다 — 처분은 `failed`
+        (`upload_failed`, `_send_finish`), finish 는 이어서 간다. 그대로 두면 `FileNotFoundError` 가
+        보내는 스레드를 죽여 레인과 잡이 재시작까지 잡히고, 다음 프로세스의 죽은 큐도 같은 오류로
+        죽는다(P6-1 G4)."""
+        ob = self.ob
+        assert ob.bundle is not None
+        self.proc.log(
+            f"{self._label('artifacts')}: cannot read the bundle"
+            f" ({e.strerror or type(e).__name__}) — the finish reports upload_failed"
+        )
+        ob.bundle = {**ob.bundle, "state": "failed"}
+        ob.save()
+        return True
+
+    def _unexpected(self, step: str, e: Exception) -> bool:
+        """한 단계가 예상 못 한 예외를 냈다(버그 · 로컬 고장). 스레드를 끝내지 않고 백오프로 다시
+        해 본다 — 같은 결정적 원인이 매번 스레드를 죽이면 살아 있는 프로세스는 레인과 잡을
+        재시작까지 잡고, 다음 프로세스의 죽은 큐 보내기도 같은 오류로 죽는다(P6-1 G4). 줄은 한
+        번이다. 끝난 잡이면 300초 뒤 finish 가 먼저 간다(`_finish_first`). D 의 큐면 등록 대기
+        300초가 이 시간도 센다 — 한 번 지나가는 오류일 수 있어 서버 오류와 같은 상한 안에서 다시
+        해 보고, 상한의 줄은 로컬 오류도 말한다(batch-7)."""
+        if not self._unexpected_said:
+            self._unexpected_said = True
+            self.proc.log(f"{self._label(step)}: unexpected {type(e).__name__} — retrying")
+        self.local_error = True
+        self.answered = True  # mutcheck: dead-local-error-not-counted
+        self.answered_local = True
+        self.failures += 1
+        return False
+
+    def _late_answer(self, body: dict[str, Any]) -> None:
+        """닫힌 잡에 보낸 finish 의 409 `job_closed` 가 실은 두 키를 읽는다(§4.6 · 결정 330, P6-1
+        G6). `lost` 잡에서 `late_result_recorded: false` 면 서버가 이미 가진 결과를 그대로 두었다는
+        뜻이다(먼저 온 사본 · 이 세션의 finish 가 닫은 잡 · 경합) — 조용히 버리지 않고 말한다. 옛
+        서버처럼 키가 없으면 말하지 않는다."""
+        jid = self.job_id
+        recorded = body.get("late_result_recorded")
+        if recorded is True:
+            self.proc.log(f"#{jid} late result recorded")
+        elif recorded is False and body.get("state") == LOST:
+            self.proc.log(
+                f"#{jid} late result not recorded — the server keeps the result it already has"
+            )
+        if body.get("hold_released") is True:
+            self.proc.log(f"#{jid} hold released")
+
+    def _spool_unreadable(self) -> bool:
+        """`stream.log` 를 못 읽었다(없다 · 잘렸다). 빈 조각을 보내 성공으로 세지 않는다 —
+        그러면 `acked` 는 그대로인 채 쉬지 않고 돈다. 백오프로 다시 해 보고 로그는 한 줄이다.
+        끝난 잡이면 5xx 와 같이 끝난 지 300초 뒤 finish 가 먼저 간다(`_finish_first`, 결정 324)
+        — 24시간 묶이면 서버에서 잡이 `running` 이고 레인도 잡혀 있다(P3 2라운드 MED). D 의
+        등록 대기 300초는 `_unexpected` 처럼 이 시간도 센다(batch-7)."""
+        if not self._read_failed_said:
+            self._read_failed_said = True
+            self.proc.log(f"#{self.job_id} report: cannot read the spooled log — retrying")
+        self.spool_unreadable = True
+        self.answered = True
+        self.answered_local = True
+        return False
+
+    def owes_finish(self) -> bool:
+        """끝난 잡의 finish 를 아직 한 번도 보내 보지 않았고, 앞을 막은 것이 서버 오류나 로컬
+        오류다(batch-7). 그러면 끝난 지 300초 뒤 finish 가 먼저 간다(`_finish_first`). D 의 등록
+        대기 상한이 그 전에 이 큐를 멈추면 물러서 있던 보내는 스레드는 finish 를 한 번도 못 보내고,
+        잡은 restarted-without-job 으로 닫혀 끝난 잡의 결과를 잃는다. 잡이 끝난 직후 다시 뜬
+        프로세스면 두 300초가 거의 같이 온다. 연결 실패면 finish 도 갈 수 없으니 기다리지 않는다.
+        등록은 이것을 `OWED_FINISH_WAIT_SECONDS` 까지만 기다린다."""
+        ob = self.ob
+        if ob.finish is None or ob.ended_at is None or ob.done or self.fenced.is_set():
+            return False
+        # 벽시계가 뒤로 가 `ended_at` 이 미래면 나이가 음수라 finish 가 먼저 가지 않는다 — 시계가
+        # 따라잡을 때까지 등록을 묶지 않는다(batch-8 #1)
+        if self.proc._epoch() < ob.ended_at:  # mutcheck: future-end-owes-finish
+            return False
+        return not self.finish_tried and self.answered
+
+    def _send_finish(self, fenced: bool) -> None:
+        rec = dict(self.ob.finish or {})
+        gone = rec.get("group_gone")
+        if fenced:
+            # 펜싱된 세션은 결과를 보낼 수 없다 — 좁은 확인만(결정 261 · 2차 Q-B)
+            if self.dead is not None and self.dead.verdicts.get(self.job_id) != CONFIRMED:
+                return  # 「모름」은 보내지 않는다 — 재확인(§4.4 의 9)에 맡긴다
+            narrow: dict[str, Any] = {"summary_code": "worker_replaced", "summary_args": {}}
+            if gone is not None:
+                narrow["group_gone"] = gone
+            self.client.finish(self.job_id, LOST, None, None, **narrow)
+            self.narrow_sent = True
+            return
+        extra: dict[str, Any] = {}
+        for key in ("group_gone", "finished_at", "summary_code", "summary_args", "log_bytes"):
+            if rec.get(key) is not None:
+                extra[key] = rec[key]
+        disposition = rec.get("artifacts")
+        bundle = self.ob.bundle
+        if bundle is not None and isinstance(disposition, dict):
+            if bundle.get("state") == "uploaded":
+                disposition = {**disposition, "bundle_sha256": bundle.get("sha256")}
+            else:
+                # 처분은 보내기 직전에 정한다 — 올리지 못한 묶음은 `ready` 가 아니다(결정 275)
+                disposition = {
+                    "state": art.FAILED,
+                    "bundle_sha256": None,
+                    "file_count": disposition.get("file_count"),
+                    "total_bytes": disposition.get("total_bytes"),
+                    "skipped_count": disposition.get("skipped_count"),
+                    "reason_code": "upload_failed",
+                    "reason_args": None,
+                }
+        if disposition is not None:
+            extra["artifacts"] = disposition
+        self.client.finish(
+            self.job_id, rec.get("outcome"), rec.get("exit_code"), rec.get("summary"), **extra
+        )
+
+    def _drop_reports(self) -> None:
+        """phase · 로그 · 산출물을 버린다(finish 는 남는다)."""
+        ob = self.ob
+        ob.phase = None
+        ob.log_stopped = True
+        if ob.bundle is not None and ob.bundle.get("state") == "pending":
+            ob.bundle = {**ob.bundle, "state": "skipped"}
+
+    def _drop_item(self, step: str, *, failed: bool) -> None:
+        ob = self.ob
+        if step == "phase":
+            ob.phase = None
+        elif step in ("query", "log"):
+            ob.log_stopped = True
+        elif step == "artifacts":
+            if ob.bundle is not None:
+                ob.bundle = {**ob.bundle, "state": "failed" if failed else "skipped"}
+        else:
+            ob.done = True
+
+    def _refused(self, step: str, e: ClientError) -> bool:
+        """응답 표(§4.5 · 살아 있는 프로세스, §4.4 · 죽은 세션 D). 참이면 진행, 거짓이면 백오프."""
+        proc, jid, dead = self.proc, self.job_id, self.dead
+        code = e.body.get("code")
+        what = f"#{jid} {step}" if dead is None else f"dead session {dead.session_id[:8]} #{jid}"
+        if proc._is_fenced(e):
+            if dead is None:
+                proc._on_fenced(what)  # W5 — 모든 레인이 멈춘다. finish 는 좁은 확인으로 간다
+            else:
+                self.fenced.set()  # D 는 다른 살아 있는 프로세스가 펜싱했다 — W5 를 부르지 않는다
+            self._drop_reports()
+            if step == "finish" and self.narrow_sent:
+                self.ob.done = True  # 좁은 확인까지 거절됐다 — 보낼 것이 없다
+            elif dead is not None and (
+                self.ob.finish is None or dead.verdicts.get(jid) != CONFIRMED
+            ):
+                # D 의 원래 결과는 남지 않는다(2차 Q-B). 「모름」은 재확인(§4.4 의 9)에 맡긴다
+                self.ob.done = True
+            return True
+        if e.status == 409 and code == "log_gap" and step in ("query", "log"):
+            expected = e.body.get("expected_offset")
+            if isinstance(expected, int) and not isinstance(expected, bool):
+                self.ob.acked = max(0, min(expected, self.ob.written))
+            return True  # 그 오프셋부터 다시 — 프로세스는 죽이지 않는다
+        if e.status == 409 and code == "not_registered":
+            if dead is not None:
+                # 서버가 D 를 모른다 — D 의 큐를 지운다. D 의 id 로 재등록하지 않는다(결정 326)
+                proc._drop_dead_queue(dead, e.message)
+                return True
+            proc._reregister(what)
+            return False
+        if e.status == 409 and code == "protocol_required":
+            proc.log(f"{what}: {e.message} — keeping the report")
+            self.halt.set()
+            return True
+        if e.status == 409:
+            # job_closed(또는 옛 서버의 코드 없는 409) — 서버가 이미 닫았다. 로그는 멈추고(스풀은
+            # 남긴다) 산출물은 건너뛰며 finish 는 지운다(`late_result` 여부는 서버가 정했다)
+            proc.log(f"{what}: server says {e.message}")
+            if step == "finish" and code == "job_closed":
+                self._late_answer(e.body)  # mutcheck: late-answer-keys-ignored
+            if code == "job_closed" and dead is None:
+                proc._closed_by_409(jid, e)
+            self._drop_item(step, failed=False)
+            if step == "finish":
+                self.ob.done = True
+            return True
+        if dead is not None and e.status in (401, 403):
+            # 남의 큐일 리 없지만 진짜 결과를 지우지 않는다(V1-5) — 파일 그대로, 보내기만 멈춘다
+            proc.log(f"{what}: {e.message} — keeping the queue on disk")
+            self.halt.set()
+            return True
+        if e.status and e.status < 500:
+            proc.log(f"{what}: {e.message} — dropped")
+            self._drop_item(step, failed=True)
+            return True
+        # 5xx · 연결 실패 · 시간 초과 — 같은 항목을 백오프로 다시. 마지막 실패가 서버 · 연결
+        # 쪽이니 예상 못 한 예외의 300초 규칙은 내린다 — 연결 실패는 순서를 지킨다
+        self.local_error = False
+        self.last_5xx = bool(e.status)
+        self.answered = bool(e.status)  # mutcheck: local-answer-kept-on-connection-failure
+        self.answered_local = False
+        self.failures += 1
+        n = self.failures
+        if n in (1, 10) or n % 60 == 0:
+            proc.log(f"{what}: {e.message} — retrying ({n})")
+        return False
+
+
 class _RemoteObserver:
-    """실행기 관찰자 — phase 는 즉시, 로그는 1초/256 KB 배치로 서버에. 마커는 서버가 파싱한다.
+    """실행기 관찰자 — phase 와 로그를 그 잡의 보고 큐(`JobOutbox`)에 넣는다. 네트워크는 잡마다
+    보내는 스레드(`_JobSender`)가 맡는다(M5t-b §4.5). 마커는 서버가 파싱한다.
 
     멈춤의 길은 이름으로 나뉜다(M5t-b 결정 334). 자기 멈춤 `self_stop` 은 `should_stop` → `lost`
     + `worker_self_stopped` 이고, 서버가 닫은 잡의 멈춤 `closed_stop`(W4 표)은 `should_cancel`
@@ -172,14 +955,15 @@ class _RemoteObserver:
         irreversible: bool = False,
         grace_seconds: int | None = None,
         grace_j: int = 10,
+        outbox: JobOutbox | None = None,
+        sender: _JobSender | None = None,
     ):
         self.proc = proc
         self.job_id = job_id
-        self._buf = bytearray()
-        self._last_flush = time.monotonic()
-        self._lock = threading.Lock()
-        self._pending_failures = 0
-        self._sender: threading.Thread | None = None  # 지금 배치를 보내는 스레드(많아야 하나)
+        self.outbox = outbox if outbox is not None else JobOutbox(None)
+        if sender is None:
+            sender = _JobSender(proc, job_id, self.outbox).start()
+        self.sender = sender
         self.closed_by_server = False  # 409: 서버가 이미 닫았다(lost 판정 등) — 로그만 멈춘다
         self.irreversible = irreversible
         self.grace_seconds = grace_seconds  # claim 에 얼린 G_J(결정 257)
@@ -188,91 +972,49 @@ class _RemoteObserver:
         self.self_stop_seconds = 0
         self.closed_stop = threading.Event()
         self.closed_state: str | None = None  # 서버가 알린 끝 상태(W4)
-        self.finish_sent = False  # `_finish` 를 거쳤다(보냈거나 못 보낸 보고로 남겼다)
+        self.finish_sent = False  # `_finish` 를 거쳤다(큐에 넣었다)
+        self._last_wake = time.monotonic()
         # 바깥 안전망(`run_claimed`)이 읽는다: 러너가 Popen 직전까지 갔나, 결과를 냈나
         self.launching = False
         self.result: Any = None
 
     def phase(self, phase: str) -> None:
-        self.proc.report(
-            lambda: self.proc.client.phase(self.job_id, phase), f"#{self.job_id} phase"
-        )
+        self.outbox.phase = phase  # 마지막 값 하나만 보낸다
+        self.outbox.save()
+        self.sender.wake.set()
 
     def output(self, data: bytes) -> None:
-        with self._lock:
-            self._buf.extend(data)
-            due = (
-                len(self._buf) >= LOG_BATCH_BYTES
-                or time.monotonic() - self._last_flush >= LOG_FLUSH_SECONDS
-            )
+        """스풀에 덧붙이고 돌아온다 — 펌프(취소 · 시간초과 · 자기 멈춤 점검)를 네트워크로 막지
+        않는다(RL5)."""
+        self.outbox.append(data)
+        due = (
+            self.outbox.pending() >= LOG_BATCH_BYTES
+            or time.monotonic() - self._last_wake >= LOG_FLUSH_SECONDS
+        )
         if due:
             self._send_later()
 
     def _send_later(self) -> None:
-        """배치 전송을 따로 한 스레드에서 한다. 펌프 스레드(러너)가 부르는 `output()` 은
-        네트워크를 기다리지 않는다 — 분단 중 전송 하나는 요청 시한(60초 이상)까지 매달리고,
-        그동안 펌프가 멈추면 워커 로컬 `log.txt` 가 자라지 않고 취소 · 시간초과 · 자기 멈춤
-        점검도 멈춘다(RL5). 보내는 스레드는 한 번에 하나라 배치의 순서가 그대로다."""
-        with self._lock:
-            if self._sender is not None and self._sender.is_alive():
-                return  # 앞 배치가 아직 매달려 있다 — 남은 바이트는 다음 배치 · 끝의 전송이 싣는다
-            self._sender = threading.Thread(
-                target=self.flush, name=f"rcm-log-{self.job_id}", daemon=True
-            )
-            self._sender.start()
+        """보내는 스레드를 깨운다 — 펌프 스레드는 네트워크를 기다리지 않는다."""
+        self._last_wake = time.monotonic()
+        self.sender.wake.set()
 
     def flush(self) -> None:
-        """로그 배치를 한 번만 보낸다 — 펌프(취소·정지 감지)를 재시도로 막지 않는다. 서버에 못
-        닿으면 되돌려 두고 다음 배치와 함께 다시 보낸다(`LOG_KEEP_BYTES` 까지; 넘치면 오래된 쪽을
-        버린다 — 워커 로컬 `log.txt` 에는 남는다). 409 는 서버가 잡을 닫은 것."""
-        with self._lock:
-            if not self._buf:
-                return
-            chunk = bytes(self._buf)
-            self._buf.clear()
-            self._last_flush = time.monotonic()
-        sent = self.proc._sent_at()
-        try:
-            self.proc.client.log(self.job_id, chunk)
-        except ClientError as e:
-            if e.status == 409:
-                self.proc.log(f"#{self.job_id} log: server says {e.message}")
-                self.closed_by_server = True
-                self.proc._closed_by_409(self.job_id, e)
-                return
-            if e.status and e.status != 503:
-                self.proc.log(f"#{self.job_id} log: {e.message}")
-                return
-            with self._lock:
-                self._buf[:0] = chunk  # 되돌린다
-                if len(self._buf) > LOG_KEEP_BYTES:
-                    del self._buf[: len(self._buf) - LOG_KEEP_BYTES]
-                self._pending_failures += 1
-            if self._pending_failures in (1, 10) or self._pending_failures % 60 == 0:
-                self.proc.log(f"#{self.job_id} log: {e.message} — keeping {len(self._buf)} bytes")
-            return
-        self.proc.mark_ok(*sent)
-        self._pending_failures = 0
+        """지금 이 스레드에서 로그 한 조각을 보낸다(진단 · 시험용). 펌프는 부르지 않는다."""
+        if self.sender.next_step() in ("query", "log"):
+            self.sender.attempt("query" if self.sender.query_first else "log")
 
-    def final_flush(self) -> None:
-        """종료 직전 — 남은 로그는 재시도까지 해서 보낸다(그 뒤 finish 가 간다). 매달린 배치
-        전송이 있으면 그것이 끝나기를 먼저 기다린다 — 바이트의 순서를 지킨다."""
-        with self._lock:
-            sender = self._sender
-        if sender is not None:
-            sender.join()
-        self.flush()
-        with self._lock:
-            chunk = bytes(self._buf)
-            self._buf.clear()
-        if chunk and not self.closed_by_server:
-            ok = self.proc.report(
-                lambda: self.proc.client.log(self.job_id, chunk),
-                f"#{self.job_id} log",
-                job_id=self.job_id,
-            )
-            if ok is None:
-                self.closed_by_server = True
+    def final_flush(self, wait: float | None = None) -> None:
+        """끝 — 보내는 스레드를 깨운다. `wait` 를 주면 로그를 다 보낼 때까지 그만큼
+        기다린다(시험)."""
+        self.sender.wake.set()
+        if wait is None:
+            return
+        deadline = time.monotonic() + wait
+        while time.monotonic() < deadline:
+            if self.outbox.pending() <= 0 or self.outbox.log_stopped or not self.sender.alive():
+                return
+            time.sleep(0.02)
 
     def should_cancel(self) -> bool:
         # mutcheck: closed-by-server-cancels
@@ -410,12 +1152,55 @@ def _group_alive(pgid: int) -> bool:
     return True
 
 
-def _write_json(path: Path, data: dict[str, Any]) -> None:
-    """임시 파일에 쓴 뒤 rename — 읽는 쪽이 반쯤 쓴 파일을 보지 않는다."""
+def _write_json(path: Path, data: dict[str, Any]) -> OSError | None:
+    """임시 파일에 쓰고 fsync 한 뒤 rename, 그 폴더도 fsync — 읽는 쪽이 반쯤 쓴 파일을 보지 않고,
+    OS 가 죽은 뒤에도 빈 파일이 남지 않는다(P6-1 G1). 실패하면 임시 파일을 지우고 다시 던진다 —
+    가득 찬 디스크에 `.<이름>.<hex>` 가 쌓이지 않게(G2). 저장은 됐는데 폴더 fsync 만 실패하면 그
+    오류를 돌려준다 — 부른 쪽이 말한다(batch-5 #5)."""
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_name(f".{path.name}.{secrets.token_hex(4)}")
-    tmp.write_text(json.dumps(data, sort_keys=True), encoding="utf-8")
-    os.replace(tmp, path)
+    try:
+        with tmp.open("w", encoding="utf-8") as fh:
+            fh.write(json.dumps(data, sort_keys=True))
+            fh.flush()
+            os.fsync(fh.fileno())  # mutcheck: json-not-synced-before-rename
+        os.replace(tmp, path)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            tmp.unlink(missing_ok=True)  # mutcheck: failed-save-leaves-temp
+        raise
+    return _fsync_dir(path.parent)
+
+
+def _write_json_unsynced(path: Path, data: dict[str, Any]) -> None:
+    """`_write_json` 과 같이 임시 파일에 써서 rename 하지만 fsync 하지 않는다. 읽는 쪽이 반쯤 쓴
+    파일을 보지 않는 것만 지킨다 — 내구성이 필요 없는 `ok_at.json` 용이다(batch-5 #1)."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(f".{path.name}.{secrets.token_hex(4)}")
+    try:
+        tmp.write_text(json.dumps(data, sort_keys=True), encoding="utf-8")
+        os.replace(tmp, path)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            tmp.unlink(missing_ok=True)
+        raise
+
+
+def _fsync_dir(folder: Path) -> OSError | None:
+    """이름 바꾸기를 디스크에 남긴다. 폴더를 열 수 없는 파일 시스템에서는 건너뛴다 — 내용은 이미
+    fsync 했고, 이름 바꾸기는 끝났다. 연 폴더의 fsync 가 실패하면(일부 네트워크 파일 시스템) 그
+    오류를 돌려준다 — 삼키지 않고 워커가 한 번 말한다(batch-5 #5)."""
+    try:
+        fd = os.open(folder, os.O_RDONLY)
+    except OSError:
+        return None
+    try:
+        os.fsync(fd)
+    except OSError as e:
+        return e  # mutcheck: dir-sync-error-swallowed
+    finally:
+        os.close(fd)
+    return None
 
 
 def _read_json(path: Path) -> dict[str, Any] | None:
@@ -679,10 +1464,15 @@ class RemoteWorker:
         self._drain_lock = threading.Lock()
         self._idle_lanes: set[int] = set()
         self._drain_done = False
-        # 보고하지 못한 잡: job_id → (finish 호출, 미룬 시각). 서버를 갈아 끼우는 몇 초에 끝난 잡을
-        # 버리지 않고 다음 heartbeat 성공 · 재등록 전 · 드레인 끝에 다시 보고한다(#234 격리 검증)
-        self._unreported: dict[int, tuple[Callable[[], Any], float]] = {}
-        self._retry_lock = threading.Lock()
+        # 잡마다 보내는 스레드(M5t-b §4.5, 결정 337). 레인은 제 잡의 큐가 끝날 때까지 다음 claim 을
+        # 하지 않고, heartbeat 의 `jobs` 목록에는 큐가 안 끝난 잡이 남는다(F10)
+        self._senders: dict[int, _JobSender] = {}
+        # 레인 → 기다림을 그만둔 뒤에도 안 끝난 그 레인 잡의 큐(드레인 한도 · done 없이 끝난 보내는
+        # 스레드). 그 잡이 `running` 에 있는 동안 서버에서도 그 레인을 잡고 있다 — 레인은 claim
+        # 하지 않는다(`_lane_held`, P3 2라운드)
+        self._lane_queues: dict[int, _JobSender] = {}
+        self._rereg_lock = threading.Lock()
+        self._dead_dropped: set[str] = set()
         self._tail_said = False
         self._window_said = False
         self._hb_unregistered = 0
@@ -710,6 +1500,7 @@ class RemoteWorker:
         self.session_dir: Path | None = None
         self._session_fd: int | None = None
         self._ok_written = 0.0
+        self._dir_sync_said = False  # 폴더 fsync 실패는 프로세스마다 한 번 말한다(batch-5 #5)
         self.previous_sessions: list[str] = []
         self.unverified_sessions: list[str] = []
         self.dead_sessions: list[DeadSession] = []
@@ -792,7 +1583,7 @@ class RemoteWorker:
         if fd is None:
             raise WorkerExit(2, f"cannot lock the worker session folder {own}")
         self._session_fd = fd
-        _write_json(own / "owner.json", owner)
+        self._save_json(own / "owner.json", owner)
         self.session_dir = own
         for entry in sorted(base.iterdir()):
             if entry == own or not entry.is_dir() or not re.fullmatch(r"[0-9a-f]{32}", entry.name):
@@ -904,7 +1695,7 @@ class RemoteWorker:
         d = self._job_dir(job_id)
         if d is not None:
             data = {"irreversible": irreversible, "disconnect_grace_seconds": grace}
-            _write_json(d / "claim.json", data)
+            self._save_json(d / "claim.json", data)
 
     def _write_proc(self, job_id: int, pid: int | None) -> None:
         """`proc.json` 두 번 쓰기(결정 333): 띄우기 직전 `{pgid: null}`, 띄운 뒤 `{pgid, start}`."""
@@ -912,7 +1703,24 @@ class RemoteWorker:
         if d is None:
             return
         start = process_start(pid) if pid is not None else None
-        _write_json(d / "proc.json", {"pgid": pid, "start": start})
+        self._save_json(d / "proc.json", {"pgid": pid, "start": start})
+
+    def _save_json(self, path: Path, data: dict[str, Any]) -> None:
+        """세션 폴더의 파일을 `_write_json` 으로 쓰고, 폴더 fsync 실패는 `_dir_not_synced` 로."""
+        unsynced = _write_json(path, data)
+        if unsynced is not None:
+            self._dir_not_synced(unsynced)
+
+    def _dir_not_synced(self, e: OSError) -> None:
+        """이름 바꾸기 뒤 폴더 fsync 가 실패했다. 저장은 됐지만 OS 가 죽으면 마지막 저장을 잃을 수
+        있다 — 프로세스마다 한 줄이다(그런 파일 시스템이면 모든 저장이 그렇다, batch-5 #5)."""
+        with self._ok_lock:
+            said, self._dir_sync_said = self._dir_sync_said, True
+        if not said:
+            self.log(
+                f"session folder: cannot sync a folder to disk ({e.strerror or type(e).__name__})"
+                " — an OS crash may lose the last saved report"
+            )
 
     def _forget_job_dir(self, job_id: int) -> None:
         if job_id in self._group_unconfirmed:
@@ -942,7 +1750,11 @@ class RemoteWorker:
                 self._ok_written = mono
         if due and self.session_dir is not None:
             try:
-                _write_json(self.session_dir / "ok_at.json", {"wall": _iso_exact(best)})
+                # fsync 하지 않는다 — heartbeat 의 도우미 스레드가 여기서 멈추면 그 회차가 시한을
+                # 넘긴다. 다음 프로세스가 D 를 다시 볼 때만 읽는 값이라 OS 충돌 뒤 옛 값이어도
+                # 된다(없으면 `lock` 의 mtime, §4.4 step 9). 보고 큐는 그대로 fsync 한다(batch-5)
+                # mutcheck: ok-at-synced-on-heartbeat
+                _write_json_unsynced(self.session_dir / "ok_at.json", {"wall": _iso_exact(best)})
             except OSError as e:
                 self.log(f"session folder: {type(e).__name__}")
 
@@ -1036,13 +1848,15 @@ class RemoteWorker:
             return
         with self._lock:
             observer = self._observers.get(job_id)
-            parked = job_id in self._unreported
+            sender = self._senders.get(job_id)
         if observer is not None:
             observer.server_closed(state, had_cancel)
-        if state in FINISH_RECORDED and parked:
+        if state in FINISH_RECORDED and sender is not None and sender.ob.finish is not None:
             # 이 세션의 finish 가 기록됐고 2xx 만 잃었다 — 큐 항목을 전달됨으로 지운다
             self.log(f"#{job_id} finish: the server already has it ({state})")
-            self._unpark(job_id)
+            sender.ob.done = True
+            sender.ob.save()
+            sender.wake.set()
 
     def _apply_closed_jobs(self, closed: Any) -> None:
         if not isinstance(closed, list):
@@ -1061,46 +1875,166 @@ class RemoteWorker:
             return outcome_summary("worker_self_stopped", seconds=observer.self_stop_seconds)
         return STOP_SUMMARY, None, None
 
-    # ── 보고 (재시도) ────────────────────────────────────────────────────────
+    # ── 보고 큐 (M5t-b §4.4 · §4.5) ──────────────────────────────────────────
 
-    def report(
-        self,
-        call: Callable[[], Any],
-        what: str,
-        *,
-        keep: Callable[[], bool] | None = None,
-        job_id: int | None = None,
-    ) -> Any:
-        """서버에 보고. 연결 오류는 1·2·4초 재시도, 409(잡이 이미 닫힘)는 None, 다른 4xx 는 로그.
-        반환: 응답(성공) · None(409) · False(포기). `keep` 은 연결 오류 · 503 으로 재시도가 다
-        실패했을 때만 부른다. 참을 돌려주면 부른 쪽이 미뤄 뒀다 다시 보고한다는 뜻이라 「giving up」
-        대신 그렇게 쓴다."""
-        for i, delay in enumerate((*REPORT_RETRIES, None)):
-            sent = self._sent_at()
+    def _reregister(self, what: str) -> None:
+        """보고가 409 `not_registered` 를 받았다(T10) — 같은 세션 id 로 재등록한다. 멱등이다(결정
+        260). 레인 · 보내는 스레드가 겹치지 않게 한 잠금 아래에서 한다."""
+        with self._rereg_lock:
+            self.log(f"{what}: worker not registered — registering again")
             try:
-                out = call()
-                self.mark_ok(*sent)
-                return {} if out is None else out
-            except ClientError as e:
-                if self._is_fenced(e):
-                    self._on_fenced(what)
-                    return None
-                if e.status == 409:
-                    self.log(f"{what}: server says {e.message}")
-                    if job_id is not None:
-                        self._closed_by_409(job_id, e)
-                    return None
-                if e.status and e.status != 503:
-                    self.log(f"{what}: {e.message}")
-                    return False
-                if delay is None or self.stopping.is_set() and i >= 1:
-                    if keep is not None and keep():
-                        self.log(f"{what}: {e.message} — will retry after the server is back")
-                    else:
-                        self.log(f"{what}: giving up — {e.message}")
-                    return False
-                time.sleep(delay)
-        return False
+                self.register()
+            except WorkerExit as x:
+                self.log(f"{what}: {x.message}")
+
+    def _drop_dead_queue(self, dead: DeadSession, message: str) -> None:
+        """서버가 D 를 모른다(409 `not_registered`) — D 의 큐를 모두 지운다(결정 326). D 의 id 로
+        재등록하면 죽은 세션을 되살려 살아 있는 세션을 펜싱한다."""
+        if dead.session_id not in self._dead_dropped:
+            self._dead_dropped.add(dead.session_id)
+            self.log(f"dead session {dead.session_id[:8]}: {message} — dropping its queue")
+        for sender in list(self._senders.values()):
+            if sender.dead is dead:
+                sender.ob.done = True
+                sender.ob.save()
+                sender.halt.set()
+
+    def dead_queues(self) -> list[_JobSender]:
+        """죽은 세션 D 마다 남은 보고 큐(§4.4 의 7). 보내는 스레드는 아직 띄우지 않는다."""
+        out: list[_JobSender] = []
+        for dead in self.dead_sessions:
+            jobs = dead.path / "jobs"
+            for job_dir in sorted(jobs.iterdir()) if jobs.is_dir() else ():
+                if not job_dir.name.isdigit():
+                    continue
+                ob = JobOutbox.load(
+                    job_dir,
+                    log=self.log,
+                    label=f"dead session {dead.session_id[:8]} #{job_dir.name}",
+                    on_dir_error=self._dir_not_synced,
+                )
+                if ob is None:
+                    self._set_aside(dead, job_dir)  # mutcheck: unreadable-outbox-silent
+                    continue
+                if ob.done:
+                    continue
+                client = copy.copy(self.client)
+                try:
+                    client.session_id = dead.session_id
+                except AttributeError:
+                    pass
+                job_id = int(job_dir.name)
+                out.append(
+                    _JobSender(self, job_id, ob, client=client, dead=dead, resumed=ob.acked > 0)
+                )
+        return out
+
+    def _set_aside(self, dead: DeadSession, job_dir: Path) -> None:
+        """D 의 잡 폴더에 `outbox.json` 이 없거나 못 읽는다(P6-1 G1 — fsync 전 OS 충돌, 손으로
+        지움). 보낼 finish 를 알 수 없으니 등록이 그 잡을 restarted-without-job 으로 닫는다. 이유를
+        한 줄 남기고, 스풀과 깨진 outbox 는 지우지 않고 세션 폴더 밖의 격리 폴더
+        `worker-sessions/unreadable-<D>-<id>/` 로 옮긴다 — 등록이 받은 D 의 폴더는 지워지지만
+        (`_settle_reported`) 잡의 출력은 남아야 한다. 격리 폴더는 다른 오래된 폴더처럼 7일 뒤 시작
+        청소(`sweep_sessions`)가 지운다. 둘 다 없으면 보고를 시작하기 전에 죽은 잡이다 — 말할 것이
+        없다."""
+        outbox, stream = job_dir / OUTBOX_FILE, job_dir / STREAM_FILE
+        if not outbox.exists():
+            if not stream.exists():
+                return
+            why = "missing"
+        else:
+            try:
+                why = "empty" if outbox.stat().st_size == 0 else "not readable JSON"
+            except OSError as e:
+                why = type(e).__name__
+        dest = dead.path.parent / f"unreadable-{dead.session_id}-{job_dir.name}"
+        if dest.exists():
+            dest = dest.with_name(f"{dest.name}-{secrets.token_hex(2)}")
+        try:
+            dest.mkdir(parents=True)
+            for f in (stream, outbox):
+                if f.exists():
+                    os.replace(f, dest / f.name)
+            kept = str(dest)
+        except OSError as e:
+            kept = f"{job_dir} (cannot move it: {type(e).__name__})"
+        self.log(
+            f"dead session {dead.session_id[:8]} job #{job_dir.name}: outbox unreadable ({why})"
+            f" — the job will close as restarted-without-job; spool kept in {kept}"
+        )
+
+    def send_dead_queues(self) -> None:
+        """등록 전에 D 의 큐를 D 의 세션 id 로 보낸다(§4.4 의 7 · 결정 326 · 337). 등록이 D 를
+        펜싱하면 D 의 finish 가 버려지기 때문이다. 서버가 응답하는(HTTP 상태가 오는) 시간이
+        단조 시계로 300초가 되면 남은 큐를 디스크에 둔 채 등록한다 — 연결 실패 시간은 세지
+        않는다. 로컬 오류(예상 못 한 예외 · 못 읽는 스풀)는 한 번 지나가는 것일 수 있어
+        같은 상한 안에서 다시 해 보고, 그 시간이 섞였으면 줄이 그렇게 말한다(batch-7)."""
+        senders = self.dead_queues()
+        if not senders:
+            return
+        with self._lock:
+            for s in senders:
+                self._senders[s.job_id] = s  # 등록 전이라 이 프로세스의 잡과 겹치지 않는다
+        for s in senders:
+            s.start()
+        answered = 0.0
+        local = False  # 센 시간에 로컬 오류가 섞였다
+        cut: set[int] = set()  # 상한에 닿아 멈춘 큐
+        capped_at: float | None = None  # 상한에 처음 닿은 때(단조 시계)
+        # 두 대기 모두 단조 시계로 잰다(§4.1.3 「D 큐 등록 대기(3판)」, batch-9 #3). 끝난 지
+        # 300초 · 24시간은 디스크의 `ended_at` 이라 보내는 스레드가 벽시계로 따로 본다
+        clock = self.mono_fn  # mutcheck: dead-session-wall-clock
+        last = clock()
+        while any(s.alive() for s in senders):
+            if self.stopping.wait(0.05):
+                break
+            now = clock()
+            # 살아 있는 D 의 큐 가운데 마지막 시도가 서버의 오류 응답이었던 것이 있을 때만 센다.
+            # 깃발은 큐마다 둔다 — 워커 하나의 깃발은 끝난 큐의 옛 503 을 다른 큐의 연결 실패
+            # 시간에 남겼다
+            answering = any(s.alive() and s.answered for s in senders)
+            if answering:
+                answered += max(0.0, now - last)
+                if any(s.alive() and s.answered and s.answered_local for s in senders):
+                    local = True
+            last = now
+            if answered >= DEAD_SESSION_WAIT_SECONDS:  # mutcheck: dead-session-wait-forever
+                why = "server errors or local errors" if local else "server errors"
+                # 빚진 finish 를 기다리는 데도 고정된 상한이 있다. 보내는 쪽의 백오프와 요청 시한이
+                # 실제 시간이라 단조 시계로 잰다 — 벽시계는 뒤로 갈 수 있다(batch-8 #1)
+                if capped_at is None:
+                    capped_at = now
+                waited = now - capped_at
+                late = waited >= OWED_FINISH_WAIT_SECONDS  # mutcheck: owed-finish-waits-forever
+                owed = False
+                for s in senders:
+                    if id(s) in cut:
+                        continue
+                    # 한 번도 가 보지 않은 끝난 잡의 finish 는 먼저 한 번 가 보게 둔다 — 끝난 지
+                    # 300초 뒤 먼저 가니 기다림은 벽시계로 정해져 있다(batch-7 #2)
+                    if s.alive() and s.owes_finish():  # mutcheck: untried-finish-cut-off
+                        if not late:
+                            owed = True
+                            continue
+                    if s.alive() and not s.ob.done:
+                        assert s.dead is not None
+                        self.log(
+                            f"dead session {s.dead.session_id[:8]} queue not delivered after"
+                            f" {DEAD_SESSION_WAIT_SECONDS}s of {why} — registering;"
+                            f" job #{s.job_id} will close as restarted-without-job"
+                        )
+                    s.halt.set()
+                    cut.add(id(s))
+                if not owed:
+                    break
+        for s in senders:
+            s.halt.set()
+        for s in senders:
+            s.thread.join(2)
+        with self._lock:
+            for s in senders:
+                if self._senders.get(s.job_id) is s:
+                    self._senders.pop(s.job_id, None)
 
     # ── 등록 · heartbeat ─────────────────────────────────────────────────────
 
@@ -1287,8 +2221,7 @@ class RemoteWorker:
             self.timeout_seconds = timeout  # L 의 T(F62)
         # 서버가 닫은 잡을 먼저 안다(W4) — 이미 기록된 finish 를 다시 보내지 않게
         self._apply_closed_jobs(out.get("closed_jobs"))  # mutcheck: closed-jobs-ignored
-        # 서버가 돌아왔다 — 못 한 보고를 드레인보다 먼저 한다
-        self._retry_unreported()
+        # heartbeat 스레드는 보고를 다시 보내지 않는다 — 잡마다 보내는 스레드가 한다(§4.5)
         self._heard_server_version(out)
         cancel = out.get("cancel") or []
         with self._lock:
@@ -1443,6 +2376,17 @@ class RemoteWorker:
             self._idle_lanes.discard(lane)
             return False
 
+    def _lane_held(self, lane: int) -> bool:
+        """레인이 기다림을 그만둔 앞 잡이 아직 `running`(heartbeat 목록)에 있으면 참."""
+        with self._lock:
+            sender = self._lane_queues.get(lane)
+            if sender is None:
+                return False
+            if self.running.get(sender.job_id) == lane:
+                return True
+            self._lane_queues.pop(lane, None)
+            return False
+
     def _drained(self) -> bool:
         """드레인 중이고 살아 있는 레인이 모두 잡 없이 기다리면 드레인을 마친다(§3.3 의 4). 보고하지
         못한 잡은 heartbeat 가 도는 동안 다시 보고한다(§14 B질문11)."""
@@ -1453,75 +2397,9 @@ class RemoteWorker:
             if not alive <= self._idle_lanes:
                 return False
             self._drain_done = True
-        self._report_unreported()
         if not self.once:
             self.restart_for = self.follow_to
         return True
-
-    def _park_unreported(self, job_id: int, call: Callable[[], Any]) -> None:
-        # heartbeat 목록에 남겨 둔다 — 서버가 이 잡을 「잊힌 잡」으로 닫지 않게
-        with self._lock:
-            self._unreported[job_id] = (call, time.monotonic())
-
-    def _unpark(self, job_id: int) -> None:
-        with self._lock:
-            self._unreported.pop(job_id, None)
-            self.running.pop(job_id, None)
-        self._forget_job_dir(job_id)
-
-    def _try_report(self, job_id: int, call: Callable[[], Any]) -> bool:
-        """한 번 보고한다. 끝났으면(보고됐거나 서버가 받지 않는 보고) 참, 다시 시도할 만하면
-        거짓."""
-        try:
-            call()
-            self.log(f"#{job_id} finish: reported after retry")
-            return True
-        except ClientError as e:
-            if e.status and e.status != 503:
-                self.log(f"#{job_id} finish: {e.message}")
-                return True
-            return False
-
-    def _retry_unreported(self, wait: float = 0.0) -> None:
-        """보고하지 못한 잡을 한 번씩 다시 보고한다(heartbeat 성공 뒤 · 레인 재등록 전). 미룬 지
-        `DRAIN_REPORT_SECONDS` 가 지나면 오늘처럼 로그를 쓰고 버린다. 다른 스레드가 이미 하고
-        있으면 `wait` 초까지 기다리고, 그래도 못 잡으면 넘어간다."""
-        if not self._unreported:
-            return
-        got = (
-            self._retry_lock.acquire(timeout=wait) if wait > 0 else self._retry_lock.acquire(False)
-        )
-        if not got:
-            return
-        try:
-            with self._lock:
-                parked = dict(self._unreported)
-            for job_id, (call, parked_at) in parked.items():
-                if self._try_report(job_id, call):
-                    self._unpark(job_id)
-                elif time.monotonic() - parked_at >= DRAIN_REPORT_SECONDS:
-                    self.log(f"job #{job_id} still not reported — giving up")
-                    self._unpark(job_id)
-        finally:
-            self._retry_lock.release()
-
-    def _report_unreported(self) -> None:
-        """드레인 끝 — 재실행 전에 보고하지 못한 잡을 미룬 때부터 `DRAIN_REPORT_SECONDS` 까지 다시
-        보고한다. 재실행 뒤의 등록이 그 잡을 lost 로 닫지 않게(§14 B질문11)."""
-        with self._retry_lock:
-            with self._lock:
-                parked = dict(self._unreported)
-            for job_id, (call, parked_at) in parked.items():
-                self.log(f"drained — job #{job_id} not reported yet, retrying before the restart")
-                deadline = parked_at + DRAIN_REPORT_SECONDS
-                while not self._try_report(job_id, call):
-                    left = deadline - time.monotonic()
-                    if left <= 0:
-                        self.log(f"job #{job_id} still not reported — restarting anyway")
-                        break
-                    if self.stopping.wait(min(DRAIN_REPORT_RETRY_SECONDS, left)):
-                        break
-                self._unpark(job_id)
 
     def release_probes(self) -> None:
         """exec 직전 — 측정이 돌고 있으면 `grace_seconds` 까지 기다리고, 그래도 돌면 그 프로브
@@ -1663,6 +2541,11 @@ class RemoteWorker:
                 # 드레인 중 — claim 하지 않고 기다린다. 받은 잡은 이미 끝내고 보고했다(§3.3 의 2)
                 self.stopping.wait(DRAIN_WAIT_SECONDS)
                 continue
+            if self._lane_held(lane):  # mutcheck: lane-claims-over-its-open-queue
+                # 이 레인의 앞 잡이 아직 heartbeat 목록에 있다(큐가 안 끝났다) — 서버도 그 잡으로
+                # 이 레인을 잡고 있어 claim 은 409 다. 큐가 끝나면 claim 한다
+                self.stopping.wait(DRAIN_WAIT_SECONDS)
+                continue
             if self.paused:
                 if self.stopping.wait(1.0):
                     break
@@ -1683,11 +2566,11 @@ class RemoteWorker:
                     break
                 if e.status == 409 and "not registered" in e.message:
                     self.log(f"lane {lane}: {e.message} — registering again")
-                    # 재등록은 이 워커의 도는 잡을 lost 로 닫는다 — 못 한 보고를 먼저 한다. 다른
-                    # 스레드가 보고하는 중이면 끝날 때까지 잠깐 기다린다
-                    self._retry_unreported(wait=REREGISTER_REPORT_WAIT_SECONDS)
+                    # 같은 세션 id 의 재등록은 멱등이다(결정 260) — 다른 레인의 잡을 닫지 않는다.
+                    # 보고 큐는 디스크에 있고 잡마다 보내는 스레드가 이어 보낸다
                     try:
-                        self.register()
+                        with self._rereg_lock:
+                            self.register()
                     except WorkerExit as x:
                         if isinstance(x, WorkerFollow) and self.follows:
                             # ④ — 다른 레인의 잡을 잃지 않고 드레인한다(§3.2 · §13 P1-5)
@@ -1818,6 +2701,9 @@ class RemoteWorker:
         try:
             self.client.download_tree(job.id, tar_path)
         except ClientError as e:
+            if e.status in (0, 503):
+                # rcm 서버와의 끊김이다 — 확정 결함(404 · 409)과 달리 `lost`(결정 259)
+                raise SnapshotUnreachable(log=f"download failed: {e.message}") from e
             # `e.message` 에는 서버가 돌려준 문구와 경로가 섞인다 — 상태 코드만 공개로 남긴다.
             raise MaterializeError(
                 "snapshot_download_failed", status=e.status, log=f"download failed: {e.message}"
@@ -1832,12 +2718,20 @@ class RemoteWorker:
         with self._lock:
             self.running[job.id] = lane
         self.log(f"lane {lane}: claimed #{job.id} {job.preset}")
+        # 그 잡의 보고 큐와 보내는 스레드(§4.5) — claim 뒤에 시작해 큐가 끝나면 끝난다
+        outbox = JobOutbox(self._job_dir(job.id), log=self.log, on_dir_error=self._dir_not_synced)
+        sender = _JobSender(self, job.id, outbox)
+        with self._lock:
+            self._senders[job.id] = sender
+        sender.start()
         observer = _RemoteObserver(
             self,
             job.id,
             irreversible=spec.irreversible,
             grace_seconds=spec.disconnect_grace_seconds,
             grace_j=spec.grace_seconds,
+            outbox=outbox,
+            sender=sender,
         )
         with self._lock:
             self._observers[job.id] = observer
@@ -1912,7 +2806,7 @@ class RemoteWorker:
                 # 이 `null` 로 온다. 로컬 레인이 같은 입력에 남기는 코드와 **같은 코드**여야
                 # 한다: 원격에서만 다른 코드가 나오면 「어느 레인이 집었나」가 요약을 바꾼다.
                 raise RunnerError("preset_missing", preset=spec.preset_name)
-            self.report(lambda: self.client.phase(job.id, PHASE_MATERIALIZING), f"#{job.id} phase")
+            observer.phase(PHASE_MATERIALIZING)
             result = run_job(
                 spec,
                 observer,
@@ -1996,9 +2890,13 @@ class RemoteWorker:
             # 행과 같은 코드·같은 인자여야 화면이 「어느 레인이 집었나」에 흔들리지 않는다.
             # 원문은 위에서 **보호된 잡 로그**로 보냈다: 공개 요약에는 절대 싣지 않는다(F2b).
             summary, code, args = outcome_summary(e.code, **e.args_public)
+            # 스냅샷을 받는 중 rcm 서버와 끊겼으면 `lost`(M5t-b 결정 259 · LOST_CODES)
+            unreachable = isinstance(e, SnapshotUnreachable)
+            if unreachable:
+                summary, code, args = outcome_summary("snapshot_unreachable")
             self._finish(
                 job.id,
-                FAILED,
+                LOST if unreachable else FAILED,
                 None,
                 summary,
                 observer,
@@ -2042,7 +2940,8 @@ class RemoteWorker:
         if policy is None or not policy.collects_for(state):
             return None
         # 스풀은 **지우지 않는다.** 전송 결과가 불확실하면 다시 보낼 수 있어야 한다(§5).
-        # 무한정 쌓이지 않게 시작할 때 `_sweep_workspaces` 가 나이로 쓸어 간다.
+        # 무한정 쌓이지 않게 시작할 때 `_sweep_workspaces` 가 나이로 쓸어 간다. 올리기는 보고
+        # 큐에서 finish 바로 앞 단계다(M5t-b 결정 275) — 재시작 뒤에도 같은 스풀을 올린다
         staging = self.config.data_path / "artifacts" / f"{job_id}.{secrets.token_hex(8)}"
         try:
             staging.mkdir(parents=True, exist_ok=True)
@@ -2056,8 +2955,14 @@ class RemoteWorker:
             )
             if out.state != art.READY or out.bundle_path is None:
                 return out
-            receipt = self.client.upload_bundle(job_id, out.bundle_path)
-            return dataclasses.replace(out, bundle_sha256=receipt.get("bundle_sha256"))
+            with self._lock:
+                sender = self._senders.get(job_id)
+            if sender is None:  # 큐 없이 부른 시험 · 안전망 — 오늘처럼 바로 올린다
+                receipt = self.client.upload_bundle(job_id, out.bundle_path)
+                return dataclasses.replace(out, bundle_sha256=receipt.get("bundle_sha256"))
+            sender.ob.bundle = {"path": str(out.bundle_path), "state": "pending", "sha256": None}
+            sender.ob.save()
+            return out
         except Exception as e:  # noqa: BLE001 — 수집·업로드 실패가 잡을 죽이지 않는다
             self.log(f"lane: #{job_id} artifacts: {type(e).__name__}")
             return CollectResult(state=art.FAILED, reason_code="upload_failed")
@@ -2076,77 +2981,109 @@ class RemoteWorker:
         summary_args: dict[str, Any] | None = None,
         group_gone: bool | None = None,
     ) -> None:
-        """완료를 보고하고 **그 뒤에** heartbeat 목록에서 뺀다(§5).
+        """완료를 그 잡의 보고 큐에 적고 큐가 끝날 때까지 레인이 기다린다(M5t-b §4.5). 큐가 끝난
+        **뒤에** heartbeat 목록에서 뺀다 — 먼저 빼면 서버가 그 잡을 「잊힌 잡」으로 닫는다(F10).
 
-        먼저 빼면 그사이의 heartbeat 에 잡이 안 실려 서버가 `lost` 로 닫는다 — 수집·업로드가
-        길어질수록 그 창이 넓어진다.
+        finish 기록은 `outbox.json` 에 먼저 쓴다. 그래서 보내기 전에 프로세스가 죽어도 다음
+        프로세스가 죽은 세션의 큐로 보낸다(RL14 a). `log_bytes` 는 그 잡이 낸 스트림 전체 바이트다
+        (스풀이 깨졌으면 센 값)이다. 서버는 `log_offset < log_bytes` 면 `log_complete = false` 다.
 
         `group_gone` 은 그 잡의 프로세스 그룹이 사라졌다는 확인이다(M5t-b 결정 330). 프로세스를
         띄운 적이 없으면 참이다. 모르면 싣지 않는다 — 서버는 표식 잡이면 홀드로 읽는다.
-        펜싱된 프로세스(W5)의 finish 는 결과가 무엇이든(성공 · 실패 · lost) 좁은 확인(`lost` +
-        `worker_replaced` + `group_gone`)으로 보낸다(결정 261, P6 GAP2) — 서버는 펜싱된 세션의
-        결과를 기록하지 않지만 확인은 받는다. 이 finish 의 409 로 펜싱을 처음 알았으면 좁은 확인을
-        한 번 더 보낸다.
+        펜싱된 프로세스(W5)의 finish 는 결과가 무엇이든 보내는 순간에 좁은 확인(`lost` +
+        `worker_replaced` + `group_gone`)으로 바뀐다(결정 261, P6 GAP2).
         """
         if observer is not None:
             observer.finish_sent = True  # 바깥 안전망(`run_claimed`)이 두 번 보내지 않게
         with self._lock:
             self.cancel_requested.discard(job_id)
             self._observers.pop(job_id, None)  # 프로세스는 끝났다 — 감시할 것이 없다
+            sender = self._senders.get(job_id)
         if getattr(observer, "irreversible", False) and group_gone is not True:
             self._group_unconfirmed.add(job_id)  # mutcheck: unconfirmed-group-folder-dropped
-        # 서버가 이 세션의 finish 를 이미 기록했다고 알렸으면(W4 표 첫 행) 다시 보내지 않는다.
-        # 서버가 닫은 다른 끝 상태(lost · cancelled)에는 보낸다 — 확인 · 홀드 풀기로 쓰인다
-        if getattr(observer, "closed_state", None) not in FINISH_RECORDED:
-            extra: dict[str, Any] = {}
-            if group_gone is not None:
-                extra["group_gone"] = group_gone
-            if artifacts is not None:
-                extra["artifacts"] = artifacts
-            if finished is not None and getattr(finished, "finished", None) is not None:
-                # 실행 종료 시각 — 수집·업로드 시간이 job_seconds 에 섞이지 않게(§10)
-                extra["finished_at"] = _iso(finished.finished)
-            if summary_code is not None:
-                extra["summary_code"] = summary_code
-                extra["summary_args"] = dict(summary_args or {})
-            narrow: dict[str, Any] = {"summary_code": "worker_replaced", "summary_args": {}}
-            if group_gone is not None:
-                narrow["group_gone"] = group_gone
-            sent_narrow: list[bool] = []
+        if sender is None:
+            # 큐 없이 부른 경우(시험 · 안전망) — 메모리 큐 하나로 같은 길을 간다
+            sender = _JobSender(self, job_id, getattr(observer, "outbox", None) or JobOutbox(None))
+            with self._lock:
+                self._senders[job_id] = sender
+            sender.start()
+        ob = sender.ob
+        record: dict[str, Any] = {
+            "outcome": outcome,
+            "exit_code": rc,
+            "summary": summary,
+            "summary_code": summary_code,
+            "summary_args": dict(summary_args or {}) if summary_code is not None else None,
+            "group_gone": group_gone,
+            "artifacts": artifacts,
+            "log_bytes": ob.length,
+            "finished_at": (
+                _iso(finished.finished)
+                if finished is not None and getattr(finished, "finished", None) is not None
+                else None
+            ),
+        }
+        if getattr(observer, "closed_state", None) in FINISH_RECORDED:
+            # 서버가 이 세션의 finish 를 이미 기록했다(W4 표 첫 행) — 다시 보내지 않는다. 서버가
+            # 닫은 다른 끝 상태(lost · cancelled)에는 보낸다 — 늦은 결과 · 확인 · 홀드 풀기로 쓰인다
+            ob.done = True
+        else:
+            ob.finish = record
+            ob.ended_at = self._epoch()
+        ob.save()
+        sender.wake.set()
+        if not self._await_queue(job_id, sender):
+            # 레인이 기다림을 그만뒀다(드레인 한도 · done 없이 끝난 보내는 스레드). 서버에서는 그
+            # 잡이 아직 이 레인을 잡고 있다 — 드레인이 취소돼 레인이 다시 돌면 claim 마다 409
+            # `LaneBusy` 를 받는다. 그 잡이 목록에서 빠질 때까지 레인은 claim 하지 않는다
+            with self._lock:
+                lane = self.running.get(job_id)
+                if lane is not None:
+                    self._lane_queues[lane] = sender
+        # 레인은 풀려도 큐는 보내는 스레드가 끝날 때까지 heartbeat 목록에 남는다 — 드레인 한도가
+        # 지난 큐는 exec 까지 계속 보낸다. 먼저 빼면 exec 전의 heartbeat 하나로 서버가 그 잡을
+        # 「잊힌 잡」(T5)으로 닫는다(§4.5 · F10, rcm-ci 4341)
+        ended = functools.partial(self._queue_ended, job_id, sender)
+        sender.when_ended(ended)  # mutcheck: queued-job-left-the-heartbeat
 
-            def call() -> Any:
-                # 부를 때마다 본다 — 미뤄 둔 보고(`_park_unreported`)도 그 사이의 펜싱을 따른다
-                fenced = self.fenced.is_set()  # mutcheck: fenced-finish-keeps-its-outcome
-                sent_narrow[:] = [fenced]
-                if fenced:
-                    return self.client.finish(job_id, LOST, None, None, **narrow)
-                return self.client.finish(job_id, outcome, rc, summary, **extra)
+    def _queue_ended(self, job_id: int, sender: _JobSender) -> None:
+        """잡의 보내는 스레드가 끝났다 — heartbeat 목록에서 빼고, 다 보냈으면 폴더를 지운다.
 
-            gave_up: list[bool] = []
-
-            def keep() -> bool:
-                gave_up.append(True)
-                return not self.stopping.is_set()
-
-            self.report(call, f"#{job_id} finish", keep=keep, job_id=job_id)
-            if self.fenced.is_set() and sent_narrow == [False]:
-                # 이 finish 의 409 `session_fenced` 로 처음 알았다 — 결과 대신 확인을 보낸다.
-                # 다른 보고처럼 `keep` 으로 보낸다(P6-2 #3) — 판정은 이 확인의 결과로 한다
-                gave_up.clear()
-                self.report(call, f"#{job_id} finish", keep=keep, job_id=job_id)
-            if gave_up and not self.stopping.is_set():
-                # 서버를 갈아 끼우는 몇 초일 수 있다 — 버리지 않고 나중에 다시 보고한다
-                self._park_unreported(job_id, call)
-                return
-            if gave_up:  # mutcheck: unsent-finish-folder-dropped
-                # 멈추는 중이라 미룰 곳이 없다(펜싱도 멈춤이다). 폴더를 남긴다 — 다음 프로세스가
-                # 이 세션을 죽은 세션으로 판정해 확인을 보낸다(P6-2 #3). 지우면 확인이 사라진다
-                with self._lock:
-                    self.running.pop(job_id, None)
-                return
+        `done` 없이 끝났는데(예상 못 한 예외 · `protocol_required`) 워커가 멈추지 않으면 잡을
+        목록에 남긴다. 빼면 finish 가 디스크에만 있는데 서버가 그 잡을 「잊힌 잡」(T5)으로 닫는다
+        (P3 2라운드). 서버에서 잡은 다음 프로세스가 디스크의 큐를 보낼 때까지 `running` 이다.
+        멈춤 · 펜싱 · 드레인 exec 이면 뺀다 — 프로세스가 끝나고 다음 프로세스가 보낸다
+        (§4.4 의 7)."""
         with self._lock:
+            unsent = not sender.ob.done
+            if unsent and not self.stopping.is_set():  # mutcheck: halted-queue-left-the-heartbeat
+                return
             self.running.pop(job_id, None)
+            if self._senders.get(job_id) is sender:
+                self._senders.pop(job_id, None)
+            # 못 보냈으면 폴더를 남긴다 — 다음 프로세스가 죽은 세션의 큐로 보낸다(§4.4 의 7).
+            # 지우면 finish 와 그 확인이 사라진다(P6-2 #3)
+            gave_up = not sender.ob.done
+            if gave_up:  # mutcheck: unsent-finish-folder-dropped
+                return
         self._forget_job_dir(job_id)  # 보고가 끝났다 — 다음 프로세스가 판정할 것이 없다
+
+    def _await_queue(self, job_id: int, sender: _JobSender) -> bool:
+        """레인이 제 잡의 큐가 끝나기를 기다린다. 끝났으면(`done`) 참. 멈추는 중이면 보내는 스레드가
+        `STOP_REPORT_SECONDS` 뒤 디스크에 남기고 끝난다. 드레인 중이면 `DRAIN_REPORT_SECONDS` 까지만
+        기다린다 — 그 뒤 레인은 풀리고 오늘처럼 exec 한다. 보내는 스레드는 멈추지 않고 exec 까지
+        보낸다. 남은 것은 디스크에 있고 새 이미지가 등록 전에 보낸다(M5q · §4.4)."""
+        waited_since: float | None = None
+        while sender.alive():
+            sender.thread.join(0.2)
+            if self.draining.is_set() and not self.stopping.is_set():
+                now = time.monotonic()
+                waited_since = waited_since or now
+                if now - waited_since >= DRAIN_REPORT_SECONDS and not sender.ob.done:
+                    # 큐는 디스크에 남는다 — 새 이미지가 등록 전에 죽은 세션의 큐로 보낸다
+                    self.log(f"job #{job_id} still not reported — restarting anyway")
+                    return False
+        return sender.ob.done
 
     def _cleanup(self, spec: RunSpec, *, failed: bool) -> None:
         keep = failed and self.config.keep_workspace_on_failure
@@ -2184,6 +3121,8 @@ class RemoteWorker:
         # 뒤에 만든다 — 재시작 루프가 빈 폴더를 쌓지 않게(V2-12)
         self.check_protocol()
         self.prepare_sessions()
+        # 죽은 세션 D 의 보고 큐를 D 의 id 로 먼저 보낸다(§4.4 의 7) — 등록은 그 뒤다
+        self.send_dead_queues()
         try:
             out = self.register()
         except BaseException:

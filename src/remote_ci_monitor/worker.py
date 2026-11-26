@@ -87,15 +87,20 @@ def format_limit(seconds: int | None) -> str:
     return f"limit {seconds}s"
 
 
-def tail_lines(path: Path, n: int = 5, max_bytes: int = 8192) -> list[str] | None:
-    """로그 파일의 마지막 n 줄(최대 max_bytes). 파일이 없으면 None."""
+def tail_lines(
+    path: Path, n: int = 5, max_bytes: int = 8192, *, end: int | None = None
+) -> list[str] | None:
+    """로그 파일의 마지막 n 줄(최대 max_bytes). 파일이 없으면 None. `end` 를 주면 그 길이에서 끝난
+    것으로 읽는다 — 원격 잡은 커밋된 길이(`log_file_bytes`)까지만 보인다(M5t-b 결정 339-f)."""
     if n <= 0:
         return []
     try:
         size = path.stat().st_size
+        if end is not None:
+            size = min(size, max(0, end))
         with path.open("rb") as fh:
             fh.seek(max(0, size - max_bytes))
-            data = fh.read()
+            data = fh.read(size - max(0, size - max_bytes))
     except OSError:
         return None
     text = data.decode("utf-8", errors="replace")

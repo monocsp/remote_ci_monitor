@@ -13,7 +13,9 @@
 
 from __future__ import annotations
 
+import io
 import re
+import tarfile
 from datetime import UTC
 from typing import Any
 
@@ -97,6 +99,23 @@ def claimed_job(srv: WorkerServer, preset: str = "gold") -> int:
     return jid
 
 
+def ready_for(srv: WorkerServer, jid: int) -> dict[str, Any]:
+    """그 잡의 묶음을 실제로 올리고 같은 해시의 `ready` 처분을 돌려준다. M5t-b 결정 275 부터
+    서버는 행 · 해시 · 파일이 있을 때만 `ready` 를 받는다(업로드 없는 `ready` 는 upload_failed)."""
+    buf = io.BytesIO()
+    with tarfile.open(fileobj=buf, mode="w") as tf:
+        for name in ("out/a.txt", "out/b.txt"):
+            info = tarfile.TarInfo(name)
+            info.size = 3
+            tf.addfile(info, io.BytesIO(b"abc"))
+    headers = {"Content-Type": "application/x-tar"}
+    status, receipt = srv.req(
+        "PUT", f"/worker/jobs/{jid}/artifacts", token=WORKER, body=buf.getvalue(), headers=headers
+    )
+    assert status == 201, receipt
+    return {**READY, "bundle_sha256": receipt["bundle_sha256"]}
+
+
 def finish(srv: WorkerServer, jid: int, **extra: Any):
     body: dict[str, Any] = {"outcome": SUCCEEDED, "exit_code": 0, **extra}
     status, resp = srv.req("POST", f"/worker/jobs/{jid}/finish", token=WORKER, json_body=body)
@@ -144,7 +163,7 @@ def test_a_queue_row_gains_only_the_artifacts_object(srv):
 
 def test_a_recent_row_gains_only_the_artifacts_object(srv):
     jid = claimed_job(srv)
-    finish(srv, jid, artifacts=READY)
+    finish(srv, jid, artifacts=ready_for(srv, jid))
     row = recent_row(srv, jid)
     assert set(row) == RECENT_KEYS | {"artifacts"}, sorted(set(row) ^ (RECENT_KEYS | {"artifacts"}))
 
@@ -152,7 +171,7 @@ def test_a_recent_row_gains_only_the_artifacts_object(srv):
 def test_the_artifacts_object_has_exactly_the_documented_keys(srv):
     """§10: 집계만 — 파일 목록도 경로도 해시도 공개 문서에는 없다."""
     jid = claimed_job(srv)
-    finish(srv, jid, artifacts=READY)
+    finish(srv, jid, artifacts=ready_for(srv, jid))
     art = recent_row(srv, jid)["artifacts"]
     assert set(art) == ARTIFACT_KEYS, sorted(set(art) ^ ARTIFACT_KEYS)
     assert art["state"] == "ready" and art["file_count"] == 2, art
@@ -205,7 +224,7 @@ def test_a_job_that_predates_the_feature_reads_as_unknown_and_is_not_collected(s
     """§9: M5e 이전 잡은 `job_artifacts` 행이 아예 없다(6→7 마이그레이션이 만들지 않는다).
     그것은 `unknown` 이지 `empty` 가 아니고, 새로 수집하지도 않는다."""
     jid = claimed_job(srv)
-    finish(srv, jid, artifacts=READY)
+    finish(srv, jid, artifacts=ready_for(srv, jid))
     # 마이그레이션 직후의 모양을 만든다 — 행을 지운다.
     srv.store._conn().execute("DELETE FROM job_artifacts WHERE job_id=?", (jid,))
     srv.store._conn().commit()
@@ -219,7 +238,7 @@ def test_the_m3_artifacts_purged_at_is_a_different_thing(srv):
     """§1: `jobs.artifacts_purged_at`(M3 — 로그·스냅샷·워크스페이스)와 `job_artifacts.purged_at`
     은 다른 것이다. M3 청소가 묶음을 지운 것처럼 보이면 안 된다."""
     jid = claimed_job(srv)
-    finish(srv, jid, artifacts=READY)
+    finish(srv, jid, artifacts=ready_for(srv, jid))
     assert srv.store.mark_artifacts_purged([jid], srv.clock.now) == 1
     art = srv.view(jid)["artifacts"]
     assert art["state"] == "ready", art
@@ -236,7 +255,7 @@ def test_a_remote_finish_reports_the_execution_end_not_the_upload_end(srv):
     started = srv.store.get_job(jid).started_at
     exec_end = srv.clock.advance(30)  # 실행 30초
     srv.clock.advance(20)  # 수집 + 업로드 20초
-    finish(srv, jid, finished_at=iso(exec_end), artifacts=READY)
+    finish(srv, jid, finished_at=iso(exec_end), artifacts=ready_for(srv, jid))
     row = recent_row(srv, jid)
     assert row["started_at"] == iso(started), row
     assert row["finished_at"] == iso(exec_end), row
@@ -247,7 +266,7 @@ def test_job_seconds_is_not_inflated_by_collection_and_upload(srv):
     jid = claimed_job(srv)
     exec_end = srv.clock.advance(30)
     srv.clock.advance(20)
-    finish(srv, jid, finished_at=iso(exec_end), artifacts=READY)
+    finish(srv, jid, finished_at=iso(exec_end), artifacts=ready_for(srv, jid))
     row = recent_row(srv, jid)
     assert row["job_seconds"] == 30, row
     art = row["artifacts"]
