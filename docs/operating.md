@@ -202,16 +202,27 @@ loaded before setup ran, the line adds that it may not be one setup wrote.
   same way unless you pass `--force service`, that service's file sits in the label's install
   place and it is byte for byte the one setup writes now (or the copy under its config folder).
   That exception covers the label only: the service's config, `data_dir`, virtualenv and checkout
-  stay refused, so to rewrite a service setup installed, remove it first. An rcm-looking service
-  setup cannot read or stat, whose `--config` or `data_dir` it cannot resolve (no `--config`,
-  `sh -c`, a `~` with no known home), or that has lines setup does not follow
-  (`EnvironmentFile=`, a specifier in `Environment=`, a line it cannot parse), also stops it,
-  naming the file. Paths are compared with symbolic links resolved and, on macOS, without case;
-  install places are compared the same way, so a link to a folder the service manager reads is
-  that folder. This holds for the services setup can find in those places only. It does not see
-  a server started by hand, another user's services, units under `/run` or `/usr/lib`, template
-  (`name@.service`) and transient units, drop-ins (`<unit>.d/`), the contents of an
-  `EnvironmentFile=` (it refuses instead), a unit created after the last check, or a wrapper
+  stay refused, so to rewrite a service setup installed, remove it first; the refusal says so
+  (``remove the installed service first — see the `to remove:` line from the run that installed
+  it``). An rcm-looking service whose `--config` or `data_dir` setup cannot resolve (no
+  `--config`, `sh -c`, a `~` with no known home), or that has lines setup does not follow
+  (`EnvironmentFile=`, a specifier in `Environment=`, `$VAR` or `${VAR}` in `ExecStart=`, a line
+  it cannot parse), also stops it, naming the file. Units are read the way systemd reads them:
+  a line ending in a backslash goes on with the next, comment lines in between are skipped, and
+  spaces around `=` do not count; an `ExecStart=` that still cannot be parsed stops setup when
+  the file mentions rcm. A file setup is not allowed to read or stat is judged by its name: one
+  that looks like rcm (or links to a file that does), or a name setup cannot judge, stops it; a
+  file named for another program only gets the warning `could not read <file> — skipped; if it
+  runs rcm, setup cannot protect it`. When setup cannot find the account's home in the password
+  database it refuses (`cannot find this account's home — refusing`) rather than trust `$HOME`
+  alone. Paths are compared with symbolic links resolved and, on macOS, without case, and so are
+  labels; install places are compared the same way, so a link to a folder the service manager
+  reads is that folder. This holds for the services setup can find in those places only. It does
+  not see a server started by hand, a service loaded straight from a file outside those places
+  (`launchctl bootstrap <path>`, `systemctl link <path>`), another user's services, units under
+  `/run` or `/usr/lib`, template (`name@.service`) and transient units, drop-ins (`<unit>.d/`),
+  the contents of an `EnvironmentFile=` (it refuses instead), a unit created after the last
+  check, an unreadable file whose name does not look like rcm (it warns instead), or a wrapper
   script that starts rcm from a service whose label and command do not look like rcm. Nothing in
   setup stands between those and their files.
 - An existing config or service file is kept: the run stops with exit 1 and writes nothing.

@@ -47,7 +47,12 @@ of a key bumps that number and is listed here.
   home, counts a service's `--data-dir` and data-dir variable as its `data_dir` too, finds the
   virtualenv of a `python -m` service, and compares install places, `$XDG_CONFIG_HOME/systemd/user`
   among them, with symbolic links resolved. An rcm-looking service it cannot read or stat, or one
-  with lines it does not follow (`EnvironmentFile=`), stops it too.
+  with lines it does not follow (`EnvironmentFile=`) or `$VARIABLES` in its `ExecStart=`, stops
+  it too; a file it may not read whose name is another program's only gets the warning `could not
+  read <file> — skipped; if it runs rcm, setup cannot protect it`. Units are read the way systemd
+  reads them (lines continued with a backslash, spaces around `=`), labels are compared without
+  case on macOS, the refusal that keeps a service setup installed says to remove it first, and
+  setup refuses when it cannot find the account's home.
   ([#272](https://github.com/monocsp/remote_ci_monitor/pull/272))
 - **`lanes = 0` runs a server that only hands jobs out.** It runs no job itself: `@local` is not
   alive and never a candidate, its probes do not run, `--machine @local`, `rcm recheck @local`
