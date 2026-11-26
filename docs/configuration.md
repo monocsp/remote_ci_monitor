@@ -1507,7 +1507,13 @@ sender per job sends them in order: the phase, then the log in pieces of at most
 at a line break (`X-RCM-Log-Offset` names the first byte; a longer line goes whole in one piece of
 up to 4 MiB), then the bundle, then the finish. Jobs
 do not wait for each other. A lane takes its next job only when its job's queue is done, and the
-heartbeat keeps listing the job until then.
+heartbeat keeps listing the job until then. A draining worker (one that follows the server to a new
+version) waits at most 60 s for a job's queue, then restarts anyway; the sender keeps sending
+until the restart and the new process sends the rest before it registers. If the drain is
+cancelled first, the lane still waits for that queue before it claims again. If a sender stops
+without delivering everything while the worker keeps running (an unexpected error), the job stays
+listed and its lane takes no job until the worker restarts; the next process sends the queue from
+disk.
 
 The server writes each piece at the length it has committed and answers with the new offset. A
 piece it already has is ignored, a piece ahead of it gets `409 log_gap` and the worker resends
@@ -1522,7 +1528,7 @@ becomes `****`, so the whole value never reaches `log.txt`.
 | the job is still running | retries every failure with backoff (1 s doubling to 30 s), with no limit |
 | the job ended and the log or bundle got HTTP 5xx for 300 s | sends the finish first; the bundle becomes `failed` (`upload_failed`) and the job's `log_complete` is `false` |
 | the job ended and the server cannot be reached | keeps the order and resends from the confirmed offset when the server is back |
-| `stream.log` cannot be read | retries with backoff and logs `#N report: cannot read the spooled log — retrying` once |
+| `stream.log` cannot be read, or is shorter than what was written | retries with backoff and logs `#N report: cannot read the spooled log — retrying` once; 300 s after the job ended it sends the finish first and the job's `log_complete` is `false` (`#N report: spooled log still unreadable 300s after the job ended — sending the finish first, the log stays incomplete`) |
 | 24 hours after the job ended | sends the finish without the rest of the log; a finish that still cannot go is dropped with a log line (`#N report: finish not delivered in 24h — dropping the report`) |
 
 A worker restarted on the same data folder with the same token and server sends what its last

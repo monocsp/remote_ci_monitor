@@ -304,6 +304,23 @@ def test_p3r1_the_report_queue_section_says_long_lines_split_secrets_and_unreada
     assert "`#N report: cannot read the spooled log — retrying`" in body
 
 
+def test_p3r2_the_report_queue_section_says_when_a_lane_claims_and_the_unreadable_limit():
+    """P3 2라운드: 못 읽는 스풀의 300초 규칙과 그 줄, 드레인 한도 · 취소 · 멈춘 보내기 뒤의 레인."""
+    from remote_ci_monitor import remote_worker as rw
+
+    body = flat(section(CONFIGURATION, "The worker's log and its report queue"))
+    assert rw.DRAIN_REPORT_SECONDS == 60 and rw.FINISH_HOLD_SECONDS == 300
+    assert (
+        "300 s after the job ended it sends the finish first and the job's `log_complete` is"
+        " `false` (`#N report: spooled log still unreadable 300s after the job ended — sending"
+        " the finish first, the log stays incomplete`)"
+    ) in body
+    assert "or is shorter than what was written" in body
+    assert "waits at most 60 s for a job's queue, then restarts anyway" in body
+    assert "If the drain is cancelled first, the lane still waits for that queue" in body
+    assert "the job stays listed and its lane takes no job until the worker restarts" in body
+
+
 def test_p63_2_the_irreversible_section_says_its_job_shows_no_retry_limit():
     """# P6-3 #2 표식 잡으로 claim 된 잡은 반복하지 않는다 — 잡 문서의
     `max_attempts` 가 null 이다."""
