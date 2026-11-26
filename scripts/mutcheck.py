@@ -7160,6 +7160,10 @@ MUTANTS = (
         new="        if False:\n",
         tests=(
             "tests/test_hold_display_m5tb.py::test_g2_g4_rl45_rcm_eta_preset_says_the_group_is_held",
+            "tests/test_queue_unreachable_m5tb.py::"
+            "test_g4_rl28_rcm_eta_job_says_lost_contact_for_a_job_in_the_grace",
+            "tests/test_queue_unreachable_m5tb.py::"
+            "test_g4_rl28_rcm_eta_job_says_why_a_waiter_behind_an_unreachable_job_has_no_eta",
         ),
     ),
     Mutant(
@@ -7171,6 +7175,17 @@ MUTANTS = (
         tests=(
             "tests/test_hold_display_m5tb.py::"
             "test_g3_rl45_rcm_top_does_not_promise_an_immediate_start_while_a_group_is_held",
+        ),
+    ),
+    Mutant(
+        # `rcm eta --job N` 이 홀드에 막힌 대기 잡에 오지 않을 순번(`N ahead`)을 보인다(P6-1 G4)
+        name="eta-job-held-ahead-counted",
+        path="src/remote_ci_monitor/cli.py",
+        old="                ahead = None  # mutcheck: eta-job-held-ahead-counted\n",
+        new="                pass\n",
+        tests=(
+            "tests/test_queue_unreachable_m5tb.py::"
+            "test_g4_rl45_rcm_eta_job_of_a_held_waiter_says_held_and_does_not_count_ahead",
         ),
     ),
 )

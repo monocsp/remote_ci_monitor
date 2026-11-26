@@ -2725,6 +2725,9 @@ def cmd_eta(args: argparse.Namespace) -> int:
                 # 갈 레인이 없는 잡 — 앞선 잡을 세면 없는 순서를 지어낸다. `/api/eta` 의 `ahead`
                 # null 과 같다(M5t-a 위임 결정 7)
                 ahead = None
+            if held_group(row.get("action"), row.get("blocked_by")) is not None:
+                # 홀드에 막힌 잡(M5t-b §4.8)도 같다 — 사람이 풀기 전에는 오지 않을 순번이다(P6-1 G4)
+                ahead = None  # mutcheck: eta-job-held-ahead-counted
             if args.json:
                 _print_json(row)
             else:

@@ -464,3 +464,66 @@ def test_rl29_each_lost_ending_waits_3_with_its_own_sentence_and_the_log_path(
     assert f"rcm logs {JOB}" in err, err
     assert code not in err  # 원문 코드는 보이지 않는다
     assert last_json(out)["summary_code"] == code
+
+
+# ── P6-1 G4: rcm eta --job N 이 새 사유를 말한다 ─────────────────────────────────
+
+
+def eta_job(fake: Script, capsys, queue: list[dict[str, Any]], job_id: int) -> str:
+    fake.fake.route(
+        "GET",
+        "/api/status",
+        {"schema_version": 1, "pools": [{"name": "default", "queue": queue, "recent": []}]},
+    )
+    code, out, err = run(capsys, ["eta", "--job", str(job_id)])
+    assert code == 0, err
+    return out.strip()
+
+
+def waiter_row(job_id: int, **over: Any) -> dict[str, Any]:
+    r = top_row(
+        id=job_id,
+        state="queued",
+        position=1,
+        lane=None,
+        ran_on=None,
+        reason="blocked_by_group",
+        blocked_by={"job_id": 907, "group": "devices", "remaining_seconds": None},
+        estimate={"waited_seconds": 30.0, "wait_seconds": None, "finish_at": None},
+    )
+    r.update(over)
+    return r
+
+
+def test_g4_rl28_rcm_eta_job_says_lost_contact_for_a_job_in_the_grace(fake, capsys):
+    """# RL28 P6-1 G4: 끊김 유예 중인 도는 잡은 「running · elapsed … · eta —」만 찍지 않고
+    `rcm top` 과 같은 사람 문장을 붙인다. 원문 코드는 없다."""
+    out = eta_job(fake, capsys, [top_row()], 907)
+    assert out.startswith("#907 · running · elapsed 4m"), out
+    assert (
+        "eta — · lost contact with mac2 — the job goes on if the worker is back within the "
+        "grace period" in out
+    ), out
+    assert GRACE not in out
+
+
+def test_g4_rl28_rcm_eta_job_says_why_a_waiter_behind_an_unreachable_job_has_no_eta(fake, capsys):
+    out = eta_job(fake, capsys, [top_row(), waiter_row(911)], 911)
+    assert "wait — " in out and "eta —" in out, out
+    assert "blocked by #907 · devices · frees in —" in out, out
+
+
+def test_g4_rl45_rcm_eta_job_of_a_held_waiter_says_held_and_does_not_count_ahead(fake, capsys):
+    """# RL45 P6-1 G4: 홀드에 막힌 대기 잡은 오지 않을 순번(`N ahead`)을 보이지 않는다 —
+    `no_capable_machine` 처럼 앞선 잡 수를 모른다. 사유는 `rcm top` 과 같은 말이다."""
+    held = waiter_row(
+        921,
+        position=2,
+        reason="needs_action",
+        blocked_by={"job_id": 812, "group": "irreversible:ship", "remaining_seconds": None},
+        action={"code": "irreversible_hold", "note": "x", "at": "2026-11-27T08:50:00Z"},
+    )
+    out = eta_job(fake, capsys, [top_row(), waiter_row(911), held], 921)
+    assert "ahead" not in out, out
+    assert "group irreversible:ship is held by #812 — rcm release-hold 812" in out, out
+    assert "irreversible_hold" not in out, out
