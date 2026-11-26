@@ -142,6 +142,11 @@
   //  4. 라틴 글자(대소문자 무시): 글자 이름의 읽는 소리로. 받침 **있는 것은 `l`(엘) · `m`(엠) ·
   //     `n`(엔) · `r`(알) 넷뿐**이고 나머지 22개는 없다. `f` 는 「에프」의 끝 글자 `프` 에
   //     받침이 없어 **받침 없는 쪽**이다(`perf가` · `mail이`).
+  //     예외 하나: 세 글자 이상 이어진 라틴 낱말이 「모음(a e i o u y) + r」로 끝나면 받침 없는
+  //     쪽이다. 한국어로 적을 때 영어 낱말 끝의 그 r 는 받침이 되지 않는다(worker 워커 · runner
+  //     러너 · docker 도커 · color 컬러). 그래서 `mac2-worker와` 다. 두 글자 이하(`AR`)와 자음 + r
+  //     (`HDR`)는 약어로 보고 글자 이름 그대로 읽는다. 다른 끝(`-ng` · `-k` · `-p`)은 낱말 읽기가
+  //     글자로 정해지지 않아 손대지 않는다.
   //  5. 그 밖(한자 · 이모지 · 빈 문자열 · 전부 건너뛴 경우): `null` → 받침 없는 쪽(가/를/는/와).
   //     「이(가)」로 되돌아가지 않는다 — 괄호를 없애는 것이 이 규칙의 목적이다.
   var JOSA_SKIP = /[\s.,!?;:'"`’”\)\]\}\(\[\{…·\-_]/;
@@ -165,6 +170,13 @@
   // 규칙 6 을 쓰는 쌍 — ㄹ 받침을 받침 없는 쪽으로 읽는다.
   var JOSA_RIEUL_OPEN = { "으로/로": true };
 
+  /** `s[end]` 가 끝인 라틴 낱말이 세 글자 이상이고 「모음 + r」로 끝나는가(규칙 4 의 예외). */
+  function latinWordEndsInVowelR(s, end) {
+    var start = end;
+    while (start > 0 && /[A-Za-z]/.test(s.charAt(start - 1))) start--;
+    return end - start + 1 >= 3 && /[aeiouy]/i.test(s.charAt(end - 1));
+  }
+
   /** 마지막 글자의 끝소리 — `null`(모름) · `"none"` · `"rieul"` · `"other"`. 안 던진다. */
   function finalSound(word) {
     if (word === null || word === undefined) return null;
@@ -180,6 +192,7 @@
       if (ch >= "0" && ch <= "9") return !JOSA_DIGIT[ch] ? "none" : JOSA_RIEUL_DIGIT[ch] ? "rieul" : "other";
       var low = ch.toLowerCase();
       if (low >= "a" && low <= "z") {
+        if (low === "r" && latinWordEndsInVowelR(s, i)) return "none";   // 규칙 4 의 예외
         return JOSA_LATIN[low] !== true ? "none" : JOSA_RIEUL_LATIN[low] ? "rieul" : "other";
       }
       return null;   // 판정할 수 없는 글자 — 건너뛰지 않고 여기서 멈춘다(규칙 5)
