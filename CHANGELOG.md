@@ -7,6 +7,43 @@ of a key bumps that number and is listed here.
 
 ## [Unreleased]
 
+## [0.11.1] - 2026-11-26
+
+### Added
+- **Windows (WSL) in the usage guide.** Section 3 has a new «Windows (WSL)» part for a session on
+  a Windows computer: Ubuntu 24.04 in WSL2 (22.04's Python 3.10 is too old), pipx from apt, a
+  client set up with the build machine's IP address, why discovery finds nothing under WSL2's
+  default NAT network and what mirrored networking may change, Tailscale on the Windows side, the
+  repository kept out of `/mnt/c` and free of CRLF scripts, and `--notify` printing a warning
+  only. The README links it, and its install lines say that PEP 668 distributions (Ubuntu 23.04+,
+  Debian 12+) install pipx with `sudo apt install pipx`. The usage guide and the configuration
+  reference also say what happens when several rcm servers answer: a client stops and asks for
+  `--server` or `server` in `client.toml`, a worker picks by `server_name`, and
+  `rcm setup --role client` never searches the network.
+  ([#281](https://github.com/monocsp/remote_ci_monitor/pull/281))
+
+### Fixed
+- **rcm on Windows itself says to use WSL instead of crashing.** Every command, `rcm version`
+  included, died with a `ModuleNotFoundError` traceback there. It now prints
+  `rcm: native Windows is not supported — install and run rcm inside WSL …` and exits 2. Native
+  Windows stays out of scope.
+  ([#281](https://github.com/monocsp/remote_ci_monitor/pull/281))
+- **«No rcm server found» says what to do next.** `rcm discover`, the client commands and
+  `rcm worker` now add `give its address with --server http://<address>:8787`, and inside WSL
+  also that WSL2's default NAT network does not pass multicast.
+  ([#281](https://github.com/monocsp/remote_ci_monitor/pull/281))
+- **`rcm discover` finds every rcm server on the computer it runs on.** It used to see only the
+  ones that could hear multicast on the network: a second or third server started from a
+  terminal on the same Mac never heard the question, so `rcm discover` listed only the server
+  that could and `rcm worker` with `server_name` stopped with `no rcm server named …`. The
+  question now also goes over the loopback interface, and each server listens there too. A
+  server on another computer still has to hear the network; on macOS, check the Local Network
+  permission of the process that runs `rcm serve`. Several servers on one computer now all show
+  up, so a client or worker that relied on finding exactly one now stops with
+  `several rcm servers on this network: …` — a client picks one with `--server` or `server` in
+  `client.toml`, a worker with `server_name` or `--server`.
+  ([#280](https://github.com/monocsp/remote_ci_monitor/pull/280))
+
 ## [0.11.0] - 2026-11-26
 
 ### Breaking changes
@@ -2448,7 +2485,8 @@ Python 3.11+ standard library only — zero runtime dependencies. API schema: `s
 - No partial-upload resume: an interrupted snapshot upload ends as `cancelled`; run `rcm run` again.
 - Basic auth is clear text — use it only behind TLS (Tailscale HTTPS or a reverse proxy).
 
-[Unreleased]: https://github.com/monocsp/remote_ci_monitor/compare/v0.11.0...HEAD
+[Unreleased]: https://github.com/monocsp/remote_ci_monitor/compare/v0.11.1...HEAD
+[0.11.1]: https://github.com/monocsp/remote_ci_monitor/compare/v0.11.0...v0.11.1
 [0.11.0]: https://github.com/monocsp/remote_ci_monitor/compare/v0.10.0...v0.11.0
 [0.10.0]: https://github.com/monocsp/remote_ci_monitor/compare/v0.9.0...v0.10.0
 [0.9.0]: https://github.com/monocsp/remote_ci_monitor/compare/v0.8.0...v0.9.0

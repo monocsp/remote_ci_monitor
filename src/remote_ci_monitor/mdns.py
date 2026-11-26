@@ -3,8 +3,11 @@
 - 응답기: UDP `0.0.0.0:5353`(SO_REUSEADDR/SO_REUSEPORT — macOS mDNSResponder · avahi 와 공존),
   `224.0.0.251` 가입 — 인터페이스마다(멀티홈 서버: 유선 + Wi-Fi 어느 쪽 질의든 듣는다). 우리
   서비스에 대한 질의에만 답한다. 시작 announce 2회, 종료 goodbye. A 레코드는 질의자에게 가는
-  인터페이스의 주소를 맨 앞에 — 노트북은 첫 A 로 붙는다.
+  인터페이스의 주소를 맨 앞에 — 노트북은 첫 A 로 붙는다. 루프백에도 가입한다(아래).
 - 질의기: 임의 포트에서 PTR 질의를 멀티캐스트하고 timeout 동안 응답을 모은다. 표준 라이브러리만.
+  같은 질의를 루프백 인터페이스로 한 번 더 보낸다 — 같은 호스트의 서버가 LAN 인터페이스로 오는
+  멀티캐스트를 받지 못해도(실측 2026-11-26: macOS 에서 터미널로 띄운 서버는 en0 로 온 질의를 하나도
+  못 받았고 lo0 로 온 것은 받았다) 루프백으로 듣고 답한다.
 - 소켓은 `sock_factory` 로 바꿔 끼울 수 있다(테스트 · 다른 포트).
 """
 
@@ -50,6 +53,8 @@ LOCAL_NETWORK_HINT = (
 SEND_ERROR = "cannot send on this network: "
 #: 이만큼 연속으로 실패하면 광고가 실제로 안 되는 것으로 보고 health 에 올린다.
 SEND_FAILURES_BEFORE_ERROR = 2
+#: 같은 호스트의 서버와 질의기가 만나는 인터페이스
+LOOPBACK_IF = "127.0.0.1"
 
 
 def _multicast_socket(port: int, *, bind_ip: str = "0.0.0.0", loop: bool = True) -> socket.socket:
@@ -65,16 +70,21 @@ def _multicast_socket(port: int, *, bind_ip: str = "0.0.0.0", loop: bool = True)
         s.bind((bind_ip, port))
         # 그룹 가입 — 기본 인터페이스(INADDR_ANY)에 더해 주소가 있는 인터페이스마다 한 번씩.
         # INADDR_ANY 만 가입하면 기본 경로 인터페이스에서만 듣는다(실측: 유선 + Wi-Fi 멀티홈
-        # 서버가 Wi-Fi 쪽 질의를 못 들었다). 이미 가입한 인터페이스는 EADDRINUSE — 무시.
+        # 서버가 Wi-Fi 쪽 질의를 못 들었다). 루프백에도 — LAN 쪽 멀티캐스트를 받지 못하는
+        # 프로세스라도 같은 호스트의 질의기에는 답한다. 이미 가입한 인터페이스는 EADDRINUSE — 무시.
+        # 루프백 가입은 덤이다 — 세지 않는다. 실제 인터페이스 가입이 하나도 안 되면(오프라인 ·
+        # 기본 경로 없음) 루프백만 되어도 광고는 꺼진 것으로 올린다(`start()` False + `error`).
         joined = 0
         failure: OSError | None = None
-        for iface in ("0.0.0.0", *local_ipv4s()):
+        for iface in ("0.0.0.0", *local_ipv4s(), LOOPBACK_IF):
             mreq = struct.pack("4s4s", socket.inet_aton(MDNS_GROUP), socket.inet_aton(iface))
             try:
                 s.setsockopt(socket.IPPROTO_IP, socket.IP_ADD_MEMBERSHIP, mreq)
-                joined += 1
             except OSError as e:
-                failure = e
+                if iface != LOOPBACK_IF:
+                    failure = e
+                continue
+            joined += iface != LOOPBACK_IF
         if not joined:
             raise failure if failure is not None else OSError("cannot join the multicast group")
         s.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_TTL, 255)
@@ -312,9 +322,7 @@ def discover(
         while True:
             now = clock()
             if sends < 2 and now >= next_send:
-                try:
-                    sock.sendto(query, (MDNS_GROUP, mdns_port))
-                except OSError:
+                if not _send_query(sock, query, (MDNS_GROUP, mdns_port)):
                     break
                 sends += 1
                 next_send = now + 0.4
@@ -344,6 +352,40 @@ def discover(
         except OSError:
             pass
     return sorted(found.values(), key=lambda f: (f.name, f.port))
+
+
+def _send_query(sock: socket.socket, query: bytes, dest: tuple[str, int]) -> bool:
+    """질의를 소켓의 멀티캐스트 인터페이스(기본: LAN)로, 이어서 루프백 인터페이스로 한 번 더
+    보내고 인터페이스를 원래 값으로 되돌린다. 이미 루프백이면 한 번만. 한쪽이 실패해도 다른 쪽은
+    보낸다 — 하나라도 나갔으면 True."""
+    sent = False
+    try:
+        sock.sendto(query, dest)
+        sent = True
+    except OSError:
+        pass
+    loopback = socket.inet_aton(LOOPBACK_IF)
+    try:
+        before = sock.getsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_IF, 4)
+    except (OSError, AttributeError):  # `sock_factory` 의 소켓이 이 옵션을 모르면 LAN 만
+        return sent
+    if before == loopback:
+        return sent
+    try:
+        sock.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_IF, loopback)
+    except OSError:
+        return sent
+    try:
+        sock.sendto(query, dest)
+        sent = True
+    except OSError:
+        pass
+    finally:
+        try:
+            sock.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_IF, before)
+        except OSError:
+            pass
+    return sent
 
 
 def _querier_socket() -> socket.socket:

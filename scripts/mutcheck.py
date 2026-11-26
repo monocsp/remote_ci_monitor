@@ -6,6 +6,10 @@
 못 찾으면 그 자체로 실패다(코드가 바뀌어 감시가 풀린 것).
 
 변이 목록(개수는 `MUTANTS` 가 정본이다 — 문서의 숫자는 머지마다 썩는다):
+  WW (Windows · WSL 안내) — `ww1-native-windows-not-refused`: 네이티브 Windows 에서 traceback
+     으로 죽음 · `ww2-none-found-without-the-address-hint`: 서버를 못 찾았을 때 `--server` 길을
+     말하지 않음 · `ww3-wsl-hint-never-added`: WSL 안에서 NAT 망을 말하지 않음
+     (`cli.py`, `tests/test_windows_wsl_hints.py`)
   M5t-a PR7 — `m5t-live-port-check-takes-8787` · `m5t-live-plist-home-unchecked`: 실기 하네스의
      bootstrap 전 검사가 운영 포트를 받음 · plist 의 HOME 을 안 봄
      (`scripts/acceptance/m5t_live.sh`, `docs/m5t-workplan.md` §7 · TR16);
@@ -200,6 +204,12 @@
      (`tools/dev_batch.py`)
   #246 격리 검증 — 넷: 새 커밋으로 풀린 제출을 닫힌 PR 잡으로 취소함 · 다시 열린 PR 을 건너뜀 · PR
      목록의 첫 쪽만 읽음 · `guard_merge` 가 저장소 옵션을 한 번만 봄
+
+  qa-1 mdns — `md-responder-skips-the-loopback-join` · `md-querier-skips-the-loopback-send`: 같은
+     호스트의 서버가 루프백으로 듣지 · 묻지 않음
+     (`mdns.py`, `tests/test_mdns_servers_on_one_host.py`)
+  qa-2 mdns — `md-responder-counts-the-loopback-join`: 루프백 가입만 되어도 광고가 켜진 것으로 침
+     (`mdns.py`, `tests/test_mdns_servers_on_one_host.py`)
 
 사용: python scripts/mutcheck.py [--keep] [--only NAME] [--list] [-j N]
 
@@ -4751,6 +4761,43 @@ MUTANTS = (
         ),
     ),
     Mutant(
+        # 네이티브 Windows 를 알아보지 못한다 — `rcm version` 부터 `submissions` 의 `import fcntl`
+        # 에서 traceback 으로 죽는다(WW1, 2026-11-26 격리 검사)
+        name="ww1-native-windows-not-refused",
+        path="src/remote_ci_monitor/cli.py",
+        old='if sys.platform == "win32":\n    sys.stderr.write(\n',
+        new='if sys.platform == "win32-never":\n    sys.stderr.write(\n',
+        tests=(
+            "tests/test_windows_wsl_hints.py::"
+            "test_ww1_native_windows_says_one_line_and_exits_2_without_a_traceback",
+        ),
+    ),
+    Mutant(
+        # 서버를 못 찾았을 때 「같은 Wi-Fi?」 만 묻고 `--server` 로 주는 길을 말하지 않는다(WW2)
+        name="ww2-none-found-without-the-address-hint",
+        path="src/remote_ci_monitor/cli.py",
+        old="    parts = [DISCOVER_NONE_HINT, DISCOVER_ADDRESS_HINT]\n",
+        new="    parts = [DISCOVER_NONE_HINT]\n",
+        tests=(
+            "tests/test_windows_wsl_hints.py::"
+            "test_ww2_discover_with_none_found_names_the_server_flag",
+            "tests/test_windows_wsl_hints.py::"
+            "test_ww2_a_worker_with_none_found_names_the_server_flag",
+        ),
+    ),
+    Mutant(
+        # WSL 안에서 못 찾아도 기본 NAT 망이 멀티캐스트를 넘기지 않는다는 말을 하지 않는다(WW3)
+        name="ww3-wsl-hint-never-added",
+        path="src/remote_ci_monitor/cli.py",
+        old="    if _in_wsl():\n        parts.append(WSL_MULTICAST_HINT)\n",
+        new="    if False:\n        parts.append(WSL_MULTICAST_HINT)\n",
+        tests=(
+            "tests/test_windows_wsl_hints.py::"
+            "test_ww3_discover_inside_wsl_says_the_nat_network_drops_multicast",
+            "tests/test_windows_wsl_hints.py::test_ww3_a_worker_inside_wsl_says_it_too",
+        ),
+    ),
+    Mutant(
         # doctor 가 `--config` 옆 `service/` 의 서비스 파일을 보지 않는다 — 시험 설치가 자기
         # 서비스 파일을 못 찾고 도는 설치의 서비스로 잰다(온보딩 시험 OB2 의 근본 원인)
         name="ob2-doctor-skips-this-configs-service-file",
@@ -4812,6 +4859,43 @@ MUTANTS = (
         tests=(
             "tests/test_onboarding_findings.py::"
             "test_ob3_init_worker_service_file_hint_prints_the_numeric_uid",
+        ),
+    ),
+    Mutant(
+        # 응답기가 루프백에 가입하지 않는다 — LAN 멀티캐스트를 못 받는 서버 프로세스가 같은
+        # 호스트의 질의를 하나도 못 듣는다(qa-1 2026-11-26, `rcm discover` 가 운영 서버만 봄)
+        name="md-responder-skips-the-loopback-join",
+        path="src/remote_ci_monitor/mdns.py",
+        old='        for iface in ("0.0.0.0", *local_ipv4s(), LOOPBACK_IF):\n',
+        new='        for iface in ("0.0.0.0", *local_ipv4s()):\n',
+        tests=(
+            "tests/test_mdns_servers_on_one_host.py::"
+            "test_md2_the_responder_socket_also_listens_on_the_loopback",
+        ),
+    ),
+    Mutant(
+        # 질의기가 루프백으로 다시 묻지 않는다 — 같은 호스트의 서버 셋 중 LAN 을 듣는 것만 보인다
+        # (qa-1 2026-11-26)
+        name="md-querier-skips-the-loopback-send",
+        path="src/remote_ci_monitor/mdns.py",
+        old="    if before == loopback:\n        return sent\n",
+        new="    if True:\n        return sent\n",
+        tests=(
+            "tests/test_mdns_servers_on_one_host.py::test_md1_three_servers_on_one_host_are_all_found",
+            "tests/test_mdns_servers_on_one_host.py::"
+            "test_md7_each_round_asks_the_lan_then_the_loopback_and_restores_the_interface",
+        ),
+    ),
+    Mutant(
+        # 응답기가 루프백 가입도 센다 — 실제 인터페이스 가입이 모두 실패해도(오프라인 Mac) 광고가
+        # 켜진 것으로 찍히고 /health 에 error 가 없다(qa-2 2026-11-26, PLAN 「fail-open 금지」)
+        name="md-responder-counts-the-loopback-join",
+        path="src/remote_ci_monitor/mdns.py",
+        old="            joined += iface != LOOPBACK_IF\n",
+        new="            joined += 1\n",
+        tests=(
+            "tests/test_mdns_servers_on_one_host.py::"
+            "test_md8_only_the_loopback_joined_means_advertise_is_off",
         ),
     ),
 )

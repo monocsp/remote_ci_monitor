@@ -239,11 +239,25 @@ rcm serve      # http://127.0.0.1:8787 · Ctrl-C 로 깨끗이 멈춘다
 2. 서버 하나에 한 줄. 딱 하나만 나오면 설정에서 `server` 를 아예 빼도 된다. rcm 이 그걸 쓴다.
    아무것도 안 나오면 서버가 다른 네트워크에 있거나 `advertise` 가 꺼진 것이다. 그럴 땐 주소를
    직접 적는다.
+3. 묻는 컴퓨터에서 도는 서버는 여럿이어도 다 나온다. rcm 이 루프백 인터페이스로도 묻고, 서버마다
+   거기서 답하기 때문이다. 다른 컴퓨터의 서버는 네트워크로 온 질문을 들어야 한다. macOS 에서 그런
+   서버가 빠지면 그 `rcm serve` 를 돌리는 프로세스에 로컬 네트워크 권한이 있는지 본다(시스템 설정 >
+   개인정보 보호 및 보안 > 로컬 네트워크).
 
 `server` 를 비우려면 **양쪽 머신 다 rcm 0.2.2 이상**이어야 한다. 그 아래 클라이언트에는 발견
 기능이 아예 없다. `no server configured` 로 멈추고, `rcm worker` 와 달리 서버와 버전을 맞춰
 보지도 않아서 진짜 원인을 짚어 주는 것도 없다. 애매하면 주소를 적자
 (`http://<빌드머신>.local:8787`). 비용도 없고 언제나 된다.
+
+**네트워크에 서버가 여럿일 때.** 발견이 rcm 서버를 둘 이상 찾으면 클라이언트는 하나를 고르지
+않는다. 서버마다 이름과 주소를 늘어놓고 `several rcm servers on this network: … — pick one with
+--server or client.toml` 로 멈춘다. 그중 하나를 적는다. 명령 하나에만 쓰려면 `--server
+http://192.0.2.10:8787` 을 붙이고, 계속 쓰려면 `client.toml` 에 `server = "http://192.0.2.10:8787"`
+을 적는다. 워커는 이름으로 고른다. `worker.toml` 에 `server_name = "<이름>"` 을 적는다.
+`rcm setup --role client` 는 네트워크를 뒤지지 않는다. `--server` 가 꼭 있어야 하고, 나중에
+발견을 쓰려면 `client.toml` 에서 `server` 줄을 지우거나 `server = "auto"` 로 바꾼다. 서버가 답하는
+이름은 짧은 호스트 이름이고, 바꾸려면 그 서버의 `server.toml` 에 `advertise_name` 을 적는다.
+`rcm setup` 에는 그 값을 받는 플래그가 없다.
 
 **토큰은 발견되지 않는다. 앞으로도 그렇다.** `rcm token add` 는 빌드 머신에서 돌고 서버의 DB 에
 바로 쓴다. 토큰을 내주는 API 는 없다. 누군가 손으로 옮겨야 한다. 그래서 새 머신의 첫 화면이
@@ -291,6 +305,59 @@ chmod 600 ~/.config/rcm/client.toml
    워커가 없는 풀이 바로 「작업이 영영 안 시작되는」 이유다.
 
 모든 줄이 `ok` 여야 한다. `warn` 줄은 알림이지 실패가 아니다. `rcm check` 는 그래도 0 으로 끝난다.
+
+### Windows (WSL)
+
+rcm 은 Windows 자체에서는 돌지 않는다. Windows 컴퓨터의 세션은 WSL 안에서 rcm 을 돌리고,
+네트워크에 있는 빌드 머신의 클라이언트가 된다. Windows 에서 바로 띄우면 rcm 은 한 줄을 찍고
+종료 코드 2 로 곧바로 멈춘다:
+
+```
+rcm: native Windows is not supported — install and run rcm inside WSL (see docs/usage.md «Windows (WSL)»)
+```
+
+1. **Windows 11 의 WSL2 에 Ubuntu.** WSL 안에 Python 3.11.4 이상이 있어야 한다. Ubuntu 24.04 는
+   Python 3.12 를 담고 있어서 된다. Ubuntu 22.04 는 Python 3.10 이라 안 된다.
+2. **pipx 는 apt 로.** Ubuntu 24.04 는 PEP 668 을 따른다. 그래서 `python3 -m pip install --user pipx`
+   는 `externally-managed-environment` 로 거부된다. pipx 를 apt 로 깔고 새 셸을 연다:
+
+   ```sh
+   sudo apt install pipx && pipx ensurepath
+   pipx install git+https://github.com/monocsp/remote_ci_monitor
+   ```
+
+3. **빌드 머신의 주소를 준다.** `.local` 이름보다 IP 주소를 쓴다. 그 이름은 mDNS 로 답하는데, WSL
+   은 기본 설정에서 mDNS 를 보지 못한다. 토큰은 [2단계](#2-빌드-머신)처럼 빌드 머신에서
+   `rcm token add` 로 만든다:
+
+   ```sh
+   rcm setup --role client --server http://192.0.2.10:8787 --yes
+   export RCM_TOKEN=<받은 토큰>
+   rcm check
+   ```
+
+4. **발견과 네트워크 방식.** WSL2 의 기본 네트워크는 NAT 이고, 멀티캐스트를 넘기지 않는다. 그래서
+   그 안에서는 `server = "auto"` 와 `rcm discover` 가 아무것도 찾지 못하고, rcm 이 그렇다고 알린다:
+
+   ```
+   rcm: no rcm server found on this network (is the server's advertise on? same Wi-Fi?) — give its address with --server http://<address>:8787 — under WSL2 the default NAT network does not pass multicast, so use --server or WSL's mirrored networking
+   ```
+
+   mirrored 네트워크를 켜면 WSL 이 Windows 의 네트워크 인터페이스를 같이 쓴다. Windows 11 22H2
+   이상에서 `%UserProfile%\.wslconfig` 의 `[wsl2]` 아래에 `networkingMode=mirrored` 를 적고
+   `wsl --shutdown` 으로 다시 띄운다. 그러면 발견이 될 수도 있지만 rcm 으로는 확인하지 않았다.
+   `--server` 는 언제나 된다. 자세한 건 Microsoft 의
+   [WSL networking](https://learn.microsoft.com/en-us/windows/wsl/networking) 문서를 본다.
+5. **Tailscale.** Tailscale 은 WSL 안이 아니라 Windows 에 깐다. WSL 은 Windows 를 거쳐 tailnet 에
+   닿는다. `--server` 에는 빌드 머신의 Tailscale 주소를 준다.
+6. **저장소는 WSL 의 파일 시스템에 둔다.** `/mnt/c` 아래가 아니라 WSL 안의 `~/` 아래에 받는다.
+   `/mnt/c` 에서는 스크립트의 실행 비트가 제대로 남지 않고 파일 읽기도 느리다. Git for Windows 가
+   `core.autocrlf` 를 켠 채 받은 저장소는 줄 끝이 CRLF 이고, CRLF 셸 스크립트는 빌드 머신에서
+   돌지 않는다. WSL 안의 git 으로 받거나, 저장소의 `.gitattributes` 에 `*.sh text eol=lf` 를 적는다.
+7. **`--notify` 는 아무것도 띄우지 않을 수 있다.** Linux 에서 `--notify` 는 `notify-send` 를 부른다.
+   WSL 에는 보통 이것이 깔려 있지 않고, 그러면 `rcm wait --notify` 는 대신 경고 한 줄을 찍는다.
+   JSON 과 종료 코드는 바뀌지 않는다. `notify-send` 를 깔았을 때 알림이 뜨는지는 WSLg 에 달려
+   있다(확인하지 못했다).
 
 ## 4. 첫 작업
 
