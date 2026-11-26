@@ -193,9 +193,9 @@ def test_follows_table(argv, expect):  # A18 · §2.3 · 결정 160
     assert follow.follows(follow.prescan(argv)) is expect
 
 
-def test_no_follow_commands_constant():  # §5.1 · M5t-a TR17 이 doctor 를 더했다
+def test_no_follow_commands_constant():  # §5.1 · M5t-a TR17 이 doctor 를, TR14 가 setup 을 더했다
     assert follow.NO_FOLLOW_COMMANDS == frozenset(
-        {"serve", "worker", "token", "init", "discover", "version", "skills", "doctor"}
+        {"serve", "worker", "token", "init", "discover", "version", "skills", "doctor", "setup"}
     )
 
 
@@ -205,6 +205,22 @@ def test_tr17_doctor_does_not_follow_the_server_version():
     for argv in (["doctor"], ["doctor", "--role", "worker", "--json"]):
         assert follow.follows(follow.prescan(argv, options=OPTS)) is False, argv
         assert follow.follows(follow.prescan(argv)) is False, argv
+
+
+def test_tr14_setup_does_not_follow_the_server_version():
+    """`rcm setup` 은 이 머신에 설정을 쓴다 — 설정이 아직 없을 때 따라가기는 뜻이 없고, `--server`
+    를 받아도 그 서버의 버전으로 갈아타지 않는다(docs/m5t-workplan.md §4.1 · §4.7 결정 171 행)."""
+    argvs = (
+        ["setup"],
+        ["setup", "--role", "client", "--server", "http://h:8787", "--yes"],
+        ["setup", "--role", "worker", "--server=http://h:8787", "--pool", "p", "--lanes", "1"],
+    )
+    for argv in argvs:
+        assert follow.follows(follow.prescan(argv)) is False, argv
+    opts = parser_options()  # 진짜 파서 — `setup` 이 하위 명령으로 붙어 있다
+    assert "--server" in opts.get("setup", frozenset()), sorted(k for k in opts if k)
+    for argv in argvs:
+        assert follow.follows(follow.prescan(argv, options=opts)) is False, argv
 
 
 # ── 설정 ─────────────────────────────────────────────────────────────────────

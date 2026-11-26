@@ -38,6 +38,7 @@ from typing import Any
 
 from remote_ci_monitor import SCHEMA_VERSION, __version__, follow, submissions
 from remote_ci_monitor import apply as apply_mod
+from remote_ci_monitor import setup as setup_cmd
 from remote_ci_monitor.client import (
     MAX_CHAIN_STEPS,
     Client,
@@ -3577,9 +3578,13 @@ def worker_plist(rcm: Path, config: Path, home: Path) -> bytes:
 
 
 def worker_unit(rcm: Path, config: Path, home: Path) -> bytes:
-    """systemd user unit(Linux) — `systemctl --user` 로 올린다. 토큰은 싣지 않는다."""
+    """systemd user unit(Linux) — `systemctl --user` 로 올린다. 토큰은 싣지 않는다. 경로는
+    `rcm setup` 의 서버 유닛과 같은 함수로 쓴다 — 공백 · `%` · `$` 는 systemd 규칙대로 쓰고,
+    줄바꿈 · 제어 문자는 `UnitValueError`(ValueError)다(P3 v2-4)."""
+    from remote_ci_monitor.core import setup as setup_core
+
     text = f"""# remote_ci_monitor worker — written by `rcm init worker --service-file`.
-# The token is not in this file: put `token = "…"` in {config} (mode 600).
+# The token is not in this file: put `token = "…"` in {setup_core.unit_path(config)} (mode 600).
 [Unit]
 Description=remote_ci_monitor worker
 After=network-online.target
@@ -3587,8 +3592,8 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-WorkingDirectory={home}
-ExecStart={rcm} worker --config {config}
+WorkingDirectory={setup_core.unit_path(home)}
+ExecStart={setup_core.exec_start([rcm, "worker", "--config", config])}
 Restart=on-failure
 RestartSec=5
 KillSignal=SIGTERM
@@ -3623,7 +3628,12 @@ def _init_worker_service(args: argparse.Namespace, config: Path) -> int:
     if rcm is None:
         return _usage("cannot find the rcm executable this command runs from")
     home = Path.home()
-    data = worker_plist(rcm, config, home) if kind == "launchd" else worker_unit(rcm, config, home)
+    try:
+        data = (
+            worker_plist(rcm, config, home) if kind == "launchd" else worker_unit(rcm, config, home)
+        )
+    except ValueError as e:  # 유닛 · plist 에 쓸 수 없는 글자(줄바꿈 · 제어 문자)
+        return _usage(f"cannot write a {kind} service file: {e}")
     try:
         write_private(target, data, 0o644)
     except OSError as e:
@@ -5792,6 +5802,8 @@ def build_parser() -> argparse.ArgumentParser:
     )
     skills.set_defaults(func=cmd_skills)
 
+    setup_cmd.register(sub)
+
     doc = sub.add_parser("doctor", help="what this machine can build and test, and what to install")
     doc.add_argument("--role", choices=("client", "worker", "coordinator", "coordinator-worker"))
     doc.add_argument("--server")
@@ -5896,6 +5908,12 @@ def _main(argv: list[str] | None, *, follow_enabled: bool, execve: Any = os.exec
         except KeyboardInterrupt:
             _err("interrupted")
             return 130
+        if code is not None:
+            return code
+    if not (sys.argv[1:] if argv is None else argv):
+        # 인자 없는 `rcm`: 물을 사람이 있고 설정이 하나도 없으면 설정을 시작할지 묻는다(결정 240).
+        # 그 밖에는 아래 argparse 가 지금처럼 사용법 오류(종료 2)를 낸다
+        code = setup_cmd.first_run()
         if code is not None:
             return code
     parser = build_parser()

@@ -1386,6 +1386,11 @@ writes the token anywhere; carrying it to the worker is still a person's job. A 
 see the `RCM_WORKER_TOKEN` of your shell, so before you start it put `token = "…"` in
 `worker.toml` (the file is mode 600).
 
+`rcm setup --role worker --server URL --pool P --lanes N --yes` does both steps at once: it writes
+`worker.toml` with that URL (never `"auto"`) and the service file in `service/` next to it,
+prints the copy and start lines instead of running them, and ends with
+the checks that need no server. See [Set a machine up](operating.md#set-a-machine-up-rcm-setup).
+
 Without `--config`, `rcm worker` reads the `worker.toml` that `rcm init worker` wrote
 (`~/.config/rcm/worker.toml`, or under `$XDG_CONFIG_HOME`) when it exists, and says which file it
 read. The long form still works, with flags instead of a file — given `--server`, it reads no file
@@ -1477,6 +1482,8 @@ each job to a worker that can take it. What changes:
 
 `rcm doctor --role coordinator` (the role a `lanes = 0` config names) ends on `capacity`
 instead of «no preset would come here»: see [rcm doctor](operating.md#check-a-machine-before-you-use-it-rcm-doctor).
+`rcm setup --role coordinator --bind ADDRESS --yes` writes such a `server.toml` with its server
+service file: see [Set a machine up](operating.md#set-a-machine-up-rcm-setup).
 
 ## Which machine runs a job
 

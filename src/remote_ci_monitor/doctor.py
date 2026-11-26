@@ -32,6 +32,7 @@ from typing import Any
 from remote_ci_monitor import __version__, hostsample, runner
 from remote_ci_monitor.core import doctor as dc
 from remote_ci_monitor.core import jobenv
+from remote_ci_monitor.core import setup as setup_core
 
 #: 플랫폼 — 시험이 바꿔 끼운다(Local Network 안내 · 설치 문구 · 서비스 관리자)
 PLATFORM = sys.platform
@@ -431,6 +432,12 @@ class ServiceFile:
     workdir_unknown: bool = False
     #: 사용자 유닛인 것을 안다(`~/.config/systemd/user/` · setup 자리) — `%h` 가 그 홈이다
     user_unit: bool = False
+    #: systemd 유닛의 `[Service]` 에 적힌 ExecStart= 명령 모두(빈 `ExecStart=` 가 지운 것은 뺀다).
+    #: `argv` 는 그중 rcm 으로 풀리는 첫 명령, 없으면 마지막 명령이다(batch 12 L1)
+    exec_argvs: list[list[str]] = field(default_factory=list)
+    #: 띄우는 명령 줄에 systemd 가 서비스의 환경으로 펼치는 `$VAR` · `${VAR}` 가 있다 — rcm 은
+    #: 펼치지 않으므로 그 인자의 값(`--config` · `--data-dir` …)은 모른다(batch 11 L4)
+    launch_vars: bool = False
     #: 시스템 자리(`/etc/systemd/system` · `/Library/LaunchDaemons`)의 파일 — 관리자가 root 로
     #: 읽고 `run_user`(없으면 root)로 띄운다
     system: bool = False
@@ -585,6 +592,49 @@ def _read_plist(p: Path) -> ServiceFile:
     )
 
 
+#: systemd 가 ExecStart 에서 펼치는 변수의 머리 — `$NAME` · `${NAME}`(`$$` 는 글자 `$`)
+_EXEC_VARIABLE = re.compile(r"\$(?:\{|[A-Za-z_])")
+
+
+def has_exec_variable(word: str) -> bool:
+    """ExecStart 의 낱말 하나에 systemd 가 펼치는 변수가 있나(systemd.service 「Command lines」).
+    `$$` 는 글자 `$` 라서 건너뛴다."""
+    i = word.find("$")
+    while i >= 0:
+        if word.startswith("$$", i):
+            i = word.find("$", i + 2)
+            continue
+        if _EXEC_VARIABLE.match(word, i):
+            return True
+        i = word.find("$", i + 1)
+    return False
+
+
+def unit_lines(text: str) -> list[tuple[int, str]]:
+    """systemd 유닛의 논리 줄 — (첫 줄 번호, 앞뒤 빈칸을 뗀 줄). systemd 처럼 읽는다
+    (systemd.syntax(7)): 주석 줄(`#` · `;`)은 줄 잇기보다 먼저 버리고, 홀수 개의 역슬래시로 끝나는
+    줄은 마지막 역슬래시를 빈칸으로 바꿔 다음 줄과 잇는다. 잇는 중에 나온 주석 줄도 건너뛴다.
+    잇지 않으면 `ExecStart=rcm serve \\` 의 argv 가 비어 rcm 을 띄우는 유닛을 놓친다(batch 11
+    HIGH)."""
+    out: list[tuple[int, str]] = []
+    held: str | None = None
+    start = 0
+    for number, raw in enumerate(text.splitlines(), 1):
+        if raw.lstrip()[:1] in ("#", ";"):
+            continue
+        if held is None:
+            start = number
+        line = raw if held is None else held + raw
+        if (len(raw) - len(raw.rstrip("\\"))) % 2:
+            held = line[:-1] + " "
+            continue
+        held = None
+        out.append((start, line.strip()))
+    if held is not None:  # 마지막 줄이 역슬래시로 끝났다 — systemd 도 모은 만큼 읽는다
+        out.append((start, held.strip()))
+    return out
+
+
 def read_service_file(
     path: str | os.PathLike[str], *, user_home: str | None = None, system: bool = False
 ) -> ServiceFile:
@@ -624,12 +674,24 @@ def read_service_file(
     path_unknown = False
     argv: list[str] = []
     unexpanded = False
+    exec_vars = False
     workdir: str | None = None
     workdir_unknown = False
     user: str | None = None
-    for number, raw in enumerate(text.splitlines(), 1):
-        line = raw.strip()
+    #: ExecStart= 마다 (argv, 실행 파일, rcm 으로 푼 인자, `$VAR` 가 있나, 풀지 않은 지정자가 있나)
+    execs: list[tuple[list[str], str | None, dict[str, Any] | None, bool, bool]] = []
+    section: str | None = None
+    for number, line in unit_lines(text):
+        if line.startswith("[") and line.endswith("]"):
+            section = line[1:-1].strip()
+            continue
+        if section not in (None, "Service"):
+            # systemd 는 `[Service]` 밖의 ExecStart= · Environment= 를 서비스에 쓰지 않는다
+            # (batch 12 L1). 섹션 머리가 없는 줄은 예전처럼 읽는다
+            continue
         key, _, value = line.partition("=")
+        # `=` 앞뒤의 빈칸은 버린다(systemd.syntax(7)) — `ExecStart = rcm …` 도 ExecStart= 다
+        key, value = key.strip(), value.strip()
         try:
             if key in SYSTEMD_UNFOLLOWED:
                 unfollowed.append(f"line {number} ({key}=): rcm does not follow {key}=")
@@ -651,7 +713,11 @@ def read_service_file(
                         continue
                     env[k] = expanded
             elif key == "ExecStart":
+                if not value:  # 빈 값은 그때까지의 명령을 지운다(systemd.service 「ExecStart=」)
+                    execs.clear()
+                    continue
                 argv = shlex.split(value)
+                exec_vars = any(has_exec_variable(a) for a in argv)
                 expanded_argv = [expand_specifiers(a, home) for a in argv]
                 unexpanded = any(a is None for a in expanded_argv)
                 if unexpanded:
@@ -662,10 +728,10 @@ def read_service_file(
                         "in ExecStart"
                     )
                 else:
-                    argv = [a for a in expanded_argv if a is not None]
+                    # `$$` 는 글자 `$` 다(systemd.service 「Command lines」 — `$NAME` 은 환경변수)
+                    argv = [a.replace("$$", "$") for a in expanded_argv if a is not None]
                 program = argv[0].lstrip("@-:+!") if argv else None
-                launch = rcm_launch(program, argv)
-                command = None if launch is None else launch["command"]
+                execs.append((argv, program, rcm_launch(program, argv), exec_vars, unexpanded))
             elif key == "WorkingDirectory":
                 # `-` 앞머리는 「없어도 된다」, `~` 는 사용자의 홈이다
                 # (systemd.exec 「WorkingDirectory=」)
@@ -682,6 +748,13 @@ def read_service_file(
                 nofile_unit = 1 << 20 if first == "infinity" else int(first)
         except ValueError:
             unreadable.append(f"line {number} ({key}=)")
+    # ExecStart= 가 여럿이면(Type=oneshot) rcm 으로 풀리는 첫 명령을 읽는다 — 마지막 줄만 읽으면
+    # 앞줄의 rcm 을 놓친다(batch 12 L1). 없으면 마지막 명령이다
+    last = execs[-1] if execs else ([], None, None, False, False)
+    argv, program, launch, exec_vars, unexpanded = next(
+        (e for e in execs if e[2] is not None), last
+    )
+    command = None if launch is None else launch["command"]
     return ServiceFile(
         p,
         dc.SYSTEMD,
@@ -694,8 +767,10 @@ def read_service_file(
         path_unknown,
         launch,
         launch_unexpanded=unexpanded,
+        launch_vars=exec_vars,
         label=p.stem,
         argv=argv,
+        exec_argvs=[e[0] for e in execs],
         workdir=None if workdir_unknown else workdir,
         workdir_unknown=workdir_unknown,
         user_unit=home is not None,
@@ -797,6 +872,17 @@ def pick_service_file(
     staged = sorted(
         p for p in staged_dir.glob("*") if p.suffix in (".plist", ".service") and p.is_file()
     )
+    # `rcm setup --label` 로 쓴 서비스는 표준 라벨의 글롭에 걸리지 않는다. setup 자리의 파일마다
+    # setup 이 찍은 복사 명령의 목적지를 같은 규칙(`core.setup.install_path`, 6-B-V1)으로 풀어 설치
+    # 자리 후보에 더한다 — 설치한 뒤에는 서비스 관리자가 읽는 그 파일을 잰다
+    for p in staged:
+        named = setup_core.label_of_file(p.name)
+        if named is None:
+            continue
+        there = setup_core.install_path(named[0], named[1], home)
+        place = launch_agents if named[1] == setup_core.LAUNCHD else user_units
+        if there.is_file() and there not in place:
+            place.append(there)
     for stage in (launch_agents + user_units + system_files, staged):
         before = len(skipped)
         found = _matching(stage, role, skipped, user_home)

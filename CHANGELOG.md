@@ -16,6 +16,50 @@ of a key bumps that number and is listed here.
   ([#268](https://github.com/monocsp/remote_ci_monitor/pull/268))
 
 ### Added
+- **`rcm setup` sets a machine up as a client, worker, coordinator or coordinator-worker.** It
+  writes the config file and, for the last three, a launchd plist or systemd user unit under the
+  config folder's `service/`; it registers and starts nothing and prints the `cp -n` and start
+  lines instead. `--role ROLE --yes` asks nothing and needs `--server` (client), `--server`,
+  `--pool` and `--lanes` (worker) or `--bind` (coordinators), or it exits 2. Existing files are
+  kept unless `--force`; a `data_dir` that already holds `rcm.sqlite3` is refused unless
+  `--reuse-data-dir`, and setup never opens a database or creates a token; it prints the
+  `rcm token` commands to run. `rcm` with no arguments, in a terminal on a machine with no config
+  at all, asks whether to set it up; everywhere else it is the usage error (exit 2) it was.
+  `rcm setup` does not follow the server's version, and `rcm doctor` finds a service installed
+  under a `--label` of your own. It takes options by their whole name only, refuses a
+  `--service-file` inside a folder the service manager reads (on macOS whatever the case), and
+  writes systemd unit paths with spaces, `%` or `$` the way systemd reads them. An empty
+  `--config`, `--service-file`, `--data-dir` or `--label` is a usage error, a `--config` inside a
+  folder the service manager reads is refused like a `--service-file` there, and a run whose files
+  are all written exits 0 even when the closing report fails or is interrupted. It prints the
+  order that replaces a service already loaded or rewritten with `--force service`, a
+  `to remove: …` line (it unloads and deletes the installed service file only when `cmp` finds
+  it is the one setup wrote), the `loginctl enable-linger` line before the start on Linux and a
+  worker's token line before its start, and its last `rcm doctor` line names the `rcm` the service
+  runs. `--bind` takes an address, not a name, and an IPv6 one without brackets; a `server.toml`
+  setup cannot read is a warning that `--force config` fixes; a service manager that does not
+  answer is "could not tell", not "not loaded". Right before it writes, setup looks for the rcm
+  services it can find on this machine (launchd and systemd, user and system places) and refuses,
+  with exit 1 and no override, a config file, service file or `data_dir` that is one of theirs or
+  inside their config, `data_dir`, virtualenv or source checkout, and their label unless
+  `--force service` and the installed file is the one setup wrote (even then that service's config,
+  `data_dir`, virtualenv and checkout stay refused). It looks under both `$HOME` and the account's
+  home, counts a service's `--data-dir` and data-dir variable as its `data_dir` too, finds the
+  virtualenv of a `python -m` service, and compares install places, `$XDG_CONFIG_HOME/systemd/user`
+  among them, with symbolic links resolved. An rcm-looking service it cannot read or stat, or one
+  with lines it does not follow (`EnvironmentFile=`) or `$VARIABLES` in its `ExecStart=`, stops
+  it too; a file it may not read whose name is another program's only gets the warning `could not
+  read <file> — skipped; if it runs rcm, setup cannot protect it`. Units are read the way systemd
+  reads them (lines continued with a backslash, spaces around `=`), labels are compared without
+  case on macOS, the refusal that keeps a service setup installed says to remove it first, and
+  setup refuses when it cannot find the account's home. It also counts an `rcm` started under
+  another name (a link to `rcm`, another executable in a virtualenv with rcm installed), refuses a
+  service whose command line shows rcm in a form it cannot read (`sh -c "cd x;rcm serve"`,
+  `$(which rcm)`) or a unit with two `ExecStart=` lines that start rcm, reads every `ExecStart=`
+  of a unit's `[Service]` section and ignores the other sections, judges a file it cannot read for
+  any reason by its name, and also looks in `~/.local/share/systemd/user`,
+  `$XDG_DATA_HOME/systemd/user`, `/etc/xdg/systemd/user` and `/usr/local/lib/systemd/`.
+  ([#272](https://github.com/monocsp/remote_ci_monitor/pull/272))
 - **`lanes = 0` runs a server that only hands jobs out.** It runs no job itself: `@local` is not
   alive and never a candidate, its probes do not run, `--machine @local`, `rcm recheck @local`
   and `local_only` submissions are refused with 409, and jobs that lost their place wait with
@@ -106,6 +150,10 @@ of a key bumps that number and is listed here.
   ([#268](https://github.com/monocsp/remote_ci_monitor/pull/268))
 
 ### Fixed
+- **`rcm init worker --service-file` writes a systemd unit whose paths hold a space, `%` or `$`
+  the way systemd reads them**, quoted, `%%` and `$$`, and refuses a path with a line break or
+  another control character with exit 2 instead of writing a broken unit.
+  ([#272](https://github.com/monocsp/remote_ci_monitor/pull/272))
 - **A config file that is not UTF-8 stops `rcm serve`, `rcm worker` and the other commands with one
   line naming the file and the byte, instead of a traceback.** An included preset file is read the
   same way. `rcm doctor` reports it as a usage error (exit 2), as it does a `server.toml` whose
