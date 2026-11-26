@@ -6464,6 +6464,86 @@ MUTANTS = (
             "test_rl45_status_says_null_not_empty_when_the_holds_cannot_be_read",
         ),
     ),
+    # ── M5t-b P3 3라운드 LOW — 로컬 레인의 바깥 처리기 · 닫기 경합 · 홀드 배선 ──
+    Mutant(
+        # 러너가 결과를 낸 뒤 레인이 터지면 그 결과와 group_gone 을 버리고 실패 · 홀드로 닫는다
+        name="local-safety-net-drops-the-result",
+        path="src/remote_ci_monitor/worker.py",
+        old=(
+            "                    if result is not None:  # mutcheck: "
+            "local-safety-net-drops-the-result\n"
+        ),
+        new="                    if False:\n",
+        tests=(
+            "tests/test_hold_notify_m5tb.py::"
+            "test_rl54_a_local_lane_error_after_the_runner_returned_keeps_that_result",
+        ),
+    ),
+    Mutant(
+        # 바깥 처리기가 홀드 판단을 버린다 — 그룹이 남았을 수 있는 표식 잡이 그룹을 연다
+        name="local-safety-net-hold-dropped",
+        path="src/remote_ci_monitor/worker.py",
+        old=(
+            "                        hold_cause=cause,  # mutcheck: local-safety-net-hold-dropped\n"
+        ),
+        new="                        hold_cause=None,\n",
+        tests=(
+            "tests/test_hold_notify_m5tb.py::"
+            "test_rl54_a_local_lane_irreversible_job_holds_unless_its_group_is_gone",
+        ),
+    ),
+    Mutant(
+        # 띄운 뒤의 RunnerError 닫기가 취소에 지면 홀드 판단 없이 cancelled 로 닫는다
+        name="local-fail-race-hold-dropped",
+        path="src/remote_ci_monitor/worker.py",
+        old=(
+            "            # mutcheck: local-fail-race-hold-dropped\n"
+            "            self._close_cancelled_before_start(job, hold_cause=hold_cause)\n"
+        ),
+        new="            self._close_cancelled_before_start(job, hold_cause=None)\n",
+        tests=(
+            "tests/test_hold_notify_m5tb.py::"
+            "test_rl54_a_local_lane_close_that_loses_to_a_cancel_keeps_the_hold_decision",
+        ),
+    ),
+    Mutant(
+        # 75 반복 결과가 취소에 지면 홀드 판단 없이 cancelled 로 닫는다
+        name="local-retried-race-hold-dropped",
+        path="src/remote_ci_monitor/worker.py",
+        old=(
+            "            # mutcheck: local-retried-race-hold-dropped\n"
+            "            self._close_cancelled_before_start(job, hold_cause=hold_cause)\n"
+        ),
+        new="            self._close_cancelled_before_start(job, hold_cause=None)\n",
+        tests=(
+            "tests/test_hold_notify_m5tb.py::"
+            "test_rl54_a_local_lane_close_that_loses_to_a_cancel_keeps_the_hold_decision",
+        ),
+    ),
+    Mutant(
+        # 로컬 레인이 「띄우는 중」을 모른다 — 띄운 뒤의 예외도 「띄운 적 없음」(확인됨)으로 읽는다
+        name="local-launch-not-marked",
+        path="src/remote_ci_monitor/worker.py",
+        old="        self.worker._launched = True  # mutcheck: local-launch-not-marked\n",
+        new="        pass\n",
+        tests=(
+            "tests/test_hold_notify_m5tb.py::"
+            "test_rl54_a_local_lane_irreversible_job_holds_unless_its_group_is_gone",
+        ),
+    ),
+    Mutant(
+        # 서버가 로컬 레인에 홀드 알림을 넘기지 않는다 — 로컬 레인의 홀드가 알림 없이 남는다
+        name="local-lanes-hold-unannounced",
+        path="src/remote_ci_monitor/server.py",
+        old="            on_hold=self._hold_created,\n",
+        new="            on_hold=None,\n",
+        tests=(
+            "tests/test_hold_notify_m5tb.py::"
+            "test_rl54_the_server_hands_its_hold_announcer_to_the_local_lanes",
+            "tests/test_hold_notify_m5tb.py::"
+            "test_rl54_a_local_lane_irreversible_job_holds_unless_its_group_is_gone",
+        ),
+    ),
 )
 
 

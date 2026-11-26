@@ -445,15 +445,34 @@ def test_rl54_on_accepts_irreversible_hold_and_the_default_leaves_it_out():
 # ── 로컬 레인도 러너의 `group_gone` 을 읽는다(P3 2라운드 HIGH · §4.12 확인 표 4행) ────────
 
 
-def _local_lane_run(tmp_path, monkeypatch, how: str, gone: bool | None):
+def _local_lane_run(
+    tmp_path,
+    monkeypatch,
+    how: str,
+    gone: bool | None,
+    *,
+    rc: int | None = 0,
+    flags: dict[str, bool] | None = None,
+    race: str | None = None,
+):
     """로컬 레인 하나가 표식 잡 하나를 가짜 러너로 돌린다. 러너는 `how` 대로 끝난다 — 결과
-    (`result`) · `RunnerError`(`runner_error`) · 관찰자 예외(`crash`), 그리고 띄우기 전의 같은
-    둘(`*_before_spawn`, `spawning` 을 부르지 않는다). 홀드 · 버스 사건을 돌려준다."""
+    (`result`, `rc` · `flags` 는 그 결과의 종료 코드와 취소 · 시간 초과 · 멈춤 표시) ·
+    `RunnerError`(`runner_error`) · 관찰자 예외(`crash`), 그리고 띄우기 전의 같은 둘
+    (`*_before_spawn`, `spawning` 을 부르지 않는다). `race` 는 러너 뒤의 경합이다.
+
+    - `crash_after_result`: 러너가 결과를 낸 뒤 레인의 종료 규칙이 터진다(바깥 처리기).
+    - `cancel_before_retried`: 75 반복 결과를 닫기 직전에 취소가 들어온다(`retried` 가 진다).
+    - `cancel_before_fail`: 띄운 뒤의 `RunnerError` 를 닫기 직전에 취소가 들어온다.
+
+    (잡 id, 홀드가 있는가, 버스 사건, 닫힌 잡)을 돌려준다."""
     import time
 
     from remote_ci_monitor import worker as worker_mod
     from remote_ci_monitor.runner import RunnerError, RunResult
-    from test_worker_api import WorkerServer, sh
+    from test_worker_api import GIT_SHA, WorkerServer, sh
+
+    def cancel_now(store: Store, jid: int) -> None:
+        assert store.request_cancel(jid, "alice", datetime.now(UTC), 1) == "cancelling"
 
     def fake_run_job(spec, observer, **_kw):
         assert spec.irreversible is True
@@ -463,7 +482,7 @@ def _local_lane_run(tmp_path, monkeypatch, how: str, gone: bool | None):
                 spawning()
         at = datetime.now(UTC)
         if how == "result":
-            return RunResult(rc=0, started=at, finished=at, group_gone=gone)
+            return RunResult(rc=rc, started=at, finished=at, group_gone=gone, **(flags or {}))
         err: Exception = (
             RunnerError("launch_failed", error="OSError")
             if how.startswith("runner_error")
@@ -471,19 +490,52 @@ def _local_lane_run(tmp_path, monkeypatch, how: str, gone: bool | None):
         )
         if gone is not None:
             err.group_gone = gone  # type: ignore[attr-defined]
+        if race == "cancel_before_fail":
+            cancel_now(observer.worker.store, spec.job_id)
         raise err
 
+    real_outcome_for = worker_mod.outcome_for
+
+    def racing_outcome_for(job, *a: Any, **kw: Any):
+        if race == "crash_after_result":
+            raise RuntimeError("outcome rule broke")
+        oc = real_outcome_for(job, *a, **kw)
+        if race == "cancel_before_retried":
+            cancel_now(srv.store, job.id)
+        return oc
+
     monkeypatch.setattr(worker_mod, "run_job", fake_run_job)
+    monkeypatch.setattr(worker_mod, "outcome_for", racing_outcome_for)
+    # 반복은 git_ref 프리셋에만 있다(M5s) — 가짜 러너라 자재화는 돌지 않는다
+    retrying = race == "cancel_before_retried"
+    retry = {
+        "source_modes": ["git_ref"],
+        "repo": "app",
+        "retry": {"on_exit": 75, "interval_seconds": 60, "max_attempts": 3},
+    }
+    preset = sh("ship", "echo ship", irreversible=True, **(retry if retrying else {}))
     # 서버가 제 레인을 띄운다(`App.start`) — 홀드 알림을 넘기는 배선까지 본다
-    srv = WorkerServer(tmp_path, workers=True, presets=[sh("ship", "echo ship", irreversible=True)])
+    srv = WorkerServer(tmp_path, workers=True, presets=[preset])
     try:
         sub = srv.app.bus.subscribe()
-        jid = srv.queued_job(preset="ship")
+        if retrying:
+            body = {
+                "preset": "ship",
+                "inputs": {},
+                "source": {"mode": "git_ref", "ref": GIT_SHA},
+                "requester_label": "alice@host",
+                "join": False,
+            }
+            status, resp = srv.req("POST", "/jobs", token="alice", json_body=body)
+            assert status == 201, resp
+            jid = int(resp["job_id"])
+        else:
+            jid = srv.queued_job(preset="ship")
         deadline = time.monotonic() + 10
         while not srv.store.get_job(jid).is_terminal:
             assert time.monotonic() < deadline, "the local lane did not close the job"
             time.sleep(0.02)
-        return jid, srv.store.has_open_hold(jid), hold_events(sub)
+        return jid, srv.store.has_open_hold(jid), hold_events(sub), srv.store.get_job(jid)
     finally:
         srv.close()
 
@@ -509,7 +561,61 @@ def test_rl54_a_local_lane_irreversible_job_holds_unless_its_group_is_gone(
 ):
     """§4.12 확인 표 4행: 로컬 레인은 러너가 돌아온 뒤 `group_gone` 을 서버가 직접 본다. 사라졌음이
     확인되지 않은 닫힘은 그 그룹을 홀드하고 한 번 알린다. 확인됐으면 홀드도 알림도 없다."""
-    jid, has_hold, events = _local_lane_run(tmp_path, monkeypatch, how, gone)
+    jid, has_hold, events, _job = _local_lane_run(tmp_path, monkeypatch, how, gone)
+    assert has_hold is held
+    assert events == ([jid] if held else [])
+
+
+@pytest.mark.parametrize(
+    "flags, rc, state",
+    [
+        ({"cancelled": True}, -15, "cancelled"),
+        ({"timed_out": True}, -15, "timed_out"),
+        ({"lost": True}, -15, "lost"),  # 멈춤(`should_stop`) — 서버가 내려가는 중
+        ({}, 2, "failed"),
+    ],
+    ids=["cancelled", "timed_out", "stopped", "exit_2"],
+)
+@pytest.mark.parametrize("gone, held", [(False, True), (None, True), (True, False)])
+def test_rl54_a_local_lane_result_that_is_not_exit_0_follows_the_same_hold_rule(
+    tmp_path, monkeypatch, flags, rc, state, gone, held
+):
+    """P3 3라운드 LOW(A2): 끝 상태가 무엇이든(취소 · 시간 초과 · 멈춤 · 0 아닌 종료) 홀드는
+    `group_gone` 하나로 정한다."""
+    jid, has_hold, events, job = _local_lane_run(
+        tmp_path, monkeypatch, "result", gone, rc=rc, flags=flags
+    )
+    assert job.state == state
+    assert has_hold is held
+    assert events == ([jid] if held else [])
+
+
+@pytest.mark.parametrize("gone, held", [(True, False), (False, True), (None, True)])
+def test_rl54_a_local_lane_error_after_the_runner_returned_keeps_that_result(
+    tmp_path, monkeypatch, gone, held
+):
+    """P3 3라운드 LOW(A1): 러너가 결과를 낸 뒤 레인이 터지면 바깥 처리기가 잡을 닫는다. 그때 러너의
+    결과와 그 `group_gone` 을 버리지 않는다 — 원격 워커의 바깥 안전망과 같다. 버리면 그룹이
+    사라졌다고 확인된 잡도 홀드되고, 끝난 잡이 실패로 남는다."""
+    jid, has_hold, events, job = _local_lane_run(
+        tmp_path, monkeypatch, "result", gone, race="crash_after_result"
+    )
+    assert (job.state, job.exit_code) == ("succeeded", 0)
+    assert has_hold is held
+    assert events == ([jid] if held else [])
+
+
+@pytest.mark.parametrize("race", ["cancel_before_retried", "cancel_before_fail"])
+@pytest.mark.parametrize("gone, held", [(False, True), (True, False)])
+def test_rl54_a_local_lane_close_that_loses_to_a_cancel_keeps_the_hold_decision(
+    tmp_path, monkeypatch, race, gone, held
+):
+    """P3 3라운드 LOW(A2): 로컬 레인의 닫기가 취소에 지면 `_close_cancelled_before_start` 가
+    닫는다. 75 반복 결과(`retried` 는 `running` 에서만 간다)와 띄운 뒤의 `RunnerError`
+    (`_fail_before_start`)가 그렇다. 두 자리 모두 러너가 정한 홀드를 그대로 넘긴다."""
+    how = "result" if race == "cancel_before_retried" else "runner_error"
+    jid, has_hold, events, job = _local_lane_run(tmp_path, monkeypatch, how, gone, rc=75, race=race)
+    assert job.state == "cancelled"
     assert has_hold is held
     assert events == ([jid] if held else [])
 
