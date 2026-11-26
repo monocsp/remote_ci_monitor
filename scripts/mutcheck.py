@@ -542,29 +542,10 @@ MUTANTS = (
         new="if j.id not in set(known)]",
         tests=("tests/test_worker_api.py",),
     ),
-    Mutant(
-        # claim 커밋이 락 밖이다 — 커밋과 기록 사이에 낀 heartbeat 이 다시 lost 를 만든다
-        name="heartbeat-spare-claim-outside-lock",
-        path="src/remote_ci_monitor/remote_workers.py",
-        old="""                with self._fresh_claims_lock:
-                    job = self.store.claim(
-                        lane,
-                        now,
-                        pool=pool,
-                        worker_name=name,
-                        claimant=claimant,
-                        now_fn=self.now_fn,  # 시작 마감은 트랜잭션 안의 시각으로(M5s)
-                    )
-""",
-        new=(
-            "                job = self.store.claim(\n"
-            "                    lane, now, pool=pool, worker_name=name, claimant=claimant,\n"
-            "                    now_fn=self.now_fn,\n"
-            "                )\n"
-            "                with self._fresh_claims_lock:\n"
-        ),
-        tests=("tests/test_worker_api.py",),
-    ),
+    # (옛 `heartbeat-spare-claim-outside-lock` 은 지웠다 — 워커 프로토콜 2 에서 레거시 claim 이
+    # 없어져 잠금 밖 claim 이 생길 코드가 없다. 그 규칙은 claim 트랜잭션이 얼리는 `claim_seq` 와
+    # T5 판정이 지키고 `t5-ignores-claims-settled` · `hb-stale-seq-judged` ·
+    # `claim-settled-before-running` 이 감시한다)
     # ── claim 이 정지를 같은 트랜잭션에서 다시 본다(2026-11-19, 정지 중 집기) ──
     Mutant(
         # 정지 검사가 없다 — 호출자의 `get_paused` 뒤에 걸린 정지를 놓치고 잡을 집는다
