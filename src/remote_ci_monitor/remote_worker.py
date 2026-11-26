@@ -2068,15 +2068,16 @@ class RemoteWorker:
 
         `group_gone` 은 그 잡의 프로세스 그룹이 사라졌다는 확인이다(M5t-b 결정 330). 프로세스를
         띄운 적이 없으면 참이다. 모르면 싣지 않는다 — 서버는 표식 잡이면 홀드로 읽는다.
-        펜싱된 프로세스(W5)의 `lost` 는 좁은 확인(`worker_replaced`)으로 보낸다(결정 261).
+        펜싱된 프로세스(W5)의 finish 는 결과가 무엇이든(성공 · 실패 · lost) 좁은 확인(`lost` +
+        `worker_replaced` + `group_gone`)으로 보낸다(결정 261, P6 GAP2) — 서버는 펜싱된 세션의
+        결과를 기록하지 않지만 확인은 받는다. 이 finish 의 409 로 펜싱을 처음 알았으면 좁은 확인을
+        한 번 더 보낸다.
         """
         if observer is not None:
             observer.finish_sent = True  # 바깥 안전망(`run_claimed`)이 두 번 보내지 않게
         with self._lock:
             self.cancel_requested.discard(job_id)
             self._observers.pop(job_id, None)  # 프로세스는 끝났다 — 감시할 것이 없다
-        if outcome == LOST and self.fenced.is_set():
-            summary, summary_code, summary_args = None, "worker_replaced", {}
         if getattr(observer, "irreversible", False) and group_gone is not True:
             self._group_unconfirmed.add(job_id)  # mutcheck: unconfirmed-group-folder-dropped
         # 서버가 이 세션의 finish 를 이미 기록했다고 알렸으면(W4 표 첫 행) 다시 보내지 않는다.
@@ -2093,7 +2094,19 @@ class RemoteWorker:
             if summary_code is not None:
                 extra["summary_code"] = summary_code
                 extra["summary_args"] = dict(summary_args or {})
-            call = lambda: self.client.finish(job_id, outcome, rc, summary, **extra)  # noqa: E731
+            narrow: dict[str, Any] = {"summary_code": "worker_replaced", "summary_args": {}}
+            if group_gone is not None:
+                narrow["group_gone"] = group_gone
+            sent_narrow: list[bool] = []
+
+            def call() -> Any:
+                # 부를 때마다 본다 — 미뤄 둔 보고(`_park_unreported`)도 그 사이의 펜싱을 따른다
+                fenced = self.fenced.is_set()  # mutcheck: fenced-finish-keeps-its-outcome
+                sent_narrow[:] = [fenced]
+                if fenced:
+                    return self.client.finish(job_id, LOST, None, None, **narrow)
+                return self.client.finish(job_id, outcome, rc, summary, **extra)
+
             gave_up: list[bool] = []
 
             def keep() -> bool:
@@ -2101,6 +2114,9 @@ class RemoteWorker:
                 return not self.stopping.is_set()
 
             self.report(call, f"#{job_id} finish", keep=keep, job_id=job_id)
+            if self.fenced.is_set() and sent_narrow == [False]:
+                # 이 finish 의 409 `session_fenced` 로 처음 알았다 — 결과 대신 확인을 보낸다
+                self.report(call, f"#{job_id} finish", job_id=job_id)
             if gave_up and not self.stopping.is_set():
                 # 서버를 갈아 끼우는 몇 초일 수 있다 — 버리지 않고 나중에 다시 보고한다
                 self._park_unreported(job_id, call)

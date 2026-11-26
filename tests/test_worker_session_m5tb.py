@@ -170,6 +170,38 @@ def test_rl10_a_second_process_fences_the_first_and_the_first_can_only_confirm(s
     assert status == 409 and body["code"] == "session_fenced"
 
 
+@pytest.mark.parametrize("learned_first", [True, False])
+@pytest.mark.parametrize(("outcome", "rc"), [(SUCCEEDED, 0), ("failed", 1)])
+def test_gap2_a_fenced_sessions_natural_end_goes_as_the_narrow_confirm(
+    srv, tmp_path, learned_first, outcome, rc
+):
+    """# GAP2 펜싱된 세션의 표식 잡이 제 힘으로 끝나도(성공 · 실패) 그 결과는 기록되지 않고 좁은
+    확인(`lost` + `worker_replaced` + `group_gone`)으로 간다(결정 261). 펜싱을 먼저 알았든
+    (heartbeat) 이 finish 의 409 로 처음 알았든 같다. 그러지 않으면 서버가 409 로 거절하고
+    워커는 종료 0 이라 잡은 G 뒤에 `worker_unreachable` 로 닫히고 그룹이 홀드된다."""
+    import types
+
+    srv.registered("build-02")
+    jid = running(srv, preset="ship")
+    old = srv.new_process("build-02")
+    srv.registered("build-02")  # 같은 토큰의 새 프로세스가 옛 세션을 펜싱했다
+    url = f"http://127.0.0.1:{srv.port}"
+    cfg = WorkerConfig(
+        server=url, token=srv.tokens["build-02"], data_dir=str(tmp_path / "w"), lanes=1
+    )
+    w = RemoteWorker(cfg, log=lambda m: None)
+    w.session_id = old
+    w._bind_session(w.client)
+    if learned_first:
+        w._on_fenced("heartbeat")
+    observer = types.SimpleNamespace(irreversible=True, closed_state=None, finish_sent=False)
+    w._finish(jid, outcome, rc, "done", observer, group_gone=True)
+    j = job_of(srv, jid)
+    assert (j.state, j.summary_code) == (LOST, "worker_replaced")
+    assert hold_rows(srv) == []
+    assert w.fenced.is_set()
+
+
 def test_rl10_an_irreversible_job_confirmed_without_group_gone_holds(srv):
     srv.registered("build-02")
     jid = running(srv, preset="ship")

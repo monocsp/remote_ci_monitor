@@ -6686,6 +6686,21 @@ MUTANTS = (
             "test_gap1_more_than_64_dead_sessions_go_oldest_first_and_the_rest_wait_on_disk",
         ),
     ),
+    Mutant(
+        # GAP2 펜싱된 세션의 성공 · 실패 finish 를 결과 그대로 보낸다 — 409 로 거절되고 잡은 G 뒤
+        # worker_unreachable 로 닫혀 그룹이 홀드된다
+        name="fenced-finish-keeps-its-outcome",
+        path="src/remote_ci_monitor/remote_worker.py",
+        old=(
+            "                fenced = self.fenced.is_set()  # mutcheck: "
+            "fenced-finish-keeps-its-outcome\n"
+        ),
+        new="                fenced = False\n",
+        tests=(
+            "tests/test_worker_session_m5tb.py::"
+            "test_gap2_a_fenced_sessions_natural_end_goes_as_the_narrow_confirm",
+        ),
+    ),
 )
 
 
