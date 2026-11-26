@@ -137,7 +137,7 @@ EOF
 }
 
 _field() { # _field <key> <fields text>
-  printf '%s\n' "$2" | sed -n "s/^$1=//p" | head -1
+  printf '%s\n' "$2" | sed -n "s/^$1=//p" | sed -n 1p
 }
 
 # bootstrap 전 검사 하나: server.toml 의 port · advertise · data_dir · bind 가 시험 값인가.
@@ -301,7 +301,7 @@ tn8_verdict() { # tn8_verdict <wait rc> <wait stderr file> <osascript log>
   if [ "$rc" != 0 ]; then
     echo "FAIL rcm wait --notify exited $rc"
   elif grep -q 'warning: --notify' "$err"; then
-    echo "FAIL $(grep 'warning: --notify' "$err" | head -1)"
+    echo "FAIL $(grep 'warning: --notify' "$err" | sed -n 1p)"
   elif [ -z "$os" ]; then
     echo "FAIL osascript was not called"
   elif [ "$os" != 0 ]; then
@@ -494,7 +494,7 @@ run_tr16() {
   "$RCM" setup --role coordinator-worker --port "$P1" --data-dir "$B/data" --label "$LABEL" \
     --bind 127.0.0.1 --no-advertise --yes >"$OUT/tr16-setup.out" 2>"$OUT/tr16-setup.err" || rc=$?
   if [ "$rc" != 0 ]; then
-    verdict TR16 FAIL "setup exited $rc: $(grep -v '^warning' "$OUT/tr16-setup.err" | head -1)"
+    verdict TR16 FAIL "setup exited $rc: $(grep -v '^warning' "$OUT/tr16-setup.err" | sed -n 1p)"
     return 0
   fi
   # bootstrap 전 검사 — 하나라도 아니면 띄우지 않는다
