@@ -2813,3 +2813,33 @@ def test_b12_l3_the_system_places_include_xdg_and_usr_local(home, monkeypatch):
     assert places.get(Path("/etc/xdg/systemd/user")) is False, places
     assert places.get(Path("/usr/local/lib/systemd/system")) is True, places
     assert places.get(Path("/usr/local/lib/systemd/user")) is False, places
+
+
+@pytest.mark.parametrize(
+    ("text", "lines"),
+    [
+        ("a=1 \\\\\nb=2", [(1, "a=1 \\\\"), (2, "b=2")]),
+        ("a=1 \\\nb=2", [(1, "a=1  b=2")]),
+        ("a=1 \\\\\\\nb=2", [(1, "a=1 \\\\ b=2")]),
+        ("a=1 \\\n# c \\\n; d\n  b=2", [(1, "a=1    b=2")]),
+        ("# x \\\nb=2", [(2, "b=2")]),
+        ("a=1\nb=2 \\", [(1, "a=1"), (2, "b=2")]),
+        ("a=1 \\ \nb=2", [(1, "a=1 \\"), (2, "b=2")]),
+    ],
+    ids=[
+        "even-backslashes-end-the-line",
+        "one-backslash-goes-on",
+        "three-backslashes-go-on",
+        "comments-inside-a-continuation",
+        "a-comment-ending-in-a-backslash",
+        "the-last-line-continued",
+        "a-space-after-the-backslash",
+    ],
+)
+def test_b12_l4_unit_lines_join_as_systemd_does(text, lines):
+    # batch 12 L4(v1-8): `doctor.unit_lines` 를 직접 잰다(systemd.syntax(7)) — 홀수 개의 역슬래시로
+    # 끝나는 줄만 잇고 마지막 역슬래시는 빈칸이 된다. 주석 줄은 잇기보다 먼저 버린다. 마지막 줄이
+    # 이어지면 모은 만큼 읽는다. 줄 번호는 논리 줄의 첫 줄이다
+    from remote_ci_monitor import doctor
+
+    assert doctor.unit_lines(text) == lines
