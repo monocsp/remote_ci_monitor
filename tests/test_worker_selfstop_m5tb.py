@@ -249,10 +249,14 @@ def test_rl56_a_tick_closes_at_most_twenty_and_other_sessions_are_not_blocked(sr
     t = threading.Thread(target=lambda: srv.app.mark_lost_workers(srv.clock.now))
     t.start()
     assert entered.wait(5)
+    t0 = time.monotonic()
     status, _ = srv.heartbeat("build-02", jobs=[])
+    took = time.monotonic() - t0
     gate.set()
     t.join(10)
     assert status == 200
+    # 닫기가 멈춘 동안 다른 세션의 heartbeat 은 기다리지 않는다 — 전역 잠금이면 5초를 기다린다
+    assert took < 2.5, took
     assert srv.store.get_job(c).state == LOST
 
 
@@ -685,3 +689,73 @@ def test_rl41_every_lost_path_reports_worker_self_stopped(tmp_path, monkeypatch,
     assert body["summary_args"] == {"seconds": 570}
     if where != "after_run":
         assert body["group_gone"] is True
+
+
+# ── 얼린 유예로 판정 · 늦은 heartbeat 응답 · claim 번호와 running(RL30 · RL50) ──────────
+
+
+def test_rl30_the_janitor_closes_by_the_frozen_grace_not_the_current_one(tmp_path):
+    srv = WorkerServer(tmp_path, presets=list(WORKER_PRESETS), disconnect_grace_seconds=300)
+    try:
+        srv.registered("build-02", lanes=2)
+        a = srv.queued_job()
+        assert srv.claimed("build-02", 1) == a
+        srv.cfg.server.disconnect_grace_seconds = 900  # 재시작 · reload 흉내 — 다음 claim 부터다
+        b = srv.queued_job()
+        assert srv.claimed("build-02", 2) == b
+        srv.clock.advance(301)
+        srv.app.mark_lost_workers(srv.clock.now)
+        assert srv.store.get_job(a).state == LOST  # 얼린 300 초
+        assert srv.store.get_job(b).state == RUNNING  # 얼린 900 초
+    finally:
+        srv.close()
+
+
+def test_rl50_a_late_heartbeat_answer_does_not_undo_a_newer_cancel(tmp_path):
+    w, fake, _clocks, _logs = make_worker(tmp_path)
+    gate = threading.Event()
+    seqs: list[Any] = []
+
+    def heartbeat(jobs, host=None, *, seq=None, claims_settled=None):
+        seqs.append(seq)
+        if len(seqs) == 1:
+            gate.wait(10)  # A — 늦게 돌아온다
+            return {"cancel": []}
+        return {"cancel": [7]}  # B — 먼저 돌아온다
+
+    fake.heartbeat = heartbeat
+    t = threading.Thread(target=w.heartbeat_once, daemon=True)
+    t.start()
+    deadline = time.monotonic() + 5
+    while not seqs:
+        assert time.monotonic() < deadline
+        time.sleep(0.01)
+    assert w.heartbeat_once() is True
+    assert 7 in w.cancel_requested
+    gate.set()
+    t.join(10)
+    assert seqs[0] < seqs[1]
+    assert 7 in w.cancel_requested  # 작은 seq 의 빈 cancel 이 새 취소를 지우지 않는다
+
+
+def test_rl50_the_claimed_job_is_running_in_the_lock_section_that_settles_its_claim(tmp_path):
+    """R20: heartbeat 이 찍는 「끝난 claim 까지」에 든 claim 의 잡은 그 순간 `running` 에 있다."""
+    w, fake, _clocks, _logs = make_worker(tmp_path)
+    fake.claim = lambda lane, wait, claim_seq=None: claimed(7, irreversible=False)
+    w.run_claimed = lambda lane, c: w.stopping.set()
+    inner = w._lock
+    seen: list[tuple[int, bool]] = []
+
+    class Watch:
+        def __enter__(self):
+            inner.__enter__()
+            return self
+
+        def __exit__(self, *exc):
+            seen.append((w.claims_settled(), 7 in w.running))
+            return inner.__exit__(*exc)
+
+    w._lock = Watch()
+    w._lane_loop(1)
+    assert 7 in w.running
+    assert [s for s in seen if s[0] >= 1 and not s[1]] == []  # 정리됐는데 running 에 없던 순간 0

@@ -381,6 +381,15 @@ def test_rl53_hold_group_comes_from_the_job_row_not_the_current_config(store):
     assert store.get_job(waiting.id).state == QUEUED
 
 
+def test_rl53_a_renamed_group_in_the_config_does_not_move_the_hold(store):
+    register(store, "build-02")
+    old = enqueue(store, "deploy", group=None, tree="r")
+    claim_remote(store, "build-02", session_id="b" * 32, claim_seq=1, grace_seconds=600)
+    store.irreversible = {"deploy": ("renamed", SCOPE_GLOBAL)}  # 그룹 이름을 바꾸고 reload
+    assert store.finish(old.id, LOST, now=at(700), summary="x", hold_cause="worker_unreachable")
+    assert [r["concurrency_group"] for r in holds(store)] == [SYNTH]  # claim 때의 그룹
+
+
 def _legacy_running(store: Store, preset: str, group: str | None = None) -> int:
     """v26 이전에 claim 된 잡 흉내 — 세션 · 얼린 값이 NULL 이다."""
     j = enqueue(store, preset, group=group, tree=f"legacy-{preset}-{group}")
