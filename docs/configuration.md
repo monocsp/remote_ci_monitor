@@ -1556,7 +1556,9 @@ try; when one was among the 300 s, the line says so
 (`dead session <id> queue not delivered after 300s of server errors or local errors — registering; job #N will close as restarted-without-job`).
 The finish of a job that ended is tried at least once before that: when a server error or a
 local error holds the queue, the finish goes first 300 s after the job ended, and registration
-waits for that try.
+waits for that try at most 60 s past the 300 s (one 30 s backoff and two 15 s requests); after
+that it registers with the line above. A job whose end time is ahead of the clock (the clock went
+back) is not waited for.
 A job folder whose `outbox.json` is missing,
 empty or not JSON while its `stream.log` is there cannot be sent: the worker logs
 `dead session <id> job #N: outbox unreadable (<why>) — the job will close as restarted-without-job; spool kept in <folder>`

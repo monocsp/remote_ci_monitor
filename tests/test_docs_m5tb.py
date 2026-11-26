@@ -447,3 +447,22 @@ def test_b7_the_report_queue_section_says_local_errors_count_and_what_a_finish_l
     assert (
         "| the job ended and its phase fails with HTTP 5xx or an unexpected error for 300 s |"
     ) in body
+
+
+def test_b8_the_report_queue_section_gives_the_worst_wait_for_an_owed_finish():
+    """# batch-8 #1 등록이 빚진 finish 를 기다리는 최악의 시간을 숫자로 적는다 — 300초 상한 뒤
+    60초(백오프 한 번 · 요청 두 번). 벽시계가 뒤로 가 끝난 시각이 미래인 잡은 기다리지 않는다."""
+    from remote_ci_monitor import remote_worker as rw
+    from remote_ci_monitor.client import WORKER_REQUEST_TIMEOUT_SECONDS
+
+    body = flat(section(CONFIGURATION, "The worker's log and its report queue"))
+    extra = int(rw.OWED_FINISH_WAIT_SECONDS)
+    backoff = int(rw.BACKOFF_MAX_SECONDS)
+    req = int(WORKER_REQUEST_TIMEOUT_SECONDS)
+    assert (
+        f"registration waits for that try at most {extra} s past the 300 s"
+        f" (one {backoff} s backoff and two {req} s requests)"
+    ) in body
+    assert "A job whose end time is ahead of the clock (the clock went back) is not waited for" in (
+        body
+    )
