@@ -7244,6 +7244,48 @@ MUTANTS = (
         tests=("tests/web/unreachable_m5tb.test.js",),
         runner="node",
     ),
+    Mutant(
+        # doctor 가 `worker` 키 없는 홀드를 로컬 레인(null)으로 읽는다(P6-1 G7)
+        name="doctor-hold-missing-worker-read-as-local",
+        path="src/remote_ci_monitor/doctor.py",
+        old=(
+            '    return "worker" in item and (  '
+            "# mutcheck: doctor-hold-missing-worker-read-as-local\n"
+        ),
+        new="    return True or (\n",
+        tests=(
+            "tests/test_hold_display_m5tb.py::"
+            "test_g7_rl45_a_hold_without_a_readable_worker_is_unknown_not_local",
+        ),
+    ),
+    Mutant(
+        # rcm check 가 `worker` 키 없는 홀드를 「서버의 로컬 레인」으로 읽는다(P6-1 G7)
+        name="check-hold-missing-worker-read-as-local",
+        path="src/remote_ci_monitor/core/render_text.py",
+        old=(
+            '    if "worker" not in hold or not (  '
+            "# mutcheck: check-hold-missing-worker-read-as-local\n"
+        ),
+        new="    if False and (\n",
+        tests=(
+            "tests/test_hold_display_m5tb.py::"
+            "test_g7_rl45_a_hold_without_a_readable_worker_is_unknown_not_local",
+        ),
+    ),
+    Mutant(
+        # 웹이 `worker` 키 없는 홀드를 로컬 레인 홀드로 그린다(P6-1 G7)
+        name="web-hold-missing-worker-read-as-local",
+        path="src/remote_ci_monitor/web/app.js",
+        old=(
+            '        && "worker" in x && (x.worker === null || typeof x.worker === "string");'
+            "   // mutcheck: web-hold-missing-worker-read-as-local"
+        ),
+        new="        ;",
+        tests=(
+            "tests/test_hold_display_m5tb.py::"
+            "test_g7_rl45_a_hold_without_a_readable_worker_is_unknown_not_local",
+        ),
+    ),
 )
 
 

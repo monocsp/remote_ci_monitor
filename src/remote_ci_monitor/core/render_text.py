@@ -824,6 +824,12 @@ def hold_fields(hold: Any) -> tuple[int, str, str, str | None] | None:
     group = clean_line(hold["group"]) if isinstance(hold.get("group"), str) else ""
     if not group:
         return None
+    # `worker: null` 은 로컬 레인이다 — 키가 없거나 다른 꼴이면 로컬과 구별할 수 없어 읽지 못한
+    # 항목이다(P6-1 G7, doctor `parse_holds` · 웹 `holdsOf` 와 같은 규칙)
+    if "worker" not in hold or not (  # mutcheck: check-hold-missing-worker-read-as-local
+        hold["worker"] is None or isinstance(hold["worker"], str)
+    ):
+        return None
     preset = clean_line(hold["preset"]) if isinstance(hold.get("preset"), str) else ""
     worker = clean_line(hold["worker"]) if isinstance(hold.get("worker"), str) else ""
     return job_id, group, preset or DASH, worker or None

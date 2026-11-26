@@ -26,7 +26,7 @@ from remote_ci_monitor import __version__
 from remote_ci_monitor import cli as cli_mod
 from remote_ci_monitor import client as client_mod
 from remote_ci_monitor.cli import main
-from remote_ci_monitor.core.render_text import render
+from remote_ci_monitor.core.render_text import hold_check_text, render
 from test_cli_m1 import last_json
 from test_doctor_cli import CLIENT_TOKEN, TOP_KEYS, run, run_json, server_toml
 
@@ -489,3 +489,111 @@ def test_g3_rl45_rcm_top_does_not_promise_an_immediate_start_while_a_group_is_he
         if holds is ...:
             del doc["irreversible_holds"]
         assert "queue — empty (rcm run <preset> starts immediately)" in render(doc)
+
+
+# ── P6-1 G7: 진짜 생산자 → 세 소비자 ───────────────────────────────────────────
+
+_WEB_NOT_MOVING = """
+globalThis.window = globalThis;
+const rcm = require(process.argv[1]);
+const holds = JSON.parse(process.argv[2]);
+const st = { schema_version: 1, generated_at: "2026-11-27T09:00:00Z",
+  server: { lanes: 1, workers: [] }, pools: [{ name: "default", queue: [], recent: [] }],
+  irreversible_holds: holds };
+const nm = rcm.notMoving(st, null, "en");
+process.stdout.write(JSON.stringify({ kind: nm.kind, why: nm.why || null,
+  lines: nm.lines.map((l) => l.text) }));
+"""
+
+
+def web_not_moving(holds: list[Any]) -> dict[str, Any]:
+    """웹의 「확인이 필요한 작업」(`notMoving` → `holdsOf`)에 홀드 목록을 그대로 넣는다."""
+    import json
+    import shutil
+    import subprocess
+    from pathlib import Path
+
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("node is not installed — the web half runs in tests/web (node --test)")
+    app = Path(__file__).resolve().parent.parent / "src/remote_ci_monitor/web/app.js"
+    out = subprocess.run(
+        [node, "-e", _WEB_NOT_MOVING, str(app), json.dumps(holds)],
+        capture_output=True,
+        text=True,
+        timeout=20,
+        check=True,
+    )
+    return json.loads(out.stdout)
+
+
+def produced_holds() -> list[dict[str, Any]]:
+    """`/api/status` · `/api/health` 가 실제로 싣는 항목 — 손으로 쓴 사본이 아니라 생산자의 출력."""
+    from datetime import UTC, datetime
+
+    from remote_ci_monitor.core.model import OpenHold
+    from remote_ci_monitor.core.status import hold_item_json
+
+    since = datetime(2026, 11, 27, 8, 50, tzinfo=UTC)
+    remote = OpenHold(
+        job_id=812,
+        group="irreversible:ship",
+        scope="global",
+        pool="default",
+        since=since,
+        preset="ship",
+        worker="mbp",
+        cause="worker_unreachable",
+    )
+    local = OpenHold(
+        job_id=815,
+        group="devices",
+        scope="pool",
+        pool="default",
+        since=since,
+        preset="deploy",
+        worker=None,
+        cause="worker_restarted_without_job",
+    )
+    return [hold_item_json(remote), hold_item_json(local)]
+
+
+def test_g7_rl45_the_real_hold_producer_feeds_doctor_check_and_the_web():
+    """# RL45 P6-1 G7: 소비자 셋(doctor `parse_holds`, rcm check `hold_check_text`, 웹
+    `holdsOf`)에 진짜 생산자 `hold_item_json` 의 출력을 그대로 넣는다. 원격 홀드는 그 워커의
+    것으로, `worker: null` 은 서버의 로컬 레인으로 읽는다."""
+    from remote_ci_monitor.doctor import parse_holds
+
+    holds = produced_holds()
+    got = parse_holds(holds)
+    assert got is not None and [(h["job_id"], h["worker"]) for h in got] == [
+        (812, "mbp"),
+        (815, None),
+    ], got
+    texts = [hold_check_text(h) for h in holds]
+    assert texts[0] is not None and "#812 (ship) on mbp" in texts[0], texts
+    assert texts[1] is not None and "#815 (deploy) on the server's local lane" in texts[1], texts
+    web = web_not_moving(holds)
+    assert web["kind"] == "list", web
+    assert "job #812 (ship) on build-02" not in web["lines"][0]
+    assert "job #812 (ship) on mbp" in web["lines"][0], web
+    assert "job #815 (deploy) on the server's local lane" in web["lines"][1], web
+
+
+@pytest.mark.parametrize("value", ["drop", 7, ["mbp"]], ids=["no-worker-key", "int", "list"])
+def test_g7_rl45_a_hold_without_a_readable_worker_is_unknown_not_local(value):
+    """# RL45 P6-1 G7: `worker` 키가 **없는** 항목(또는 문자열 · null 이 아닌 값)은 로컬
+    레인(`null`)과 구별해 읽을 수 없다 — 로컬로 읽으면 coordinator-worker 의 doctor 가
+    남의 홀드를 제 것으로, worker 역할은 제 홀드를 「여기 없음」으로 읽는다. 세 소비자 모두
+    목록 전체를 모름으로 둔다."""
+    from remote_ci_monitor.doctor import parse_holds
+
+    holds = produced_holds()
+    if value == "drop":
+        del holds[0]["worker"]
+    else:
+        holds[0]["worker"] = value
+    assert parse_holds(holds) is None
+    assert hold_check_text(holds[0]) is None
+    web = web_not_moving(holds)
+    assert (web["kind"], web["why"]) == ("unknown", "holds"), web

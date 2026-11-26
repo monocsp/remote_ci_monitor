@@ -1344,6 +1344,13 @@ def parse_health(answer: dict[str, Any]) -> Health:
 HOLD_KEYS = ("job_id", "preset", "group", "scope", "worker", "cause", "since")
 
 
+def _hold_worker_readable(item: dict[str, Any]) -> bool:
+    """홀드 항목의 `worker` 가 읽히나 — 키가 있고 문자열이거나 null(로컬 레인)이어야 한다."""
+    return "worker" in item and (  # mutcheck: doctor-hold-missing-worker-read-as-local
+        item["worker"] is None or isinstance(item["worker"], str)
+    )
+
+
 def parse_holds(raw: Any) -> tuple[dict[str, Any], ...] | None:
     """`/api/health` 의 `irreversible_holds` — 씻은 항목들. 모르면 None.
 
@@ -1360,6 +1367,10 @@ def parse_holds(raw: Any) -> tuple[dict[str, Any], ...] | None:
         if not isinstance(job_id, int) or isinstance(job_id, bool):
             return None
         if not isinstance(item.get("group"), str) or not item["group"].strip():
+            return None
+        # `worker: null` 은 서버의 로컬 레인이다 — 키가 없거나 다른 꼴이면 로컬과 구별할 수 없다.
+        # 로컬로 읽으면 이 머신의 홀드를 놓치거나 남의 홀드를 제 것으로 읽는다(P6-1 G7)
+        if not _hold_worker_readable(item):
             return None
         hold: dict[str, Any] = {"job_id": job_id}
         for key in HOLD_KEYS[1:]:

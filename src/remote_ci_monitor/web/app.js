@@ -553,7 +553,9 @@
     var h = status.irreversible_holds;
     if (!Array.isArray(h)) return null;   // mutcheck: holds-null-read-as-none
     var ok = h.filter(function (x) {
-      return x && typeof x === "object" && isNum(x.job_id) && Math.floor(x.job_id) === x.job_id && typeof x.group === "string" && x.group.trim() !== "";
+      return x && typeof x === "object" && isNum(x.job_id) && Math.floor(x.job_id) === x.job_id && typeof x.group === "string" && x.group.trim() !== ""
+        // `worker: null` 은 로컬 레인이다 — 키가 없거나 다른 꼴이면 로컬과 구별할 수 없다(P6-1 G7)
+        && "worker" in x && (x.worker === null || typeof x.worker === "string");   // mutcheck: web-hold-missing-worker-read-as-local
     });
     return ok.length === h.length ? ok : null;   // mutcheck: holds-unreadable-entry-dropped
   }
