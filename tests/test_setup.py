@@ -2312,3 +2312,75 @@ def test_b10_m5_a_symlinked_program_names_the_venv_it_points_into(cfg, home, tmp
     fake = Fake()
     assert go(fake, *coordinator_args(tmp_path / "data", "--config", str(target))) == 1
     assert f"this is {SERVER_LABEL}'s venv — refusing" in fake.err.getvalue(), fake.text
+
+
+# ── P6 재확인(batch 11) ──
+
+
+def _hand_unit(home: Path, tmp_path: Path, exec_lines: str, name: str = "ci-hub") -> dict:
+    """손으로 쓴 systemd 사용자 유닛 — 이름은 rcm 같지 않고(`ci-hub.service`) 운영 설정을 띄운다."""
+    venv = _server_venv(tmp_path)
+    config = tmp_path / "hub" / "server.toml"
+    config.parent.mkdir()
+    config.write_text(f'[server]\ndata_dir = "{tmp_path / "hub-data"}"\n')
+    unit = home / ".config" / "systemd" / "user" / f"{name}.service"
+    unit.parent.mkdir(parents=True)
+    rcm = venv / "bin" / "rcm"
+    unit.write_text(
+        "[Service]\n" + exec_lines.format(rcm=rcm, config=config) + "\n", encoding="utf-8"
+    )
+    return {"config": config, "unit": unit, "venv": venv}
+
+
+@pytest.mark.parametrize(
+    "exec_lines",
+    [
+        "ExecStart={rcm} serve \\\n    --config {config}",
+        "ExecStart={rcm} \\\n# a comment inside the continuation\n  serve --config {config}",
+        "ExecStart = {rcm} serve --config {config}",
+    ],
+    ids=["continued", "continued-past-a-comment", "spaces-around-equals"],
+)
+def test_b11_h_a_continued_execstart_unit_is_read_as_systemd_reads_it(
+    cfg, home, tmp_path, exec_lines
+):
+    # batch 11 HIGH(v1-1): 줄 끝 역슬래시로 이어진 ExecStart= 는 shlex 가 읽지 못해 argv=[] 가 됐고,
+    # 이름이 rcm 같지 않은 유닛(`ci-hub.service`)은 스캔이 건너뛰었다 — systemd 는 줄을 이어 rcm 을
+    # 띄운다. 유닛 파서는 systemd 처럼 줄을 잇고(이어지는 중의 주석 줄은 건너뛴다), `=` 앞뒤의 빈칸도
+    # 버린다(systemd.syntax(7))
+    hub = _hand_unit(home, tmp_path, exec_lines)
+    before = hub["config"].read_bytes()
+    fake = Fake(platform="linux")
+    argv = coordinator_args(tmp_path / "data", "--config", str(hub["config"]), "--force", "all")
+    assert go(fake, *argv) == 1, fake.text
+    assert "this is ci-hub's config — refusing" in fake.err.getvalue(), fake.text
+    assert hub["config"].read_bytes() == before
+    from remote_ci_monitor import doctor
+
+    sf = doctor.read_service_file(hub["unit"], user_home=str(home))
+    assert sf.command == "serve" and sf.unreadable_lines == [], sf
+    assert sf.argv == [str(hub["venv"] / "bin" / "rcm"), "serve", "--config", str(hub["config"])]
+
+
+def test_b11_h_a_comment_ending_in_a_backslash_does_not_swallow_the_next_line(home, tmp_path):
+    # systemd 는 주석 줄을 줄 잇기보다 먼저 버린다 — `# …\` 뒤의 ExecStart= 는 제 줄이다
+    hub = _hand_unit(home, tmp_path, "# old: \\\nExecStart={rcm} serve --config {config}")
+    from remote_ci_monitor import doctor
+
+    sf = doctor.read_service_file(hub["unit"], user_home=str(home))
+    assert sf.command == "serve", sf
+
+
+def test_b11_h_an_execstart_setup_cannot_read_with_rcm_bytes_closes(cfg, home, tmp_path):
+    # batch 11 HIGH(v1-1) (2): 끝내 읽지 못한 ExecStart= 에 rcm 바이트가 있으면 이름이 rcm 같지
+    # 않아도 닫는 쪽이다(doctor 의 `_matching` 과 같은 규칙) — 그 파일을 대고 거절한다
+    hub = _hand_unit(home, tmp_path, "ExecStart={rcm} serve --config '{config}")
+    fake = Fake(platform="linux")
+    assert go(fake, *coordinator_args(tmp_path / "data")) == 1, fake.text
+    err = fake.err.getvalue()
+    assert str(hub["unit"]) in err and "refusing" in err, err
+    _nothing_written(cfg, tmp_path / "data")
+    # rcm 바이트가 없는 다른 프로그램의 유닛은 그대로 건너뛴다
+    hub["unit"].write_text("[Service]\nExecStart=/opt/hub/start '--fast\n", encoding="utf-8")
+    fake = Fake(platform="linux")
+    assert go(fake, *coordinator_args(tmp_path / "data")) == 0, fake.text
