@@ -293,6 +293,17 @@ def test_rl19_the_configuration_says_how_the_report_queue_retries_and_gives_up()
     )
 
 
+def test_p3r1_the_report_queue_section_says_long_lines_split_secrets_and_unreadable_spools():
+    """P3 1라운드: 긴 줄은 한 조각(4 MiB 안), 조각에 걸친 비밀도 가림, 못 읽는 스풀의 한 줄."""
+    from remote_ci_monitor import remote_worker as rw
+
+    body = flat(section(CONFIGURATION, "The worker's log and its report queue"))
+    assert rw.LOG_PIECE_MAX_BYTES == 4 * 1024 * 1024
+    assert "a longer line goes whole in one piece of up to 4 MiB" in body
+    assert "also a value split across two pieces" in body
+    assert "`#N report: cannot read the spooled log — retrying`" in body
+
+
 def test_p63_2_the_irreversible_section_says_its_job_shows_no_retry_limit():
     """# P6-3 #2 표식 잡으로 claim 된 잡은 반복하지 않는다 — 잡 문서의
     `max_attempts` 가 null 이다."""
