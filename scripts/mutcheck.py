@@ -3783,7 +3783,7 @@ MUTANTS = (
         # 운영 라벨을 보지 않는다 — 운영 서비스와 같은 라벨의 서비스 파일을 쓴다(결정 352)
         name="setup-production-label-ignored",
         path="src/remote_ci_monitor/core/setup.py",
-        old="        if mine.intersection(svc.names) and not own(svc):\n",
+        old="        if mine.intersection(names(svc.names)) and not own(svc):\n",
         new="        if False:\n",
         tests=(
             "tests/test_setup.py::test_b9_352_the_production_label_needs_force_service_and_the_same_file",
@@ -3794,11 +3794,8 @@ MUTANTS = (
         # 않는다(결정 352)
         name="setup-production-own-without-cmp",
         path="src/remote_ci_monitor/core/setup.py",
-        old=(
-            "        return named and force_service and placed and svc.data is not None "
-            "and svc.data in written\n"
-        ),
-        new="        return named and force_service and placed\n",
+        old="        return named and placed and svc.data is not None and svc.data in written\n",
+        new="        return named and placed\n",
         tests=(
             "tests/test_setup.py::test_b9_352_the_production_label_needs_force_service_and_the_same_file",
             "tests/test_setup.py::test_b9_352_setups_own_installed_service_still_guards_its_config",
@@ -3870,8 +3867,8 @@ MUTANTS = (
         # 운영 설정을 덮는다(batch 10 H3)
         name="setup-scan-account-home-missed",
         path="src/remote_ci_monitor/setup.py",
-        old="        homes.append(account)\n",
-        new="        pass\n",
+        old="    return [Path.home(), account]\n",
+        new="    return [Path.home()]\n",
         tests=("tests/test_setup.py::test_b10_h3_the_scan_reads_the_account_home_not_only_home",),
     ),
     Mutant(
@@ -3968,8 +3965,11 @@ MUTANTS = (
         # 읽을 권한이 없는 서비스 파일을 이름이 rcm 같지 않으면 건너뛴다(batch 10 L1)
         name="setup-scan-permission-denied-skipped",
         path="src/remote_ci_monitor/setup.py",
-        old="        denied = isinstance(e, PermissionError)\n",
-        new="        denied = False\n",
+        old=(
+            "        if isinstance(e, PermissionError):\n"
+            "            # 읽을 권한이 없으면 바이트로 가릴 수 없다"
+        ),
+        new="        if False:\n            # 읽을 권한이 없으면 바이트로 가릴 수 없다",
         tests=(
             "tests/test_setup.py::"
             "test_b10_l1_a_service_file_setup_may_not_read_closes_without_a_traceback",
@@ -4060,6 +4060,146 @@ MUTANTS = (
         tests=(
             "tests/test_setup.py::test_s4_the_last_doctor_line_names_the_rcm_and_the_paths_given",
         ),
+    ),
+    # ── batch 11 (PR #272): 유닛을 systemd 처럼 읽기 · 읽지 못한 파일의 이름 · 남은 LOW ──
+    Mutant(
+        # 줄 끝 역슬래시로 이어진 ExecStart= 를 잇지 않는다 — argv 가 비어 이름이 rcm 같지 않은
+        # 유닛을 건너뛴다(batch 11 HIGH)
+        name="doctor-unit-lines-not-continued",
+        path="src/remote_ci_monitor/doctor.py",
+        old='        if (len(raw) - len(raw.rstrip("\\\\"))) % 2:\n',
+        new="        if False:\n",
+        tests=(
+            "tests/test_setup.py::"
+            "test_b11_h_a_continued_execstart_unit_is_read_as_systemd_reads_it",
+        ),
+    ),
+    Mutant(
+        # 주석 줄을 버리지 않는다 — 잇는 중의 주석이 argv 에 섞이고, 역슬래시로 끝나는 주석이
+        # 다음 ExecStart= 를 삼킨다(batch 11 HIGH)
+        name="doctor-unit-comments-joined",
+        path="src/remote_ci_monitor/doctor.py",
+        old='        if raw.lstrip()[:1] in ("#", ";"):\n            continue\n',
+        new="        if False:\n            continue\n",
+        tests=(
+            "tests/test_setup.py::"
+            "test_b11_h_a_continued_execstart_unit_is_read_as_systemd_reads_it",
+            "tests/test_setup.py::"
+            "test_b11_h_a_comment_ending_in_a_backslash_does_not_swallow_the_next_line",
+        ),
+    ),
+    Mutant(
+        # `ExecStart = …` 의 `=` 앞 빈칸을 남긴다 — 키가 ExecStart 가 아니게 된다(batch 11 HIGH)
+        name="doctor-unit-key-spaces-kept",
+        path="src/remote_ci_monitor/doctor.py",
+        old="        key, value = key.strip(), value.strip()\n",
+        new="        pass\n",
+        tests=(
+            "tests/test_setup.py::"
+            "test_b11_h_a_continued_execstart_unit_is_read_as_systemd_reads_it",
+        ),
+    ),
+    Mutant(
+        # 끝내 읽지 못한 ExecStart= 에 rcm 바이트가 있어도 이름만 보고 건너뛴다(batch 11 HIGH)
+        name="setup-scan-unread-execstart-rcm-bytes-skipped",
+        path="src/remote_ci_monitor/setup.py",
+        old="        if exec_unread and data is not None and _RCM_BYTES.search(data):\n",
+        new="        if False:\n",
+        tests=(
+            "tests/test_setup.py::test_b11_h_an_execstart_setup_cannot_read_with_rcm_bytes_closes",
+        ),
+    ),
+    Mutant(
+        # 읽지 못한 파일을 이름과 상관없이 경고만 하고 건너뛴다 — rcm 이름의 파일도 지나간다
+        # (batch 11 MED)
+        name="setup-scan-unread-rcm-name-warned",
+        path="src/remote_ci_monitor/setup.py",
+        old="    if unread_may_be_rcm(path):\n",
+        new="    if False:\n",
+        tests=("tests/test_setup.py::test_b11_m_an_unreadable_file_with_an_rcm_name_still_closes",),
+    ),
+    Mutant(
+        # 읽지 못한 파일을 이름과 상관없이 거절한다 — 다른 프로그램의 파일 하나가 setup 전체를
+        # 막는다(batch 11 MED)
+        name="setup-scan-unread-other-name-refused",
+        path="src/remote_ci_monitor/setup.py",
+        old="    if unread_may_be_rcm(path):\n",
+        new="    if True:\n",
+        tests=(
+            "tests/test_setup.py::test_b11_m_an_unreadable_file_another_program_names_only_warns",
+        ),
+    ),
+    Mutant(
+        # 링크가 가리키는 파일의 이름을 보지 않는다 — `ci-hub.service` → rcm-server.service 가
+        # 경고만 받는다(batch 11 MED)
+        name="setup-scan-unread-link-target-name-missed",
+        path="src/remote_ci_monitor/setup.py",
+        old="        names = dict.fromkeys((path.name, real_path(path).name))\n",
+        new="        names = dict.fromkeys((path.name,))\n",
+        tests=("tests/test_setup.py::test_b11_m_an_unreadable_file_with_an_rcm_name_still_closes",),
+    ),
+    Mutant(
+        # UTF-8 이 아닌 이름을 다른 프로그램의 이름으로 본다 — 판단할 수 없는 이름이 지나간다
+        # (batch 11 MED)
+        name="setup-scan-unread-undecodable-name-trusted",
+        path="src/remote_ci_monitor/setup.py",
+        old="        except UnicodeDecodeError:\n            return True\n",
+        new="        except UnicodeDecodeError:\n            return False\n",
+        tests=("tests/test_setup.py::test_b11_m_a_name_setup_cannot_judge_closes",),
+    ),
+    Mutant(
+        # 자기 서비스의 조각을 지키는 거절이 다음 할 일을 말하지 않는다(batch 11 L1)
+        name="setup-production-own-hint-dropped",
+        path="src/remote_ci_monitor/core/setup.py",
+        old='                        hint = f"; {OWN_SERVICE_NEXT}" if ours(svc) else ""\n',
+        new='                        hint = ""\n',
+        tests=(
+            "tests/test_setup.py::test_b11_l1_the_own_service_refusal_says_to_remove_it_first",
+            "tests/test_setup.py::test_b11_l1_the_hint_is_only_for_the_service_setup_wrote",
+            "tests/test_setup.py::"
+            "test_b11_l2_force_service_alone_on_the_installed_service_is_refused",
+        ),
+    ),
+    Mutant(
+        # passwd 에서 홈을 찾지 못해도 거절하지 않는다 — `$HOME` 만 믿는다(batch 11 L3)
+        name="setup-scan-missing-account-home-trusted",
+        path="src/remote_ci_monitor/setup.py",
+        old="    if account is None:\n        raise SetupFailed(\n",
+        new="    if account is None:\n        return [Path.home()]\n        raise SetupFailed(\n",
+        tests=("tests/test_setup.py::test_b11_l3_no_account_home_refuses",),
+    ),
+    Mutant(
+        # ExecStart 의 `$VAR` · `${VAR}` 를 글자 그대로 믿는다(batch 11 L4)
+        name="setup-scan-exec-variables-trusted",
+        path="src/remote_ci_monitor/setup.py",
+        old="    if sf.launch_vars:  # systemd 는 펼치고 setup 은 펼치지 않는다(batch 11 L4)\n",
+        new="    if False:\n",
+        tests=(
+            "tests/test_setup.py::"
+            "test_b11_l4_an_execstart_with_variables_setup_cannot_expand_closes",
+        ),
+    ),
+    Mutant(
+        # `$$`(글자 `$`)도 변수로 본다 — 변수가 없는 유닛을 거절한다(batch 11 L4)
+        name="doctor-exec-variable-dollar-dollar-counted",
+        path="src/remote_ci_monitor/doctor.py",
+        old='        if word.startswith("$$", i):\n',
+        new="        if False:\n",
+        tests=(
+            "tests/test_setup.py::"
+            "test_b11_l4_an_execstart_with_variables_setup_cannot_expand_closes",
+        ),
+    ),
+    Mutant(
+        # darwin 에서 라벨을 대소문자 그대로 견준다(batch 11 L5)
+        name="setup-production-label-case-not-folded",
+        path="src/remote_ci_monitor/core/setup.py",
+        old=(
+            '        return {unicodedata.normalize("NFC", n).casefold() if fold_case else n '
+            "for n in of}\n"
+        ),
+        new="        return set(of)\n",
+        tests=("tests/test_setup.py::test_b11_l5_darwin_compares_labels_without_case",),
     ),
     # ── M5t-a PR3 — 분배 전용 코디네이터 `lanes = 0` (docs/m5t-workplan.md §7 변이 검사) ──
     Mutant(
