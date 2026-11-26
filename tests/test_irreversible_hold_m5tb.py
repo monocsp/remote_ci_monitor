@@ -267,6 +267,37 @@ def test_rl48_config_fills_a_synthetic_global_group_for_an_irreversible_preset()
         parse_preset({"name": "bad", "argv": ["true"], "irreversible": "yes"})
 
 
+def test_rl48_the_server_logs_one_startup_line_per_synthetic_group(tmp_path, capsys, monkeypatch):
+    """설정 로드 뒤 그룹 없는 표식 프리셋마다 기동 로그에 한 줄(그룹 `irreversible:<이름>` ·
+    `global`). 사용자 그룹을 적은 표식 프리셋과 일반 프리셋은 줄이 없고, reload 가 다시 쓰지
+    않는다."""
+    import copy
+
+    from remote_ci_monitor import server as server_mod
+    from test_worker_api import WORKER_PRESETS, WorkerServer, sh
+
+    presets = [
+        *WORKER_PRESETS,
+        sh("ship", "echo ship", irreversible=True),
+        {**sh("ship2", "echo ship2", irreversible=True), "concurrency_group": "store"},
+    ]
+    capsys.readouterr()
+    srv = WorkerServer(tmp_path, presets=presets, lanes=0)
+    try:
+        lines = [ln for ln in capsys.readouterr().err.splitlines() if "concurrency_group" in ln]
+        assert lines == [
+            "[rcm] preset ship: irreversible without concurrency_group — using group "
+            "irreversible:ship (global)"
+        ]
+        fresh = copy.deepcopy(srv.app.config)
+        srv.app.config.path = fresh.path = tmp_path / "server.toml"
+        monkeypatch.setattr(server_mod, "load_server_config", lambda path: fresh)
+        srv.app.reload_config()
+        assert "concurrency_group" not in capsys.readouterr().err  # 프리셋마다 한 번
+    finally:
+        srv.close()
+
+
 # ── 홀드 만들기 · 막기 · 남기 ──────────────────────────────────────────────────
 
 

@@ -5928,6 +5928,30 @@ MUTANTS = (
             "test_rl31_unknown_identity_warns_then_the_recheck_stops_the_same_group",
         ),
     ),
+    Mutant(
+        # 그룹 없는 표식 프리셋의 합성 그룹을 기동 로그에 남기지 않는다(RL48 · 결정 330)
+        name="synthetic-group-not-logged",
+        path="src/remote_ci_monitor/remote_workers.py",
+        old=("                self._synthetic_said.add(p.name)\n                self.log(\n"),
+        new=(
+            "                self._synthetic_said.add(p.name)\n                (lambda m: None)(\n"
+        ),
+        tests=(
+            "tests/test_irreversible_hold_m5tb.py::"
+            "test_rl48_the_server_logs_one_startup_line_per_synthetic_group",
+        ),
+    ),
+    Mutant(
+        # 합성 그룹 줄을 reload 마다 다시 쓴다 — 프리셋마다 한 번이 아니다(RL48)
+        name="synthetic-group-logged-every-reload",
+        path="src/remote_ci_monitor/remote_workers.py",
+        old="                self._synthetic_said.add(p.name)\n",
+        new="                pass\n",
+        tests=(
+            "tests/test_irreversible_hold_m5tb.py::"
+            "test_rl48_the_server_logs_one_startup_line_per_synthetic_group",
+        ),
+    ),
 )
 
 
