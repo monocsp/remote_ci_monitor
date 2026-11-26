@@ -408,6 +408,7 @@ def test_rl35_closed_jobs_follow_the_w4_table(
 ):
     """W4 표(§4.1.2, V2-6): 멈춤은 `closed_stop` → `should_cancel` 길이다(결정 334). 멈추지 않는
     일반 `lost` 잡은 끝나면 finish 를 보낸다(서버는 그것을 `late_result` 로만 남긴다)."""
+    # RL8 (b) 워커 쪽: 취소 요청이 있던 일반 잡은 다시 붙은 뒤 첫 2xx 의 had_cancel 로 멈춘다
     w, fake, _, _ = make_worker(tmp_path)
     runner, t = start_job(w, monkeypatch, claimed(irreversible=irreversible))
     closed_hb(w, fake, 7, state, had_cancel)
