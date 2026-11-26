@@ -2135,3 +2135,36 @@ def test_b10_m1_every_data_dir_a_unit_can_use_is_protected(cfg, home, tmp_path, 
     assert go(fake, *coordinator_args(dirs[which] / "x")) == 1, fake.text
     assert f"this is {SERVER_LABEL}'s data_dir — refusing" in fake.err.getvalue(), fake.text
     _nothing_written(cfg, dirs[which] / "x")
+
+
+@pytest.mark.parametrize("module", ["remote_ci_monitor.cli", "remote_ci_monitor"])
+@pytest.mark.parametrize("manager", ["launchd", "systemd"])
+def test_b10_m2_a_python_m_unit_names_the_venv_its_python_sits_in(
+    cfg, home, tmp_path, module, manager
+):
+    # batch 10 M2(v1-5): `<venv>/bin/python -m remote_ci_monitor[.cli]` 의 `bin/python` 은 시스템
+    # 파이썬으로 가는 심볼릭 링크다. 링크를 따라가면 venv 를 놓친다 — `bin/python` 이 있는 폴더의
+    # 부모(`pyvenv.cfg`)가 그 서비스의 venv 다
+    venv = tmp_path / "svc" / "venv"
+    (venv / "bin").mkdir(parents=True)
+    (venv / "pyvenv.cfg").write_text("home = /usr/bin\n")
+    (venv / "bin" / "python").symlink_to(os.path.realpath(shutil.which("python3") or "/bin/sh"))
+    config = tmp_path / "unit" / "server.toml"
+    config.parent.mkdir()
+    config.write_text(f'[server]\ndata_dir = "{tmp_path / "unit-data"}"\n')
+    argv = [str(venv / "bin" / "python"), "-m", module, "serve", "--config", str(config)]
+    if manager == "launchd":
+        place = home / "Library" / "LaunchAgents" / f"{SERVER_LABEL}.plist"
+        place.parent.mkdir(parents=True)
+        place.write_bytes(plistlib.dumps({"Label": SERVER_LABEL, "ProgramArguments": argv}))
+        name = SERVER_LABEL
+    else:
+        place = home / ".config" / "systemd" / "user" / "rcm-server.service"
+        place.parent.mkdir(parents=True)
+        place.write_text(f"[Service]\nExecStart={' '.join(argv)}\n")
+        name = "rcm-server"
+    target = venv / "etc" / "server.toml"
+    fake = Fake(platform="darwin" if manager == "launchd" else "linux")
+    assert go(fake, *coordinator_args(tmp_path / "data", "--config", str(target))) == 1, fake.text
+    assert f"this is {name}'s venv — refusing" in fake.err.getvalue(), fake.text
+    assert not target.exists()
