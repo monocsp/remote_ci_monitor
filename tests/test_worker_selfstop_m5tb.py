@@ -447,6 +447,16 @@ class FakeClient:
         return {}
 
 
+class _Unreachable:
+    """모든 보고가 연결 실패인 클라이언트(못 한 보고가 쌓인 잡 흉내)."""
+
+    def __getattr__(self, name: str) -> Any:
+        def fail(*a: Any, **kw: Any) -> Any:
+            raise ClientError(0, "connection refused")
+
+        return fail
+
+
 def make_worker(tmp_path: Path, clocks: Clocks | None = None, **cfg: Any):
     clocks = clocks or Clocks()
     fake = FakeClient()
@@ -556,18 +566,25 @@ def test_rl35_a_recorded_finish_drops_the_parked_report_and_is_not_sent_again(
     tmp_path, monkeypatch, state
 ):
     """이 세션의 finish 가 이미 기록됐고 2xx 만 잃었다 — 큐 항목을 전달됨으로 지우고 다시 보내지
-    않는다(W4 표 첫 행). heartbeat 목록에서도 빠진다."""
+    않는다(W4 표 첫 행). heartbeat 목록에서도 빠진다. M5t-b PR2: 못 보낸 finish 는 그 잡의 보고 큐에
+    남고 레인은 큐가 끝날 때까지 기다린다(§4.5)."""
     w, fake, _, _ = make_worker(tmp_path)
     fake.finish_error = ClientError(503, "busy")
-    monkeypatch.setattr(rw, "REPORT_RETRIES", ())
+    monkeypatch.setattr(rw, "BACKOFF_START_SECONDS", 0.01)
+    monkeypatch.setattr(rw, "BACKOFF_MAX_SECONDS", 0.01)
     runner, t = start_job(w, monkeypatch, claimed(irreversible=False))
     runner.release.set()
+    deadline = time.monotonic() + 10
+    while not fake.finishes and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert t.is_alive() and 7 in w._senders and 7 in w.running  # 못 보내 큐에 남았다
+    closed_hb(w, fake, 7, state, False)
     t.join(10)
-    assert 7 in w._unreported and 7 in w.running  # 못 보내서 미뤄 뒀다
+    assert not t.is_alive()
     sent = len(fake.finishes)
     fake.finish_error = None
-    closed_hb(w, fake, 7, state, False)
-    assert 7 not in w._unreported and 7 not in w.running
+    time.sleep(0.05)
+    assert 7 not in w._senders and 7 not in w.running
     assert len(fake.finishes) == sent  # 다시 보내지 않는다
 
 
@@ -835,15 +852,15 @@ def test_rl34_a_b_the_group_is_gone_before_the_server_may_close(
     runner, t = start_job(w, monkeypatch, claimed(irreversible=True, grace=grace_g))
     clocks.advance(30)
     if backlog:
-
-        def unreachable() -> None:
-            raise ClientError(0, "connection refused")
-
-        w._unreported[99] = (unreachable, time.monotonic())
+        # 못 한 보고가 쌓인 다른 잡 — 그 잡의 보내는 스레드가 연결 실패를 다시 하는 중이다
+        stuck = rw._JobSender(w, 99, rw.JobOutbox(None), client=_Unreachable())
+        stuck.ob.finish = {"outcome": SUCCEEDED, "exit_code": 0}
+        stuck.ob.ended_at = clocks.now().timestamp()
+        w._senders[99] = stuck.start()
     sent = clocks.now().timestamp()
     assert w.heartbeat_once() is True  # 돌아온 첫 heartbeat — 마지막 2xx
     assert w.ok_at() == (sent, clocks.mono)
-    assert (99 in w._unreported) is backlog
+    assert (99 in w._senders) is backlog
     spec, _ = w._spec_from_claim(claimed(irreversible=True, grace=grace_g), 1)
     grace_j = spec.grace_seconds
     stopped = _tick_until_stopped(w, clocks, runner, grace_g + 10)  # 분단
@@ -899,6 +916,11 @@ def test_rl34_d_heartbeats_that_keep_getting_5xx_stop_the_job_at_g_minus_m(tmp_p
     w, fake, clocks, _ = make_worker(tmp_path)
     w.mark_ok(clocks.now().timestamp(), clocks.mono)
     runner, t = start_job(w, monkeypatch, claimed(irreversible=True, grace=600))
+    # M5t-b PR2: phase 는 그 잡의 보내는 스레드가 보낸다 — 시계를 밀기 전에 보냈는지 본다(그 2xx 도
+    # `ok_at` 을 올린다)
+    deadline = time.monotonic() + 5
+    while w._senders[7].ob.phase is not None and time.monotonic() < deadline:
+        time.sleep(0.01)
 
     def five_xx(jobs, host=None, *, seq=None, claims_settled=None):
         raise ClientError(503, "server busy")
@@ -1644,7 +1666,7 @@ def test_rl5_a_hanging_log_post_does_not_stall_the_runner_pump(tmp_path, monkeyp
         obs.output(line)
     took = time.monotonic() - began
     gate.set()
-    obs.final_flush()
+    obs.final_flush(wait=10)  # M5t-b PR2: 보내는 스레드가 순서대로 보낸다 — 다 보낼 때까지 기다린다
     # 펌프에서 보냈다면 한 줄마다 10초를 기다린다(기준선 30초)
     assert took < 3, took
     assert b"".join(sent) == b"a\nb\nc\n"  # 빠짐 · 겹침 · 뒤바뀜 없이

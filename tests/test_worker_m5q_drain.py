@@ -640,17 +640,19 @@ def test_unreported_job_is_retried_before_the_restart(rig, monkeypatch):
     # 미룬 보고는 heartbeat 가 성공할 때도 다시 나간다. 부하로 드레인 끝이 늦으면 heartbeat 가 먼저
     # 보고해 드레인 끝의 줄이 안 찍혔다(맥미니 잡 #3914). 드레인이 켜진 뒤로는 heartbeat 를 503 으로
     # 막아 다시 보고할 길을 드레인 끝 하나로 둔다. 그러면 그 경로가 없을 때 잡이 보고되지 않는다
-    monkeypatch.setattr(remote_worker, "REPORT_RETRIES", (0.05, 0.05, 0.05))
+    monkeypatch.setattr(remote_worker, "BACKOFF_START_SECONDS", 0.05)  # M5t-b 보고 큐의 백오프
+    monkeypatch.setattr(remote_worker, "BACKOFF_MAX_SECONDS", 0.05)
     rw = rig.start(lanes=1)
     jid = rig.hold()
     rig.bump(NEW)
     rig.until(rig.draining, "draining")
     rig.hb_down = True
-    rig.finish_fails = 4  # 레인의 보고(처음 한 번 + 재시도 세 번)가 모두 실패해 미뤄진다
+    rig.finish_fails = 4  # 처음 네 번이 실패한다 — 레인은 그 잡의 보고 큐가 끝날 때까지 기다린다
     rig.go(jid)
     assert rig.join() == 0, rig.logs
-    line = f"drained — job #{jid} not reported yet, retrying before the restart"
-    assert rig.count(line) == 1, rig.logs
+    # M5t-b PR2: 드레인 끝에 따로 다시 보고하는 길은 없다 — 그 잡의 보내는 스레드가 백오프로 다시
+    # 보내고, 드레인은 레인이 그 큐를 끝낸 뒤에 끝난다(§4.4 · §4.5)
+    assert rig.count("restarting anyway") == 0, rig.logs
     assert rig.state(jid).state == SUCCEEDED
     done = [at for at, j, status in rig.finishes if j == jid and status == 200]
     assert len(done) == 1 and done[0] < rw.stopping.set_at, rig.finishes
@@ -661,7 +663,8 @@ def test_unreported_job_is_given_up_after_the_limit(rig, monkeypatch):
     # §14 B질문11 · §5.5: 상한(`DRAIN_REPORT_SECONDS`)이 지나면 그래도 재실행한다.
     # heartbeat 쪽 다시 보고도 같은 상한에서 잡을 버린다. 부하로 드레인 끝이 1.5초 넘게 늦으면
     # heartbeat 가 먼저 버려 이 줄이 안 찍힌다. 그래서 앞 시험처럼 heartbeat 를 막는다
-    monkeypatch.setattr(remote_worker, "REPORT_RETRIES", (0.05, 0.05, 0.05))
+    monkeypatch.setattr(remote_worker, "BACKOFF_START_SECONDS", 0.05)  # M5t-b 보고 큐의 백오프
+    monkeypatch.setattr(remote_worker, "BACKOFF_MAX_SECONDS", 0.05)
     monkeypatch.setattr(remote_worker, "DRAIN_REPORT_SECONDS", 1.5)
     rw = rig.start(lanes=1)
     jid = rig.hold()
@@ -733,12 +736,13 @@ def test_a_job_finished_while_the_server_was_away_is_reported_before_the_drain(r
     # 서버를 갈아 끼우는 몇 초에 잡이 끝나 보고 재시도가 다 실패해도 버리지 않는다. 서버가 새
     # 버전으로 돌아오면 다음 heartbeat 가 그 잡을 먼저 succeeded 로 보고하고, 그다음에 드레인 ·
     # 재실행한다
-    monkeypatch.setattr(remote_worker, "REPORT_RETRIES", (0.05, 0.05, 0.05))
+    monkeypatch.setattr(remote_worker, "BACKOFF_START_SECONDS", 0.05)  # M5t-b 보고 큐의 백오프
+    monkeypatch.setattr(remote_worker, "BACKOFF_MAX_SECONDS", 0.05)
     rw = rig.start(lanes=1)
     jid = rig.hold()
     rig.down = True
     rig.go(jid)
-    rig.until(lambda: sum(1 for _, j, st in rig.finishes if j == jid and st == 503) >= 4, "gave up")
+    rig.until(lambda: sum(1 for _, j, st in rig.finishes if j == jid and st == 503) >= 4, "retried")
     time.sleep(0.3)
     assert rig.state(jid).state != SUCCEEDED
     assert not rw.draining.is_set()
@@ -748,27 +752,27 @@ def test_a_job_finished_while_the_server_was_away_is_reported_before_the_drain(r
     job = rig.state(jid)
     assert job.state == SUCCEEDED and job.exit_code == 0, (job.state, job.summary)
     done = [at for at, j, st in rig.finishes if j == jid and st == 200]
-    assert done and done[0] < rw.draining.set_at
+    # M5t-b PR2: 그 잡의 보내는 스레드가 서버가 돌아오는 대로 보낸다. 드레인은 레인이 그 큐를 끝낸
+    # 뒤에야 끝나므로 재실행보다 먼저다(heartbeat 와의 앞뒤는 정하지 않는다)
+    assert done and done[0] < rw.stopping.set_at
     assert rw.restart_for == NEW
-    # #234 재검증: 포기한다고 쓰지 않는다 — 미뤄 뒀다 다시 보고한다는 줄과 보고했다는 줄이 하나씩
-    later = [ln for ln in rig.logs if ln.startswith(f"#{jid} finish: ")]
-    assert len(later) == 2, rig.logs
-    assert later[0].endswith(" — will retry after the server is back"), later
-    assert later[1] == f"#{jid} finish: reported after retry"
+    # #234 재검증: 포기하지 않는다
     assert not any("giving up" in ln for ln in rig.logs), rig.logs
+    assert rig.count("restarting anyway") == 0, rig.logs
 
 
 def test_registering_again_waits_for_a_retry_already_running(rig, monkeypatch):
     # #234 재검증: 다른 스레드(heartbeat)가 다시 보고하는 중이면 레인은 그 보고를 건너뛰고
     # 재등록하지 않는다 — 잠금을 잠깐 기다려 미룬 보고가 재등록보다 먼저 가게 한다
-    monkeypatch.setattr(remote_worker, "REPORT_RETRIES", (0.05, 0.05, 0.05))
+    monkeypatch.setattr(remote_worker, "BACKOFF_START_SECONDS", 0.05)  # M5t-b 보고 큐의 백오프
+    monkeypatch.setattr(remote_worker, "BACKOFF_MAX_SECONDS", 0.05)
     rw = rig.start(lanes=2)
     jid = rig.hold()
     rig.down = True
     rig.go(jid)
-    rig.until(lambda: jid in rw._unreported, "parked")
-    rw._retry_lock.acquire()  # 다른 스레드가 다시 보고하는 중인 것처럼
-    threading.Timer(1.5, rw._retry_lock.release).start()
+    rig.until(lambda: jid in rw._senders and rw._senders[jid].ob.finish, "queued")
+    # M5t-b PR2: 다시 보고는 그 잡의 보내는 스레드가 하고 같은 세션의 재등록은 멱등이다(결정 260) —
+    # 레인의 재등록이 그 잡을 닫지 않는다
     rig.forget()
     rig.down = False
     rig.until(lambda: rig.srv.store.get_worker(WORKER) is not None, "registered again")
@@ -779,30 +783,39 @@ def test_registering_again_waits_for_a_retry_already_running(rig, monkeypatch):
 
 
 def test_a_job_not_reported_is_given_up_after_the_limit_without_a_drain(rig, monkeypatch):
-    # 드레인이 아니어도 상한(`DRAIN_REPORT_SECONDS`)까지는 heartbeat 마다 다시 보고하고, 넘으면
-    # 오늘처럼 로그를 쓰고 버린다 — heartbeat 목록에 영영 남지 않는다
-    monkeypatch.setattr(remote_worker, "REPORT_RETRIES", (0.05, 0.05, 0.05))
+    # M5t-b PR2(§4.5 · 결정 264 · 324): 드레인이 아니면 `DRAIN_REPORT_SECONDS` 로 버리지 않는다. 그
+    # 잡의 큐는 끝난 뒤 24시간 창(5xx 면 300초 뒤 finish 먼저)까지 다시 보내고, 그동안 heartbeat
+    # 목록에 남는다(잊힌 잡으로 닫히지 않게 — F10). 옛 「giving up」 길은 없다
+    monkeypatch.setattr(remote_worker, "BACKOFF_START_SECONDS", 0.05)  # M5t-b 보고 큐의 백오프
+    monkeypatch.setattr(remote_worker, "BACKOFF_MAX_SECONDS", 0.05)
     monkeypatch.setattr(remote_worker, "DRAIN_REPORT_SECONDS", 1.5)
     rw = rig.start(lanes=1)
     jid = rig.hold()
     rig.finish_fails = 10_000
     rig.go(jid)
-    rig.until(lambda: rig.count(f"job #{jid} still not reported — giving up") == 1, "given up")
-    rig.until(lambda: jid not in rw.running, "dropped from the heartbeat list")
+    rig.until(lambda: sum(1 for _, j, _st in rig.finishes if j == jid) >= 3, "retried")
+    time.sleep(2.0)  # 옛 상한(1.5초)을 넘긴다
+    assert rig.count("giving up") == 0, rig.logs
+    assert jid in rw.running  # heartbeat 목록에 남는다
     assert not rw.draining.is_set()
+    rig.finish_fails = 0
+    rig.until(lambda: jid not in rw.running, "reported")
+    assert rig.state(jid).state == SUCCEEDED
 
 
 def test_a_job_not_reported_is_tried_again_before_registering_again(rig, monkeypatch):
     # 재등록은 그 워커의 도는 잡을 lost 로 닫는다. 서버가 워커를 잊어 레인이 다시 등록하기 전에
     # 보고하지 못한 잡을 먼저 보고한다
-    monkeypatch.setattr(remote_worker, "REPORT_RETRIES", (0.05, 0.05, 0.05))
+    monkeypatch.setattr(remote_worker, "BACKOFF_START_SECONDS", 0.05)  # M5t-b 보고 큐의 백오프
+    monkeypatch.setattr(remote_worker, "BACKOFF_MAX_SECONDS", 0.05)
     rw = rig.start(lanes=2)
     jid = rig.hold()
     rig.down = True
     rig.go(jid)
-    rig.until(lambda: jid in rw._unreported, "parked")
+    rig.until(lambda: jid in rw._senders and rw._senders[jid].ob.finish, "queued")
     rig.forget()
-    rig.down = False  # heartbeat 는 이제 409(등록 안 됨)라 다시 보고할 기회는 재등록뿐이다
+    # heartbeat 는 이제 409(등록 안 됨) — 큐가 받은 409 not_registered 가 같은 세션으로 재등록한다
+    rig.down = False
     rig.until(lambda: rig.srv.store.get_worker(WORKER) is not None, "registered again")
     job = rig.state(jid)
     assert job.state == SUCCEEDED, (job.state, job.summary)

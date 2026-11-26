@@ -255,6 +255,18 @@ def test_rl36_e_fence_between_write_and_commit_is_409_session_fenced(srv, monkey
     assert row(srv, jid)["log_offset"] == 2  # 펜스 뒤 반영 0
 
 
+def test_rl36_an_uncommitted_tail_left_in_the_file_is_overwritten_not_kept(srv):
+    """커밋된 길이 뒤에 남은 바이트(앞 요청의 미커밋 꼬리)는 다음 쓰기가 그 자리부터 덮고 자른다 —
+    덧붙이면(1판 꼴) 그 꼬리가 스트림 사이에 끼인다(V1-3)."""
+    jid = running(srv)
+    assert post_log(srv, jid, b"one\n", 0)[0] == 200
+    with srv.app.log_path(jid).open("ab") as fh:
+        fh.write(b"uncommitted\n")
+    assert post_log(srv, jid, b"two\n", 4)[0] == 200
+    assert log_file(srv, jid) == b"one\ntwo\n"
+    assert row(srv, jid)["log_file_bytes"] == 8
+
+
 # ── 짧은 파일(T16 · RL37) · 기동 정리(RL16 c) ─────────────────────────────────
 
 

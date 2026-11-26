@@ -211,7 +211,10 @@ def test_p62_3_a_narrow_confirm_that_cannot_be_sent_is_retried_and_keeps_the_job
     `worker_unreachable` 로 닫히며 표식 잡의 그룹은 홀드된다."""
     import types
 
-    monkeypatch.setattr(rw, "REPORT_RETRIES", (0.0, 0.0, 0.0))
+    # M5t-b PR2: 보고는 잡마다 보내는 스레드의 백오프로 다시 보내고 멈추는 중에는 정한 창까지 한다
+    monkeypatch.setattr(rw, "BACKOFF_START_SECONDS", 0.01)
+    monkeypatch.setattr(rw, "BACKOFF_MAX_SECONDS", 0.01)
+    monkeypatch.setattr(rw, "STOP_REPORT_SECONDS", 0.3)
     srv.registered("build-02")
     jid = running(srv, preset="ship")
     old = srv.new_process("build-02")
@@ -256,7 +259,9 @@ def test_p63_1_an_unsent_finish_while_stopping_keeps_the_job_folder_and_parks_no
     보낸다. 지우면 확인이 사라지고 표식 잡의 그룹은 G 뒤 홀드된다."""
     import types
 
-    monkeypatch.setattr(rw, "REPORT_RETRIES", (0.0, 0.0, 0.0))
+    monkeypatch.setattr(rw, "BACKOFF_START_SECONDS", 0.01)
+    monkeypatch.setattr(rw, "BACKOFF_MAX_SECONDS", 0.01)
+    monkeypatch.setattr(rw, "STOP_REPORT_SECONDS", 0.3)
     srv.registered("build-02")
     jid = running(srv, preset="ship")
     url = f"http://127.0.0.1:{srv.port}"
@@ -283,7 +288,7 @@ def test_p63_1_an_unsent_finish_while_stopping_keeps_the_job_folder_and_parks_no
     w._finish(jid, SUCCEEDED, 0, "done", observer, group_gone=True)
     assert not w.fenced.is_set()
     assert sent and set(sent) == {SUCCEEDED}  # 결과를 보내려 했고 좁은 확인으로 바꾸지 않았다
-    assert w._unreported == {}  # 멈추는 프로세스에는 미룰 곳이 없다
+    assert w._senders == {}  # 멈추는 프로세스는 메모리에 남기지 않는다 — 큐는 디스크에 있다
     assert jid not in w.running
     assert (folder / "claim.json").is_file()  # 보내지 못했다 — 다음 프로세스가 판정한다
     assert job_of(srv, jid).state == RUNNING

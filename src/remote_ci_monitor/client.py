@@ -261,8 +261,12 @@ class WorkerClient:
         summary_code: str | None = None,
         summary_args: dict[str, Any] | None = None,
         group_gone: bool | None = None,
+        log_bytes: int | None = None,
     ) -> dict[str, Any]:
         body: dict[str, Any] = {"outcome": outcome, "exit_code": exit_code}
+        if log_bytes is not None:
+            # 그 잡이 낸 스트림 전체 바이트(M5t-b §4.6) — 서버가 `log_complete` 를 정한다
+            body["log_bytes"] = log_bytes
         if group_gone is not None:
             # 그 잡의 프로세스 그룹이 사라졌다는 확인(M5t-b 결정 330) — 모르면 싣지 않는다
             body["group_gone"] = group_gone
