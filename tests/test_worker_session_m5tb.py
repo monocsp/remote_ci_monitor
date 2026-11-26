@@ -62,6 +62,40 @@ def running(srv: WorkerServer, worker: str = "build-02", *, preset: str = "ok", 
 # ── 펜싱(T8 · W5 · RL10 · RL11) ────────────────────────────────────────────────
 
 
+def test_rl10_a_long_poll_claim_fenced_while_it_waits_takes_no_job(srv, monkeypatch):
+    """A 의 claim 이 긴 대기 중일 때 B 가 등록해 A 를 펜싱한다. 그 뒤 들어온 잡을 A 의 대기가
+    집으면 받을 사람이 없는 잡이 G 동안 `running` 이고, 표식이면 돈 적 없는 명령에 홀드가 걸린다.
+    claim 트랜잭션이 세션의 펜싱을 다시 보고 409 `session_fenced` 로 끝낸다(P3 1라운드 MED)."""
+    srv.registered("build-02")
+    old = srv.session("build-02")
+    real_claim = srv.store.claim
+    entered = threading.Event()
+
+    def first_try_seen(*args: Any, **kw: Any):
+        entered.set()
+        return real_claim(*args, **kw)
+
+    monkeypatch.setattr(srv.store, "claim", first_try_seen)
+    out: dict[str, Any] = {}
+
+    def wait_for_a_job() -> None:
+        body = {"lane": 1, "wait_seconds": 8, "worker_session_id": old, "claim_seq": 1}
+        out["answer"] = srv.req("POST", "/worker/claim", token="build-02", json_body=body)
+
+    t = threading.Thread(target=wait_for_a_job, daemon=True)
+    t.start()
+    assert entered.wait(5)  # A 는 이미 대기에 들어갔다(첫 시도는 빈 큐)
+    srv.new_process("build-02")
+    srv.registered("build-02")  # B — A 를 펜싱한다
+    jid = srv.queued_job(preset="ship")
+    t.join(15)
+    assert not t.is_alive()
+    status, body = out["answer"]
+    assert (status, (body or {}).get("code")) == (409, "session_fenced"), body
+    assert job_of(srv, jid).state == QUEUED and hold_rows(srv) == []
+    assert srv.claimed("build-02") == jid  # B 가 집는다
+
+
 def test_rl10_a_second_process_fences_the_first_and_the_first_can_only_confirm(srv):
     srv.registered("build-02", lanes=2)
     jid = running(srv)

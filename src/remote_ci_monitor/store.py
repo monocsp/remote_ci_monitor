@@ -953,6 +953,11 @@ class LaneBusy(StoreError):
     """그 워커의 그 레인에 이미 running·cancelling 잡이 있다 — 레인 과할당 금지(M5b-2)."""
 
 
+class SessionFenced(StoreError):
+    """claim 하는 세션이 그사이 펜싱됐다(M5t-b §4.2). 긴 대기 claim 은 시작할 때 한 번 본 세션
+    판정을 믿을 수 없다 — 그 사이 같은 이름의 새 프로세스가 등록했을 수 있다."""
+
+
 @dataclass(frozen=True)
 class TokenInfo:
     name: str
@@ -3438,6 +3443,14 @@ class Store:
             if conn.execute(_PAUSED_SQL).fetchone() is not None:
                 conn.execute("COMMIT")
                 return None
+            if session_id is not None:
+                # 같은 트랜잭션에서 세션을 다시 본다 — 펜싱된 세션이 집은 잡은 받을 사람이 없다
+                fenced = conn.execute(
+                    "SELECT fenced_at FROM worker_sessions WHERE id=?", (session_id,)
+                ).fetchone()
+                if fenced is not None and fenced["fenced_at"] is not None:  # mutcheck: claim-fenced
+                    conn.execute("ROLLBACK")
+                    raise SessionFenced(f"session {session_id[:8]} was fenced")
             busy = ",".join("?" * len(BUSY_STATES))
             busy_states = sorted(BUSY_STATES)
             if worker_name is not None:
@@ -3522,7 +3535,7 @@ class Store:
                 return None
             self._event(conn, job_id, EVENT_STATE, {"state": RUNNING}, ts)
             conn.execute("COMMIT")
-        except LaneBusy:
+        except (LaneBusy, SessionFenced):
             raise
         except Exception:
             conn.execute("ROLLBACK")

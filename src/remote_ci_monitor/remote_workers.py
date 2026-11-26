@@ -65,7 +65,13 @@ from remote_ci_monitor.core.progress import parse_marker
 from remote_ci_monitor.core.status import iso, source_json
 from remote_ci_monitor.materialize import MaterializeError, assemble_tar_from_manifest
 from remote_ci_monitor.release_secrets import mask_bytes
-from remote_ci_monitor.store import RELEASE_WORKER, LaneBusy, TokenInfo, WorkerRow
+from remote_ci_monitor.store import (
+    RELEASE_WORKER,
+    LaneBusy,
+    SessionFenced,
+    TokenInfo,
+    WorkerRow,
+)
 
 if TYPE_CHECKING:
     from remote_ci_monitor.config import ServerConfig
@@ -800,6 +806,9 @@ class RemoteWorkersMixin:
             if taken and all(j.worker_session_id != session for j in taken):
                 return None, None
             raise _api_error(409, str(e)) from e
+        except SessionFenced as e:
+            # 긴 대기 중에 같은 이름의 새 프로세스가 등록했다 — 시작 때의 세션 판정과 같은 답
+            raise _api_error(409, SESSION_FENCED, code="session_fenced") from e
         except sqlite3.OperationalError as e:
             # 잠금·바쁨만 일시 오류다. `no such table` 같은 영구 결함을 「다시 해 보라」고 하면
             # 워커가 영원히 재시도한다. 워커는 503 을 이미 일시 오류로 처리한다.

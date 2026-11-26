@@ -6179,6 +6179,18 @@ MUTANTS = (
             "test_rl43_any_observer_error_after_popen_stops_the_job_and_reports_it",
         ),
     ),
+    # ── M5t-b P3 1라운드 MED — 긴 대기 claim 이 펜싱을 다시 보지 않는다 ──
+    Mutant(
+        # claim 트랜잭션이 세션의 펜싱을 보지 않는다 — 펜싱된 세션의 긴 대기가 새 잡을 집는다
+        name="claim-ignores-fencing",
+        path="src/remote_ci_monitor/store.py",
+        old='if fenced is not None and fenced["fenced_at"] is not None:  # mutcheck: claim-fenced',
+        new="if False:",
+        tests=(
+            "tests/test_worker_session_m5tb.py::"
+            "test_rl10_a_long_poll_claim_fenced_while_it_waits_takes_no_job",
+        ),
+    ),
 )
 
 
