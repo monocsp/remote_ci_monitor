@@ -412,3 +412,34 @@ def test_rl53_a_legacy_job_holds_when_its_preset_is_irreversible_or_gone(store, 
         ]
     else:
         assert rows == []
+
+
+# ── 로컬 레인의 표식 잡은 감독자 아래에서 돈다(F76 · 결정 331, §4.13) ─────────
+
+
+@pytest.mark.parametrize("irreversible", [True, False])
+def test_rl43_a_local_lane_irreversible_job_runs_under_the_supervisor(tmp_path, irreversible):
+    """로컬 레인 표식 잡의 부모는 서버 프로세스가 아니라 감독자다(서버가 죽으면 감독자가 끊는다).
+    일반 잡은 감독자 없이 오늘처럼 돈다(결정 253)."""
+    import os
+
+    import test_worker as tw
+    from remote_ci_monitor.config import ServerConfig
+
+    cfg = ServerConfig()
+    cfg.server.data_dir = str(tmp_path / "data")
+    cfg.server.grace_seconds = 1
+    preset = tw.sh("ship", "echo parent=$PPID", irreversible=irreversible)
+    cfg.presets = (parse_preset(preset),)
+    store = Store(cfg.data_dir / "rcm.sqlite3")
+    try:
+        if irreversible:
+            store.irreversible = {"ship": ("irreversible:ship", "global")}
+        jid = tw.enqueue(store, cfg, "ship")
+        tw.run_one(store, cfg, jid)
+        assert store.get_job(jid).state == SUCCEEDED
+        log = (cfg.data_dir / "jobs" / str(jid) / "log.txt").read_text()
+        parent = int(log.split("parent=")[1].split()[0])
+        assert (parent != os.getpid()) is irreversible
+    finally:
+        store.close()

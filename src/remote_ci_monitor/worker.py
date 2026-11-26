@@ -563,6 +563,9 @@ class Worker(threading.Thread):
             workspace=workspace,
             log_path=log_path,
             grace_seconds=self.config.server.grace_seconds,
+            # claim 이 얼린 표식(M5t-b 결정 257 · F76). 감독자 아래에서 돌고 서버가 죽으면
+            # 감독자가 그룹을 끊는다(결정 331). 재기동 홀드는 `recover_on_start` 가 건다
+            irreversible=job.irreversible is True,
         )
         observer = _LocalObserver(self, job)
         try:
