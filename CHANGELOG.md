@@ -52,7 +52,13 @@ of a key bumps that number and is listed here.
   read <file> — skipped; if it runs rcm, setup cannot protect it`. Units are read the way systemd
   reads them (lines continued with a backslash, spaces around `=`), labels are compared without
   case on macOS, the refusal that keeps a service setup installed says to remove it first, and
-  setup refuses when it cannot find the account's home.
+  setup refuses when it cannot find the account's home. It also counts an `rcm` started under
+  another name (a link to `rcm`, another executable in a virtualenv with rcm installed), refuses a
+  service whose command line shows rcm in a form it cannot read (`sh -c "cd x;rcm serve"`,
+  `$(which rcm)`) or a unit with two `ExecStart=` lines that start rcm, reads every `ExecStart=`
+  of a unit's `[Service]` section and ignores the other sections, judges a file it cannot read for
+  any reason by its name, and also looks in `~/.local/share/systemd/user`,
+  `$XDG_DATA_HOME/systemd/user`, `/etc/xdg/systemd/user` and `/usr/local/lib/systemd/`.
   ([#272](https://github.com/monocsp/remote_ci_monitor/pull/272))
 - **`lanes = 0` runs a server that only hands jobs out.** It runs no job itself: `@local` is not
   alive and never a candidate, its probes do not run, `--machine @local`, `rcm recheck @local`
