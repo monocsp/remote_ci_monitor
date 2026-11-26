@@ -75,6 +75,16 @@ class ClientError(Exception):
         self.body = body or {}
 
 
+def _answer(status: int, raw: bytes) -> Any:
+    """2xx 본문을 JSON 으로 읽는다. JSON 이 아니면(앞의 프록시 · 잘린 응답) 서버는 답했지만
+    알아들을 수 없다 — 502 `ClientError` 로 바꿔 부르는 쪽이 다시 해 보게 한다(M5t-b P6-1 G4).
+    `json.loads` 의 예외가 그대로 나가면 보내는 스레드가 죽는다."""
+    try:
+        return json.loads(raw)  # mutcheck: worker-2xx-not-json-escapes
+    except ValueError as e:
+        raise ClientError(502, f"HTTP {status} with an answer that is not JSON") from e
+
+
 class WorkerClient:
     """원격 워커가 서버에 말하는 쪽(M5b-3) — `/worker/*` 만. 재시도는 없다(정책은 워커 루프가).
 
@@ -105,7 +115,7 @@ class WorkerClient:
         status, _, raw = self._inner._request("POST", path, json_body=body, timeout=timeout)
         if status == 204 or not raw:
             return None
-        return json.loads(raw)
+        return _answer(status, raw)
 
     def register(
         self,
@@ -243,7 +253,7 @@ class WorkerClient:
             timeout=max(self.timeout, 60.0),
             extra_headers=headers or None,
         )
-        out = json.loads(raw) if raw else {}
+        out = _answer(status, raw) if raw else {}
         got = out.get("offset") if isinstance(out, dict) else None
         if isinstance(got, int) and not isinstance(got, bool):
             self._log_offsets[job_id] = got
@@ -292,7 +302,7 @@ class WorkerClient:
         """
         size = tar_path.stat().st_size
         with tar_path.open("rb") as fh:
-            _status, _headers, raw = self._inner._request(
+            status, _headers, raw = self._inner._request(
                 "PUT",
                 f"/worker/jobs/{job_id}/artifacts",
                 data=fh,
@@ -301,14 +311,14 @@ class WorkerClient:
                 timeout=max(self.timeout, 300.0),
                 extra_headers=self._session_headers(),
             )
-        return json.loads(raw) if raw else {}
+        return _answer(status, raw) if raw else {}
 
     def bundle_status(self, job_id: int) -> dict[str, Any]:
         """`GET /worker/jobs/{id}/artifacts` — 모호한 finish 응답을 푼다(M5e §6)."""
-        _status, _headers, raw = self._inner._request(
+        status, _headers, raw = self._inner._request(
             "GET", f"/worker/jobs/{job_id}/artifacts", extra_headers=self._session_headers()
         )
-        return json.loads(raw) if raw else {}
+        return _answer(status, raw) if raw else {}
 
     def health(self) -> dict[str, Any]:
         return self._inner.health()

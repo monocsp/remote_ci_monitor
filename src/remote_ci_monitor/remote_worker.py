@@ -375,6 +375,11 @@ class _JobSender:
         self.spool_unreadable = False
         self._read_failed_said = False
         self._unreadable_first_said = False
+        # 마지막 시도가 예상 못 한 예외였다(P6-1 G4) — 못 읽는 스풀처럼 끝난 잡이면 300초 뒤
+        # finish 가 먼저 간다. 시도가 성공하거나 서버 · 연결 오류로 끝나면 내린다
+        self.local_error = False
+        self._unexpected_said = False
+        self._local_first_said = False
         self.failures = 0
         # 펜싱 — 이 프로세스의 큐는 프로세스의 펜싱(W5)을, D 의 큐는 그 큐가 받은 409 를 본다
         self.fenced = proc.fenced if dead is None else threading.Event()
@@ -461,6 +466,16 @@ class _JobSender:
                     " after the job ended — sending the finish first, the log stays incomplete"
                 )
             return True
+        # 같은 결정적 원인(버그 · 로컬 고장)이 로그 · 산출물 단계를 계속 막아도 같다(P6-1 G4)
+        stuck = self.local_error  # mutcheck: unexpected-error-holds-finish
+        if stuck and age >= FINISH_HOLD_SECONDS:
+            if not self._local_first_said:
+                self._local_first_said = True
+                self.proc.log(
+                    f"#{self.job_id} report: still failing with an unexpected error"
+                    f" {FINISH_HOLD_SECONDS}s after the job ended — sending the finish first"
+                )
+            return True
         # 5xx 는 서버에 닿았다는 뜻이다. 연결 실패면 finish 도 갈 수 없으니 순서를 지킨다
         return age >= FINISH_HOLD_SECONDS and self.last_5xx  # mutcheck: finish-waits-forever
 
@@ -529,7 +544,11 @@ class _JobSender:
                     self.wake.wait(LOG_FLUSH_SECONDS)
                     self.wake.clear()
                     continue
-                if self.attempt(step):
+                try:
+                    ok = self.attempt(step)
+                except Exception as e:  # noqa: BLE001 — 한 단계의 예상 못 한 예외에 스레드를 잃지 않는다
+                    ok = self._unexpected(step, e)  # mutcheck: unexpected-error-kills-the-sender
+                if ok:
                     self.delay = 0.0
                     continue
                 if step == "finish" and self._window_over():  # mutcheck: finish-kept-past-24h
@@ -589,7 +608,12 @@ class _JobSender:
                 self._last_log = time.monotonic()
             elif step == "artifacts":
                 assert ob.bundle is not None
-                receipt = self.client.upload_bundle(self.job_id, Path(ob.bundle["path"]))
+                try:
+                    receipt = self.client.upload_bundle(self.job_id, Path(ob.bundle["path"]))
+                except OSError as e:
+                    # 네트워크 오류는 클라이언트가 `ClientError` 로 바꾼다 — 여기 오는 것은 큐의
+                    # 묶음 파일을 못 읽은 것이다(지워졌다). 다시 해도 같다(P6-1 G4)
+                    return self._bundle_unreadable(e)  # mutcheck: missing-bundle-kills-the-sender
                 ob.bundle = {
                     **ob.bundle,
                     "state": "uploaded",
@@ -606,10 +630,46 @@ class _JobSender:
         ob.save()
         if self.dead is None:
             self.proc.mark_ok(*sent)
+        self.local_error = False
         self.last_5xx = False
         self.answered = False
         self.failures = 0
         return True
+
+    def _label(self, step: str) -> str:
+        dead = self.dead
+        if dead is None:
+            return f"#{self.job_id} {step}"
+        return f"dead session {dead.session_id[:8]} #{self.job_id} {step}"
+
+    def _bundle_unreadable(self, e: OSError) -> bool:
+        """큐의 묶음 파일이 없거나 못 읽는다. 명세의 산출물 실패 갈래로 간다 — 처분은 `failed`
+        (`upload_failed`, `_send_finish`), finish 는 이어서 간다. 그대로 두면 `FileNotFoundError` 가
+        보내는 스레드를 죽여 레인과 잡이 재시작까지 잡히고, 다음 프로세스의 죽은 큐도 같은 오류로
+        죽는다(P6-1 G4)."""
+        ob = self.ob
+        assert ob.bundle is not None
+        self.proc.log(
+            f"{self._label('artifacts')}: cannot read the bundle"
+            f" ({e.strerror or type(e).__name__}) — the finish reports upload_failed"
+        )
+        ob.bundle = {**ob.bundle, "state": "failed"}
+        ob.save()
+        return True
+
+    def _unexpected(self, step: str, e: Exception) -> bool:
+        """한 단계가 예상 못 한 예외를 냈다(버그 · 로컬 고장). 스레드를 끝내지 않고 백오프로 다시
+        해 본다 — 같은 결정적 원인이 매번 스레드를 죽이면 살아 있는 프로세스는 레인과 잡을
+        재시작까지 잡고, 다음 프로세스의 죽은 큐 보내기도 같은 오류로 죽는다(P6-1 G4). 줄은 한
+        번이다. D 의 등록 대기 300초가 이 시간도 센다(등록을 끝없이 막지 않게). 끝난 잡이면 300초
+        뒤 finish 가 먼저 간다(`_finish_first`)."""
+        if not self._unexpected_said:
+            self._unexpected_said = True
+            self.proc.log(f"{self._label(step)}: unexpected {type(e).__name__} — retrying")
+        self.local_error = True
+        self.answered = True
+        self.failures += 1
+        return False
 
     def _spool_unreadable(self) -> bool:
         """`stream.log` 를 못 읽었다(없다 · 잘렸다). 빈 조각을 보내 성공으로 세지 않는다 —
@@ -737,7 +797,9 @@ class _JobSender:
             proc.log(f"{what}: {e.message} — dropped")
             self._drop_item(step, failed=True)
             return True
-        # 5xx · 연결 실패 · 시간 초과 — 같은 항목을 백오프로 다시
+        # 5xx · 연결 실패 · 시간 초과 — 같은 항목을 백오프로 다시. 마지막 실패가 서버 · 연결
+        # 쪽이니 예상 못 한 예외의 300초 규칙은 내린다 — 연결 실패는 순서를 지킨다
+        self.local_error = False
         self.last_5xx = bool(e.status)
         self.answered = bool(e.status)
         self.failures += 1

@@ -1311,19 +1311,30 @@ def test_rl12_b_c_a_lane_freed_by_the_drain_limit_waits_for_its_queue_after_a_ca
     "refusal", [RuntimeError("boom"), http(409, "protocol_required")], ids=["error", "protocol"]
 )
 def test_rl14_a_c_a_queue_that_ends_unsent_while_the_worker_runs_stays_in_the_heartbeat(
-    tmp_path, fast, refusal
+    tmp_path, fast, refusal, monkeypatch
 ):
     """보내는 스레드가 `done` 없이 끝났다(예상 못 한 예외 · `protocol_required`) — 워커는 멈추지
     않고 계속 돈다. 그 잡을 heartbeat 목록에서 빼면 finish 가 디스크에만 있는데 서버가 그 잡을
     「잊힌 잡」(T5, `worker_restarted_without_job`)으로 닫는다(P3 2라운드 LOW). 잡은 목록에 남고
-    폴더도 남는다 — 다음 프로세스가 디스크에서 보낸다. 멈춤 · 드레인 exec 은 p63_1 이 본다."""
+    폴더도 남는다 — 다음 프로세스가 디스크에서 보낸다. 멈춤 · 드레인 exec 은 p63_1 이 본다.
+
+    P6-1 G4 뒤로 한 단계(attempt) 안의 예상 못 한 예외는 다시 해 본다(p6_1_g4_d). 스레드를
+    끝내는 예외는 단계 밖(고르기)에서 난 것이라, [error] 는 거기서 던진다."""
     clock = WClock()
     fake = FakeServer(clock)
     w = wworker(tmp_path, fake, clock)
     w.prepare_sessions()
-    fake.script["finish"] = [refusal]
     ob = rw.JobOutbox(w._job_dir(7))
-    s = rw._JobSender(w, 7, ob).start()
+    s = rw._JobSender(w, 7, ob)
+    if isinstance(refusal, RuntimeError):
+
+        def broken_pick() -> bool:
+            raise refusal
+
+        monkeypatch.setattr(s, "_finish_first", broken_pick)
+    else:
+        fake.script["finish"] = [refusal]
+    s.start()
     w._senders[7] = s
     with w._lock:
         w.running[7] = 1
@@ -1523,3 +1534,128 @@ def test_p6_1_g3_b_a_lost_close_by_the_server_still_takes_the_workers_lost_finis
     )
     assert status == 409 and body["late_result_recorded"] is True, body
     assert len(late_events(srv, jid)) == 1
+
+
+def test_p6_1_g4_a_a_missing_bundle_file_finishes_with_upload_failed(tmp_path, fast):
+    """# P6-1 G4 큐의 번들 파일이 없다(지워졌다). `upload_bundle` 의 `stat()` 은 `_request` 밖이라
+    `FileNotFoundError` 가 보내는 스레드를 죽여, 레인과 잡이 재시작까지 잡혀 있었다. 산출물 실패
+    갈래(`upload_failed`)로 finish 를 보낸다."""
+    clock = WClock()
+    fake = FakeServer(clock)
+    w, ob, s = live_sender(tmp_path, fake, clock)
+    ob.append(b"one\n")
+    ob.bundle = {"path": str(tmp_path / "gone.tar"), "state": "pending", "sha256": None}
+    end_job(w, ob, artifacts={"state": "ready", "file_count": 1, "total_bytes": 2})
+    s.start()
+    s.thread.join(10)
+    assert ob.done and not s.gave_up, w.logs
+    sent = [c for c in fake.calls if c[0] == "finish"]
+    assert len(sent) == 1
+    arts = sent[0][5]["artifacts"]
+    assert (arts["state"], arts["reason_code"]) == ("failed", "upload_failed"), arts
+    assert sum(1 for x in w.logs if "cannot read the bundle" in x) == 1, w.logs
+
+
+class _ScriptedInner:
+    """`WorkerClient._inner` 대역 — 길마다 정한 (status, headers, raw) 를 앞에서부터 돌려준다."""
+
+    def __init__(self, script: dict[str, list[bytes]]) -> None:
+        self.script = script
+        self.calls: list[str] = []
+
+    def _request(self, method: str, path: str, **kw: Any) -> tuple[int, dict[str, str], bytes]:
+        route = path.rsplit("/", 1)[-1]
+        self.calls.append(route)
+        queue = self.script.get(route) or []
+        raw = queue.pop(0) if queue else b'{"offset": 4}' if route == "log" else b"{}"
+        return 200, {}, raw
+
+
+def _scripted_client(script: dict[str, list[bytes]]):
+    from remote_ci_monitor.client import WorkerClient
+
+    client = WorkerClient("http://fake", "t")
+    inner = _ScriptedInner(script)
+    client._inner = inner  # type: ignore[assignment]
+    return client, inner
+
+
+@pytest.mark.parametrize("route", ["log", "finish", "artifacts"])
+def test_p6_1_g4_b_a_2xx_answer_that_is_not_json_is_a_client_error(tmp_path, route):
+    """# P6-1 G4 2xx 인데 본문이 JSON 이 아니다(앞의 프록시 · 깨진 응답). 지금까지는
+    `json.loads` 의 예외가 그대로 나가 보내는 스레드를 죽였다. `ClientError` 로 바꿔 다시 해 본다
+    — 서버가 답은 했으니 HTTP 오류 응답과 같이 센다(5xx 갈래)."""
+    client, _ = _scripted_client({route: [b"<html>proxy</html>"]})
+    tar = tmp_path / "b.tar"
+    tar.write_bytes(b"x")
+    got: BaseException | None = None
+    try:
+        if route == "log":
+            client.log(7, b"one\n", offset=0)
+        elif route == "finish":
+            client.finish(7, SUCCEEDED, 0, None)
+        else:
+            client.upload_bundle(7, tar)
+    except Exception as e:  # noqa: BLE001 — 무엇이 나오는지 본다
+        got = e
+    assert isinstance(got, ClientError), repr(got)
+    assert got.status >= 500, got.status
+
+
+def test_p6_1_g4_c_a_sender_retries_a_2xx_answer_that_is_not_json(tmp_path, fast):
+    """# P6-1 G4 진짜 클라이언트로 — 깨진 2xx 본문 뒤에도 보내는 스레드가 살아 로그와 finish 를
+    보낸다."""
+    clock = WClock()
+    client, inner = _scripted_client({"log": [b"not json"], "finish": [b"also not json"]})
+    w = wworker(tmp_path, client, clock)  # type: ignore[arg-type]
+    ob = rw.JobOutbox(None)
+    ob.append(b"one\n")
+    end_job(w, ob)
+    s = rw._JobSender(w, 7, ob).start()
+    s.thread.join(10)
+    assert ob.done and not s.gave_up, w.logs
+    assert inner.calls.count("log") == 2 and inner.calls.count("finish") == 2, inner.calls
+
+
+def test_p6_1_g4_d_an_unexpected_error_backs_off_and_retries_saying_so_once(tmp_path, fast):
+    """# P6-1 G4 그 밖의 예상 못 한 예외(버그 · 로컬 고장)는 스레드를 죽이지 않고 물러서며 다시
+    해 본다. 같은 결정적 원인이 매번 스레드를 죽이면 살아 있는 프로세스가 레인과 잡을 재시작까지
+    잡고, 죽은 큐 보내기도 같은 오류로 죽는다. 줄은 한 번이다."""
+    clock = WClock()
+    fake = FakeServer(clock)
+    w, ob, s = live_sender(tmp_path, fake, clock)
+    ob.append(b"one\n")
+    end_job(w, ob)
+    fake.script["finish"] = [RuntimeError("boom")] * 5
+    s.start()
+    s.thread.join(10)
+    assert ob.done and not s.gave_up, w.logs
+    assert len([c for c in fake.calls if c[0] == "finish"]) == 6
+    said = [x for x in w.logs if "unexpected" in x]
+    assert len(said) == 1, w.logs
+    assert said[0].startswith("#7 finish: unexpected RuntimeError")
+
+
+def test_p6_1_g4_e_a_finished_job_stuck_on_an_unexpected_error_sends_the_finish_after_300s(
+    tmp_path, fast
+):
+    """# P6-1 G4 끝난 잡의 로그 단계가 예상 못 한 예외로 계속 막히면, 못 읽는 스풀과 같이 끝난 지
+    300초 뒤 finish 가 먼저 간다 — 24시간 묶이면 서버에서 잡이 running 이고 레인도 잡혀 있다."""
+    clock = WClock()
+    fake = FakeServer(clock)
+    w, ob, s = live_sender(tmp_path, fake, clock)
+    ob.append(b"one\n")
+    end_job(w, ob)
+    fake.script["log"] = [RuntimeError("boom")] * 100000
+    s.start()
+    try:
+        assert wait_for(lambda: any("unexpected" in x for x in w.logs), 5), w.logs
+        time.sleep(0.05)
+        assert not ob.done
+        clock.advance(rw.FINISH_HOLD_SECONDS + 1)
+        s.wake.set()
+        assert wait_for(lambda: ob.done, 10), w.logs
+    finally:
+        s.halt.set()
+    assert fake.routes()[-1] == "finish"
+    assert fake.calls[-1][5]["log_bytes"] == 4

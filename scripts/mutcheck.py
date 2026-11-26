@@ -7647,6 +7647,61 @@ MUTANTS = (
             "test_p6_1_g3_a_resent_copy_of_the_workers_own_lost_finish_is_not_a_late_result",
         ),
     ),
+    Mutant(
+        # 2xx 의 JSON 이 아닌 본문이 json.loads 예외로 나가 보내는 스레드를 죽인다(P6-1 G4)
+        name="worker-2xx-not-json-escapes",
+        path="src/remote_ci_monitor/client.py",
+        old=(
+            "        return json.loads(raw)"
+            "  # mutcheck: worker-2xx-not-json-escapes\n    except ValueError as e:\n"
+        ),
+        new="        return json.loads(raw)\n    except ZeroDivisionError as e:\n",
+        tests=(
+            "tests/test_worker_outbox_m5tb.py::"
+            "test_p6_1_g4_b_a_2xx_answer_that_is_not_json_is_a_client_error",
+            "tests/test_worker_outbox_m5tb.py::"
+            "test_p6_1_g4_c_a_sender_retries_a_2xx_answer_that_is_not_json",
+        ),
+    ),
+    Mutant(
+        # 한 단계의 예상 못 한 예외가 보내는 스레드를 끝낸다 — 레인과 잡이 잡힌다(P6-1 G4)
+        name="unexpected-error-kills-the-sender",
+        path="src/remote_ci_monitor/remote_worker.py",
+        old=(
+            "                    ok = self._unexpected(step, e)"
+            "  # mutcheck: unexpected-error-kills-the-sender\n"
+        ),
+        new="                    raise\n",
+        tests=(
+            "tests/test_worker_outbox_m5tb.py::"
+            "test_p6_1_g4_d_an_unexpected_error_backs_off_and_retries_saying_so_once",
+        ),
+    ),
+    Mutant(
+        # 없는 번들 파일을 upload_failed 로 넘기지 않는다 — finish 가 가지 않는다(P6-1 G4)
+        name="missing-bundle-kills-the-sender",
+        path="src/remote_ci_monitor/remote_worker.py",
+        old=(
+            "                    return self._bundle_unreadable(e)"
+            "  # mutcheck: missing-bundle-kills-the-sender\n"
+        ),
+        new="                    raise\n",
+        tests=(
+            "tests/test_worker_outbox_m5tb.py::"
+            "test_p6_1_g4_a_a_missing_bundle_file_finishes_with_upload_failed",
+        ),
+    ),
+    Mutant(
+        # 예상 못 한 예외에 막힌 끝난 잡의 finish 가 24시간 기다린다(P6-1 G4)
+        name="unexpected-error-holds-finish",
+        path="src/remote_ci_monitor/remote_worker.py",
+        old="        stuck = self.local_error  # mutcheck: unexpected-error-holds-finish\n",
+        new="        stuck = False\n",
+        tests=(
+            "tests/test_worker_outbox_m5tb.py::"
+            "test_p6_1_g4_e_a_finished_job_stuck_on_an_unexpected_error_sends_the_finish_after_300s",
+        ),
+    ),
 )
 
 
