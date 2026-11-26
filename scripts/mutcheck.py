@@ -7310,10 +7310,16 @@ MUTANTS = (
         old=(
             "        self.last_5xx = False\n"
             "        self.answered = False\n"
+            "        self.answered_local = False\n"
             "        self.failures = 0\n"
             "        return True\n"
         ),
-        new="        self.last_5xx = False\n        self.failures = 0\n        return True\n",
+        new=(
+            "        self.last_5xx = False\n"
+            "        self.answered_local = False\n"
+            "        self.failures = 0\n"
+            "        return True\n"
+        ),
         tests=(
             "tests/test_worker_outbox_m5tb.py::test_rl46_c_a_dead_queue_answers_do_not_go_stale",
         ),
