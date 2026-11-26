@@ -145,12 +145,14 @@ path; setup warns when it could only find an `rcm` on `PATH`.
 In a systemd unit a path with a space, `%` or `$` is written the way systemd reads it (quoted,
 `%%`, `$$`); a path with a line break or another control character is refused with exit 2.
 
-**It registers and starts nothing.** It prints the lines to run yourself, with absolute paths:
+**It registers and starts nothing.** It prints the lines to run yourself, with absolute paths and
+your numeric user id in `gui/<uid>` (`gui/501`, what `id -u` prints), so a pasted line holds no
+shell substitution:
 
 ```sh
 mkdir -p <log folder> <LaunchAgents folder>
 cp -n <config dir>/service/<label>.plist <LaunchAgents folder>/<label>.plist
-cmp -s <config dir>/service/<label>.plist <LaunchAgents folder>/<label>.plist && launchctl bootstrap gui/$(id -u) <LaunchAgents folder>/<label>.plist || echo "not started: the installed file differs from the one setup wrote, or the start failed; to replace an installed one: launchctl bootout, cp without -n, launchctl bootstrap"
+cmp -s <config dir>/service/<label>.plist <LaunchAgents folder>/<label>.plist && launchctl bootstrap gui/<uid> <LaunchAgents folder>/<label>.plist || echo "not started: the installed file differs from the one setup wrote, or the start failed; to replace an installed one: launchctl bootout, cp without -n, launchctl bootstrap"
 ```
 
 On Linux the start is `systemctl --user daemon-reload && systemctl --user enable --now
@@ -160,8 +162,8 @@ when you log out. `cp -n` never replaces a file already installed, and the start
 installed file is the one setup just wrote. When a service with the same label is already loaded
 (setup only asks: `launchctl print`, or `systemctl --user is-active` and `is-enabled`), it says so
 and leaves it alone. Then, and when `--force service` rewrote a service file that was there, it
-also prints the order that replaces the installed one: `launchctl bootout gui/$(id -u)/<label>`,
-`cp` without `-n`, `launchctl bootstrap gui/$(id -u) <file>`, or `systemctl --user disable --now
+also prints the order that replaces the installed one: `launchctl bootout gui/<uid>/<label>`,
+`cp` without `-n`, `launchctl bootstrap gui/<uid> <file>`, or `systemctl --user disable --now
 <unit>`, `cp`, `systemctl --user daemon-reload`, `systemctl --user enable --now <unit>`. Only
 launchd's `Could not find service` and systemd's `is-active` exit 3 with `inactive` or `unknown`
 on its output count as not loaded (`activating` or `reloading` does not, and `failed` means the
@@ -171,7 +173,7 @@ printed start may fail on that machine. Once the file is installed, `rcm doctor`
 installed copy, `--label` or not.
 
 **To remove it.** Unload the service, then delete the installed file and the files setup wrote.
-On macOS: `launchctl bootout gui/$(id -u)/<label>` and `rm -f ~/Library/LaunchAgents/<label>.plist`;
+On macOS: `launchctl bootout gui/<uid>/<label>` and `rm -f ~/Library/LaunchAgents/<label>.plist`;
 on Linux: `systemctl --user disable --now <unit>`, `rm -f ~/.config/systemd/user/<unit>` and
 `systemctl --user daemon-reload`. The config file and `<config dir>/service/<file>` go the same
 way; a `data_dir` and its database stay until you delete them. setup prints this as one
@@ -256,7 +258,9 @@ loaded before setup ran, the line adds that it may not be one setup wrote.
   the shelf and the machine list, and a LAN address also the advice to reserve it in your router.
   `127.0.0.1` gets a warning that no other machine can connect.
 - A `coordinator-worker` on a machine that already has `worker.toml` gets a warning: the two run
-  two sets of lanes on one host.
+  two sets of lanes on one host. When `--config` puts this config outside the folder that
+  `worker.toml` is in (a test install next to a running one), the warning names that file as
+  another rcm install's, separate from this config.
 - A flag the role does not use (`--lanes` for a coordinator, `--pool` or `--server` for a
   coordinator, `--advertise` for a client) gets one warning line naming them.
 - When setup cannot tell whether the port is free, or whether a service with the label is already
@@ -341,7 +345,16 @@ directory (a systemd unit outside `~/.config/systemd/user/` without `WorkingDire
 are read (`~/.config/rcm/worker.toml`, `~/.config/rcm/server.toml`); pass `--config` for a file
 anywhere else. `--config` and `--server` given to `rcm doctor` win, with a warning when the
 service starts with another `--config` (or a relative one, which depends on the service's working
-directory and is not compared). A `coordinator` or `coordinator-worker` report
+directory and is not compared). That warning says no service starts rcm with the config given,
+names the service it found by label and file with the config that service uses, another
+install's, and says the given file was measured as given; with `--service-file` it only says that
+the given file starts rcm with another config. With a `--config` outside the default config folder,
+the service file `rcm setup` put next to that config (in its `service/` folder) is looked at first,
+or its installed copy when one with the same label is installed, so a test install next to a
+running one measures its own service. When that folder holds none of the role's files, several,
+or one rcm cannot read, doctor picks nothing from that folder and looks in the places it always
+has; a test install without one of its own falls back to the running install's service, with that
+warning. With the default config, doctor only looks in those places. A `coordinator` or `coordinator-worker` report
 with no server config anywhere is a usage error (exit 2): it does not ask whatever answers on port
 8787 with the built-in defaults. When the service file cannot be read and no `--config` is given,
 or the config the service names cannot be read, rcm does not know what the service runs with: the
@@ -372,7 +385,12 @@ needs them — is `unknown` with `applies: unknown`: it is never read as a `pool
 it misses does not exit 1, and "nothing would come to this machine" is not claimed while it might.
 The coordinator's `[[tools]]` hints show for the server's own lane too.
 
-The service file is found in this order: `--service-file`; the standard places
+The service file is found in this order: `--service-file`; with `--config FILE`, the one `rcm setup`
+put in the `service/` folder next to `FILE` (its copy in the install place instead, whenever a copy
+with the same label is installed there — bytes and `--config` are not compared); this step runs
+only for a `--config` outside the default config folder, and when that folder holds none of the
+role's files, several, or one rcm cannot read, it picks nothing and the next place is tried, so a
+config in the default folder goes straight to the standard order; the standard places
 (`~/Library/LaunchAgents/com.remote-ci-monitor.*.plist`, `~/.config/systemd/user/rcm-*.service`,
 and the system places `/Library/LaunchDaemons/com.remote-ci-monitor.*.plist` and
 `/etc/systemd/system/rcm-*.service`, where the Linux server install above puts

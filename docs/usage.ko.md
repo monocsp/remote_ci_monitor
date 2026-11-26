@@ -51,8 +51,8 @@ rcm 을 쓰는 머신에는 저마다 역할이 있다. `rcm setup` 이 역할 �
    [도는 설치 옆의 시험 설치](#도는-설치-옆의-시험-설치)를 따른다.
 2. **서비스를 설치하고 띄운다.** setup 이 `next —` 아래에 찍은 줄을 찍힌 그대로 친다. macOS 에서는
    `mkdir -p`, `~/Library/LaunchAgents/` 로 복사하는 `cp -n`,
-   `cmp -s … && launchctl bootstrap gui/$(id -u) …` 다. Linux 에서는
-   `sudo loginctl enable-linger $USER`(로그아웃해도 서비스가 남게 한다)와
+   `cmp -s … && launchctl bootstrap gui/501 …` 이다(`501` 자리에는 내 사용자 id 가 찍힌다).
+   Linux 에서는 `sudo loginctl enable-linger $USER`(로그아웃해도 서비스가 남게 한다)와
    `systemctl --user … enable --now` 다. 그러면 `curl http://127.0.0.1:8787/api/health` 가
    답한다. 로그는 macOS 에서 `~/Library/Logs/rcm/server.log`, Linux 에서
    `~/.local/state/rcm/server.log` 다.
@@ -72,20 +72,24 @@ rcm 을 쓰는 머신에는 저마다 역할이 있다. `rcm setup` 이 역할 �
    것이 있음(설치 안내가 같이 찍힌다), 3 은 판정하지 못함(토큰 없음, 서버 꺼짐)이다. 역할을 꼭
    준다. 이 머신은 이제 역할이 둘이라 `--role` 없는 `rcm doctor` 는 종료 2 로 멈춘다. 그다음
    `rcm check` 의 행이 모두 `ok` 여야 한다(`warn` 행이 있어도 종료 0 이다).
-6. **첫 작업을 보낸다.** 아무 디렉터리에서 `rcm run ok` 를 치면 그 디렉터리를 올리고, 템플릿에
-   든 무해한 `ok` 프리셋을 돌리고, stdout 에 JSON 한 줄을 찍고 종료 0 으로 끝난다. 돌려 두고
-   나중에 돌아오려면 이렇게 한다.
+6. **첫 작업을 보낸다.** `rcm run ok` 는 지금 있는 디렉터리를 올린다. 그러니 홈 폴더가 아니라
+   작은 폴더에서 친다. 템플릿에 든 무해한 `ok` 프리셋을 돌리고 종료 0 으로 끝난다. 기다리는 동안
+   `rcm run` 은 stderr 에 상태 줄(작업이 끝나면 `#1 succeeded` 로 시작한다)을 찍고 stdout 에 JSON
+   한 줄을 찍는다. 돌려 두고 나중에 돌아오려면 이렇게 한다.
 
    ```sh
    rcm run ok --no-wait             # 작업 번호를 찍고 바로 돌아온다
    rcm wait --job N --notify        # 작업 N 을 따라간다. 끝나면 데스크톱 알림이 뜬다
    ```
 
-   기다림은 작업이 어디서 어떻게 돌았는지 말하는 한 줄로 끝난다. 예를 들면
-   `#1 succeeded on macmini · 1s` 이고 머신 이름은 내 머신의 것이다. 산출물을 선언한 프리셋이면 그
-   상태가 붙고, 산출물 수집이 실패했으면 경고 줄이 붙는다. JSON 에는 같은 머신이 `ran_on` 으로
-   실린다. 종료 코드는 작업의 것이다. 0 성공, 1 실패, 2 취소나 시간 초과, 3 모름이고 3 은 실패가
-   아니다([Exit codes](../README.ko.md#exit-codes)).
+   `rcm wait` 는 작업이 어디서 어떻게 돌았는지 말하는 한 줄, 예를 들면
+   `#1 succeeded on macmini · 1s` 로 끝나고 머신 이름은 내 머신의 것이다. 이 줄은 `rcm run` 이
+   찍지 않는다. 산출물을 선언한 프리셋이면 그 상태가 붙고, 산출물 수집이 실패했으면 경고 줄이
+   붙는다. JSON 에는 같은 머신이 `ran_on` 으로 실린다. 종료 코드는 작업의 것이다. 0 성공, 1 실패,
+   2 취소나 시간 초과, 3 모름이고 3 은 실패가 아니다([Exit codes](../README.ko.md#exit-codes)).
+   `--notify` 는 알림을 보내는 데 성공하면 아무것도 찍지 않고 OS 알림만 띄운다. 보내지 못하면
+   경고 한 줄을 찍는다. `ok` 작업은 1초 안에 끝나므로 알림을 보려면 늦게 시작하는 작업을
+   기다려 본다. `rcm run ok --in 30s --no-wait` 로 보낸 뒤 `rcm wait --job N --notify` 를 친다.
 7. **내 것으로 만든다.** `server.toml` 의 예시 프리셋을 팀이 실제로 돌리는 명령으로 바꾼다
    ([Configuration](configuration.md)). 프리셋을 바꾼 뒤에는 `rcm reload` 가 재시작 없이
    적용한다. 파일 끝에는 주석으로 단 툴체인 카탈로그가 있다. Flutter, Xcode, Android, Node,
@@ -144,12 +148,24 @@ rcm serve --config ~/rcm-test/server.toml      # 따로 연 터미널에서. Ctr
 (umask 077 && rcm token --config ~/rcm-test/server.toml add test > ~/rcm-test/token) && chmod 600 ~/rcm-test/token
 export RCM_TOKEN="$(cat ~/rcm-test/token)"
 RCM_SERVER=http://127.0.0.1:8790 rcm check --config ~/rcm-test/server.toml
+mkdir -p ~/rcm-test/job && cd ~/rcm-test/job   # 빈 폴더. rcm run 은 지금 있는 폴더를 올린다
 RCM_SERVER=http://127.0.0.1:8790 rcm run ok
 unset RCM_TOKEN                                # 시험 토큰이 export 된 채 남지 않게 한다
 ```
 
 `umask 077` 은 서브셸 안에서만 적용된다. 그래서 토큰 파일은 `chmod` 가 돌기 전에도 셸의 umask 가
-허락하는 만큼이 아니라 처음부터 본인만 읽을 수 있게 만들어진다.
+허락하는 만큼이 아니라 처음부터 본인만 읽을 수 있게 만들어진다. `rcm run` 은 지금 폴더를 올린다.
+그래서 블록은 작은 빈 폴더를 만들고 거기서 작업을 보낸다(`--dir <폴더>` 를 줘도 된다). 홈 폴더에서
+치면 홈 폴더를 통째로 올린다. `export RCM_TOKEN` 과 `unset RCM_TOKEN` 은 그 셸 안에서만 효력이
+있으므로 블록의 줄은 같은 터미널에서 차례로 친다. `rcm serve` 만 따로 연 터미널에서 돌린다.
+
+시험 설치에서도 `rcm version` · `rcm doctor` · `rcm setup` 은 도는 설치의 기본 설정 · 서비스 ·
+캐시를 보여 줄 수 있다. 이 명령들은 기본 자리도 보기 때문이다. `rcm doctor --config
+~/rcm-test/server.toml` 은 setup 이 `~/rcm-test/service/` 에 둔 서비스 파일로 재고, 그 파일을
+설치했으면 설치한 사본으로 잰다. 그 폴더에 파일이 없거나 여럿일 때만 도는 설치의 서비스로 재고,
+그 서비스가 다른 설치의 설정으로 rcm 을 띄운다고 말한다.
+`rcm setup` 은 도는 설치의 `worker.toml` 이 이 설정과 별개라고 말한다. 시험 클라이언트를 시험 서버에 묶는 것은 위 블록처럼 `RCM_SERVER` 와
+`RCM_TOKEN`(또는 `--server`)이다.
 
 시험 빌드에 도는 설치의 `--config` 나 `--data-dir` 을 주지 않는다. DB 를 여는 rcm 은 그 DB 를 자기
 판으로 마이그레이션한다.

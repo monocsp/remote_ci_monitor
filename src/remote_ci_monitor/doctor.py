@@ -827,6 +827,56 @@ def _matching(
     return out
 
 
+def _service_files_in(folder: Path) -> list[Path]:
+    return sorted(p for p in folder.glob("*") if p.suffix in (".plist", ".service") and p.is_file())
+
+
+def _default_config_dir(config: Path, home: Path, config_dir: Path) -> bool:
+    """`config` 가 기본 설정 폴더(`user_config_dir()` 나 서버의 옛 자리 `~/.config/rcm`)의 파일인가.
+    역할마다의 기본 설정 파일(`server.toml` · `worker.toml` · `client.toml`)이 모두 그 폴더에 있다.
+    실경로로 견주고 대소문자는 setup 의 `place_key` 규칙을 따른다(macOS 는 접는다)."""
+    fold = setup_core.folds_case(PLATFORM)
+    here = setup_core.place_key(config.parent.resolve(), fold_case=fold)
+    return any(
+        here == setup_core.place_key(d.resolve(), fold_case=fold)
+        for d in (config_dir, home / ".config" / "rcm")
+    )
+
+
+def _own_service_files(config: Path, home: Path) -> list[Path]:
+    """`--config` 의 설치가 쓰는 서비스 파일 후보 — setup 이 그 설정 옆에 둔 파일
+    (`core.setup.staged_service_dir`, setup 이 쓰는 자리와 같은 규칙)마다 하나.
+
+    같은 라벨로 서비스 관리자의 자리(`core.setup.install_path`)에 설치된 사본이 있으면 그 사본이
+    이긴다. 바이트도 `--config` 도 견주지 않는다 — 서비스 관리자가 읽는 것은 그 파일이다(6-B-V2
+    의 「설치본 우선」). 견주었더니 손으로 고친 설치본이나 상대 경로 `--config` 로 뜨는 설치본이
+    setup 사본에 졌다(PR #277 검토 MED 1)."""
+    out: list[Path] = []
+    for p in _service_files_in(setup_core.staged_service_dir(config)):
+        named = setup_core.label_of_file(p.name)
+        there = setup_core.install_path(*named, home) if named else None
+        out.append(there if there is not None and there.is_file() else p)
+    return out
+
+
+def _own_service_file(
+    config: Path, role: str, *, home: Path, config_dir: Path, user_home: str | None
+) -> ServiceFile | None:
+    """`--config` 의 설치가 쓰는 서비스 파일 하나, 또는 None(이 단계에서는 고르지 않았다).
+
+    이 단계는 예전 순서 앞에 더한 것이라 예전에 성공하던 경우의 결과를 바꾸지 않는다(PR #277
+    검토). 그래서 기본 설정 폴더의 `--config` 면 돌지 않는다 — 그 폴더의 `service/` 는 예전 순서의
+    마지막 자리다. 이 역할의 파일이 여럿이거나 그 폴더의 파일을 못 읽어도 고르지 않는다. 사용법
+    오류(exit 2)도 「서비스 파일 없음」도 새로 내지 않고 예전 순서로 넘긴다(검토 MED 2)."""
+    if _default_config_dir(config, home, config_dir):
+        return None
+    skipped: list[ServiceFileUnreadable] = []
+    found = _matching(_own_service_files(config, home), role, skipped, user_home)
+    if skipped or len(found) != 1:
+        return None
+    return found[0]
+
+
 def pick_service_file(
     explicit: str | None,
     role: str,
@@ -834,9 +884,16 @@ def pick_service_file(
     home: Path,
     config_dir: Path,
     unreadable: list[ServiceFileUnreadable] | None = None,
+    config_file: Path | None = None,
 ) -> ServiceFile | None:
-    """찾는 순서: `--service-file`, 표준 라벨의 설치 자리(사용자 자리와 시스템 자리
-    `/etc/systemd/system` · `/Library/LaunchDaemons`), setup 의 자리 `<config dir>/service/*`.
+    """찾는 순서: `--service-file`, `config_file`(사람이 준 `--config`)의 설치가 쓰는 서비스 파일,
+    표준 라벨의 설치 자리(사용자 자리와 시스템 자리 `/etc/systemd/system` ·
+    `/Library/LaunchDaemons`), setup 의 자리 `<config dir>/service/*`.
+
+    `config_file` 의 자리를 먼저 보는 것은 시험 설치 때문이다 — 도는 설치 옆의 시험 설치에서
+    doctor 가 시험 설치의 서비스 파일을 못 보고 도는 설치의 서비스로 쟀다(온보딩 시험 OB2). 그
+    단계는 기본 설정 폴더 밖의 `config_file` 에서만 돌고, 같은 라벨의 설치본이 setup 사본을
+    이기며, 이 역할의 파일 하나를 읽었을 때만 고른다. 아니면 아래 순서로 간다(`_own_service_file`).
 
     설치 자리를 setup 자리보다 먼저 본다 — 서비스 관리자가 실제로 읽는 파일이다(6-B-V2). 후보는
     그 역할의 `rcm` 하위 명령을 띄우는 파일로 거른다. 같은 자리에 둘 이상이면 사람이 고르고,
@@ -869,9 +926,7 @@ def pick_service_file(
     system_files = sorted(LAUNCH_DAEMONS_DIR.glob(LAUNCH_AGENTS_GLOB)) + sorted(
         SYSTEM_UNIT_DIR.glob(SYSTEMD_GLOB)
     )
-    staged = sorted(
-        p for p in staged_dir.glob("*") if p.suffix in (".plist", ".service") and p.is_file()
-    )
+    staged = _service_files_in(staged_dir)
     # `rcm setup --label` 로 쓴 서비스는 표준 라벨의 글롭에 걸리지 않는다. setup 자리의 파일마다
     # setup 이 찍은 복사 명령의 목적지를 같은 규칙(`core.setup.install_path`, 6-B-V1)으로 풀어 설치
     # 자리 후보에 더한다 — 설치한 뒤에는 서비스 관리자가 읽는 그 파일을 잰다
@@ -883,6 +938,12 @@ def pick_service_file(
         place = launch_agents if named[1] == setup_core.LAUNCHD else user_units
         if there.is_file() and there not in place:
             place.append(there)
+    if config_file is not None:
+        own = _own_service_file(
+            config_file, role, home=home, config_dir=config_dir, user_home=user_home
+        )
+        if own is not None:
+            return own
     for stage in (launch_agents + user_units + system_files, staged):
         before = len(skipped)
         found = _matching(stage, role, skipped, user_home)
@@ -1640,6 +1701,10 @@ class _Run:
                 home=Path(self.home),
                 config_dir=user_config_dir(),
                 unreadable=skipped,
+                # 준 설정의 설치가 쓰는 서비스 파일을 먼저 본다(온보딩 시험 OB2)
+                config_file=(
+                    Path(self.opts.config).expanduser().absolute() if self.opts.config else None
+                ),
             )
         except ServiceFileUnreadable as e:
             sf, broken = None, e
@@ -1846,9 +1911,24 @@ class _Run:
             )
             return
         if Path(theirs).expanduser().resolve() != mine.resolve():
+            # 찾은 서비스는 이 설정을 쓰지 않는다 — 시험 설치 옆의 운영 서비스일 수 있다. 「the
+            # service」 만 말하면 그 서비스가 자기 것인지 알 수 없었다(온보딩 시험 OB2). 라벨과
+            # 파일을 대고 다른 설치의 설정이라고 말한다. 판정 · `--json` 의 키는 그대로다
+            sf = self._service_file
+            label = sf.path.stem if sf is not None else "the service"
+            shown = self.mask(str(mine))
+            if self.opts.service_file:
+                # 사람이 준 파일 하나만 봤다 — 「이 설정으로 뜨는 서비스가 없다」는 과장이다(PR #277
+                # 검토 LOW). 그 파일이 다른 설정으로 뜬다고만 말한다
+                self.warnings.append(
+                    f"the given service file ({self.service['file']}) starts rcm with --config "
+                    f"{self.mask(theirs)}, not {shown}; {shown} was measured as given"
+                )
+                return
             self.warnings.append(
-                f"the service starts rcm with --config {self.mask(theirs)}, not "
-                f"{self.mask(str(mine))} — measured with the file given"
+                f"no service starts rcm with --config {shown} — {label} "
+                f"({self.service['file']}) starts rcm with --config {self.mask(theirs)}, another "
+                f"install's config; {shown} was measured as given"
             )
 
     def config_dirs(self, env: Mapping[str, str]) -> list[Path]:

@@ -3739,9 +3739,12 @@ def _init_worker_service(args: argparse.Namespace, config: Path) -> int:
         "your shell's RCM_WORKER_TOKEN does not reach it"
     )
     if kind == "launchd":
+        # 사람이 붙여 넣는 줄이다 — setup 과 같게 숫자 uid 를 찍고 셸 치환을 두지 않는다(OB3)
+        from remote_ci_monitor.core.setup import gui_domain
+
         _info(
             f"next: mkdir -p {home / 'Library' / 'Logs' / 'rcm'} && "
-            f"launchctl bootstrap gui/$(id -u) {target}"
+            f"launchctl bootstrap {gui_domain()} {target}"
         )
     else:
         _info(

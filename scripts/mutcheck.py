@@ -3889,10 +3889,13 @@ MUTANTS = (
         name="setup-remove-line-without-cmp",
         path="src/remote_ci_monitor/core/setup.py",
         old=(
-            '            service = f"{same} && {{ launchctl bootout gui/$(id -u)/{q(label)}; '
+            '            service = f"{same} && {{ launchctl bootout {gui_domain(uid)}/{q(label)}; '
             '{gone}; }}; "\n'
         ),
-        new='            service = f"{{ launchctl bootout gui/$(id -u)/{q(label)}; {gone}; }}; "\n',
+        new=(
+            '            service = f"{{ launchctl bootout {gui_domain(uid)}/{q(label)}; '
+            '{gone}; }}; "\n'
+        ),
         tests=(
             "tests/test_setup.py::"
             "test_b8_3_the_remove_line_takes_the_installed_file_only_when_setup_wrote_it",
@@ -3913,11 +3916,11 @@ MUTANTS = (
         name="setup-remove-line-unload-gates-the-rm",
         path="src/remote_ci_monitor/core/setup.py",
         old=(
-            '            service = f"{same} && {{ launchctl bootout gui/$(id -u)/{q(label)}; '
+            '            service = f"{same} && {{ launchctl bootout {gui_domain(uid)}/{q(label)}; '
             '{gone}; }}; "\n'
         ),
         new=(
-            '            service = f"{same} && launchctl bootout gui/$(id -u)/{q(label)} && '
+            '            service = f"{same} && launchctl bootout {gui_domain(uid)}/{q(label)} && '
             '{gone}; "\n'
         ),
         tests=(
@@ -4705,6 +4708,110 @@ MUTANTS = (
         tests=(
             "tests/test_acceptance_m5t_live.py::"
             "test_tr16_bootout_checks_the_label_again_and_removes_only_a_test_file",
+        ),
+    ),
+    Mutant(
+        # 시험 설치의 setup 이 기본 자리의 worker.toml(운영 설치의 것)을 「이 머신에 이미 있다」고
+        # 제 것처럼 말한다(온보딩 시험 OB1)
+        name="ob1-setup-worker-toml-of-another-install-as-own",
+        path="src/remote_ci_monitor/setup.py",
+        old=(
+            "    if worker.is_file() and core.place_key(real_path(worker.parent), "
+            "fold_case=fold) != here:\n"
+        ),
+        new="    if False:\n",
+        tests=(
+            "tests/test_onboarding_findings.py::"
+            "test_ob1_a_worker_toml_outside_this_configs_folder_is_another_installs",
+        ),
+    ),
+    Mutant(
+        # doctor 가 찾은 서비스가 다른 설정으로 떠도 「the service starts rcm with …」 만 말한다 —
+        # 시험 설치에서 그 서비스가 남의 것인지 알 수 없다(온보딩 시험 OB2)
+        name="ob2-doctor-another-installs-service-unnamed",
+        path="src/remote_ci_monitor/doctor.py",
+        old='                f"no service starts rcm with --config {shown} — {label} "\n',
+        new='                f"the service starts rcm with --config {shown} — {label} "\n',
+        tests=(
+            "tests/test_onboarding_findings.py::"
+            "test_ob2_doctor_says_the_service_it_found_runs_another_config",
+        ),
+    ),
+    Mutant(
+        # setup 이 찍는 launchctl 줄이 셸 치환 `gui/$(id -u)` 로 돌아간다 — 사람이 붙여 넣는 줄에
+        # 치환이 있고, 안전 훅이 그 줄을 막는다(온보딩 시험 OB3)
+        name="ob3-setup-gui-domain-command-substitution",
+        path="src/remote_ci_monitor/core/setup.py",
+        old='    return f"gui/{os.getuid() if uid is None else uid}"\n',
+        new='    return "gui/$(id -u)"\n',
+        tests=(
+            "tests/test_onboarding_findings.py::"
+            "test_ob3_setup_prints_the_numeric_uid_not_a_command_substitution",
+            "tests/test_onboarding_findings.py::test_ob3_core_commands_take_the_uid_they_are_given",
+        ),
+    ),
+    Mutant(
+        # doctor 가 `--config` 옆 `service/` 의 서비스 파일을 보지 않는다 — 시험 설치가 자기
+        # 서비스 파일을 못 찾고 도는 설치의 서비스로 잰다(온보딩 시험 OB2 의 근본 원인)
+        name="ob2-doctor-skips-this-configs-service-file",
+        path="src/remote_ci_monitor/doctor.py",
+        old="    if config_file is not None:\n        own = _own_service_file(\n",
+        new="    if False:\n        own = _own_service_file(\n",
+        tests=(
+            "tests/test_onboarding_findings.py::"
+            "test_ob2_doctor_measures_the_service_file_setup_put_next_to_this_config",
+            "tests/test_onboarding_findings.py::"
+            "test_ob2_doctor_prefers_the_installed_copy_of_this_configs_service_file",
+        ),
+    ),
+    Mutant(
+        # 같은 라벨의 설치본이 setup 사본을 이기지 않고 늘 setup 사본을 고른다 — 설치본 우선
+        # (6-B-V2)이 깨져 손으로 고친 설치본 대신 설치하지 않은 사본으로 잰다
+        name="ob2-doctor-staged-copy-beats-the-installed-copy",
+        path="src/remote_ci_monitor/doctor.py",
+        old="        out.append(there if there is not None and there.is_file() else p)\n",
+        new="        out.append(p)\n",
+        tests=(
+            "tests/test_onboarding_findings.py::"
+            "test_ob2_trial_config_measures_the_installed_copy_of_the_same_label",
+            "tests/test_onboarding_findings.py::"
+            "test_ob2_doctor_prefers_the_installed_copy_of_this_configs_service_file",
+        ),
+    ),
+    Mutant(
+        # 기본 설정 폴더의 `--config` 에서도 새 단계가 돈다 — 설치하지 않은 setup 사본이 표준
+        # 라벨의 설치된 서비스를 이겨 예전 결과가 바뀐다(PR #277 검토 MED 1)
+        name="ob2-doctor-new-stage-runs-for-the-default-config",
+        path="src/remote_ci_monitor/doctor.py",
+        old="    if _default_config_dir(config, home, config_dir):\n        return None\n",
+        new="    if False:\n        return None\n",
+        tests=(
+            "tests/test_onboarding_findings.py::"
+            "test_ob2_default_config_keeps_the_old_order_over_a_staged_only_file",
+        ),
+    ),
+    Mutant(
+        # 설정 옆 `service/` 에 이 역할의 파일이 여럿이어도 새 단계가 하나를 고른다 — 예전
+        # 순서로 넘기지 않는다(PR #277 검토 MED 2)
+        name="ob2-doctor-picks-one-of-several-next-to-the-config",
+        path="src/remote_ci_monitor/doctor.py",
+        old="    if skipped or len(found) != 1:\n        return None\n    return found[0]\n",
+        new="    if skipped or not found:\n        return None\n    return found[0]\n",
+        tests=(
+            "tests/test_onboarding_findings.py::"
+            "test_ob2_several_files_next_to_the_config_fall_back_to_the_old_order",
+        ),
+    ),
+    Mutant(
+        # `rcm init worker --service-file` 의 `next:` 줄이 셸 치환 `gui/$(id -u)` 로 돌아간다
+        # (온보딩 시험 OB3 의 남은 한 곳)
+        name="ob3-init-worker-gui-domain-command-substitution",
+        path="src/remote_ci_monitor/cli.py",
+        old='            f"launchctl bootstrap {gui_domain()} {target}"\n',
+        new='            f"launchctl bootstrap gui/$(id -u) {target}"\n',
+        tests=(
+            "tests/test_onboarding_findings.py::"
+            "test_ob3_init_worker_service_file_hint_prints_the_numeric_uid",
         ),
     ),
 )

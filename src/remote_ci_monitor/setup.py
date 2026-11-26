@@ -1177,11 +1177,31 @@ def _server(
         )
     warnings.extend(core.bind_warnings(kind))
     if role == dc.ROLE_COORDINATOR_WORKER and dc.ROLE_WORKER in roles_here:
-        warnings.append(
-            "this machine already has worker.toml — an rcm worker next to a coordinator-worker "
-            "runs two sets of lanes on one host; that is only needed for a second worker"
-        )
+        warnings.append(_worker_next_door(path, world))
     return plan
+
+
+def _worker_next_door(config: Path, world: World) -> str:
+    """이 머신에 워커가 있을 때의 경고 — 한 호스트에 레인이 두 벌 돈다는 것을 알린다.
+
+    워커는 기본 설정 폴더(`user_config_dir()`)의 `worker.toml` 로 안다(`doctor.infer_roles`).
+    이 설정이 그 폴더 밖이면(시험 설치의 `--config`) 그 파일은 다른 rcm 설치의 것이다 — 「이
+    머신에 이미 있다」고 이 설치의 것처럼 말하지 않고 경로를 대고 별개라고 말한다(온보딩 시험
+    OB1, 2026-11-26)."""
+    from remote_ci_monitor.config import user_config_dir
+
+    worker = user_config_dir() / "worker.toml"
+    fold = core.folds_case(world.platform)
+    here = core.place_key(real_path(config.parent), fold_case=fold)
+    if worker.is_file() and core.place_key(real_path(worker.parent), fold_case=fold) != here:
+        return (
+            f"another rcm install's worker.toml is at {worker} — it is separate from this config "
+            f"({config}); if both run, this host runs two sets of lanes"
+        )
+    return (
+        "this machine already has worker.toml — an rcm worker next to a coordinator-worker "
+        "runs two sets of lanes on one host; that is only needed for a second worker"
+    )
 
 
 def _render_service(
