@@ -163,7 +163,8 @@ and leaves it alone. Then, and when `--force service` rewrote a service file tha
 also prints the order that replaces the installed one: `launchctl bootout gui/$(id -u)/<label>`,
 `cp` without `-n`, `launchctl bootstrap gui/$(id -u) <file>`, or `systemctl --user disable --now
 <unit>`, `cp`, `systemctl --user daemon-reload`, `systemctl --user enable --now <unit>`. Only
-launchd's `Could not find service` and systemd's `is-active` exit 3 count as not loaded; any other
+launchd's `Could not find service` and systemd's `is-active` exit 3 with `inactive`, `failed` or
+`unknown` on its output count as not loaded (`activating` or `reloading` does not); any other
 answer (no user session, `Failed to connect to bus`) is "could not tell", with a warning that the
 printed start may fail on that machine. Once the file is installed, `rcm doctor` reads the
 installed copy, `--label` or not.

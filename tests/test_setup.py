@@ -1439,7 +1439,10 @@ def test_s7_systemd_only_an_inactive_unit_is_not_loaded(
 ):
     # systemctl is-active 의 3 은 「active 아님」(systemctl(1) Exit status), 1 은 「Failed to
     # connect to bus」 같은 실패다 — 모름
-    script = f'case "$2" in is-active) exit {active};; *) exit {enabled};; esac\n'
+    # 진짜 systemctl 처럼 is-active 는 상태 낱말을 stdout 에 찍는다(batch 8 부터 3 은 그 낱말과
+    # 함께 읽는다)
+    word = "active" if active == 0 else "inactive"
+    script = f'case "$2" in is-active) echo {word}; exit {active};; *) exit {enabled};; esac\n'
     _manager_stub(tmp_path / "bin", "systemctl", script)
     monkeypatch.setenv("PATH", str(tmp_path / "bin"))
     assert setup.service_loaded("systemd", "test.rcm.server") is loaded
@@ -1587,3 +1590,25 @@ def test_b8_3_a_label_already_loaded_may_not_be_setups(cfg, tmp_path):
     fake = Fake()
     assert go(fake, *coordinator_args(tmp_path / "data2"), "--force", "all") == 0
     assert "may not be one setup wrote" not in _lines(fake)[-2]
+
+
+@pytest.mark.parametrize(
+    ("state", "loaded"),
+    [
+        ("inactive", False),
+        ("failed", False),
+        ("unknown", False),
+        ("activating", None),
+        ("reloading", None),
+        ("", None),
+    ],
+)
+def test_b8_4_systemd_exit_3_is_absent_only_for_an_absent_state(
+    tmp_path, monkeypatch, state, loaded
+):
+    # v1-2 · v2: is-active 가 3 이어도 stdout 이 activating · reloading 이면 모른다. inactive ·
+    # failed · unknown 만 「없음」이다
+    script = f'case "$2" in is-active) echo "{state}"; exit 3;; *) echo "disabled"; exit 1;; esac\n'
+    _manager_stub(tmp_path / "bin", "systemctl", script)
+    monkeypatch.setenv("PATH", str(tmp_path / "bin"))
+    assert setup.service_loaded("systemd", "test.rcm.server") is loaded

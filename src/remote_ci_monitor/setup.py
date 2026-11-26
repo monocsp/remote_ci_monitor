@@ -149,6 +149,9 @@ LAUNCHD_NO_SERVICE = "Could not find service"
 #: `systemctl is-active` 의 「active 아님」 — systemctl(1) 「Exit status」 표의 3(LSB 의 「program
 #: is not running」). 버스에 닿지 못하면(`Failed to connect to bus`) 1 이다 — 그쪽은 모른다
 SYSTEMD_INACTIVE = 3
+#: 3 과 함께 stdout 이 이 낱말일 때만 「없음」이다. `activating` · `reloading` · `deactivating`
+#: 은 그 유닛이 있다는 뜻이라 모른다(P6 재확인 4 · v1-2). 없는 유닛은 `inactive` 다
+SYSTEMD_ABSENT_STATES = frozenset({"inactive", "failed", "unknown"})
 
 
 def service_loaded(manager: str, label: str) -> bool | None:
@@ -174,7 +177,10 @@ def service_loaded(manager: str, label: str) -> bool | None:
     if any(answer is not None and answer[0] == 0 for answer in answers):
         return True
     active = answers[0]
-    return False if active is not None and active[0] == SYSTEMD_INACTIVE else None
+    if active is None or active[0] != SYSTEMD_INACTIVE:
+        return None
+    state = active[1].strip().split("\n", 1)[0].strip()
+    return False if state in SYSTEMD_ABSENT_STATES else None
 
 
 def host_facts() -> dict[str, Any]:

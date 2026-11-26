@@ -3487,9 +3487,18 @@ MUTANTS = (
         # systemctl 의 버스 실패(1)도 「올라가지 않음」으로 읽는다(P5 A-E2)
         name="setup-systemd-unknown-read-as-absent",
         path="src/remote_ci_monitor/setup.py",
-        old="    return False if active is not None and active[0] == SYSTEMD_INACTIVE else None\n",
-        new="    return False\n",
+        old="    if active is None or active[0] != SYSTEMD_INACTIVE:\n",
+        new="    if active is None:\n",
         tests=("tests/test_setup.py::test_s7_systemd_only_an_inactive_unit_is_not_loaded",),
+    ),
+    Mutant(
+        # is-active 의 3 을 stdout 과 상관없이 「없음」으로 읽는다 — activating · reloading 인
+        # 유닛이 「올라가지 않음」이 된다(P6 재확인 4 · v1-2)
+        name="setup-systemd-activating-read-as-absent",
+        path="src/remote_ci_monitor/setup.py",
+        old="    return False if state in SYSTEMD_ABSENT_STATES else None\n",
+        new="    return False\n",
+        tests=("tests/test_setup.py::test_b8_4_systemd_exit_3_is_absent_only_for_an_absent_state",),
     ),
     Mutant(
         # `--bind` 의 이름을 받는다 — 묶어 보는 자리에서 DNS · mDNS 로 이름을 푼다(P5 A-E7)
