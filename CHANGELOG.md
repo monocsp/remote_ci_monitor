@@ -217,15 +217,18 @@ of a key bumps that number and is listed here.
   did. The `server: found …` line and the "several rcm servers" messages of every command clean
   the name and address found on the network to one line.
   ([#268](https://github.com/monocsp/remote_ci_monitor/pull/268))
-- **`tools/guard_production.py` no longer refuses ordinary commands as ones that could reach
-  `rcm setup`.** A quoted title, commit message or comment body that names rcm (`--title "$T"`
-  after `T='feat(cli): rcm wait …'`, `--body "… rcm (job 3712) …"`) no longer arms the setup net,
-  unless the same command also runs text (`sh -c`, `bash -c`, `eval`, `xargs`, `python -c`,
-  `alias`, a git shell alias). A launcher counts only where a command stands: `-x` only when the
-  command is `fd`, `-exec` only when it is `find`, so `tar -x`, `unzip -x`, `grep -x` and
-  `grep -n expect` are not launchers any more; redirections and wrappers in front
-  (`<f xargs rcm`, `nice xargs rcm`) still are. A command with a heredoc or an unclosed quote is
-  judged as before. Text naming both rcm and `setup` is still refused.
+- **`tools/guard_production.py` lets a few ordinary commands through that its `rcm setup` net
+  refused.** The net of #272 still decides; it now lets a command through only when every
+  command in it is on a closed list of plain commands (`cd`, `git` with a plain subcommand, `gh`,
+  `python3 tools/guard_naming.py`, `tar`, `grep`, `fd` and `find` without their exec flags,
+  `rcm`, …) and its rcm words stand only in text: a `gh pr create|edit|comment|review` title or
+  body, a `gh api -f body=` value, a `git commit -m` message, the text given to
+  `tools/guard_naming.py`, `printf '%s' … > file.txt`, or a one-letter variable used only there.
+  `tar -x`, `unzip -x`, `grep -x`, `grep -n expect` and `git log --grep xargs` in such a command
+  are not launchers. Anything else the old net refused is still refused: `trap`, `eval`, git
+  aliases and `-c`, environment-variable commands such as `GIT_SSH_COMMAND`, a wrapper such as
+  `taskset`, a function, `coproc`, a command named by a variable or a path, a `#` comment, a
+  heredoc, and text naming both rcm and `setup`.
   ([#274](https://github.com/monocsp/remote_ci_monitor/pull/274))
 
 ## [0.10.0] - 2026-11-23
