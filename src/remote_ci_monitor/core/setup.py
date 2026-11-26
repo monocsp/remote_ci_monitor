@@ -897,9 +897,9 @@ def production_refusal(
     2. 대상이 어느 서비스의 서비스 파일 · 설정 · data_dir · venv · 체크아웃이거나 그 안이면
        거절한다.
     3. setup 의 라벨(과 그 유닛 이름)이 설치된 서비스의 이름이면 `--force service` 이고 설치
-       파일이 setup 이 쓴(쓸) 파일과 같을 때(`written`)만 받는다. 그 서비스는 setup 자신의
-       것이라 2 에서도 견주지 않는다 — 설치한 뒤 `--force` 로 다시 쓰는 길이다(덮는 것은
-       여전히 `--force` 의 몫이다)."""
+       파일이 setup 이 쓴(쓸) 파일과 같을 때(`written`)만 받는다. 이 예외는 라벨 검사에만
+       있다 — 그 서비스의 설정 · data_dir · venv · 체크아웃은 2 에서 예외 없이 거절한다(batch
+       10 H1: 같은 인자에 `--force all` 이면 설치된 서비스가 읽는 설정을 덮었다)."""
     for svc in services:
         if svc.problem is not None:
             return (
@@ -914,8 +914,6 @@ def production_refusal(
 
     for flag, target in targets.items():
         for svc in services:
-            if own(svc):
-                continue
             for attr, what in PRODUCTION_PIECES:
                 root = getattr(svc, attr)
                 if root is not None and same_or_inside(target, root, fold_case=fold_case):

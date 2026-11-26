@@ -3801,7 +3801,23 @@ MUTANTS = (
         new="        return named and force_service\n",
         tests=(
             "tests/test_setup.py::test_b9_352_the_production_label_needs_force_service_and_the_same_file",
-            "tests/test_setup.py::test_b9_352_a_label_setup_wrote_and_installed_may_be_rewritten_with_force",
+            "tests/test_setup.py::test_b9_352_setups_own_installed_service_still_guards_its_config",
+        ),
+    ),
+    Mutant(
+        # setup 자신의 서비스(라벨 · `--force service` · 같은 바이트)면 설정 · data_dir · venv ·
+        # 체크아웃도 견주지 않는다 — 같은 인자에 `--force all` 이면 그 서비스의 설정을 덮는다
+        # (batch 10 H1)
+        name="setup-production-own-skips-every-piece",
+        path="src/remote_ci_monitor/core/setup.py",
+        old="        for svc in services:\n            for attr, what in PRODUCTION_PIECES:\n",
+        new=(
+            "        for svc in services:\n            if own(svc):\n                continue\n"
+            "            for attr, what in PRODUCTION_PIECES:\n"
+        ),
+        tests=(
+            "tests/test_setup.py::test_b9_352_setups_own_installed_service_still_guards_its_config",
+            "tests/test_setup.py::test_b10_h1_setups_own_service_is_free_of_the_label_check_only",
         ),
     ),
     Mutant(
