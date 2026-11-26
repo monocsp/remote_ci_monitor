@@ -15,6 +15,7 @@ of a key bumps that number and is listed here.
   question now also goes over the loopback interface, and each server listens there too. A
   server on another computer still has to hear the network; on macOS, check the Local Network
   permission of the process that runs `rcm serve`.
+  ([#280](https://github.com/monocsp/remote_ci_monitor/pull/280))
 
 ## [0.11.0] - 2026-11-26
 
