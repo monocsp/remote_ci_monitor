@@ -5871,6 +5871,45 @@ MUTANTS = (
             "test_rl10_an_unconfirmed_fenced_process_keeps_the_job_until_its_last_heard_plus_g",
         ),
     ),
+    Mutant(
+        # `[server]` 가 바뀐 reload 를 거절하지 않는다 — 긴 수명 스레드는 옛 G 로 돌고 claim 은
+        # 새 G 를 얼린다(RL30)
+        name="reload-takes-a-changed-server-section",
+        path="src/remote_ci_monitor/server.py",
+        old="            if getattr(fresh, section) != getattr(self.config, section)\n",
+        new="            if False\n",
+        tests=(
+            "tests/test_worker_selfstop_m5tb.py::"
+            "test_rl30_a_reload_that_changes_the_grace_is_refused_whole_and_keeps_the_old_values",
+        ),
+    ),
+    Mutant(
+        # 홀드 판정이 claim 때 얼린 `irreversible` 대신 지금 설정의 표를 본다 — reload 로 표식을
+        # 뗀 프리셋의 도는 잡이 닫힐 때 그룹이 풀린다(RL30 · 결정 257)
+        name="hold-reads-the-reloaded-preset",
+        path="src/remote_ci_monitor/store.py",
+        old=(
+            '        if row["irreversible"] is not None:\n'
+            '            return bool(row["irreversible"])\n'
+        ),
+        new='        if False:\n            return bool(row["irreversible"])\n',
+        tests=(
+            "tests/test_worker_selfstop_m5tb.py::"
+            "test_rl30_irreversible_changed_by_a_reload_while_a_job_runs_reaches_only_the_next_claim",
+        ),
+    ),
+    Mutant(
+        # 워커 grace 가 커도 표식 잡의 grace_J 를 줄이지 않는다 — 문턱 `G − m` 이 L 아래로
+        # 내려간다(RL30 · §4.3)
+        name="irreversible-grace-not-lowered",
+        path="src/remote_ci_monitor/remote_worker.py",
+        old="        grace = max(1, min(conf, cap))\n",
+        new="        grace = conf\n",
+        tests=(
+            "tests/test_worker_selfstop_m5tb.py::"
+            "test_rl30_the_worker_grace_seconds_keeps_its_meaning_and_shrinks_only_for_an_irreversible_job",
+        ),
+    ),
 )
 
 

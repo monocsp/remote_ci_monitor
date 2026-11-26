@@ -22,6 +22,7 @@ from remote_ci_monitor.config import (
     WorkerConfig,
     disconnect_grace,
     load_server_config,
+    parse_preset,
 )
 from remote_ci_monitor.core.model import CANCELLED, CANCELLING, LOST, RUNNING, SUCCEEDED
 from remote_ci_monitor.runner import RunResult
@@ -122,6 +123,102 @@ def test_rl30_claim_freezes_the_grace_and_a_reload_changes_only_the_next_claim(t
         assert srv.store.get_job(a).disconnect_grace_seconds == 300
     finally:
         srv.close()
+
+
+def _reload_with(srv: WorkerServer, monkeypatch, edit: Any) -> Any:
+    """`App.reload_config` 를 진짜로 돌린다 — 파일 대신 지금 설정의 사본을 `edit` 로 고쳐 읽힌다."""
+    import copy
+
+    from remote_ci_monitor import server as server_mod
+
+    fresh = copy.deepcopy(srv.app.config)
+    edit(fresh)
+    srv.app.config.path = Path("server.toml")
+    fresh.path = srv.app.config.path
+    monkeypatch.setattr(server_mod, "load_server_config", lambda path: fresh)
+    return srv.app.reload_config()
+
+
+def test_rl30_a_reload_that_changes_the_grace_is_refused_whole_and_keeps_the_old_values(
+    tmp_path, monkeypatch
+):
+    """`[server]` 를 바꾼 reload(여기서는 `disconnect_grace_seconds`)는 오늘처럼 통째로 거절되고
+    옛 값이 남는다 — 같은 파일의 새 프리셋도 들어가지 않고, 다음 claim 도 옛 G 를 얼린다."""
+    from remote_ci_monitor.server import ApiError
+
+    srv = WorkerServer(tmp_path, presets=SHIP, lanes=0, disconnect_grace_seconds=300)
+    try:
+
+        def edit(fresh: Any) -> None:
+            fresh.server.disconnect_grace_seconds = 900
+            fresh.presets = (*fresh.presets, parse_preset(sh("extra", "true")))
+
+        with pytest.raises(ApiError) as e:
+            _reload_with(srv, monkeypatch, edit)
+        assert e.value.status == 409 and "[server]" in str(e.value)
+        assert srv.app.config.server.disconnect_grace_seconds == 300
+        assert srv.app.config.preset("extra") is None
+        srv.registered("build-02")
+        a = srv.queued_job(preset="ship")
+        status, body = srv.claim("build-02", 1)
+        assert status == 200 and body["job"]["id"] == a
+        assert body["job"]["disconnect_grace_seconds"] == 300
+    finally:
+        srv.close()
+
+
+def test_rl30_irreversible_changed_by_a_reload_while_a_job_runs_reaches_only_the_next_claim(
+    tmp_path, monkeypatch
+):
+    """도는 잡은 claim 때 얼린 `irreversible` 을 쓴다 — reload 로 표식을 뗀 프리셋의 도는 잡은 G 에
+    닫힐 때 여전히 그룹을 홀드하고, 다음 claim 부터 새 값(표식 없음)을 얼린다."""
+    srv = WorkerServer(tmp_path, presets=SHIP, lanes=0)
+    try:
+        srv.registered("build-02", lanes=2)
+        a = srv.queued_job(preset="ship")
+        assert srv.claimed("build-02", 1) == a
+
+        def edit(fresh: Any) -> None:
+            fresh.presets = tuple(
+                parse_preset(sh("ship", "echo ship")) if p.name == "ship" else p
+                for p in fresh.presets
+            )
+
+        out = _reload_with(srv, monkeypatch, edit)
+        assert out["presets_changed"] == ["ship"]
+        assert srv.app.config.preset("ship").irreversible is False
+        assert srv.store.get_job(a).irreversible is True  # 얼린 값
+        b = srv.queued_job(preset="ship")
+        status, body = srv.claim("build-02", 2)
+        assert status == 200 and body["job"]["id"] == b  # 홀드 · 표식 그룹 없이 들어간다
+        assert body["job"]["irreversible"] is False
+        srv.clock.advance(G + 1)
+        assert sorted(srv.app.mark_lost_workers(srv.clock.now)) == [a, b]
+        assert [(h["job_id"], h["cause"]) for h in holds(srv)] == [(a, "worker_unreachable")]
+    finally:
+        srv.close()
+
+
+def test_rl30_the_worker_grace_seconds_keeps_its_meaning_and_shrinks_only_for_an_irreversible_job(
+    tmp_path,
+):
+    """새 키(`disconnect_grace_seconds`)는 워커의 `grace_seconds`(SIGTERM→KILL)와 겹치지 않는다.
+    워커 grace 가 커서 `G − m < L` 이 되면 그 표식 잡에서만 grace 를 줄여 쓰고 로그 한 줄을
+    남긴다. 일반 잡과 설정 값은 그대로다."""
+    w, _fake, _clocks, logs = make_worker(tmp_path, grace_seconds=300)
+    floor_l = w.connected_age_floor()
+    lowest = floor_l + DISCONNECT_GRACE_MARGIN_SECONDS  # 서버가 받는 가장 작은 G
+    assert w._grace_for(7, False, lowest) == 300  # 일반 잡 — 그대로
+    assert logs == []
+    grace = w._grace_for(8, True, lowest)
+    assert grace < 300
+    assert w.self_stop_threshold(lowest, grace) >= floor_l  # 줄인 grace 로 문턱이 L 이상
+    assert logs == [
+        f"#8: grace_seconds 300 lowered to {grace} for this job — fits disconnect_grace_seconds"
+    ]
+    assert w.config.grace_seconds == 300  # 설정은 그대로
+    assert w._grace_for(9, True, 86400) == 300  # G 가 넉넉하면 줄이지 않는다
+    assert len(logs) == 1
 
 
 # ── 서버 유예(T2 · T3 · T4 · T8 · 결정 266 · 328 · 330 · 339-g) ─────────────────
