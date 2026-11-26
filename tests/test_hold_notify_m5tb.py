@@ -306,6 +306,131 @@ def test_rl54_the_server_publishes_the_hold_event_after_it_holds(tmp_path):
         srv.close()
 
 
+# ── 홀드를 만드는 모든 길이 알린다(P3 1라운드 MED) ──────────────────────────────
+
+
+@pytest.fixture
+def wsrv(tmp_path):
+    from test_worker_api import WorkerServer, sh
+
+    s = WorkerServer(
+        tmp_path, presets=[sh("ship", "echo ship", irreversible=True), sh("ok", "echo ok")]
+    )
+    yield s
+    s.close()
+
+
+def hold_events(sub: Any) -> list[int]:
+    out = []
+    while (ev := sub.get(timeout=0.2)) is not None:
+        if ev.kind == KIND_IRREVERSIBLE_HOLD:
+            out.append(ev.data.get("job_id"))
+    return out
+
+
+@pytest.mark.parametrize("by", ["heartbeat", "janitor"])
+def test_rl54_a_cancel_unconfirmed_hold_is_announced_once(wsrv, by):
+    """들리는 세션이 취소를 확인하지 않아 `cancel_unconfirmed` 로 닫힌 표식 잡의 홀드 — heartbeat
+    가 닫든 janitor 가 닫든 버스 사건 `irreversible_hold` 가 한 번 나간다."""
+    wsrv.registered("build-02")
+    jid = wsrv.queued_job(preset="ship")
+    assert wsrv.claimed("build-02", 1) == jid
+    assert wsrv.cancel(jid)[1]["state"] == "cancelling"
+    job = wsrv.store.get_job(jid)
+    past = (job.cancel.kill_at - wsrv.clock()).total_seconds() + 2 * 5 + 1
+    assert past < 60  # 세션은 worker_timeout 안에 들린 채다
+    sub = wsrv.app.bus.subscribe()
+    wsrv.clock.advance(past)
+    if by == "heartbeat":
+        assert wsrv.heartbeat("build-02", jobs=[jid])[0] == 200
+    else:
+        wsrv.app.mark_lost_workers(wsrv.clock.now)
+    assert wsrv.store.get_job(jid).summary_code == "cancel_unconfirmed"
+    assert wsrv.store.has_open_hold(jid)
+    assert hold_events(sub) == [jid]
+    wsrv.app.mark_lost_workers(wsrv.clock.now)
+    assert hold_events(sub) == []  # 두 번 알리지 않는다
+
+
+def test_rl54_a_legacy_worker_forgetting_its_irreversible_job_announces_the_hold(wsrv):
+    """옛 워커(세션 없음)의 heartbeat 목록에서 빠진 레거시 표식 잡 — `worker_restarted_without_job`
+    으로 닫히며 홀드가 걸리고 그 사건이 한 번 나간다."""
+    from remote_ci_monitor import __version__
+    from remote_ci_monitor.core.model import RUNNING
+
+    wsrv.store.register_worker(
+        "build-02", pool="default", lanes=1, host_name=None, version=__version__, now=wsrv.clock()
+    )
+    jid = wsrv.queued_job(preset="ship")
+    wsrv.store._conn().execute(
+        "UPDATE jobs SET state=?, worker_name='build-02', lane=1, started_at=? WHERE id=?",
+        (RUNNING, wsrv.clock().timestamp(), jid),
+    )
+    sub = wsrv.app.bus.subscribe()
+    status, _ = wsrv.req(
+        "POST", "/worker/heartbeat", token="build-02", json_body={"jobs": []}, legacy=True
+    )
+    assert status == 200
+    assert wsrv.store.get_job(jid).summary_code == "worker_restarted_without_job"
+    assert wsrv.store.has_open_hold(jid)
+    assert hold_events(sub) == [jid]
+
+
+HOLD_MAKERS = {"finish", "recover_on_start", "open_session"}
+
+
+def _calls(fn: Any, attr: str) -> list[Any]:
+    import ast
+
+    return [
+        n
+        for n in ast.walk(fn)
+        if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute) and n.func.attr == attr
+    ]
+
+
+def test_rl54_every_path_that_makes_a_hold_calls_hold_created():
+    """홀드를 넣는 store 메서드와, 그것을 부르는 서버 쪽 함수를 짝지어 잠근다. 홀드를 만들 수 있는
+    호출(`store.finish(…, hold_cause=…)` · `store.recover_on_start` · `store.open_session`)이 있는
+    함수는 `_hold_created` 를 부르거나, 그 함수를 부르는 모든 함수가 부른다(잠금 밖으로 미루는 한
+    단계). 새 길이 알림 없이 홀드를 만들면 여기서 빨갛다."""
+    import ast
+    from pathlib import Path
+
+    import remote_ci_monitor
+
+    root = Path(remote_ci_monitor.__file__).parent
+    store_tree = ast.parse((root / "store.py").read_text(encoding="utf-8"))
+    makers = {
+        fn.name
+        for fn in ast.walk(store_tree)
+        if isinstance(fn, ast.FunctionDef) and fn.name != "_hold_tx" and _calls(fn, "_hold_tx")
+    }
+    assert makers == HOLD_MAKERS  # 새 메서드가 홀드를 넣으면 이 짝 맞추기에 더한다
+    problems: list[str] = []
+    for path in sorted(root.rglob("*.py")):
+        if path.name == "store.py":
+            continue
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        funcs = [n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef)]
+        announces = {f.name for f in funcs if _calls(f, "_hold_created")}
+        for fn in funcs:
+            making = [
+                c
+                for m in HOLD_MAKERS
+                for c in _calls(fn, m)
+                if isinstance(c.func.value, ast.Attribute)
+                and c.func.value.attr == "store"
+                and (m != "finish" or any(k.arg == "hold_cause" for k in c.keywords))
+            ]
+            if not making or fn.name in announces:
+                continue
+            callers = {f.name for f in funcs if _calls(f, fn.name)}
+            if not callers or not callers <= announces:
+                problems.append(f"{path.name}:{fn.lineno} {fn.name}")
+    assert problems == []
+
+
 def test_rl54_on_accepts_irreversible_hold_and_the_default_leaves_it_out():
     assert "irreversible_hold" in rule("h", on=("irreversible_hold",)).on
     assert rule("d").on == frozenset(NOTIFY_DEFAULT_STATES)

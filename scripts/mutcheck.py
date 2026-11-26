@@ -5280,15 +5280,10 @@ MUTANTS = (
         # 취소 미확인 닫기가 현재 · 들리는 세션 조건 없이 그 이름의 모든 잡에 걸린다(RL33)
         name="cancel-unconfirmed-any-session",
         path="src/remote_ci_monitor/remote_workers.py",
-        old=(
-            "                self._close_unconfirmed_cancels(self.store.j"
-            "obs_of_session(current), now)\n"
-        ),
+        old="                jobs = self.store.jobs_of_session(current)\n",
         new=(
-            "                self._close_unconfirmed_cancels(\n"
-            "                    [j for j in self.store.busy_remote_jobs("
-            ") if j.worker_name == row.name], now\n"
-            "                )\n"
+            "                jobs = [j for j in self.store.busy_remote_jobs("
+            ") if j.worker_name == row.name]\n"
         ),
         tests=(
             "tests/test_worker_selfstop_m5tb.py::"
@@ -6189,6 +6184,35 @@ MUTANTS = (
         tests=(
             "tests/test_worker_session_m5tb.py::"
             "test_rl10_a_long_poll_claim_fenced_while_it_waits_takes_no_job",
+        ),
+    ),
+    # ── M5t-b P3 1라운드 MED — 알림 없는 홀드 두 길 ──
+    Mutant(
+        # 옛 워커가 잊은 표식 잡의 홀드를 알리지 않는다 — 로그 · 버스 사건 · 알림이 없다
+        name="legacy-hold-silent",
+        path="src/remote_ci_monitor/remote_workers.py",
+        old=(
+            "            if closed and self.store.has_open_hold(job.id):  # mutcheck: "
+            "legacy-hold-silent\n"
+            "                self._hold_created(job.id)\n"
+        ),
+        new="            if False:\n                self._hold_created(job.id)\n",
+        tests=(
+            "tests/test_hold_notify_m5tb.py::"
+            "test_rl54_a_legacy_worker_forgetting_its_irreversible_job_announces_the_hold",
+        ),
+    ),
+    Mutant(
+        # 취소 미확인 닫기의 홀드를 알리지 않는다(heartbeat · janitor 두 길 모두)
+        name="cancel-unconfirmed-hold-silent",
+        path="src/remote_ci_monitor/remote_workers.py",
+        old=(
+            "                    if self.store.has_open_hold(job.id):  # mutcheck: "
+            "cancel-unconfirmed-hold-silent\n"
+        ),
+        new="                    if False:\n",
+        tests=(
+            "tests/test_hold_notify_m5tb.py::test_rl54_a_cancel_unconfirmed_hold_is_announced_once",
         ),
     ),
 )

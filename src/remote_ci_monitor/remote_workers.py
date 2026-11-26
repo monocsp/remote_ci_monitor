@@ -1294,7 +1294,8 @@ class RemoteWorkersMixin:
                 with self._remote_lock:
                     self._worker_samples[token.name] = parsed
         cancel = [j.id for j in active if j.state == CANCELLING]
-        self._close_unconfirmed_cancels(active, now)
+        for job_id in self._close_unconfirmed_cancels(active, now):
+            self._hold_created(job_id)
         self._mark_dirty()
         return {
             "cancel": cancel,
@@ -1318,7 +1319,7 @@ class RemoteWorkersMixin:
         forgotten = [j for j in active if j.id not in set(known)]
         for job in forgotten:
             text, code, args = outcome.summary("worker_restarted_without_job", name=token.name)
-            self.store.finish(
+            closed = self.store.finish(
                 job.id,
                 LOST,
                 now=now,
@@ -1329,6 +1330,8 @@ class RemoteWorkersMixin:
                 hold_cause="worker_restarted_without_job",
             )
             self._publish_job(None, job.id)
+            if closed and self.store.has_open_hold(job.id):  # mutcheck: legacy-hold-silent
+                self._hold_created(job.id)
         if forgotten:
             self._drop_log_partial([f.id for f in forgotten])
         return [j for j in active if j.id not in {f.id for f in forgotten}]
@@ -1407,12 +1410,14 @@ class RemoteWorkersMixin:
             return cancel.kill_at
         return max(cancel.kill_at, resumed + (cancel.kill_at - cancel.requested_at))
 
-    def _close_unconfirmed_cancels(self, jobs: list[Job], now: datetime) -> None:
+    def _close_unconfirmed_cancels(self, jobs: list[Job], now: datetime) -> list[int]:
         """살아 있는 워커가 취소를 확인하지 않으면 `kill_at + 2 × heartbeat` 뒤 서버가 닫는다.
-        `kill_at` 은 `_cancel_deadline` 이 조용했던 시간만큼 민다."""
+        `kill_at` 은 `_cancel_deadline` 이 조용했던 시간만큼 민다. 홀드가 걸린 잡 id 를 돌려준다 —
+        호출자가 세션 잠금을 놓은 뒤 `_hold_created` 를 부른다(§4.2 · §4.12)."""
         # 순환 import 를 피한다(위 finish 의 `outcome_for` 와 같다)
         from remote_ci_monitor.worker import cancel_outcome
 
+        held: list[int] = []
         slack = timedelta(seconds=2 * self.config.server.worker_heartbeat_seconds)
         for job in jobs:
             if job.state != CANCELLING:
@@ -1437,6 +1442,9 @@ class RemoteWorkersMixin:
                 ):
                     self._drop_log_partial([job.id])
                     self._publish_job(None, job.id)
+                    if self.store.has_open_hold(job.id):  # mutcheck: cancel-unconfirmed-hold-silent
+                        held.append(job.id)
+        return held
 
     # ── down · lost 판정 (janitor 루프) ─────────────────────────────────────
 
@@ -1450,6 +1458,7 @@ class RemoteWorkersMixin:
         많아야 `GRACE_CLOSES_PER_TICK` 개, 닫기가 DB 바쁨이면 이 틱을 멈춘다(결정 339-g)."""
         lost: list[int] = []
         held: list[int] = []
+        cancel_held: list[int] = []
         mono = self.mono_fn()  # type: ignore[attr-defined]
         timeout = self.config.server.worker_timeout_seconds
         for row in self._workers():
@@ -1465,7 +1474,10 @@ class RemoteWorkersMixin:
             if mono - self.heard_at(current) > timeout:
                 continue
             with self._session_lock(current):
-                self._close_unconfirmed_cancels(self.store.jobs_of_session(current), now)
+                jobs = self.store.jobs_of_session(current)
+                cancel_held += self._close_unconfirmed_cancels(jobs, now)
+        for job_id in cancel_held:  # 잠금을 놓은 뒤에(§4.2)
+            self._hold_created(job_id)
         default_grace = disconnect_grace(self.config.server)
         budget = GRACE_CLOSES_PER_TICK
         for job in self.store.busy_remote_jobs():
