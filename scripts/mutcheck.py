@@ -216,6 +216,8 @@
      설정 경로) · 운영 거부(폴더 · 설정 · 포트 · `[server]` 없음 · data_dir · 줄임말 · 훅 판정) ·
      모름(ps 실패 · 기다리는 중 ps 실패 · 못 읽는 기록) · 띄우기(곧바로 죽음 · 기록 못 한 자식 ·
      신호 마스크) (`tools/live_proc.py`, `tests/test_live_proc.py`, PR #287 batch-6)
+     batch-7 이 여덟을 더했다: 따옴표 포트 · 설정의 8787 · 워커와 클라이언트의 서버 찾기 · 확인
+     못 한 옛 기록 덮기 · ps 의 이상한 종료 · `RCM_SERVER_BIND` · `RCM_SERVER_PORT`
 
 사용: python scripts/mutcheck.py [--keep] [--only NAME] [--list] [-j N]
 
@@ -8660,6 +8662,10 @@ MUTANTS = (
         tests=(
             "tests/test_live_proc.py::test_b6_1_port_8787_on_the_command_line_is_refused",
             "tests/test_live_proc.py::test_b6_3_an_abbreviated_option_is_read_as_the_whole_option",
+            # batch-7 부터 이긴 `--port` 는 설정 검사도 본다 — 이 규칙만 잡는 사례(감싼 스크립트,
+            # 뒤의 플래그가 이기는 명령)
+            "tests/test_live_proc.py::"
+            "test_b7_4_an_explicit_8787_is_refused_even_when_it_does_not_win",
         ),
     ),
     Mutant(
@@ -8771,6 +8777,88 @@ MUTANTS = (
         tests=(
             "tests/test_live_proc.py::test_b6_9_interactive_sigint_also_clears_a_blocked_mask",
             "tests/test_live_proc.py::test_b6_9_a_blocked_sigterm_is_not_inherited",
+        ),
+    ),
+    # ── tools/live_proc.py 의 남은 지킴 규칙 (PR #287 batch-7) ──
+    Mutant(
+        # 글로 적힌 포트를 날 값으로 둔다 — `port = "8787"` 이 정수 8787 과 달라 통과한다(MED 1)
+        name="live-proc-quoted-port-unread",
+        path="tools/live_proc.py",
+        old="        return int(value.strip())  # mutcheck: live-proc-quoted-port-unread\n",
+        new="        return value  # type: ignore[return-value]\n",
+        tests=("tests/test_live_proc.py::test_b7_1_a_quoted_port_8787_is_refused",),
+    ),
+    Mutant(
+        # 설정의 포트 8787 을 보지 않는다 — 플래그 · 환경이 없으면 운영 포트로 뜬다
+        name="live-proc-config-port-accepted",
+        path="tools/live_proc.py",
+        old="    if port == PRODUCTION_PORT:  # mutcheck: live-proc-config-port-accepted\n",
+        new="    if False:\n",
+        tests=(
+            "tests/test_live_proc.py::test_b7_1_a_quoted_port_8787_is_refused",
+            "tests/test_live_proc.py::test_a_config_that_reaches_production_is_refused",
+        ),
+    ),
+    Mutant(
+        # 주소 없는 · `auto` 워커를 받는다 — mDNS 로 운영 서버를 찾을 수 있다(MED 2)
+        name="live-proc-worker-discovery-accepted",
+        path="tools/live_proc.py",
+        old="            if _discovers(url):  # mutcheck: live-proc-worker-discovery-accepted\n",
+        new="            if False:\n",
+        tests=(
+            "tests/test_live_proc.py::test_b7_2_a_worker_without_a_server_url_is_refused",
+            "tests/test_live_proc.py::"
+            "test_b7_2_a_worker_told_to_discover_on_the_command_line_is_refused",
+        ),
+    ),
+    Mutant(
+        # `RCM_SERVER=auto` · `--server auto` 클라이언트를 받는다 — 같은 망에서 서버를 찾는다
+        name="live-proc-client-discovery-accepted",
+        path="tools/live_proc.py",
+        old=(
+            "    if client and chosen is not None and _discovers(chosen):"
+            "  # mutcheck: live-proc-client-discovery\n"
+        ),
+        new="    if False:\n",
+        tests=("tests/test_live_proc.py::test_b7_2_a_client_told_to_discover_is_refused",),
+    ),
+    Mutant(
+        # 확인하지 못한 옛 기록 위에 새로 띄운다 — 살아 있을지 모르는 것의 신원을 잃는다
+        name="live-proc-stale-record-overwritten",
+        path="tools/live_proc.py",
+        old="        if earlier.unknown:  # 그 기록을 덮으면",
+        new="        if False:  # 그 기록을 덮으면",
+        tests=(
+            "tests/test_live_proc.py::test_b7_4_an_unconfirmed_earlier_record_is_not_written_over",
+        ),
+    ),
+    Mutant(
+        # ps 의 이상한 종료(0 · 1 이 아님, 1 에 stderr)를 「없는 pid」로 읽는다
+        name="live-proc-ps-odd-exit-gone",
+        path="tools/live_proc.py",
+        old=(
+            "    if out.returncode not in (0, 1) or (out.returncode == 1 and out.stderr.strip()):\n"
+        ),
+        new="    if False:\n",
+        tests=("tests/test_live_proc.py::test_b7_4_an_odd_ps_exit_is_unknown_not_gone",),
+    ),
+    Mutant(
+        # RCM_SERVER_BIND 를 보지 않는다 — `127.0.0.1:8787` 이 통과한다
+        name="live-proc-bind-env-ignored",
+        path="tools/live_proc.py",
+        old='        binds.append(environ["RCM_SERVER_BIND"])\n',
+        new="        pass\n",
+        tests=("tests/test_live_proc.py::test_b7_4_rcm_server_bind_on_8787_is_refused",),
+    ),
+    Mutant(
+        # RCM_SERVER_PORT=8787 을 보지 않는다 — 설정이 없는 명령 · 플래그가 이기는 명령에서 통과한다
+        name="live-proc-server-port-env-accepted",
+        path="tools/live_proc.py",
+        old='    if _int_or_none(environ.get("RCM_SERVER_PORT", "")) == PRODUCTION_PORT:\n',
+        new="    if False:\n",
+        tests=(
+            "tests/test_live_proc.py::"
+            "test_b7_4_an_explicit_8787_is_refused_even_when_it_does_not_win",
         ),
     ),
 )
