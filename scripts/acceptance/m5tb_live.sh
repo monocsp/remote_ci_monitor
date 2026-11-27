@@ -126,6 +126,36 @@ is_test_port() { # is_test_port <port>
   [ "$1" -ge 8790 ] && [ "$1" -le 8899 ]
 }
 
+# 127.0.0.1:<port> 가 비었는가 — 누가 듣고 있으면(연결이 됨) 또는 bind 가 안 되면 비지 않았다.
+# lsof 에 기대지 않는다(없으면 조용히 통과했다). 검사기가 돌지 못하면 「빔」을 찍지 않으므로 비지 않음
+port_free() { # port_free <port>
+  local got
+  got=$("$PY" -I - "${1:-}" 2>/dev/null <<'EOF' || true
+import socket, sys
+port = int(sys.argv[1])
+c = socket.socket()
+c.settimeout(1)
+try:
+    c.connect(("127.0.0.1", port))
+    print("busy")
+    sys.exit(0)
+except OSError:
+    pass
+finally:
+    c.close()
+s = socket.socket()
+try:
+    s.bind(("127.0.0.1", port))
+    print("free")
+except OSError:
+    print("busy")
+finally:
+    s.close()
+EOF
+  )
+  [ "$got" = free ]
+}
+
 # 운영 launchd 라벨인가(대소문자와 상관없이 com.remote-ci-monitor 이거나 그 아래)
 is_prod_label() { # is_prod_label <label>
   local lower
@@ -2128,6 +2158,30 @@ kill_job_group() { # kill_job_group <pid> <start file> — 잡 그룹을 KILL(�
   kill -KILL "$pid" 2>/dev/null || true
 }
 
+# 표지 파일의 잡 · 자식 프로세스를 거둔다. <잡>.pid 의 시작 시각은 <잡>.start, RL51 의 <잡>.child
+# (SIGTERM 을 무시하는 자식)의 것은 <잡>.child.start 다(child_of 가 쓴다)
+reap_marks() {
+  local f p
+  for f in "$MARKS"/*.pid "$MARKS"/*.child; do
+    [ -s "$f" ] || continue
+    p=$(tr -d ' \n' <"$f")
+    case "$f" in
+      *.pid) kill_job_group "$p" "${f%.pid}.start" ;;
+      *) kill_job_group "$p" "$f.start" ;;
+    esac
+  done
+}
+
+# RL51 잡이 남긴 자식 pid — 읽자마자 시작 시각을 <잡>.child.start 에 적는다(그래야 정리가 거둔다)
+child_of() { # child_of <잡> → pid(없으면 빈 줄)
+  local p=""
+  if wait_file "$MARKS/$1.child" 10; then
+    p=$(tr -d ' \n' <"$MARKS/$1.child")
+    [ -s "$MARKS/$1.child.start" ] || proc_start "$p" >"$MARKS/$1.child.start"
+  fi
+  echo "$p"
+}
+
 alive() { if h alive "$1"; then echo 1; else echo 0; fi; }
 
 server_start() {
@@ -2326,18 +2380,14 @@ record_lost() { # record_lost <잡> — 끝난 lost 잡의 요약 코드를 RL29
 }
 
 reset_world() { # 단계 사이: 중계를 풀고 워커를 멈추고 남은 잡 그룹 · 홀드를 치운다
-  local p f ids
+  local p ids
   relay_do resume >/dev/null 2>&1 || true
   relay_do unrefuse >/dev/null 2>&1 || true
   relay_do fast >/dev/null 2>&1 || true
   relay_do release >/dev/null 2>&1 || true
   for p in ${WORKER_PIDS[@]+"${WORKER_PIDS[@]}"}; do stop_ours "$p"; done
   WORKER_PIDS=()
-  for f in "$MARKS"/*.pid "$MARKS"/*.child; do
-    [ -s "$f" ] || continue
-    p=$(tr -d ' \n' <"$f")
-    kill_job_group "$p" "${f%.*}.start"
-  done
+  reap_marks
   # 워커를 멈춘 뒤 남은 잡(대기 · 도는 중 · 예약)을 취소한다 — 남겨 두면 다음 단계의 첫 워커가
   # 집어 그 뒤 단계마다 잡이 하나씩 밀린다(2026-11-27 첫 실기: #19 rl15-ship 이 rl1a 로)
   ids=$(h openjobs "$URL" "$CTOK")
@@ -2478,9 +2528,8 @@ run_sweep() {
   data=$W_DATA
   j=$(submit rl51-child)
   pj=$(pid_of "$j" 30)
-  wait_file "$MARKS/$j.child" 10 && child=$(tr -d ' \n' <"$MARKS/$j.child")
+  child=$(child_of "$j")
   if [ -n "${child:-}" ]; then
-    proc_start "$child" >"$MARKS/$j.child.start"
     client cancel "$j" >>"$OUT/rl51.log" 2>&1 || true
     fact RL51 b1_gone "$(h waitdead "$child" $((GRACE_J + 20)) || true)"
   fi
@@ -2488,9 +2537,8 @@ run_sweep() {
   child=""
   j=$(submit rl51-slowexit)
   pj=$(pid_of "$j" 30)
-  wait_file "$MARKS/$j.child" 10 && child=$(tr -d ' \n' <"$MARKS/$j.child")
+  child=$(child_of "$j")
   if [ -n "${child:-}" ]; then
-    proc_start "$child" >"$MARKS/$j.child.start"
     client cancel "$j" >>"$OUT/rl51.log" 2>&1 || true
     fact RL51 c_gone "$(h waitdead "$child" $((GRACE_J + 20)) || true)"
   fi
@@ -2498,10 +2546,9 @@ run_sweep() {
   child=""
   j=$(submit rl51-child)
   pj=$(pid_of "$j" 30)
-  wait_file "$MARKS/$j.child" 10 && child=$(tr -d ' \n' <"$MARKS/$j.child")
+  child=$(child_of "$j")
   if [ -n "${child:-}" ] && is_our_proc "$W_PID" "$B" "$(recorded_start "$W_PID")"; then
-    proc_start "$child" >"$MARKS/$j.child.start"
-    out=$(h killtime KILL "$W_PID" "$child" $((GRACE_J + 10)))
+    out=$(h killtime KILL "$W_PID" "$child" $((GRACE_J + 10)) || true)
     fact RL51 b2_gone "$(printf '%s\n' "$out" | sed -n "s/^$child=//p")"
     # 같은 폴더로 다시 띄워 죽은 세션의 그룹이 없음을 확인시킨다 — G 뒤에 홀드가 남지 않게
     worker_start rl51 direct "$GRACE_J" "$data" || true
@@ -3333,17 +3380,13 @@ EOF
 # ── 정리 ────────────────────────────────────────────────────────────────────
 
 cleanup() {
-  local p f
+  local p
   for p in ${WORKER_PIDS[@]+"${WORKER_PIDS[@]}"}; do stop_ours "$p"; done
   WORKER_PIDS=()
   if [ -s "$B/run/procs.tsv" ]; then
     for p in $(cut -f2 "$B/run/procs.tsv"); do stop_ours "$p"; done
   fi
-  for f in "$MARKS"/*.pid "$MARKS"/*.child; do
-    [ -s "$f" ] || continue
-    p=$(tr -d ' \n' <"$f")
-    kill_job_group "$p" "${f%.*}.start"
-  done
+  reap_marks
   for p in ${LAUNCHERS[@]+"${LAUNCHERS[@]}"}; do
     kill -TERM "$p" 2>/dev/null || true
     wait "$p" 2>/dev/null || true
@@ -3447,10 +3490,10 @@ main() {
   # 포트와 시험 폴더 검사가 먼저다 — 아무것도 만들기 전에 멈춘다
   P=${M5TB_PORT:-8797}
   is_test_port "$P" || die "M5TB_PORT $P is not a test port (8790-8899)"
-  if lsof -nP -iTCP:"$P" -sTCP:LISTEN >/dev/null 2>&1; then die "port $P is in use"; fi
+  [ -x "$PY" ] || die "no $PY"
+  port_free "$P" || die "port $P is in use (or could not be checked)"
   if [ -n "$only" ]; then runners=$(runners_for "$only"); else runners=$ALL_RUNNERS; fi
 
-  [ -x "$PY" ] || die "no $PY"
   RID=$("$PY" -I -c 'import secrets; print(secrets.token_hex(4))')
   B=${M5TB_BASE:-$real_home/.local/share/$TEST_DIR_NAME/live-$RID}
   is_test_base "$B" "$real_home" || die "base $B is not ~/.local/share/$TEST_DIR_NAME/<name>"
