@@ -42,12 +42,15 @@ rcm-ci 잡은 그 데이터 폴더 안(`workspaces/<id>`)에서 돌 수 있으�
 
 from __future__ import annotations
 
+import contextlib
 import functools
 import os
 import re
+import shutil
 import socket
 import sys
 import tempfile
+from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
@@ -368,3 +371,35 @@ def _production_guard(request):
         hits = list(_GUARD_HITS)
         del _GUARD_HITS[:]
         pytest.fail(f"the test reached production: {', '.join(hits)} (tests/conftest.py)")
+
+
+# ── /tmp 밖의 시험 폴더 (`tools/live_proc.py` 시험) ───────────────────────────────────
+
+
+@contextlib.contextmanager
+def outside_tmp_folder() -> Iterator[Path]:
+    """`/tmp` 밖의 시험 폴더 하나. 맥미니 CI 는 TMPDIR 을 /private/tmp 아래에 두어 tmp_path 도
+    거기 있고, `tools/live_proc.py` 는 /tmp 아래의 `--dir` 를 거부한다(잡 4380). 그래서 계정의
+    진짜 홈(`HOME` 이 아니라 — 도구와 같다)에 `~/.local/share/rcm-devtest-livep-<무작위>` 를
+    만들고 끝나면 그 폴더만 지운다. 운영 자리 `~/.local/share/rcm` 의 형제일 뿐 안이 아니다.
+
+    못 지우면 시험이 실패한다(2026-11-27 batch-8 — 예전에는 `ignore_errors` 로 조용히 남았다).
+    강제 종료로 남은 `rcm-devtest-livep-*` 는 다음 실행이 지우지 않는다. 같은 이름의 폴더는
+    다른 실행 · 다른 세션의 것일 수 있다 — 손으로 확인하고 지운다."""
+    import pwd  # 유닉스에만 있다 — 이 함수를 부르는 시험만 들여온다
+
+    base = Path(pwd.getpwuid(os.getuid()).pw_dir) / ".local" / "share"
+    base.mkdir(parents=True, exist_ok=True)
+    folder = Path(tempfile.mkdtemp(prefix="rcm-devtest-livep-", dir=base))
+    try:
+        yield folder
+    finally:
+        shutil.rmtree(folder)  # mutcheck: conftest-outside-tmp-ignores-cleanup
+
+
+@pytest.fixture
+def outside_tmp() -> Iterator[Path]:
+    """`outside_tmp_folder` 의 픽스처 꼴. `tests/test_live_proc.py` 와 `tests/test_skill_links.py`
+    가 쓴다."""
+    with outside_tmp_folder() as folder:
+        yield folder

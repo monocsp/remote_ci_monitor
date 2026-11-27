@@ -82,8 +82,10 @@ Never weaken, skip or `xfail` a test, and never `# noqa` a rule, to get green.
 2. **Plan↔test check, without the code.** The snapshot (the workplan and the tagged tests with their
    helpers, never `src/`) and the prompt are [`_shared/scenario-trace.md`](../_shared/scenario-trace.md)
    «The plan-to-test verifier»; one [`isolated-verifier`](../../agents/isolated-verifier.md) gets only
-   that folder. SOUND → push. UNSOUND → a new lead with the findings. UNSOUND a third time → stop and
-   ask the owner: the plan or the tests may be wrong, not the code.
+   that folder. SOUND → push. UNSOUND → a new lead with the findings, and the next check is a
+   re-review (the same file, «Re-reviews»). When it stops and goes to the owner instead is
+   [`isolated-verifier`](../../agents/isolated-verifier.md) «Rounds» 6: then the plan or the tests
+   may be wrong, not the code.
 3. Push and open the PR with the `pr` skill. In `## 검사` keep two lists apart: the lead's feedback
    checks (which tests, ruff, node — run in the worktree) and the authoritative result, `rcm/ci` on
    the head sha with its job number. A feedback pass is never written as the gate.

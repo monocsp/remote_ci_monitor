@@ -50,6 +50,8 @@ result is not asserted — only a state name not the value, only "was called", a
 always-true assertion, a skipped test (file:line + what is missing). `MISSING`: no test. `(live)` rows:
 `LIVE_OK` or `SHOULD_TEST` (pytest could; = WEAK). Unsure is WEAK. Table `| ID | verdict | evidence |
 missing assertion or reason |`, last line `verdict: SOUND` (all COVERED or LIVE_OK) or `verdict: UNSOUND`.
+A re-review (the prompt says `re-review r<N>`) follows `_shared/scenario-trace.md` «Re-reviews»: the
+previous answers are given, a carried row keeps its word, a new WEAK on it needs a counterexample.
 
 ## Edge audit (P5)
 
@@ -73,7 +75,8 @@ HIGH is any of the four below; all else is MED or LOW. Design-review grades: P0 
 
 ## Rounds, convergence, escalation (canon; proposed for rcm, in force until the owner changes them)
 
-1. Two verifiers per round, one after another, head frozen (P5's run in parallel: they only read); a
+1. Two verifiers per round, one after another, head frozen. P5's reading round runs in parallel, as
+   it only reads; its live lane runs one after another, as it runs commands on test servers. A
    finding from either counts, a tie is a defect. A round closes the stage only with HIGH 0 **and**
    unknown 0 (P5: rule 6) — unknown is no pass; QA B5 also needs `core: yes` from both (`unsure` is no).
 2. During rounds fix HIGH only. A MED/LOW not fixed is counted again each later round until resolved
@@ -86,7 +89,11 @@ HIGH is any of the four below; all else is MED or LOW. Design-review grades: P0 
    ordering test red first, the fix at the cause; new LOWs from that cause are deferred.
 6. P5 closes with unknown 0 once its confirmed GAPs, whatever their severity (RARE is none), are handed
    to P6: a HIGH GAP is closed by the P6 re-check, not by "HIGH 0" in P5. P6 re-verification fixes HIGH
-   only. A GAP not closed after three attempts, or plan-to-test UNSOUND three times, goes to the owner.
+   only. A GAP not closed after three attempts goes to the owner. The plan-to-test trace goes to the
+   owner only when one row is «not closed» twice in a row on re-reviews, or the fifth review of one
+   workplan or QA table is still UNSOUND (five is the most); otherwise the tests are fixed and the
+   trace asked again (`_shared/scenario-trace.md` «Re-reviews», other project 2026-11-26: seven
+   fresh UNSOUND in a row moved the target, not the tests).
 7. A head moved by triage code fixes gets one fresh isolated verifier, who reviews only the diff since
    the last verified head, before `verified:` names it; only a diff of documents or a report alone is
    exempt, and then the main session states that in the PR. Input: `git diff <verified>..<new>` as a
@@ -113,7 +120,7 @@ high: that is fixed, or raised to the owner as ⛔, never only reported. Then th
 
 | where | verifiers |
 |---|---|
-| P1 plan, P3 diff, P4 live (`live-verifier`), P5 edges, a dev-batch PR, QA B5 | 2 per round |
+| P1 plan, P3 diff, P4 live (`live-verifier`), P5 edges, P5 live lane (`live-verifier`, one after another), a dev-batch PR, QA B5 | 2 per round |
 | plan-to-test trace; round-3 cause analysis; «Rounds» 7 | 1, fresh |
 | dev-lite | 1; 2 if `src/remote_ci_monitor/core/`, `store.py`, `server.py`, `remote_workers.py` or `worker.py` changed (fixes included). HIGH: fix, one more of the same count; still HIGH, stop and report. No triage; MED/LOW go to the PR body |
 | whoever wrote or fixed the target | never |

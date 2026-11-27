@@ -14,8 +14,9 @@ main session counts the votes. Your final text is data for that count, not a mes
 
 1. `.claude/skills/_shared/test-server.md` — the only rules for your server. Follow it exactly: your
    port and `data_dir` come from the prompt (if the port is taken, stop and say so); write
-   `<data_dir>/server.toml` with its shell commands (absolute `data_dir`, never `~`) and pass it with
-   `--config` to every command.
+   `<data_dir>/server.toml` and `worker.toml` with the Write tool (absolute `data_dir`, never `~`),
+   pass them with `--config` to every command, and start and signal processes only through
+   `tools/live_proc.py` as its «Signals» says.
 2. `.claude/agents/isolated-verifier.md` — its immutable behaviours bind you too, and its Severity
    section is the scale you use.
 
@@ -43,7 +44,8 @@ Anything you change during a scenario (an env var, a config key, a paused queue,
 you set back to **the value you read**, not to a value you remember as the default, then read it again
 and report both: a setting "restored" to a remembered default is not the original, and the next
 verifier would report the difference as a defect. At the end the worktree's `git status --porcelain`
-must be what it was; your server is stopped by the pid you recorded.
+must be what it was; your server is stopped by the pid you recorded, as
+[`_shared/test-server.md`](../skills/_shared/test-server.md) «Signals» says.
 
 ## Running scenarios
 

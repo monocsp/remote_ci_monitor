@@ -18,11 +18,14 @@ list to run:
 
 - output a user reads: CLI text or `--json`, the web page, notify hook environment, log lines;
 - two processes: client ↔ server, server ↔ `rcm worker`, a hook the server starts;
-- restart, signal or time: `rcm serve` stopped and started, SIGTERM/KILL, a schedule that waits;
+- restart, signal or time: `rcm serve` stopped and started, SIGTERM/KILL to a recorded pid
+  ([`_shared/test-server.md`](../_shared/test-server.md) «Signals»), a schedule that waits;
 - install or upgrade: a wheel, `scripts/smoke_install.sh`, a client following the server's version.
 
 Not required: pure functions in `core/`, docs-only and tests-only PRs, a refactor with no output
-change. A `(live)` row that is not run is `UNKNOWN` with the reason, never PASS.
+change. A `(live)` row that is not run is `UNKNOWN` with the reason, never PASS. A row whose `where`
+cell starts with `live lane` is not run here: P5 runs it right after this stage, on the same head
+([`edge-audit`](../edge-audit/SKILL.md) «Live lane»), so no row is driven twice.
 
 ## 1. The script
 
@@ -66,6 +69,8 @@ this PR. The prompt asks each to:
 5. For workers: the two-process helpers in `tests/test_e2e_worker.py` — a real `rcm worker` process,
    `kill -9`, SIGTERM, a server restart while a job runs; submitted to the worker-only preset, as
    [`_shared/test-server.md`](../_shared/test-server.md) says, or the local lane answers instead.
+   Outside pytest, a signal to the test server or worker goes only to its recorded pid, as
+   [`_shared/test-server.md`](../_shared/test-server.md) «Signals» says.
 6. Report per ID: command, job number, observed result, verdict (FAIL only with evidence that the
    result is wrong; what could not be established is `UNKNOWN`, never PASS), severity — severity as
    [`isolated-verifier`](../../agents/isolated-verifier.md) defines it. A difference in environment

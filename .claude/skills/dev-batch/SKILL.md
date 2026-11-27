@@ -45,6 +45,8 @@ Judgement-free hand work (captures, collecting files) goes to a general agent wi
 - The head is frozen while it is verified. Fixes wait until the round ends; a fix landed mid-round leaves
   the round verifying a stale head.
 - Results come back as files, never as a lead's chat text, which a terminal read can cut short.
+- After the conversation is compacted, reopen this file and the section of the step you are in before
+  the next action ([stage-lead.md](../_shared/stage-lead.md) «When a lead stops or is needed again»).
 
 ## 0 Set up
 
@@ -151,6 +153,9 @@ calls for them. Severity, rounds, convergence, escalation and triage are
 [isolated-verifier.md](../../agents/isolated-verifier.md); this skill adds only:
 
 - Freeze the head: no new round for that bundle until the verification round has ended.
+- Live runs take turns. A bundle's P5 live lane ([edge-audit](../edge-audit/SKILL.md) «Live lane»)
+  runs right after its own P4, on the same head; live runs of different bundles stay within the
+  parallel limit of test servers above.
 - Give each verifier the spec section, the PR's diff as a file (`diff-<n>.patch`) and a `git archive`
   snapshot of the head (`snap-<n>/`), both under `.verify/handoff/<branch with / as ->/` of that worktree
   ([stage-lead.md](../_shared/stage-lead.md) «What a read-only agent gets») — never a moving worktree and
@@ -184,7 +189,9 @@ After each merge:
 - A conflict confined to registry lines (both sides appended) is resolved by keeping both sides. A conflict
   in behaviour is not resolved by the main session: `git -C <wt> merge --abort`, then a lead round or the
   owner: an auto-resolved conflict becomes approved text nobody checked.
-- A re-synced bundle has a new head: `rcm/ci` and verification run again before it merges.
+- A re-synced bundle has a new head: `rcm/ci` and verification run again before it merges. A
+  `pattern not found` from mutcheck there is a mutant whose anchor the merged bundle moved: a new lead
+  round anchors it again ([build-lead](../../agents/build-lead.md) «Mutants»).
 
 ## 6 Clean up and report
 
