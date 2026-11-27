@@ -212,6 +212,10 @@
      변이(`docs/m5tb-workplan.md` §7.4 의 PR1 행 + P2 가 더한 것). 이름 목록은 `--list`
   qa-2 mdns — `md-responder-counts-the-loopback-join`: 루프백 가입만 되어도 광고가 켜진 것으로 침
      (`mdns.py`, `tests/test_mdns_servers_on_one_host.py`)
+  시험 서버 도구 — `live-proc-*` 열여덟: 신원 확인(시작 시각 · 빈 기록 · pid 1 이하 · 좀비 ·
+     설정 경로) · 운영 거부(폴더 · 설정 · 포트 · `[server]` 없음 · data_dir · 줄임말 · 훅 판정) ·
+     모름(ps 실패 · 기다리는 중 ps 실패 · 못 읽는 기록) · 띄우기(곧바로 죽음 · 기록 못 한 자식 ·
+     신호 마스크) (`tools/live_proc.py`, `tests/test_live_proc.py`, PR #287 batch-6)
 
 사용: python scripts/mutcheck.py [--keep] [--only NAME] [--list] [-j N]
 
@@ -8565,6 +8569,208 @@ MUTANTS = (
             "test_b9_3_b_a_wall_clock_that_went_back_and_stands_does_not_stall_the_dead_session_wait",
             "tests/test_worker_outbox_m5tb.py::"
             "test_b8_1_b_the_wait_for_an_owed_finish_has_a_fixed_cap",
+        ),
+    ),
+    # ── 시험 서버 도구 tools/live_proc.py (PR #287 batch-6) ──
+    Mutant(
+        # 시작 시각이 달라도 보낸다 — 재사용된 pid 의 남의 프로세스가 신호를 받는다
+        name="live-proc-start-mismatch-sent",
+        path="tools/live_proc.py",
+        old="    elif current != recorded:\n",
+        new="    elif False:\n",
+        tests=(
+            "tests/test_live_proc.py::test_a_changed_start_time_is_another_process",
+            "tests/test_live_proc.py::test_stop_all_reaps_only_what_this_folder_recorded",
+        ),
+    ),
+    Mutant(
+        # 빈 start 파일을 「지금 도는 것」으로 채운다 — 기록 없는 신원을 믿는다
+        name="live-proc-empty-start-accepted",
+        path="tools/live_proc.py",
+        old='    if not recorded:\n        problem = f"{start_path} is missing or empty"\n',
+        new=(
+            "    if not recorded:\n        recorded = current\n"
+            '    if False:\n        problem = f"{start_path} is missing or empty"\n'
+        ),
+        tests=("tests/test_live_proc.py::test_an_empty_start_file_is_refused",),
+    ),
+    Mutant(
+        # pid 1 을 받는다 — 시작 시각까지 맞춘 기록이면 launchd 에 신호가 간다
+        name="live-proc-low-pid-accepted",
+        path="tools/live_proc.py",
+        old="    if pid <= 1:\n",
+        new="    if pid < 0:\n",
+        tests=(
+            "tests/test_live_proc.py::test_b6_5_pid_one_is_refused_even_with_its_own_start_time",
+        ),
+    ),
+    Mutant(
+        # 좀비를 산 것으로 본다 — 거두지 않은 자식에 신호를 보내고 「보냈다」고 한다
+        name="live-proc-zombie-running",
+        path="tools/live_proc.py",
+        old='    if not stat or stat.startswith("Z"):\n',
+        new="    if not stat:\n",
+        tests=(
+            "tests/test_live_proc.py::test_b6_5_an_unreaped_child_is_a_zombie_and_counts_as_gone",
+        ),
+    ),
+    Mutant(
+        # --expect-config 를 보지 않는다 — 시작 시각만 맞으면 운영 워커일 수도 있는 것에 보낸다
+        name="live-proc-expect-config-ignored",
+        path="tools/live_proc.py",
+        old="    elif expect_config is not None and not _holds(command, expect_config):\n",
+        new="    elif False:\n",
+        tests=(
+            "tests/test_live_proc.py::test_expect_config_must_be_on_the_command_line",
+            "tests/test_live_proc.py::test_expect_config_is_a_whole_word_not_a_prefix",
+        ),
+    ),
+    Mutant(
+        # --dir 가 운영 폴더 · /tmp 여도 띄운다
+        name="live-proc-production-dir-accepted",
+        path="tools/live_proc.py",
+        old="    place = _production_place(target, places)\n    if place is not None:\n",
+        new="    place = _production_place(target, places)\n    if False:\n",
+        tests=(
+            "tests/test_live_proc.py::test_production_folders_are_refused",
+            "tests/test_live_proc.py::test_tmp_is_refused",
+        ),
+    ),
+    Mutant(
+        # 운영 설정 폴더의 파일도 포트 · data_dir 만 맞으면 받는다
+        name="live-proc-production-config-accepted",
+        path="tools/live_proc.py",
+        old=("    place = _production_place(path, places, tmp=False)\n    if place is not None:\n"),
+        new="    place = _production_place(path, places, tmp=False)\n    if False:\n",
+        tests=(
+            "tests/test_live_proc.py::"
+            "test_b6_5_a_readable_production_config_is_refused_for_its_place",
+            "tests/test_live_proc.py::test_b6_5_environment_cases_are_refused",
+        ),
+    ),
+    Mutant(
+        # CLI 의 --port 8787 을 보지 않는다 — 설정 위에 얹혀 운영 포트로 뜬다(HIGH 1)
+        name="live-proc-port-flag-accepted",
+        path="tools/live_proc.py",
+        old=(
+            "        if _int_or_none(value) == PRODUCTION_PORT:\n"
+            '            return f"--port {value}'
+        ),
+        new='        if False:\n            return f"--port {value}',
+        tests=(
+            "tests/test_live_proc.py::test_b6_1_port_8787_on_the_command_line_is_refused",
+            "tests/test_live_proc.py::test_b6_3_an_abbreviated_option_is_read_as_the_whole_option",
+        ),
+    ),
+    Mutant(
+        # `[server]` 없는 설정을 포트 없음으로 본다 — 기본값 8787 로 뜬다
+        name="live-proc-config-without-server-accepted",
+        path="tools/live_proc.py",
+        old="            port = PRODUCTION_PORT\n    except ValueError",
+        new="            port = None\n    except ValueError",
+        tests=("tests/test_live_proc.py::test_b6_2_a_config_without_a_server_table_is_port_8787",),
+    ),
+    Mutant(
+        # --data-dir · RCM_SERVER_DATA_DIR 의 운영 data_dir 를 받는다
+        name="live-proc-data-dir-accepted",
+        path="tools/live_proc.py",
+        old='            return f"data_dir {value} is inside {place}"\n',
+        new="            pass\n",
+        tests=(
+            "tests/test_live_proc.py::test_b6_5_environment_cases_are_refused",
+            "tests/test_live_proc.py::test_b6_3_an_abbreviated_option_is_read_as_the_whole_option",
+        ),
+    ),
+    Mutant(
+        # 줄임말(--por · --conf · --data-d)을 그 옵션으로 읽지 않는다
+        name="live-proc-abbreviation-ignored",
+        path="tools/live_proc.py",
+        old='        and any(name.startswith("--") and name.startswith(word) for name in names)\n',
+        new="        and False\n",
+        tests=(
+            "tests/test_live_proc.py::test_b6_3_an_abbreviated_option_is_read_as_the_whole_option",
+        ),
+    ),
+    Mutant(
+        # 운영 가드 훅의 판정을 묻지 않는다 — 이 도구가 훅을 돌아가는 길이 된다
+        name="live-proc-decide-not-asked",
+        path="tools/live_proc.py",
+        old="    verdict = gp.decide(\n",
+        new="    verdict = None and gp.decide(\n",
+        tests=(
+            "tests/test_live_proc.py::test_b6_5_only_the_guard_hook_refuses_these",
+            "tests/test_live_proc.py::test_b6_5_the_guard_hook_is_called_with_the_inner_command",
+        ),
+    ),
+    Mutant(
+        # ps 를 못 돌리면 빈 글 — 「not running」 · 「stopped by SIGTERM」 · 종료 0 이 된다(MED 4)
+        name="live-proc-ps-failure-not-running",
+        path="tools/live_proc.py",
+        old=(
+            '        raise PsFailed(f"cannot run {PS_COMMAND} for pid {pid} ({error})")'
+            " from error\n"
+        ),
+        new='        return ""\n',
+        tests=(
+            "tests/test_live_proc.py::test_b6_4_a_failing_ps_blocks_signal",
+            "tests/test_live_proc.py::test_b6_4_a_ps_that_hangs_blocks_stop_all",
+        ),
+    ),
+    Mutant(
+        # SIGTERM 뒤 기다리는 중의 ps 실패를 「끝남」으로 센다
+        name="live-proc-stop-all-ps-failure-stopped",
+        path="tools/live_proc.py",
+        old="        return None  # mutcheck: live-proc-stop-all-ps-failure-stopped\n",
+        new="        return False\n",
+        tests=(
+            "tests/test_live_proc.py::test_b6_4_ps_failing_after_sigterm_keeps_the_process_pending",
+        ),
+    ),
+    Mutant(
+        # 못 읽는 기록이 traceback 으로 올라간다 — stop-all 이 중간에 멈춘다
+        name="live-proc-unreadable-record-raises",
+        path="tools/live_proc.py",
+        old="        return None\n    except (OSError, UnicodeDecodeError) as error:\n",
+        new="        return None\n    except ZeroDivisionError as error:\n",
+        tests=(
+            "tests/test_live_proc.py::"
+            "test_b6_8_an_unreadable_record_is_blocked_and_stop_all_goes_on",
+            "tests/test_live_proc.py::test_b6_8_a_record_that_cannot_be_read_blocks_signal",
+        ),
+    ),
+    Mutant(
+        # 곧바로 죽은 자식을 「started」로 말한다(로그 꼬리 없이)
+        name="live-proc-dead-child-started",
+        path="tools/live_proc.py",
+        old="        if proc.poll() is not None:  # mutcheck: live-proc-dead-child-started\n",
+        new="        if False:\n",
+        tests=(
+            "tests/test_live_proc.py::test_b6_7_a_child_that_ends_at_once_is_exit_1_with_its_log",
+        ),
+    ),
+    Mutant(
+        # 기록하지 못한 자식을 거두지 않는다 — 신원 없이 산다
+        name="live-proc-unrecorded-child-kept",
+        path="tools/live_proc.py",
+        old="  # mutcheck: live-proc-unrecorded-child-kept\n        _reap(proc)\n",
+        new="\n        pass\n",
+        tests=(
+            "tests/test_live_proc.py::test_b6_10_a_failed_record_write_reaps_the_child",
+            "tests/test_live_proc.py::test_b6_7_ps_failing_right_after_the_start_reaps_the_child",
+        ),
+    ),
+    Mutant(
+        # 부모의 막힌 신호 마스크를 자식에게 넘긴다(#267) — SIGINT · SIGTERM 이 닿지 않는다
+        name="live-proc-sigmask-kept",
+        path="tools/live_proc.py",
+        old=(
+            "        signal.pthread_sigmask(signal.SIG_SETMASK, [])"
+            "  # mutcheck: live-proc-sigmask-kept\n"
+        ),
+        new="        pass\n",
+        tests=(
+            "tests/test_live_proc.py::test_b6_9_interactive_sigint_also_clears_a_blocked_mask",
+            "tests/test_live_proc.py::test_b6_9_a_blocked_sigterm_is_not_inherited",
         ),
     ),
 )
