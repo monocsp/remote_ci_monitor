@@ -498,7 +498,7 @@ def test_b6_2_a_config_without_a_server_table_is_port_8787(
         ["--po=8787"],
         ["--serv", "http://127.0.0.1:8787"],
         ["--data-d", "{home}/.local/share/rcm"],
-        ["--data-=", "{home}/.local/share/rcm"],
+        ["--data-={home}/.local/share/rcm"],
         ["--conf", "{home}/.config/rcm/server.toml"],
         ["--confi={home}/.config/rcm/server.toml"],
     ],

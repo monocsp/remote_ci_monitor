@@ -13,15 +13,22 @@
   (`--expect-config` 면 명령줄에 그 경로가 낱말로 있을 때만) 보낸다. 아니면 적은 시각 · 지금
   시각 · 명령줄을 한 줄씩 찍고 `BLOCKED`, 종료 3. 이름으로 찾는 길은 없다.
 - `stop-all`: 그 폴더에 적힌 것만 같은 확인 뒤 SIGTERM → 기다림 → 아직 같은 신원이면 SIGKILL.
+- 모름은 「끝남」이 아니다(2026-11-27 batch-6): `ps` 를 못 돌리거나(없음 · 시간 초과 · 이상한
+  종료) 기록을 못 읽으면(디렉터리 · 권한 · UTF-8 아님) 그 이름은 BLOCKED 이고 stop-all 은
+  나머지를 계속한다. 곧바로 죽은 자식(CLI 는 1초 지켜본다)과 기록하지 못한 자식은 종료 1 이고,
+  기록하지 못한 자식은 거둔다. 자식의 신호 마스크는 exec 전에 비운다(#267).
 
 운영 가드는 띄우기 전에 본다(거부는 종료 4, 아무것도 만들지 않는다): `--dir` 가 진짜 홈의
 `~/.local/share/rcm` · `~/.config/rcm` 아래이거나 `/tmp` 아래, 또는 운영 설치의 뿌리 안이면
-거부한다. 안쪽 명령의 `--config` 가 운영 설정이거나, 포트 8787(설정의 기본값이기도 하다)을
-쓰거나, 운영 data_dir 를 열면 거부한다. `rcm serve|worker|token` 은 `--config` 를 꼭 받고,
-클라이언트 명령은 서버 주소(`RCM_SERVER` · `--server`)를 꼭 받는다 — 없으면 발견으로 운영을
-찾는다. 그리고 운영 가드 훅의 판정(`guard_production.decide`)을 안쪽 명령에 그대로 묻는다 —
-이 도구가 훅을 돌아가는 길이 되지 않게. 운영 설치는 훅과 같은 함수(`find_production`)로 찾되
-홈은 `HOME` 이 아니라 계정의 진짜 홈이다 — 이 도구는 `HOME=<data_dir>/home` 아래에서 불린다.
+거부한다. 안쪽 명령의 `--config` 가 운영 설정이거나, 포트 8787(설정의 기본값이기도 하다 —
+`[server]` 가 없거나 `port` 가 없으면 8787 이다)을 쓰거나, 운영 data_dir 를 열면 거부한다.
+설정 위에 얹히는 `--port` · `--bind` · `--server` 의 8787 도, 그리고 rcm 의 argparse 가 받는
+줄임말(`--por` · `--conf` · `--data-d`)도 그 옵션으로 읽는다. `rcm serve|worker|token` 은
+`--config` 를 꼭 받고, 클라이언트 명령은 서버 주소(`RCM_SERVER` · `--server`)를 꼭 받는다
+— 없으면 발견으로 운영을 찾는다. 그리고 운영 가드 훅의 판정(`guard_production.decide`)을
+안쪽 명령에 그대로 묻는다 — 이 도구가 훅을 돌아가는 길이 되지 않게. 운영 설치는 훅과 같은
+함수(`find_production`)로 찾되 홈은 `HOME` 이 아니라 계정의 진짜 홈이다 — 이 도구는
+`HOME=<data_dir>/home` 아래에서 불린다.
 
 표준 라이브러리만 쓴다.
 """
@@ -64,6 +71,12 @@ NAME_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]*")
 PID_RE = re.compile(r"[0-9]+")
 #: `ps` 는 워커의 읽기 코드(`remote_worker.ps_start`)와 같은 로캘 · 시간대로 부른다
 PS_ENV = {"LC_ALL": "C", "TZ": "UTC"}
+#: 부를 `ps` 와 그 시간 상한. 시험이 없는 경로 · 오래 걸리는 가짜로 바꿔 실패 갈래를 본다
+PS_COMMAND = "ps"
+PS_TIMEOUT = 5.0
+#: `start` 의 CLI 가 띄운 뒤 자식이 살아 있는지 지켜보는 초. 곧바로 죽은 자식은 종료 1 이다
+SETTLE_SECONDS = 1.0
+LOG_TAIL_LINES = 20
 SKILL = ".claude/skills/_shared/test-server.md"
 
 
@@ -149,16 +162,47 @@ def _production_place(path: Path, places: Places, *, tmp: bool = True) -> str | 
     return None
 
 
+def _names_option(word: str, names: tuple[str, ...]) -> bool:
+    """`word` 가 `names` 가운데 하나인가. rcm 의 argparse 는 `allow_abbrev` 를 끄지 않아
+    `--por` 도 `--port` 다 — 그래서 `--` 낱말이 지키는 긴 옵션의 앞부분이면 그 옵션으로 본다.
+    줄임말이 모호하면 rcm 이 거부하지만, 여기서는 그 값을 보는 쪽(더 막는 쪽)으로 읽는다."""
+    if word in names:
+        return True
+    return (
+        word.startswith("--")
+        and len(word) > 2
+        and any(name.startswith("--") and name.startswith(word) for name in names)
+    )
+
+
 def _options(argv: Sequence[str], names: tuple[str, ...]) -> list[str]:
-    """`--x v` · `--x=v` 꼴의 값을 모두."""
+    """`--x v` · `--x=v` 꼴의 값을 모두. 긴 옵션의 줄임말(`--conf v`)도."""
     values = []
     for index, token in enumerate(argv):
-        if token in names and index + 1 < len(argv):
+        if not token.startswith("-"):
+            continue
+        word, equals, value = token.partition("=")
+        if not _names_option(word, names):
+            continue
+        if equals:
+            values.append(value)
+        elif index + 1 < len(argv):
             values.append(argv[index + 1])
-        for name in names:
-            if token.startswith(name + "="):
-                values.append(token.split("=", 1)[1])
     return values
+
+
+def _int_or_none(value: str) -> int | None:
+    """argparse 의 `type=int` 와 같은 읽기(`int()` 그대로 — 앞의 0 · 공백 · `_` 도 받는다)."""
+    try:
+        return int(value)
+    except ValueError:
+        return None
+
+
+def _bind_port(value: str) -> int | None:
+    """`--bind` 값에 포트가 붙어 있으면(`127.0.0.1:8787`) 그 포트."""
+    host, colon, tail = value.rpartition(":")
+    return _int_or_none(tail) if colon and host else None
 
 
 def _url_port(url: str) -> int | None:
@@ -187,8 +231,8 @@ def _config_refusal(path: Path, places: Places) -> str | None:
             port = section.get("port", PRODUCTION_PORT)
         elif isinstance(section, str):  # worker.toml — 붙을 서버의 주소
             port = _url_port(section)
-        else:
-            port = None
+        else:  # `[server]` 가 아예 없다 — `ServerConfig.port` 의 기본값 8787 로 뜬다
+            port = PRODUCTION_PORT
     except ValueError as error:
         return f"cannot read the port in --config {path} ({error})"
     if port == PRODUCTION_PORT:
@@ -236,8 +280,18 @@ def refusal(
         place = _production_place(_abs(value, cwd), places)
         if place is not None:
             return f"data_dir {value} is inside {place}"
-    if environ.get("RCM_SERVER_PORT", "").strip() == str(PRODUCTION_PORT):
+    if _int_or_none(environ.get("RCM_SERVER_PORT", "")) == PRODUCTION_PORT:
         return f"RCM_SERVER_PORT={PRODUCTION_PORT} is production's port"
+    # CLI 의 `--port` · `--bind` 는 설정 위에 얹힌다(`cli._server_config`) — 설정이 8790 이어도.
+    for value in _options(argv, ("--port",)):
+        if _int_or_none(value) == PRODUCTION_PORT:
+            return f"--port {value} is production's port {PRODUCTION_PORT}"
+    binds = _options(argv, ("--bind",))
+    if environ.get("RCM_SERVER_BIND"):
+        binds.append(environ["RCM_SERVER_BIND"])
+    for value in binds:
+        if _bind_port(value) == PRODUCTION_PORT:
+            return f"bind address {value} is on production's port {PRODUCTION_PORT}"
     servers = _options(argv, ("--server",))
     if environ.get("RCM_SERVER"):
         servers.append(environ["RCM_SERVER"])
@@ -270,25 +324,37 @@ def refusal(
 # ── 신원 ─────────────────────────────────────────────────────────────────────
 
 
+class PsFailed(Exception):
+    """`ps` 를 못 돌렸다 — 그 프로세스가 살았는지 끝났는지 모른다. 「끝남」으로 읽지 않는다."""
+
+
+class Unreadable(Exception):
+    """pid · start 기록을 읽지 못했다(디렉터리 · 권한 · UTF-8 아님)."""
+
+
 def _ps(pid: int, column: str) -> str:
-    """`LC_ALL=C TZ=UTC ps -p <pid> -o <column>=` 의 출력 그대로. 없는 프로세스면 빈 글."""
+    """`LC_ALL=C TZ=UTC ps -p <pid> -o <column>=` 의 출력 그대로. 없는 프로세스면 빈 글
+    (`ps` 는 그때 아무것도 찍지 않고 1 로 끝난다). 못 돌렸으면 `PsFailed`."""
     try:
         out = subprocess.run(
-            ["ps", "-p", str(pid), "-o", f"{column}="],
+            [PS_COMMAND, "-p", str(pid), "-o", f"{column}="],
             env={**os.environ, **PS_ENV},
             capture_output=True,
             text=True,
-            timeout=5,
+            timeout=PS_TIMEOUT,
             check=False,
         )
-    except (OSError, subprocess.SubprocessError):
-        return ""
+    except (OSError, subprocess.SubprocessError) as error:
+        raise PsFailed(f"cannot run {PS_COMMAND} for pid {pid} ({error})") from error
+    if out.returncode not in (0, 1) or (out.returncode == 1 and out.stderr.strip()):
+        said = out.stderr.strip()[:200]
+        raise PsFailed(f"{PS_COMMAND} for pid {pid} ended with exit {out.returncode} ({said})")
     return out.stdout
 
 
 def _running_start(pid: int) -> str:
     """살아 있는 프로세스의 시작 시각(앞뒤 공백 없이). 끝났거나 좀비면 빈 글 — 좀비는 신호를
-    받아도 아무 일이 없고, 거둘 부모를 기다리는 중일 뿐이다."""
+    받아도 아무 일이 없고, 거둘 부모를 기다리는 중일 뿐이다. `ps` 를 못 돌리면 `PsFailed`."""
     stat = _ps(pid, "stat").strip()
     if not stat or stat.startswith("Z"):
         return ""
@@ -305,17 +371,22 @@ class Identity:
     current: str
     command: str
     problem: str | None
+    #: 기록을 못 읽었거나 `ps` 를 못 돌렸다 — 끝났다고도 살았다고도 말하지 않는다
+    unknown: bool = False
 
     @property
     def gone(self) -> bool:
-        return self.pid is not None and self.pid > 1 and not self.current
+        return self.pid is not None and self.pid > 1 and not self.current and not self.unknown
 
 
 def _read(path: Path) -> str | None:
+    """기록 하나. 없으면 None, 있는데 못 읽으면 `Unreadable`."""
     try:
         return path.read_text(encoding="utf-8")
     except FileNotFoundError:
         return None
+    except (OSError, UnicodeDecodeError) as error:
+        raise Unreadable(f"cannot read {path} ({error})") from error
 
 
 def _holds(command: str, path: str) -> bool:
@@ -326,8 +397,11 @@ def _holds(command: str, path: str) -> bool:
 
 def identity(directory: Path, name: str, expect_config: str | None = None) -> Identity:
     pid_path, start_path = directory / f"{name}.pid", directory / f"{name}.start"
-    recorded = (_read(start_path) or "").strip()
-    text = _read(pid_path)
+    try:
+        recorded = (_read(start_path) or "").strip()
+        text = _read(pid_path)
+    except Unreadable as error:
+        return Identity(name, None, "", "", "", str(error), unknown=True)
     if text is None:
         return Identity(name, None, recorded, "", "", f"no pid file {pid_path}")
     if not PID_RE.fullmatch(text.strip()):
@@ -335,8 +409,12 @@ def identity(directory: Path, name: str, expect_config: str | None = None) -> Id
     pid = int(text.strip())
     if pid <= 1:
         return Identity(name, pid, recorded, "", "", f"pid {pid} is not above 1")
-    current = _running_start(pid)
-    command = _ps(pid, "command").strip() if current else ""
+    try:
+        current = _running_start(pid)
+        command = _ps(pid, "command").strip() if current else ""
+    except PsFailed as error:
+        problem = f"{error}: whether pid {pid} still runs is unknown"
+        return Identity(name, pid, recorded, "", "", problem, unknown=True)
     problem = None
     if not recorded:
         problem = f"{start_path} is missing or empty"
@@ -365,10 +443,45 @@ def _write_atomically(path: Path, text: str) -> None:
     os.replace(temporary, path)
 
 
-def _default_sigint() -> None:
-    # 작업 제어 없는 셸이 뒤로 보낸 프로세스는 SIGINT 를 무시한 채 시작하고, 파이썬은 그때
-    # ctrl-C 처리기를 달지 않는다. exec 전에 기본 처분으로 돌려 놓으면 파이썬이 처리기를 단다.
-    signal.signal(signal.SIGINT, signal.SIG_DFL)
+def _child_setup(interactive_sigint: bool) -> Callable[[], None]:
+    """exec 직전 자식에서 돌 함수. 신호 마스크는 늘 비운다 — 부모가 막아 둔 신호(#267 의 막힌
+    SIGTERM)는 exec 를 지나 자식에게 그대로 가서, 이 도구의 SIGTERM · SIGINT 가 닿지 않는다."""
+
+    def prepare() -> None:
+        signal.pthread_sigmask(signal.SIG_SETMASK, [])  # mutcheck: live-proc-sigmask-kept
+        if interactive_sigint:
+            # 작업 제어 없는 셸이 뒤로 보낸 프로세스는 SIGINT 를 무시한 채 시작하고, 파이썬은
+            # 그때 ctrl-C 처리기를 달지 않는다. 기본 처분으로 돌려 놓으면 파이썬이 처리기를 단다.
+            signal.signal(signal.SIGINT, signal.SIG_DFL)
+
+    return prepare
+
+
+def _reap(proc: subprocess.Popen[bytes]) -> None:
+    """기록하지 못한 자식을 거둔다 — 신원 없이 살아 남으면 아무도 그것에 신호를 못 보낸다."""
+    if proc.poll() is None:
+        proc.kill()
+    try:
+        proc.wait(timeout=10)
+    except subprocess.TimeoutExpired:  # pragma: no cover — SIGKILL 뒤 10초는 커널이 멈춘 것
+        pass
+
+
+def _forget(*paths: Path) -> None:
+    """반쪽 기록을 지운다. 못 지우면(디렉터리 · 권한) 그대로 둔다 — 그 이름은 다음에 BLOCKED 다."""
+    for path in paths:
+        try:
+            path.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+
+def _log_tail(path: Path, lines: int = LOG_TAIL_LINES) -> list[str]:
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except OSError as error:
+        return [f"(cannot read {path}: {error})"]
+    return text.splitlines()[-lines:]
 
 
 def start(
@@ -381,8 +494,12 @@ def start(
     out: IO[str] = sys.stdout,
     cwd: str | Path | None = None,
     environ: Mapping[str, str] | None = None,
+    settle: float | None = None,
 ) -> subprocess.Popen[bytes] | int:
-    """띄운 `Popen`, 아니면 종료 코드. 시험은 `Popen` 으로 자식을 거둔다."""
+    """띄운 `Popen`, 아니면 종료 코드. 시험은 `Popen` 으로 자식을 거둔다.
+
+    `settle` 초가 주어지면(CLI) 그동안 자식이 살아 있는지 본다. 곧바로 죽었으면 `FAILED` 와
+    로그 꼬리를 찍는다 — 돌려주는 `Popen` 은 끝나 있고 CLI 는 종료 1 로 바꾼다."""
     here = Path.cwd() if cwd is None else Path(cwd)
     session = os.environ if environ is None else environ
     if not NAME_RE.fullmatch(name):
@@ -399,7 +516,8 @@ def start(
     if not target.is_dir():
         print(f"REFUSED: {target} does not exist; create it first. See {SKILL}.", file=out)
         return EXIT_REFUSED
-    if (target / f"{name}.pid").exists():
+    pid_path, start_path = target / f"{name}.pid", target / f"{name}.start"
+    if pid_path.exists():
         earlier = identity(target, name)
         if earlier.problem is None:
             print(
@@ -407,7 +525,11 @@ def start(
                 file=out,
             )
             return EXIT_REFUSED
-    preexec: Callable[[], None] | None = _default_sigint if interactive_sigint else None
+        if earlier.unknown:  # 그 기록을 덮으면 아직 살아 있을지 모르는 것의 신원을 잃는다
+            print(
+                f"REFUSED: the earlier {name} cannot be confirmed gone: {earlier.problem}", file=out
+            )
+            return EXIT_REFUSED
     log_path = target / f"{name}.log"
     with log_path.open("ab") as log:
         try:
@@ -419,18 +541,37 @@ def start(
                 cwd=here,
                 env=dict(session),
                 start_new_session=True,
-                preexec_fn=preexec,  # noqa: PLW1509 — 신호 처분 하나만 바꾼다
+                preexec_fn=_child_setup(interactive_sigint),  # noqa: PLW1509 — 신호만 바꾼다
             )
         except OSError as error:
             print(f"FAILED: cannot start {argv[0]}: {error}", file=out)
             return EXIT_FAILED
-    _write_atomically(target / f"{name}.pid", f"{proc.pid}\n")
-    started = _ps(proc.pid, "lstart")
-    _write_atomically(target / f"{name}.start", started)
-    if started.strip():
-        print(f"started {name}: pid {proc.pid}, start {started.strip()}, log {log_path}", file=out)
-    else:
-        print(f"started {name}: pid {proc.pid} ended at once; read {log_path}", file=out)
+    # pid · 시작 시각을 못 적으면 그 자식은 신원 없이 산다 — 거두고 반쪽 기록도 지운다.
+    try:
+        _write_atomically(pid_path, f"{proc.pid}\n")
+        started = _ps(proc.pid, "lstart")
+        if not started.strip():
+            raise PsFailed(f"{PS_COMMAND} printed no start time for pid {proc.pid}")
+        _write_atomically(start_path, started)
+    except (OSError, PsFailed) as error:  # mutcheck: live-proc-unrecorded-child-kept
+        _reap(proc)
+        _forget(pid_path, start_path)
+        print(f"FAILED: {name} (pid {proc.pid}) was not recorded ({error}); stopped it", file=out)
+        return EXIT_FAILED
+    if settle is not None:
+        deadline = time.monotonic() + settle
+        while proc.poll() is None and time.monotonic() < deadline:
+            time.sleep(0.05)
+        if proc.poll() is not None:  # mutcheck: live-proc-dead-child-started
+            print(
+                f"FAILED: {name} (pid {proc.pid}) ended at once with exit {proc.returncode}; "
+                f"the end of {log_path}:",
+                file=out,
+            )
+            for line in _log_tail(log_path):
+                print(f"  {line}", file=out)
+            return proc
+    print(f"started {name}: pid {proc.pid}, start {started.strip()}, log {log_path}", file=out)
     return proc
 
 
@@ -459,8 +600,14 @@ def send(
     return EXIT_BLOCKED
 
 
-def _still(ident: Identity) -> bool:
-    return ident.pid is not None and _running_start(ident.pid) == ident.recorded
+def _still(ident: Identity) -> bool | None:
+    """아직 같은 신원으로 살아 있나. `ps` 를 못 돌리면 None — 모름은 「끝남」이 아니다."""
+    if ident.pid is None:
+        return False
+    try:
+        return _running_start(ident.pid) == ident.recorded
+    except PsFailed:
+        return None  # mutcheck: live-proc-stop-all-ps-failure-stopped
 
 
 def stop_all(directory: str | Path, *, grace: float = 10.0, out: IO[str] = sys.stdout) -> int:
@@ -487,9 +634,19 @@ def stop_all(directory: str | Path, *, grace: float = 10.0, out: IO[str] = sys.s
     waiting = list(pending)
     while waiting and time.monotonic() < deadline:
         time.sleep(0.1)
-        waiting = [ident for ident in waiting if _still(ident)]
+        # 확인 못 한 것(None)은 끝난 것으로 빼지 않고 기다리는 쪽에 남긴다.
+        waiting = [ident for ident in waiting if _still(ident) is not False]
     for ident in pending:
-        if ident in waiting and _still(ident):
+        state = _still(ident) if ident in waiting else False
+        if state is None:
+            print(
+                f"{ident.name}: reason: {PS_COMMAND} failed after SIGTERM, so whether pid "
+                f"{ident.pid} ended is unknown; no SIGKILL sent",
+                file=out,
+            )
+            print(f"{ident.name}: BLOCKED", file=out)
+            blocked = True
+        elif state:
             try:
                 os.kill(ident.pid or 0, signal.SIGKILL)
             except ProcessLookupError:
@@ -510,8 +667,10 @@ def _parser() -> argparse.ArgumentParser:
         description=(
             "Start test-server processes and signal only the pid and start time recorded at "
             f"start. There is no lookup by name. Rules: {SKILL} (Signals). Exit codes: 0 done, "
-            "1 failed to start, 2 usage, 3 BLOCKED (identity not confirmed, nothing sent), "
-            "4 REFUSED (a production path or port, nothing started)."
+            "1 failed to start, ended within a second (the log's end is printed) or could not "
+            "be recorded (then it is stopped), 2 usage, 3 BLOCKED (identity not confirmed, "
+            "ps failed or a record unreadable, nothing sent), 4 REFUSED (a production path or "
+            "port, nothing started)."
         ),
     )
     sub = parser.add_subparsers(dest="action", required=True)
@@ -554,12 +713,11 @@ def main(
     if args.action == "start":
         result = start(
             args.dir, args.name, command, interactive_sigint=args.interactive_sigint,
-            places=places, out=out,
+            places=places, out=out, settle=SETTLE_SECONDS,
         )  # fmt: skip
         if isinstance(result, int):
             return result
-        recorded = _read(_abs(args.dir, Path.cwd()) / f"{args.name}.start") or ""
-        return EXIT_OK if recorded.strip() else EXIT_FAILED
+        return EXIT_OK if result.poll() is None else EXIT_FAILED
     if command:
         print("only start takes a command after --", file=out)
         return EXIT_USAGE
