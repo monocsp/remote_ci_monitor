@@ -6,7 +6,7 @@
 #
 #   bash scripts/acceptance/m5tb_live.sh --list         # 단계 표(§7.1 의 행 ID 전부 → 확인 방법)
 #   bash scripts/acceptance/m5tb_live.sh --self-test    # 잡 없이 가드 · 서버 · 중계 · 워커 · 정리만(약 15초)
-#   bash scripts/acceptance/m5tb_live.sh                # 전부(약 25~30분 — G 만료를 실제로 기다린다)
+#   bash scripts/acceptance/m5tb_live.sh                # 전부(약 20분 — G 만료를 실제로 기다린다)
 #   bash scripts/acceptance/m5tb_live.sh --only RL43,RL45
 #   M5TB_PORT=8797 bash scripts/acceptance/m5tb_live.sh
 #
@@ -156,7 +156,8 @@ EOF
   [ "$got" = free ]
 }
 
-# 운영 launchd 라벨인가(대소문자와 상관없이 com.remote-ci-monitor 이거나 그 아래)
+# 운영 launchd 라벨인가(대소문자와 상관없이 com.remote-ci-monitor 이거나 그 아래). 하네스는 launchd
+# 를 아예 쓰지 않으므로(launchctl 이 없다 — 시험이 잠근다) 지금은 아무 자리도 이것을 부르지 않는다
 is_prod_label() { # is_prod_label <label>
   local lower
   lower=$(printf '%s' "${1:-}" | tr '[:upper:]' '[:lower:]')
@@ -2555,6 +2556,7 @@ run_sweep() {
     waitstate "$j" 60 terminal >/dev/null
   fi
   judge RL51
+  verdict RL51-a SKIP "(a) SIGTERM between the supervisor's start check and the command's Popen needs an injected hook — unit test test_rl51_a_sigterm_in_the_popen_window_reaches_the_command (tests/test_job_supervisor_m5tb.py)"
   reset_world
 }
 
