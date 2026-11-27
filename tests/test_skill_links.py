@@ -20,6 +20,10 @@
   제목을 거부했다. 자리표시(`<title>` · `…`)는 건너뛴다.
 - 스킬 · 에이전트가 시키는 명령은 워크트리의 `.venv` 것이다 — `python3 tools/redgreen.py` 는 pytest
   가 없는 인터프리터로 돌고, 맨 `ruff` · `python scripts/mutcheck.py` 는 PATH 의 남의 것을 쓴다.
+  맨 `python -m pytest` 도 같다(2026-11-27). 경로 검사는 `tests/` 의 파일 이름도 본다.
+- 2026-11-27 다른 프로젝트의 새 판에서 들인 규칙(다시 받는 계획-시험 대조, 사람에게 쓰는 커버리지
+  낱말, P5 실기 레인, 압축 뒤 다시 열기, 머지 뒤 dev, 시계 주입, 변이 앵커)이 정본에 있고, 셈이 든
+  규칙은 정본 밖에서 다시 적지 않는다(파일 끝 절).
 """
 
 from __future__ import annotations
@@ -64,7 +68,9 @@ PATH_RE = re.compile(
     r"(?<![\w~./-])\.claude/(agents/[\w-]+\.md|skills/[\w-]+/SKILL\.md|skills/_shared/[\w-]+\.md)"
 )
 LINK_RE = re.compile(r"\]\(([^)\s#]+)(?:#[^)]*)?\)")
-TOOL_RE = re.compile(r"(?<![\w~./<-])((?:tools|scripts)/[\w./-]+\.(?:py|sh))\b")
+#: `tools/` · `scripts/` · `tests/` 의 파일 이름. 글롭(`m5*.py`)과 자리표시(`<topic>`)는
+#: 이름이 아니다.
+TOOL_RE = re.compile(r"(?<![\w~./<-])((?:tools|scripts|tests)/[\w./-]+\.(?:py|sh|js))(?![\w*<>-])")
 WORD = r"(sub-?agents?|agents?|skills?|에이전트|스킬)"
 NAMED_RE = re.compile(
     rf"`([a-z][a-z0-9-]*)`\s*{WORD}(?![\w-])|(?<![\w-]){WORD}\s+`([a-z][a-z0-9-]*)`"
@@ -84,6 +90,7 @@ BARE_COMMANDS = {
     "python3 tools/redgreen.py": re.compile(r"(?<![\w/.-])python3?\s+tools/redgreen\.py"),
     "python scripts/mutcheck.py": re.compile(r"(?<![\w/.-])python3?\s+scripts/mutcheck\.py"),
     "ruff …": re.compile(r"(?<![\w/.-])ruff\s+(check|format)\b"),
+    "python -m pytest": re.compile(r"(?<![\w/.-])python3?\s+-m\s+pytest\b"),
 }
 
 
