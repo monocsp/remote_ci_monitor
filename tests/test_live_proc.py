@@ -28,7 +28,6 @@ import shutil
 import signal
 import subprocess
 import sys
-import tempfile
 import time
 from collections.abc import Iterator
 from pathlib import Path
@@ -71,22 +70,8 @@ def _places(home: Path, *, tmp_roots: tuple[Path, ...] = ()) -> object:
 
 
 @pytest.fixture
-def outside_tmp() -> Iterator[Path]:
-    """`/tmp` 밖의 시험 폴더 하나. 맥미니 CI 는 TMPDIR 을 /private/tmp 아래에 두어 tmp_path 도
-    거기 있고, 도구는 /tmp 아래의 `--dir` 를 거부한다(잡 4380). 그래서 진짜 홈의
-    `~/.local/share/rcm-devtest-livep-<무작위>` 를 만들고 끝나면 그 폴더만 지운다 — 시험 서버
-    문서의 자리와 같은 꼴이고, 운영 자리(`~/.local/share/rcm`)의 형제일 뿐 안이 아니다."""
-    base = lp._real_home() / ".local" / "share"
-    base.mkdir(parents=True, exist_ok=True)
-    folder = Path(tempfile.mkdtemp(prefix="rcm-devtest-livep-", dir=base))
-    try:
-        yield folder
-    finally:
-        shutil.rmtree(folder, ignore_errors=True)
-
-
-@pytest.fixture
 def d(outside_tmp: Path) -> Path:
+    # `outside_tmp` 는 tests/conftest.py 의 것이다: 진짜 홈의 /tmp 밖 폴더(잡 4380).
     # 시험 서버 폴더: 도구는 안쪽 명령의 `--config` 를 읽어 보므로 그 파일들을 둔다.
     path = outside_tmp / "home" / ".local" / "share" / "rcm-devtest-t"
     path.mkdir(parents=True)
@@ -1196,9 +1181,10 @@ def test_b8_4_a_test_folder_that_cannot_be_removed_fails_the_test() -> None:
     # 파일이 복사본을 따로 들고 있으면 한쪽만 고쳐진다.
     import conftest
 
+    copy = "def " + "outside_tmp("  # 이 파일 자신의 글자에 걸리지 않게 나눠 쓴다
     for module in ("test_live_proc.py", "test_skill_links.py"):
         text = (ROOT / "tests" / module).read_text(encoding="utf-8")
-        assert "def outside_tmp(" not in text, f"tests/{module} keeps its own outside_tmp"
+        assert copy not in text, f"tests/{module} keeps its own outside_tmp"
     make = getattr(conftest, "outside_tmp_folder", None)
     assert make is not None, "tests/conftest.py has no shared outside_tmp_folder"
     if os.geteuid() == 0:  # pragma: no cover — root 는 읽기 전용 폴더도 지운다

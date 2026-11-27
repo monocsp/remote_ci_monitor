@@ -35,15 +35,12 @@ from __future__ import annotations
 
 import importlib.util
 import os
-import pwd
 import re
 import shutil
 import signal
 import subprocess
 import sys
-import tempfile
 import time
-from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
@@ -591,21 +588,6 @@ def _ready(log: Path) -> None:
             return
         time.sleep(0.05)
     raise AssertionError(f"{log.name} never printed ready")
-
-
-@pytest.fixture
-def outside_tmp() -> Iterator[Path]:
-    """`/tmp` 밖의 시험 폴더 하나. 도구는 진짜 홈의 운영 자리를 보고 `/tmp` 아래의 `--dir` 를
-    거부하는데, 맥미니 CI 는 TMPDIR 을 /private/tmp 아래에 두어 tmp_path 도 거기 있다(잡 4380).
-    그래서 진짜 홈(`HOME` 이 아니라 계정의 홈 — 도구와 같다)의
-    `~/.local/share/rcm-devtest-livep-<무작위>` 를 만들고 끝나면 그 폴더만 지운다."""
-    base = Path(pwd.getpwuid(os.getuid()).pw_dir) / ".local" / "share"
-    base.mkdir(parents=True, exist_ok=True)
-    folder = Path(tempfile.mkdtemp(prefix="rcm-devtest-livep-", dir=base))
-    try:
-        yield folder
-    finally:
-        shutil.rmtree(folder, ignore_errors=True)
 
 
 @pytest.mark.parametrize("shell", ["sh", "zsh"])
