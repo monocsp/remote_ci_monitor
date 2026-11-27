@@ -42,6 +42,7 @@ HB=1
 CLAIM_WAIT=2
 GRACE_J=3   # 워커 grace_seconds — 표식 잡의 grace_J(상한 G − L − 15 − 10 = 13 안쪽)
 BIG_GRACE=30 # RL34 「워커 grace 큰 값」 — 워커가 13 으로 줄인다고 한 줄 남긴다
+RECENT_COUNT=100 # 웹 최근 목록 — 전체 실기가 끝내는 잡(서른 남짓)을 다 담는다(RL29-web)
 LATE_SECONDS=210 # RL5: 일반 잡이 G 를 넘긴 분단 · 서버 재시작 · 복귀 뒤에 끝나도록
 
 die() {
@@ -82,7 +83,7 @@ RL25|unit|-|가짜 옛 서버
 RL26|unit|-|워커 시계 주입
 RL27|unit|-|서버 now_fn · mono_fn
 RL28|live|run_grace_view|유예 중(T~G): 사유 worker_unreachable_grace · finish_at null · running · rcm top · rcm eta --job 문장(원문 코드 없음) · /api/health 고정 · rcm wait --timeout 3 · 끊김/돌아옴 줄 지연 · 웹 띠 390px 80px 이하 · 두 언어 · 콘솔 오류 0 · 끊긴 행은 시간을 안 셈 · 회색 레인 · 막대에 시간 눈금 없음(듣는 행이 대조군) — RL28-cancel: 유예 중 취소한 잡은 top · eta · wait 가 「돌아오면 취소」, 기다리던 wait 은 「cancel requested」로 바로잡음, 돌아온 뒤 cancelled
-RL29|live|run_lost_ends|다섯 lost 끝(worker_unreachable · worker_self_stopped · worker_replaced · worker_restarted_without_job · orphan_unverified): 종료 3 · rcm wait 의 lost 문장(core/outcome.py 가 그린 것) · 알림 훅 잡당 1회 · 웹 문장 · 콘솔 오류 0
+RL29|live|run_claim_lost+run_lost_ends|다섯 lost 끝(worker_unreachable · worker_self_stopped · worker_replaced · worker_restarted_without_job · orphan_unverified): 종료 3 · rcm wait 의 lost 문장(core/outcome.py 가 그린 것) · 알림 훅 잡당 1회 · 웹 문장 · 콘솔 오류 0
 RL30|unit|-|설정 로드 · reload
 RL31|unit|-|ps · /proc 실패 주입 — 리더만 죽은 그룹은 RL15 가 실기로 본다
 RL32|unit|-|가짜 서버
@@ -454,6 +455,101 @@ def cmd_holds(url: str, tok: str) -> int:
         print("unknown")
         return 0
     print(" ".join(str(h.get("job_id")) for h in holds if isinstance(h, dict)))
+    return 0
+
+
+def open_job_ids(doc: object) -> list[int] | None:
+    """`/api/status` 의 풀마다 대기열(queued · uploading · running · cancelling)과 예약의 잡 번호.
+
+    큐를 못 읽은 풀(`queue` 가 null)이 하나라도 있거나 문서가 이상하면 None — 빈 목록과 다르다."""
+    pools = doc.get("pools") if isinstance(doc, dict) else None
+    if not isinstance(pools, list):
+        return None
+    ids: set[int] = set()
+    for pool in pools:
+        if not isinstance(pool, dict) or not isinstance(pool.get("queue"), list):
+            return None
+        for row in [*pool["queue"], *(pool.get("scheduled") or [])]:
+            if isinstance(row, dict) and isinstance(row.get("id"), int):
+                ids.add(row["id"])
+    return sorted(ids)
+
+
+def cmd_openjobs(url: str, tok: str) -> int:
+    """남은(끝나지 않은) 잡 번호(공백으로). 못 읽으면 unknown."""
+    try:
+        status, doc = get(url, tok, "/api/status")
+    except OSError:
+        print("unknown")
+        return 0
+    ids = open_job_ids(doc) if status == 200 else None
+    print("unknown" if ids is None else " ".join(str(i) for i in ids))
+    return 0
+
+
+def why_not_started(
+    jobs: list[dict[str, object]], status: object, workers: list[str]
+) -> tuple[str, str]:
+    """시작하지 않은 잡마다 「어디서 돌았나 · 대기 사유」와 그 단계 워커 레인의 막힘을 한 줄로.
+
+    하네스 탓이 보이면 FAIL 이고 글은 `harness: ` 로 시작한다 — 앞 단계의 남은 잡이 이 단계 워커를
+    가져갔거나, 하네스가 끈 부하 게이트가 이 단계 워커의 레인을 막고 있다. 모르면 UNKNOWN 이다."""
+    if not isinstance(status, dict):
+        ids = " ".join(f"#{j.get('id')}" for j in jobs)
+        return "UNKNOWN", f"jobs did not start ({ids}); status unreadable"
+    rows: dict[object, dict[str, object]] = {}
+    for pool in status.get("pools") or []:
+        for row in (pool.get("queue") or []) if isinstance(pool, dict) else []:
+            if isinstance(row, dict):
+                rows[row.get("id")] = row
+    lanes = [
+        w
+        for w in ((status.get("server") or {}).get("workers") or [])
+        if isinstance(w, dict) and w.get("worker") in workers
+    ]
+    harness = False
+    parts: list[str] = []
+    for j in jobs:
+        jid, preset, state = j.get("id"), j.get("preset") or "?", j.get("state") or "?"
+        text = f"#{jid} {preset} {state}"
+        ran = j.get("ran_on")
+        if isinstance(ran, str) and ran and ran not in workers:
+            harness = True
+            text += f" on {ran}, not on {','.join(workers)}"
+        reason = (rows.get(jid) or {}).get("reason")
+        if reason:
+            text += f" ({reason})"
+        parts.append(text)
+    for name in workers:
+        mine = [w for w in lanes if w.get("worker") == name]
+        if not mine:
+            parts.append(f"{name}: not registered")
+            continue
+        for w in mine:
+            if w.get("hold_code"):
+                harness = True
+                parts.append(f"{name} lane {w.get('lane')} held ({w.get('hold_code')})")
+            elif w.get("state") not in ("idle", "busy"):
+                parts.append(f"{name} lane {w.get('lane')} {w.get('state')}")
+    text = "jobs did not start: " + "; ".join(parts)
+    return ("FAIL", "harness: " + text) if harness else ("UNKNOWN", text)
+
+
+def cmd_whynot(url: str, tok: str, workers: str, *jids: str) -> int:
+    """`LEVEL 글` 한 줄 — `why_not_started` 를 진짜 잡 문서와 `/api/status` 로."""
+    jobs: list[dict[str, object]] = []
+    for jid in jids:
+        try:
+            status, doc = get(url, tok, f"/jobs/{jid}")
+        except OSError:
+            status, doc = 0, {}
+        jobs.append(doc if status == 200 and isinstance(doc, dict) else {"id": jid})
+    try:
+        status, sdoc = get(url, tok, "/api/status")
+    except OSError:
+        status, sdoc = 0, None
+    level, text = why_not_started(jobs, sdoc if status == 200 else None, workers.split(","))
+    print(f"{level} {text}")
     return 0
 
 
@@ -882,6 +978,15 @@ READY_JS = (
 )
 
 
+#: 「show N more」를 눌러 최근 목록을 다 편다(app.js data-more-recent). 이미 폈거나 단추가 없으면
+#: 그대로 둔다 — 단추 글이 「show fewer」면 이미 편 것이다. 누른 뒤 다시 그려질 때까지 기다린다
+EXPAND_RECENT_JS = (
+    "(() => { const b = document.querySelector('[data-more-recent]'); "
+    "if (!b || !/more/i.test(b.textContent) && !/더/.test(b.textContent)) return 0; "
+    "b.click(); return 1; })()"
+)
+
+
 def cmd_web(url: str, outdir: str, tag: str, width: str, rows: str = "") -> int:
     """390px 와 두 언어로 첫 화면을 연다. 사실을 `키=값` 줄로, 스크린샷 · 본문 글을 outdir 에.
 
@@ -910,10 +1015,14 @@ def cmd_web(url: str, outdir: str, tag: str, width: str, rows: str = "") -> int:
                     print(f"{lang}_{k}={show(c.eval(js))}")
                 if roles:
                     _rows(c, roles, lang)  # type: ignore[arg-type]
+                c.screenshot(out / f"{tag}-{lang}.png")
+                # 화면 글은 최근 목록을 다 편 뒤에 읽는다 — 앞 단계의 끝난 잡도 거기 있다(RL29-web)
+                if c.eval(EXPAND_RECENT_JS) == 1:
+                    c.frames(2)
+                    time.sleep(0.5)
                 print(f"{lang}_errors={len(c.page_errors())}")
                 body = c.eval("document.body.innerText") or ""
                 (out / f"{tag}-{lang}.txt").write_text(body, encoding="utf-8")
-                c.screenshot(out / f"{tag}-{lang}.png")
         print("web=ok")
     except Exception as e:  # noqa: BLE001
         print(f"web=failed {type(e).__name__}: {str(e)[:200]}")
@@ -1623,6 +1732,8 @@ COMMANDS = {
     "waitstate": cmd_waitstate,
     "status": cmd_status,
     "holds": cmd_holds,
+    "openjobs": cmd_openjobs,
+    "whynot": cmd_whynot,
     "health": cmd_health,
     "getraw": cmd_getraw,
     "sse": cmd_sse,
@@ -1991,12 +2102,30 @@ reset_world() { # 단계 사이: 중계를 풀고 워커를 멈추고 남은 잡
     p=$(tr -d ' \n' <"$f")
     kill_job_group "$p" "${f%.*}.start"
   done
+  # 워커를 멈춘 뒤 남은 잡(대기 · 도는 중 · 예약)을 취소한다 — 남겨 두면 다음 단계의 첫 워커가
+  # 집어 그 뒤 단계마다 잡이 하나씩 밀린다(2026-11-27 첫 실기: #19 rl15-ship 이 rl1a 로)
+  ids=$(h openjobs "$URL" "$CTOK")
+  if [ "$ids" = unknown ]; then
+    log "reset: the queue could not be read — leftover jobs may reach the next step"
+  else
+    for p in $ids; do
+      printf 'reset: cancel leftover #%s %s %s\n' "$p" "$(jv "$p" preset)" "$(jv "$p" state)" >>"$OUT/reset.log"
+      client cancel "$p" >>"$OUT/reset.log" 2>&1 || admin cancel "$p" >>"$OUT/reset.log" 2>&1 || true
+      waitstate "$p" 20 terminal >/dev/null
+    done
+  fi
   ids=$(h holds "$URL" "$CTOK")
   if [ "$ids" != unknown ]; then
     for p in $ids; do
       admin release-hold "$p" --reason "acceptance reset" >>"$OUT/reset.log" 2>&1 || true
     done
   fi
+}
+
+not_started() { # not_started <ID> <워커,워커> <잡…> — 시작하지 않은 잡의 이유를 판정 한 줄로
+  local id=$1 workers=$2
+  shift 2
+  verdict_line "$id" "$(h whynot "$URL" "$CTOK" "$workers" "$@" || echo "UNKNOWN jobs did not start: $*")"
 }
 
 # ── 단계 ────────────────────────────────────────────────────────────────────
@@ -2401,7 +2530,7 @@ run_orphan() {
   x=$(submit rl15-ship)
   px=$(pid_of "$x" 30)
   [ -n "$py" ] && [ -n "$px" ] || {
-    verdict RL15 UNKNOWN "jobs did not start"
+    not_started RL15 rl15 "$y" "$x"
     reset_world
     return 0
   }
@@ -2465,7 +2594,7 @@ run_partition_past_g() {
   y=$(submit rl1-late)
   py=$(pid_of "$y" 30)
   [ -n "$px" ] && [ -n "$py" ] || {
-    verdict RL1 UNKNOWN "jobs did not start"
+    not_started RL1 rl1a,rl1b "$x" "$y"
     reset_world
     return 0
   }
@@ -2550,7 +2679,7 @@ run_cancel_in_partition() {
   y=$(submit rl8-tick)
   py=$(pid_of "$y" 30)
   [ -n "$px" ] && [ -n "$py" ] || {
-    verdict RL8 UNKNOWN "jobs did not start"
+    not_started RL8 rl8a,rl8b "$x" "$y"
     reset_world
     return 0
   }
@@ -2598,7 +2727,7 @@ run_server_stop_past_g() {
   y=$(submit rl2-plain)
   py=$(pid_of "$y" 30)
   [ -n "$px" ] && [ -n "$py" ] || {
-    verdict RL2 UNKNOWN "jobs did not start"
+    not_started RL2 rl2a,rl2b "$x" "$y"
     reset_world
     return 0
   }
@@ -2645,7 +2774,7 @@ run_kill_worker() {
   ye=$(submit rl43-plain)
   pe=$(pid_of "$ye" 30)
   [ -n "$pa" ] && [ -n "$pb" ] && [ -n "$pe" ] || {
-    verdict RL43 UNKNOWN "jobs did not start"
+    not_started RL43 rl43a,rl43b,rl43e "$xa" "$xb" "$ye"
     reset_world
     return 0
   }
@@ -2868,6 +2997,10 @@ write_server_toml() { # write_server_toml <self-test 0|1>
     printf '[server]\nbind = "127.0.0.1"\nport = %s\ndata_dir = "%s"\nadvertise = false\nlanes = 0\n' "$P" "$DATA"
     printf 'grace_seconds = %s\nworker_timeout_seconds = %s\nworker_heartbeat_seconds = %s\n' "$GRACE_J" "$T" "$HB"
     printf 'worker_claim_wait_seconds = %s\ndisconnect_grace_seconds = %s\n' "$CLAIM_WAIT" "$G"
+    # 부하 게이트(server.py admit)는 시험하지 않는다 — 켜 두면 레인 둘인 워커(RL15)의 둘째 레인이
+    # 머신이 바쁠 때 쿨다운 · CPU 창에 막혀 잡이 안 시작한다. 웹 최근 목록(RL29-web)은 실기가 끝낸
+    # 잡을 다 담는다(기본 8개)
+    printf 'admission = "always"\nrecent_count = %s\n' "$RECENT_COUNT"
     preset rl50-ship 1 900 "$long"
     preset rl10-ship 1 900 "$long"
     preset rl43d-exit7 1 60 "$PID_LINE; sleep 1; exit 7"
