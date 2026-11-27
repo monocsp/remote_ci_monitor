@@ -24,9 +24,11 @@ from __future__ import annotations
 import importlib.util
 import io
 import os
+import shutil
 import signal
 import subprocess
 import sys
+import tempfile
 import time
 from collections.abc import Iterator
 from pathlib import Path
@@ -69,9 +71,24 @@ def _places(home: Path, *, tmp_roots: tuple[Path, ...] = ()) -> object:
 
 
 @pytest.fixture
-def d(tmp_path: Path) -> Path:
+def outside_tmp() -> Iterator[Path]:
+    """`/tmp` 밖의 시험 폴더 하나. 맥미니 CI 는 TMPDIR 을 /private/tmp 아래에 두어 tmp_path 도
+    거기 있고, 도구는 /tmp 아래의 `--dir` 를 거부한다(잡 4380). 그래서 진짜 홈의
+    `~/.local/share/rcm-devtest-livep-<무작위>` 를 만들고 끝나면 그 폴더만 지운다 — 시험 서버
+    문서의 자리와 같은 꼴이고, 운영 자리(`~/.local/share/rcm`)의 형제일 뿐 안이 아니다."""
+    base = lp._real_home() / ".local" / "share"
+    base.mkdir(parents=True, exist_ok=True)
+    folder = Path(tempfile.mkdtemp(prefix="rcm-devtest-livep-", dir=base))
+    try:
+        yield folder
+    finally:
+        shutil.rmtree(folder, ignore_errors=True)
+
+
+@pytest.fixture
+def d(outside_tmp: Path) -> Path:
     # 시험 서버 폴더: 도구는 안쪽 명령의 `--config` 를 읽어 보므로 그 파일들을 둔다.
-    path = tmp_path / "home" / ".local" / "share" / "rcm-devtest-t"
+    path = outside_tmp / "home" / ".local" / "share" / "rcm-devtest-t"
     path.mkdir(parents=True)
     _test_configs(path)
     return path

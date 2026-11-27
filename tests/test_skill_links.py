@@ -35,12 +35,15 @@ from __future__ import annotations
 
 import importlib.util
 import os
+import pwd
 import re
 import shutil
 import signal
 import subprocess
 import sys
+import tempfile
 import time
+from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
@@ -590,19 +593,32 @@ def _ready(log: Path) -> None:
     raise AssertionError(f"{log.name} never printed ready")
 
 
+@pytest.fixture
+def outside_tmp() -> Iterator[Path]:
+    """`/tmp` 밖의 시험 폴더 하나. 도구는 진짜 홈의 운영 자리를 보고 `/tmp` 아래의 `--dir` 를
+    거부하는데, 맥미니 CI 는 TMPDIR 을 /private/tmp 아래에 두어 tmp_path 도 거기 있다(잡 4380).
+    그래서 진짜 홈(`HOME` 이 아니라 계정의 홈 — 도구와 같다)의
+    `~/.local/share/rcm-devtest-livep-<무작위>` 를 만들고 끝나면 그 폴더만 지운다."""
+    base = Path(pwd.getpwuid(os.getuid()).pw_dir) / ".local" / "share"
+    base.mkdir(parents=True, exist_ok=True)
+    folder = Path(tempfile.mkdtemp(prefix="rcm-devtest-livep-", dir=base))
+    try:
+        yield folder
+    finally:
+        shutil.rmtree(folder, ignore_errors=True)
+
+
 @pytest.mark.parametrize("shell", ["sh", "zsh"])
-def test_the_signals_blocks_run_as_written(tmp_path: Path, shell: str) -> None:
+def test_the_signals_blocks_run_as_written(tmp_path: Path, outside_tmp: Path, shell: str) -> None:
     # «Signals» 의 블록을 문서에서 꺼내 차례로 글자 그대로 돌린다: 서버 · 워커 띄우기 → 클라이언트
-    # 띄우기 → 워커 SIGTERM · 클라이언트 SIGINT → stop-all. rcm 은 가짜다. 도구는 진짜 홈의 운영
-    # 자리를 보고 `/tmp` 를 거부하므로 pytest 의 tmp_path 가 `/tmp` 아래인 머신에서는 건너뛴다.
+    # 띄우기 → 워커 SIGTERM · 클라이언트 SIGINT → stop-all. rcm 은 가짜다. data_dir 는 `/tmp`
+    # 밖(`outside_tmp`)이라 tmp_path 가 `/tmp` 아래인 CI 에서도 건너뛰지 않고 돈다(잡 4380 뒤).
     if shutil.which(shell) is None:
         pytest.skip(f"no {shell}")
-    if any(str(tmp_path.resolve()).startswith(r) for r in ("/tmp/", "/private/tmp/")):
-        pytest.skip("tools/live_proc.py refuses /tmp, where pytest keeps tmp_path here")
     text = TEST_SERVER_CANON.read_text(encoding="utf-8")
     blocks = _signals_blocks(text)
     assert len(blocks) == 4, blocks  # 서버 · 워커, 클라이언트, 신호, 정리
-    home = tmp_path / "home"
+    home = outside_tmp / "home"
     d = home / ".local" / "share" / "rcm-devtest-t"
     (d / "home").mkdir(parents=True)
     worktree = tmp_path / "wt"
@@ -649,7 +665,8 @@ def test_the_signals_blocks_run_as_written(tmp_path: Path, shell: str) -> None:
     finally:
         for path in d.glob("*.pid"):
             number = int(path.read_text(encoding="utf-8"))
-            if str(tmp_path) in _ps(number, "command"):
+            command = _ps(number, "command")
+            if str(tmp_path) in command or str(outside_tmp) in command:
                 os.kill(number, signal.SIGKILL)
 
 
