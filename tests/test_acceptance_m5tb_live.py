@@ -1866,3 +1866,51 @@ def test_pr4_a_busy_port_is_found_without_lsof(tmp_path: Path) -> None:
     assert sh("port_free", port, extra={"PATH": path, "M5TB_PY": "/usr/bin/false"}).returncode == 1
     main = _body("main")
     assert re.search(r'port_free "\$P" \|\| die', main), main[:1200]
+
+
+def test_rl51_a_is_a_skip_line_that_names_its_unit_test() -> None:
+    # RL51 (a) 는 단계 표에서 「단위(주입 훅)」인데 하네스도 보고서도 SKIP 줄이 없었다
+    body = _body("run_sweep")
+    m = re.search(r'verdict RL51-a SKIP "([^"]*)"', body)
+    assert m, body[-400:]
+    assert "test_rl51_a_sigterm_in_the_popen_window_reaches_the_command" in m.group(1), m.group(1)
+
+
+def test_pr4_changelog_claims_only_guards_the_harness_runs() -> None:
+    # CHANGELOG 은 「launchd 라벨을 거절한다」고 했지만 is_prod_label 은 정의만 있고 불리지 않는다
+    text = (ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
+    start = text.index("## [Unreleased]")
+    bullet = next(
+        b for b in text[start : text.index("\n## [", start + 1)].split("\n- ") if "m5tb_live" in b
+    )
+    calls = [x for x in script_text().splitlines() if "is_prod_label " in x and "() {" not in x]
+    if not calls:
+        assert "launchd label" not in bullet, bullet
+    assert "launchd" in bullet, "say that the harness does not use launchd"
+    assert re.search(r"\b3\b", bullet) and "UNKNOWN" in bullet, "the bullet names no exit code 3"
+
+
+def test_pr4_report_and_header_agree_on_run_time_and_exit_codes() -> None:
+    head = script_text().split("set -euo pipefail", 1)[0]
+    h = re.search(r"전부\(약 (\d+)분", head)
+    r = re.search(r"전체는 (\d+)분쯤", report_text())
+    assert h and r and h.group(1) == r.group(1), (h and h.group(0), r and r.group(0))
+    assert re.search(r"UNKNOWN[^\n|]*3", report_text()), "the report does not give exit code 3"
+
+
+def test_pr4_report_cites_functions_not_line_numbers() -> None:
+    # 줄 번호는 다음 커밋에서 틀린다 — 판정 · 단계 함수 이름으로 가리킨다
+    bad = re.findall(r"\d+~\d+행|\d+행\)", report_text())
+    assert bad == [], bad
+
+
+def test_pr4_report_states_the_bounds_the_judges_now_use() -> None:
+    # RL1 은 허용치 없이 DB finished_at 과, RL15 는 워커 로그의 줄 순서로, RL51 (b) 경계는 명세의
+    # 「첫 SIGTERM + grace_J + 0.5초」에서 왜 그만큼인지 — 보고서가 판정과 같은 말을 한다
+    rows = report_rows()
+    rl1, rl15, rl51 = (" ".join(rows[i]) for i in ("RL1", "RL15", "RL51"))
+    assert "finished_at" in rl1 and "허용치" in rl1, rl1
+    assert "claimed #" in rl15 and "줄 순서" in rl15, rl15
+    assert "첫 SIGTERM" in rl51 and "heartbeat" in rl51, rl51
+    assert "4.01" not in rl51, rl51  # 옛 상한 grace_J + 0.31 + 0.7
+    assert "RL51-a" in rows, sorted(rows)
