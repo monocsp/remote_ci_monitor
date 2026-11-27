@@ -111,8 +111,23 @@ gets `--by acceptance` so the requester names no person or host.
 ## Parallel servers and cleanup
 
 At most two servers at once (the build machine also runs `rcm-ci`), each with its own port and
-`data_dir`. Record each server's pid and stop that pid when done. Leave `data_dir` until the report has
-its evidence, then remove it by its exact path, never with a glob.
+`data_dir`. Leave `data_dir` until the report has its evidence, then remove it by its exact path,
+never with a glob.
+
+**Signals go only to a pid you recorded, never by name.** Start each test `rcm serve` and `rcm worker`,
+and any client you will signal (an `rcm run` for a ctrl-C), in the background and write its pid into
+`data_dir` at once, in the same call (the worker below; the others the same way, `server.pid`,
+`client.pid`):
+
+```sh
+D=$HOME/.local/share/rcm-devtest-<topic>
+cd <abs worktree> && { HOME=$D/home RCM_WORKER_TOKEN=$(cat $D/worker.token) ./.venv/bin/rcm worker --config $D/worker.toml > $D/worker.log 2>&1 & echo $! > $D/worker.pid; }
+```
+
+Every stop, SIGTERM, `kill -9` or SIGINT, the live lane's included, goes to `$(cat $D/<name>.pid)`
+after `ps -p <pid> -o command=` still shows this `data_dir`'s config; anything else there means your
+process is gone and the pid is not yours to signal. Never by name: `pkill rcm`, `killall` or a
+`pgrep` pattern also hit the production launchd server and worker on this build machine.
 
 ## Production is read-only, only with the owner's OK, and only by the main session
 

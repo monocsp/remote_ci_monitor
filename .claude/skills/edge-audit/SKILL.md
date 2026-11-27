@@ -127,7 +127,8 @@ files in your data_dir.
 Rows (id · Given/When/Then · the condition and the means that makes it · what should be observed):
 <the rows>
 Make each condition only with the means named, and first check that it really happened (the worker
-really died, the server really stopped) before you judge the result.
+really died, the server really stopped) before you judge the result. Signals go only as
+<abs snap-<n>/>.claude/skills/_shared/test-server.md «Parallel servers and cleanup» says.
 Per row: PASS — the condition happened and the result is as expected (evidence). FAIL — the condition
 happened and the result is wrong: a job lost or doubled, a wrong state, a traceback, a wrong exit
 code, a silent failure (evidence, and the path action → wrong result). BLOCKED — the condition could

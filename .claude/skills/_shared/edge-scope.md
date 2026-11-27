@@ -65,10 +65,9 @@ and returns any match to the author as a row to write.
 ## Live lane
 
 Reading the code covers many edges and runs none. The live lane runs a few edges for real in P5, on a
-test server built from the PR's head, by `live-verifier`s. The owner of the project these skills came
-from asked for it (2026-11-26): run the risky edge cases during development, but «실제로 위험이 큰
-시나리오만 테스트하는게 좋아보여 진짜 진짜 발생하기 힘든케이스를 테스트하는건 의미없다고 보거든».
-This section is the canon for which edges go in; [`edge-audit`](../edge-audit/SKILL.md) «Live lane»
+test server built from the PR's head, by `live-verifier`s. Each run costs a server, a worker and
+minutes, so only an edge that is both reachable and costly when unhandled earns one; running an edge
+nobody reaches proves nothing a reader needs. This section is the canon for which edges go in; [`edge-audit`](../edge-audit/SKILL.md) «Live lane»
 is the procedure.
 
 An edge goes in only when all three hold:
@@ -90,10 +89,10 @@ on test servers: a step that could only run against production is not a lane row
 
 | condition | means | described in |
 |---|---|---|
-| the server restarts while a job runs, waits or uploads | stop and start the test server's `rcm serve` (SIGTERM, then start) | `_shared/test-server.md` |
-| a worker is killed, stopped or restarted | `kill -9` or SIGTERM to the `rcm worker` process, then start it again | `tests/test_e2e_worker.py` (`WorkerProc`, `Stack`) |
+| the server restarts while a job runs, waits or uploads | SIGTERM to the test server's recorded pid, then start it again | `_shared/test-server.md` «Parallel servers and cleanup» |
+| a worker is killed, stopped or restarted | `kill -9` or SIGTERM to the test worker's recorded pid, then start it again | `_shared/test-server.md` «Parallel servers and cleanup»; `tests/test_e2e_worker.py` (`WorkerProc`, `Stack`) |
 | a worker or a client loses the server | stop the test server while the worker runs or while `rcm wait --job <N> --timeout <seconds>` waits; start it again | `_shared/test-server.md` |
-| ctrl-C during `rcm run` | SIGINT to the client process | — |
+| ctrl-C during `rcm run` | SIGINT to the client's recorded pid | `_shared/test-server.md` «Parallel servers and cleanup» |
 | `--no-wait`, then `rcm wait` later | the two commands one after the other | — |
 | two sessions submit the same tree | two `rcm run … --no-wait` one after the other | — |
 | a job's exit code, marker or very long output | a fake preset: `sh -c` printing a marker and an exit code | `live-verify` §1 |
