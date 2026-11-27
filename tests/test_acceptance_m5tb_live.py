@@ -1048,7 +1048,9 @@ BAD: dict[str, list[dict[str, str]]] = {
     "RL45-empty": [{"found_empty_held": "0"}, {"en_empty_hint": "1"}],
     "RL50": [{"x_state": "lost"}, {"second_state": "running"}],
     # RL51 — (b) 워커 kill -9 는 첫 SIGTERM(감지 ≤ 0.31) + grace_J + 0.5, (c) 도 (b) 와 같은 경계
-    "RL51": [{"b1_gone": "6.5"}, {"b2_gone": "5"}, {"b2_gone": "3.9"}, {"c_gone": "5.5"}],
+    # b1 의 상한은 grace_J 3 + HB 1 + 0.5 + 0.5 = 5.0초 — 5.1 은 그 바로 위
+    "RL51": [{"b1_gone": "6.5"}, {"b1_gone": "5.1"}, {"b2_gone": "5"}, {"b2_gone": "3.9"},
+             {"c_gone": "5.5"}],
     "F78": [{"a_detect": "0.6"}, {"true_supervised": "0.5"}],
 }  # fmt: skip
 
@@ -1936,3 +1938,49 @@ def test_pr4_report_numbers_come_from_the_last_run_under_the_current_judges(tmp_
         "the evidence list has no hash of the last run's console output"
     )
     assert "이 자리에 적는다" not in text, "the rerun placeholder is still in the report"
+
+
+# ── batch-7: 마지막 head 의 부분 실기 · SKIP 수의 정의 · RL10 의 인용 ─────────────────────────────
+
+
+def test_pr4_report_partial_runs_say_their_steps_and_match_their_exit() -> None:
+    # 마지막 head 가 바꾼 줄은 `--only` 부분 실기로 돌았다 — 실기 표의 부분 실기 행은 고른 단계를
+    # 적고, FAIL 0, 종료 코드가 판정 수와 맞고(UNKNOWN 이 있으면 3), 콘솔 출력의 sha256 이 있다
+    text = report_text()
+    parts = re.findall(
+        r"^\| (\S+) \| 2026-11-27 (\d\d):(\d\d) \| [^|]+ \| [^|]+ \| "
+        r"`--only ([A-Z0-9,-]+)`[^|]*?PASS (\d+) · SKIP (\d+) · FAIL (\d+) · UNKNOWN (\d+), "
+        r"종료 (\d+) \|$",
+        text,
+        re.M,
+    )
+    assert parts, "the run table has no `--only` partial run row"
+    live = {s[0] for s in steps() if s[1] == "live"}
+    for name, hh, mm, only, _p, _s, failed, unknown, rc in parts:
+        assert set(only.split(",")) <= live, (name, only)
+        assert failed == "0", (name, failed)
+        assert rc == ("3" if unknown != "0" else "0"), (name, unknown, rc)
+        assert re.search(rf"^[0-9a-f]{{64}}  m5tb-live-20261127-{hh}{mm}\.txt$", text, re.M), (
+            f"no hash of the {name} run's console output"
+        )
+
+
+def test_pr4_report_defines_what_the_skip_count_counts() -> None:
+    # 「SKIP 8」은 단계가 낸 `verdict <ID> SKIP` 줄의 수다. main 이 summary.txt 끝에
+    # 덧붙이는 `row, not live` 줄(verdict 를 거치지 않아 콘솔에도 안 나온다)은 세지 않는다
+    # — 보고서가 그렇게 말한다
+    main_body = script_text().split("\nmain() {", 1)[1]
+    not_live = r'printf [^\n]*"SKIP", \$2 " row, not live"'
+    assert re.search(not_live, main_body), "main's not-live rows"
+    text = report_text()
+    m = re.search(r"[^\n]*`verdict <ID> SKIP`[^\n]*", text)
+    assert m, "the report does not say which lines the SKIP count counts"
+    assert "row, not live" in m.group(0) and "세지 않는다" in m.group(0), m.group(0)
+
+
+def test_pr4_report_rl10_cites_only_what_the_harness_records() -> None:
+    # facts/RL10.txt 에는 시간이 없다. RL10 행의 초 값은 하네스가 timeline.txt 에 적는 줄에서만 온다
+    assert 'log "RL10 first process gone after $out s"' in script_text()
+    cells = " ".join(report_rows()["RL10"])
+    if re.search(r"\d+\.\d+초", cells):
+        assert "timeline.txt" in cells and "first process gone after" in cells, cells
