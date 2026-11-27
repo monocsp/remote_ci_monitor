@@ -83,6 +83,7 @@ from remote_ci_monitor.config import (
 )
 from remote_ci_monitor.core import admission, jobenv, outcome
 from remote_ci_monitor.core import artifacts as art
+from remote_ci_monitor.core import pairing as pair_core
 from remote_ci_monitor.core.capability import LOCAL_WORKER
 from remote_ci_monitor.core.failures import failures_json
 from remote_ci_monitor.core.gitref import validate_ref
@@ -186,9 +187,18 @@ from remote_ci_monitor.gitops import (
 from remote_ci_monitor.hostsample import HostSampler
 from remote_ci_monitor.janitor import Janitor, reconcile_shelf_on_start
 from remote_ci_monitor.materialize import blob_path, stale_blob_keys
-from remote_ci_monitor.mdns import Responder
+from remote_ci_monitor.mdns import Responder, local_ipv4s
 from remote_ci_monitor.notify import Notifier
-from remote_ci_monitor.pairing import load_or_create_pair_key
+from remote_ci_monitor.pairing import (
+    NONCE_HEADER,
+    REJECT_MAC_KEY,
+    ChallengeLedger,
+    PairingMixin,
+    PairRefusal,
+    PairWindows,
+    load_or_create_pair_key,
+    reject_target,
+)
 from remote_ci_monitor.release_driver import (
     KIND_CONFIRM,
     KIND_RETRY,
@@ -545,7 +555,7 @@ def shown_pool(job: Job) -> str:
     return job.pool
 
 
-class App(RemoteWorkersMixin, CapabilitiesMixin, ShelfAppMixin):
+class App(RemoteWorkersMixin, CapabilitiesMixin, ShelfAppMixin, PairingMixin):
     """서버의 상태와 동작. HTTP 핸들러는 얇고, 규칙은 여기에 있다(테스트하기 쉽게)."""
 
     def __init__(
@@ -565,6 +575,10 @@ class App(RemoteWorkersMixin, CapabilitiesMixin, ShelfAppMixin):
         # 서버 신원 키(M5t-c §4.2). `serve()` 는 기동 때 읽어 넘긴다. 직접 만든 App(시험)은 처음
         # 쓸 때 `data_dir` 에서 읽거나 만든다(`PairingMixin.pair_key`)
         self._pair_key = pair_key
+        # 짝짓기 창은 프로세스 메모리에만 둔다(291) — 재시작하면 사라지고 reload 는 건드리지 않는다
+        self._pair_windows = PairWindows()
+        self._pair_challenges = ChallengeLedger()
+        self.pair_ips_fn: Callable[[], list[str]] = local_ipv4s  # 화면 URL 후보(시험이 바꾼다)
         # 단조 시계(M5t-b 결정 266) — 끊김 유예는 벽시계가 아니라 이것으로 잰다. 바닥은 기동 시각.
         # 주입 시계만 받은 곳(시험)에서는 그 시계를 따른다 — 시간을 미는 시험이 유예도 민다
         if mono_fn is None:
@@ -5704,6 +5718,20 @@ class _BodyReader:
         self.raw = raw
         self.remaining = remaining  # None = 길이를 모른다(chunked · 깨진 Content-Length)
         self.broken = False  # EOF 나 오류로 끊겼다 — 더 기다려도 안 온다
+        # 거절 MAC 이 묶는 본문의 sha256(M5t-c 342). 라우트가 읽은 바이트와 `drain` 이 흘려보낸
+        # 바이트를 모두 넣는다. `MAX_DRAIN_BODY` 안에서 끝을 아는 본문만 센다 — 그 밖은 MAC 이 없다
+        self._sha = (
+            hashlib.sha256() if remaining is not None and remaining <= MAX_DRAIN_BODY else None
+        )
+
+    @property
+    def complete(self) -> bool:
+        """본문을 `MAX_DRAIN_BODY` 안에서 끝까지 다 읽었나 — 거절 MAC 을 달아도 되나(§4.2)."""
+        return self._sha is not None and self.remaining == 0 and not self.broken
+
+    @property
+    def sha256(self) -> str:
+        return self._sha.hexdigest() if self._sha is not None else ""
 
     def read(self, n: int = -1) -> bytes:
         try:
@@ -5711,6 +5739,8 @@ class _BodyReader:
         except (OSError, ValueError):
             self.broken = True
             raise
+        if self._sha is not None:
+            self._sha.update(data)
         if self.remaining is not None:
             self.remaining = max(0, self.remaining - len(data))
         if n >= 0 and len(data) < n:
@@ -5776,6 +5806,9 @@ class Handler(ShelfHandlerMixin, BaseHTTPRequestHandler):
         # 상태 코드와 본문은 그대로 두고 `Connection: close` 만 붙는다.
         if not self.body.drain():
             close = True
+        mac = self._pair_reject_mac(e)
+        if mac is not None:
+            obj[REJECT_MAC_KEY] = mac
         if e.status == 401:
             self.send_response(401)
             if e.challenge == "basic":
@@ -5796,6 +5829,36 @@ class Handler(ShelfHandlerMixin, BaseHTTPRequestHandler):
         self._send_json(e.status, obj, extra_headers=extra_headers or None)
         if close:
             self.close_connection = True
+
+    def _pair_reject_mac(self, e: ApiError) -> str | None:
+        """짝지은 토큰에 대한 거절의 `pair_reject_mac`(M5t-c 340 · 342 · 343). 거절 MAC 은 이 한
+        곳에서 단다 — 403 · 409 를 내는 라우트(PR2 · M5t-b)는 `ApiError` 를 낼 뿐이다. `drain` 뒤에
+        부른다: 본문을 `MAX_DRAIN_BODY` 안에서 끝까지 읽지 못했거나 `Content-Encoding` 이 있으면
+        (서버는 압축을 풀지 않는다) 달지 않는다. 계산이 실패해도 응답은 그대로 나간다."""
+        target = reject_target(e.status, e.extra)
+        if target is None:
+            return None
+        headers = getattr(self, "headers", None)
+        if headers is None:
+            return None
+        encoded = bool(headers.get("Content-Encoding"))
+        undrained = encoded or not self.body.complete  # mutcheck: reject-mac-on-undrained-body
+        if undrained:
+            return None
+        code, reason = target
+        try:
+            return self.app.pair_reject_mac_for(
+                method=self.command,
+                raw_path=self.path.split("?", 1)[0],
+                status=e.status,
+                code=code,
+                reason=reason,
+                nonce=headers.get(NONCE_HEADER),
+                authorization=headers.get("Authorization"),
+                body_hash=self.body.sha256,
+            )
+        except Exception:  # noqa: BLE001 — MAC 을 못 달아도 거절은 거절이다(키 없음 = 종료 아님)
+            return None
 
     # ── 요청 처리 ───────────────────────────────────────────────────────────
 
@@ -5910,6 +5973,53 @@ class Handler(ShelfHandlerMixin, BaseHTTPRequestHandler):
         except (UnicodeDecodeError, json.JSONDecodeError) as e:
             raise ApiError(400, "body is not valid JSON") from e
 
+    def _pair_body(self, message: str, code: str) -> Any:
+        """pair 라우트의 본문 — 1 KiB 상한(넘으면 413), UTF-8 JSON 이 아님 · 깊이 초과는 그 라우트의
+        고정 400(F63: `RecursionError` 도 500 이 아니다)."""
+        n = self._content_length()
+        if n > pair_core.PAIR_BODY_MAX:
+            raise ApiError(413, f"pairing body larger than {pair_core.PAIR_BODY_MAX} bytes")
+        data = self.rfile.read(n) if n else b""
+        try:
+            return pair_core.loads_pair_body(data)
+        except ValueError:
+            raise ApiError(400, message, code=code) from None
+
+    def _pair_route(self, method: str, path: str) -> None:
+        """M5t-c 의 `/pair*`(§4.2 · §4.4). hello · exchange 는 익명, 나머지는 admin."""
+        try:
+            if path == "/pair/hello":
+                self._only(method, "POST")
+                body = self._pair_body("bad hello request", "bad_hello")
+                sock = self.connection.getsockname()
+                self._send_json(200, self.app.pair_hello(body, str(sock[0]), int(sock[1])))
+                return
+            if path == "/pair/exchange":
+                self._only(method, "POST")
+                body = self._pair_body("bad pairing request", "bad_pair_request")
+                self._send_json(200, self.app.pair_exchange(body, str(self.client_address[0])))
+                return
+            port = int(self.server.server_address[1])
+            if path == "/pair":
+                if method not in ("GET", "POST"):
+                    raise ApiError(405, "method not allowed; use GET or POST")
+                t = self.app.require_admin(self._token())  # mutcheck: pair-open-without-admin
+                if method == "GET":
+                    self._send_json(200, self.app.pair_list())
+                    return
+                body = self._pair_body("the pairing request is not JSON", "bad_pair_admin_request")
+                self._send_json(201, self.app.pair_open(body, t.name, port))
+                return
+            if path == "/pair/cancel":
+                self._only(method, "POST")
+                self.app.require_admin(self._token())
+                body = self._pair_body("the cancel request is not JSON", "bad_pair_admin_request")
+                self._send_json(200, self.app.pair_cancel(body))
+                return
+        except PairRefusal as e:
+            raise ApiError(e.status, e.message, **e.extra) from None
+        raise ApiError(404, "not found", hint=not_found_hint(path))
+
     def _read_token(self) -> TokenInfo | None:
         """읽기 라우트의 신원. Bearer 또는(basic 모드) Basic."""
         return self.app.authenticate_read(self.headers.get("Authorization"))
@@ -5958,6 +6068,9 @@ class Handler(ShelfHandlerMixin, BaseHTTPRequestHandler):
             self._only(method, "GET")
             status, body = self.app.health()
             self._send_json(status, body)
+            return
+        if path == "/pair" or path.startswith("/pair/"):
+            self._pair_route(method, path)
             return
         if path == "/api/whoami":
             self._only(method, "GET")

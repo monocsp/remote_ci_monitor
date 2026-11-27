@@ -196,9 +196,14 @@ def test_pi33_worker_window_response_rejects_bool_and_string_counts():
     secret = cp.format_pair_secret(PAIR_ID, cp.derive_pair_secret(KEY, PAIR_ID))
     args = dict(kind="worker", host_name="build-01", worker_nonce=wn, server_nonce=sn)
     mac = cp.exchange_response_mac(
-        code_key, **args, name="build-01", pool="default", presets_count=3, token=token,
+        code_key,
+        **args,
+        name="build-01",
+        pool="default",
+        presets_count=3,
+        token=token,
         pair_secret=secret,
-    )  # fmt: skip
+    )
     fields = ("worker", "build-01", wn, sn, "build-01", "default", "3", token, secret)
     assert mac == ref_mac(code_key, "rcm-pair-response-v1", *fields)
     body = {
@@ -374,10 +379,12 @@ def test_pi46_verify_pair_reject_binds_nonce_body_and_key():
     k2 = cp.derive_pair_secret(KEY, "a" * 32)
     assert not cp.verify_pair_reject(k2, *args[1:], n, sent_body_sha256=sent)  # 다른 K
     no_key = {k3: v for k3, v in body.items() if k3 != "pair_reject_mac"}
-    assert not cp.verify_pair_reject(k, "POST", "/worker/register", 409, no_key, n,
-                                     sent_body_sha256=sent)  # fmt: skip
-    assert not cp.verify_pair_reject(k, "POST", "/worker/register", 409, None, n,
-                                     sent_body_sha256=sent)  # fmt: skip
+    assert not cp.verify_pair_reject(
+        k, "POST", "/worker/register", 409, no_key, n, sent_body_sha256=sent
+    )
+    assert not cp.verify_pair_reject(
+        k, "POST", "/worker/register", 409, None, n, sent_body_sha256=sent
+    )
     # 401 은 code · reason 이 빈 문자열
     empty = cp.body_sha256(b"")
     mac401 = ref_mac(k, "rcm-pair-reject-v1", "POST", "/worker/heartbeat", "401", "", "", n, empty)
