@@ -25,7 +25,9 @@
 #
 # 판정 줄(out/summary.txt): PASS · FAIL · UNKNOWN · SKIP. 모르면 PASS 가 아니라 UNKNOWN 이다(PLAN.md
 # 「fail-open 금지」). SKIP 은 이 하네스가 일부러 돌리지 않는 몫(단위 시험 몫 · Linux 머신 없음)이다.
-# 종료 코드: FAIL 이 하나라도 있으면 1, 시작 전 검사에서 멈추면 2, 아니면 0.
+# 판정 줄 없이 끝난 단계(워커가 등록하지 않아 돌아온 단계 등)는 끝에 `UNKNOWN … no verdict` 로 채운다.
+# 종료 코드: FAIL 이 하나라도 있으면 1, 시작 전 검사에서 멈추면 2,
+#   UNKNOWN 이 하나라도 있으면(판정 없이 끝난 단계 포함) 3, 모두 PASS · SKIP 이면 0.
 set -euo pipefail
 
 M5TB_ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
@@ -327,6 +329,9 @@ WEB_LANE_UNHEARD="quiet"
 WEB_LANE_LIVE="run"
 # 하네스가 부르는 rcm 하위 명령과 그 옵션(시험이 cli.build_parser() 와 견준다). --no-follow 는 맨 앞
 CLI_USES="wait:--job,--timeout,--return-on-action release-hold:--reason,--json doctor:--role,--config,--json run:--by,--no-wait,--no-join cancel: top: logs: check: eta:--job worker:--config serve:--config token:--config"
+# 판정 표(도우미 JUDGES)에서 꼬리가 붙은 판정 — 그 ID(꼬리 앞)의 단계가 돌면 이것도 한 줄을 내야 한다.
+# 시험이 JUDGES 와 견준다
+SUB_VERDICTS="RL28-web RL28-cancel RL29-web RL45-web RL45-empty"
 # 중계 명령(도우미 apply_relay) — tests/tcp_relay.py 의 TcpRelay 메서드로 간다
 RELAY_OPS="pause resume stop hold release unrefuse slow fast quit"
 
@@ -1971,12 +1976,57 @@ log() {
 h() { "$PY" -I "$H" "$@"; }
 
 verdict() { # verdict <id> <PASS|FAIL|UNKNOWN|SKIP> <text>
-  printf '%-9s %-7s %s\n' "$1" "$2" "$3" | sed "s|$REAL_HOME|<HOME>|g" | tee -a "$OUT/summary.txt"
-  [ "$2" != FAIL ] || FAILS=$((FAILS + 1))
+  local word=${2:-} text=${3:-}
+  # 판정 낱말이 아니면(빈 출력 · traceback) 모르는 것이다 — 빈 칸을 남기지 않는다
+  case "$word" in
+    PASS | FAIL | UNKNOWN | SKIP) ;;
+    *)
+      text="the judge gave no verdict word (${word:-empty}${text:+ $text})"
+      word=UNKNOWN
+      ;;
+  esac
+  printf '%-9s %-7s %s\n' "$1" "$word" "$text" | sed "s|${REAL_HOME:-/nonexistent}|<HOME>|g" |
+    tee -a "$OUT/summary.txt"
+  [ "$word" != FAIL ] || FAILS=$((FAILS + 1))
 }
 
 verdict_line() { # verdict_line <id> <「PASS 글」 한 줄>
-  verdict "$1" "${2%% *}" "${2#* }"
+  case "${2:-}" in
+    *" "*) verdict "$1" "${2%% *}" "${2#* }" ;;
+    *) verdict "$1" "${2:-}" "" ;;
+  esac
+}
+
+# 돌린 함수들이 판정 줄을 내야 하는 ID — 단계 표의 live 행 가운데 그 함수가 하나라도 맡은 행과,
+# 그 ID 에 꼬리가 붙은 하위 판정(SUB_VERDICTS)
+expected_ids() { # expected_ids <함수 목록>
+  local runs=$1 id kind fns rest fn s
+  steps_table | while IFS='|' read -r id kind fns rest; do
+    [ "$kind" = live ] || continue
+    for fn in $(printf '%s' "$fns" | tr '+' ' '); do
+      has_runner "$runs" "$fn" || continue
+      echo "$id"
+      for s in $SUB_VERDICTS; do
+        if [ "${s%%-*}" = "$id" ]; then echo "$s"; fi
+      done
+      break
+    done
+  done
+}
+
+# 판정 줄이 없는 ID 마다 UNKNOWN 한 줄 — 단계가 판정 전에 돌아왔다(`worker_start … || return 0` 등)
+finish_summary() { # finish_summary <함수 목록>
+  local id
+  for id in $(expected_ids "$1"); do
+    awk -v i="$id" '$1 == i { f = 1 } END { exit !f }' "$OUT/summary.txt" 2>/dev/null && continue
+    verdict "$id" UNKNOWN "no verdict — its step returned before judging (see timeline.txt)"
+  done
+}
+
+# 종료 코드: FAIL 1, UNKNOWN(또는 판정 줄이 하나도 없음) 3, 아니면 0
+summary_rc() { # summary_rc <summary.txt>
+  awk '$2 == "FAIL" { f = 1 } $2 == "UNKNOWN" { u = 1 } NF { n = 1 }
+    END { print (f ? 1 : (u || !n ? 3 : 0)) }' "$1" 2>/dev/null || echo 3
 }
 
 fact() { # fact <id> <key> <value…> — 사실 한 줄(값의 줄바꿈은 공백으로)
@@ -1985,8 +2035,8 @@ fact() { # fact <id> <key> <value…> — 사실 한 줄(값의 줄바꿈은 공
   printf '%s=%s\n' "$key" "$(printf '%s' "$*" | tr '\n' ' ')" >>"$OUT/facts/$id.txt"
 }
 
-judge() { # judge <id> — 그 단계의 사실을 판정해 한 줄로
-  verdict_line "$1" "$(h judge "$1" "$OUT/facts/$1.txt")"
+judge() { # judge <id> — 그 단계의 사실을 판정해 한 줄로(도우미가 깨지면 out/judge.err, 판정은 UNKNOWN)
+  verdict_line "$1" "$(h judge "$1" "$OUT/facts/$1.txt" 2>>"$OUT/judge.err")"
 }
 
 common_facts() { # common_facts <id> — 시험 값과 이 빌드에 PR2 · PR3 가 있는지
@@ -3377,7 +3427,7 @@ has_runner() { # has_runner <함수 목록(공백 · 줄바꿈)> <이름> — �
 ALL_RUNNERS="run_hb_order run_fence run_supervisor_only run_sweep run_secret run_grace_view run_self_stop_timing run_finish_offline run_claim_lost run_orphan run_partition_past_g run_cancel_in_partition run_server_stop_past_g run_kill_worker run_lost_ends"
 
 main() {
-  local real_home=${HOME:-} mode=all only="" runners r
+  local real_home=${HOME:-} mode=all only="" runners r rc
   case "${1:-}" in
     "") ;;
     --list)
@@ -3451,9 +3501,9 @@ main() {
     self_test
     cleanup
     trap - EXIT
-    log "self-test done · $FAILS failed · results in $OUT"
-    [ "$FAILS" = 0 ]
-    return
+    rc=$(summary_rc "$OUT/summary.txt")
+    log "self-test done · $FAILS failed · exit $rc · results in $OUT"
+    return "$rc"
   fi
 
   (cd "$SRC" && git init -q -b main && echo m5tb >README &&
@@ -3470,11 +3520,14 @@ main() {
   done
   relay_do quit || true
   dump_jobs
+  # 판정 줄 없이 끝난 단계를 UNKNOWN 으로 채운다 — 「stopped early」만 남기고 0 으로 끝나지 않게
+  finish_summary "$runners"
   steps_table | awk -F '|' '$2 != "live" { printf "%-9s %-7s %s — %s\n", $1, "SKIP", $2 " row, not live", $4 }' >>"$OUT/summary.txt"
   cleanup
   trap - EXIT
-  log "done · $FAILS failed · results in $OUT"
-  [ "$FAILS" = 0 ]
+  rc=$(summary_rc "$OUT/summary.txt")
+  log "done · $FAILS failed · exit $rc · results in $OUT"
+  return "$rc"
 }
 
 if [ "${BASH_SOURCE[0]}" = "$0" ]; then
