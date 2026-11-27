@@ -248,6 +248,16 @@ is_our_proc() { # is_our_proc <pid> <base> <recorded start>
   [ "$(proc_start "$pid")" = "$rec" ]
 }
 
+# <pid> 의 부모가 <parent> 인가(ps -o ppid=). 감독자는 워커가 직접 띄운 자식이다(runner.py Popen)
+is_child_of() { # is_child_of <pid> <parent pid>
+  local pid=${1:-} parent=${2:-} got
+  case "$pid" in "" | *[!0-9]*) return 1 ;; esac
+  case "$parent" in "" | *[!0-9]*) return 1 ;; esac
+  [ "$pid" -gt 1 ] && [ "$parent" -gt 1 ] || return 1
+  got=$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d ' ' || true)
+  [ "$got" = "$parent" ]
+}
+
 # 잡 프로세스(표지 파일의 pid)인가: 시작 시각이 처음 읽을 때 적어 둔 것과 같다(pid 재사용을 거른다)
 is_our_job_pid() { # is_our_job_pid <pid> <recorded start>
   local pid=${1:-} rec=${2:-}
@@ -687,8 +697,16 @@ def cmd_waitdead(pid: str, timeout: str) -> int:
 
 
 def cmd_killtime(sig: str, targets: str, watch: str, timeout: str) -> int:
-    """targets 에 신호를 한꺼번에 보내고 watch 의 pid 마다 사라진 시간(초)을 잰다."""
+    """targets 에 신호를 한꺼번에 보내고 watch 의 pid 마다 사라진 시간(초)을 잰다.
+
+    pid 는 2 이상의 수만 받는다. 0 은 자기 프로세스 그룹, 음수는 그룹, 1 은 init 이다 — 하나라도
+    있으면 아무 신호도 보내지 않고 `refused=…` 를 찍고 2 로 끝난다."""
     signum = getattr(signal, f"SIG{sig}")
+    pids = [p for p in (*targets.split(","), *watch.split(",")) if p]
+    bad = [p for p in pids if not p.isdigit() or int(p) <= 1 or int(p) == os.getpid()]
+    if bad:
+        print(f"refused={','.join(bad)}")
+        return 2
     t0 = time.monotonic()
     print(f"t0={time.time():.3f}")
     for p in targets.split(","):
@@ -2379,11 +2397,18 @@ run_supervisor_only() {
   d=$(submit rl43d-ship)
   pd=$(pid_of "$d" 30)
   if [ -n "$pd" ]; then
+    # 감독자는 명령 그룹의 리더다(pgid). 그 pid 가 이 단계 워커의 자식일 때만 재고 죽인다 —
+    # `ps` 가 빈 줄을 주면 0 이 되어 하네스 자신의 그룹을 죽였다(격리 확인 1라운드 MED 3)
     sup=$(ps -o pgid= -p "$pd" 2>/dev/null | tr -d ' ' || true)
-    sleep 30
-    fact F78 sup_cpu_30s "$(h cputime "${sup:-0}")"
-    out=$(h killtime KILL "${sup:-0}" "$pd" $((GRACE_J + 10)))
-    fact RL43 d_dead "$(printf '%s\n' "$out" | sed -n "s/^$pd=//p")"
+    if [ -n "$sup" ] && [ "$sup" != "$pd" ] && is_child_of "$sup" "$W_PID" &&
+      is_our_proc "$W_PID" "$B" "$(recorded_start "$W_PID")"; then
+      sleep 30
+      fact F78 sup_cpu_30s "$(h cputime "$sup")"
+      out=$(h killtime KILL "$sup" "$pd" $((GRACE_J + 10)) || true)
+      fact RL43 d_dead "$(printf '%s\n' "$out" | sed -n "s/^$pd=//p")"
+    else
+      log "RL43 (d) #$d: '$sup' is not a supervisor under worker $W_PID — not signalling it"
+    fi
   fi
   fact RL43 d_state "$(waitstate "$d" 30 terminal)"
   fact RL43 d_exit "$(jv "$d" exit_code)"
@@ -2744,8 +2769,10 @@ run_orphan() {
   p3=$(pid_of "$x3" 30)
   if [ -n "$p3" ]; then
     sup=$(ps -o pgid= -p "$p3" 2>/dev/null | tr -d ' ' || true)
-    if is_our_proc "$W_PID" "$B" "$(recorded_start "$W_PID")" && [ -n "$sup" ] && [ "$sup" != "$p3" ]; then
-      out=$(h killtime KILL "$W_PID,$sup" "$sup" 5)
+    # 감독자가 이 단계 워커의 자식일 때만 둘을 함께 죽인다(run_supervisor_only 와 같은 확인)
+    if is_our_proc "$W_PID" "$B" "$(recorded_start "$W_PID")" && [ -n "$sup" ] &&
+      [ "$sup" != "$p3" ] && is_child_of "$sup" "$W_PID"; then
+      out=$(h killtime KILL "$W_PID,$sup" "$sup" 5 || true)
       sleep 2
       fact RL15 leader_alive "$(alive "$p3")"
       W_LANES=2 worker_start rl15 direct "$GRACE_J" "$data" || true
