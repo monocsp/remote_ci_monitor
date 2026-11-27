@@ -22,7 +22,9 @@ list to run:
 - install or upgrade: a wheel, `scripts/smoke_install.sh`, a client following the server's version.
 
 Not required: pure functions in `core/`, docs-only and tests-only PRs, a refactor with no output
-change. A `(live)` row that is not run is `UNKNOWN` with the reason, never PASS.
+change. A `(live)` row that is not run is `UNKNOWN` with the reason, never PASS. A row whose `where`
+cell starts with `live lane` is not run here: P5 runs it right after this stage, on the same head
+([`edge-audit`](../edge-audit/SKILL.md) «Live lane»), so no row is driven twice.
 
 ## 1. The script
 

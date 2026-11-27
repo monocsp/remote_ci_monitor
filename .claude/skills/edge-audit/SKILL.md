@@ -1,6 +1,6 @@
 ---
 name: edge-audit
-description: P5 of the development loop for remote_ci_monitor — two isolated verifiers, in parallel, read the code of a PR's head against the workplan's edge list and judge each edge HANDLED, GAP, INTENDED, NEEDS_RUN or RARE with `file:line` evidence and a root-cause theme, in JSON; the main session merges the verdicts and hands confirmed GAPs to `build-pr` gap-fix mode. Use it on a full-lane PR after `rcm/ci` is green and P3 has closed. Not for fixing anything (this stage only reads), and not as a replacement for a live run (`live-verify`).
+description: P5 of the development loop for remote_ci_monitor — two isolated verifiers, in parallel, read the code of a PR's head against the workplan's edge list and judge each edge HANDLED, GAP, INTENDED, NEEDS_RUN or RARE with `file:line` evidence and a root-cause theme, in JSON, then live-verifiers run the few common, high-risk, reproducible edges on test servers (the live lane); the main session merges the verdicts and hands confirmed GAPs to `build-pr` gap-fix mode. Use it on a full-lane PR after `rcm/ci` is green and P3 has closed. Not for fixing anything (this stage only reads), and not as a replacement for a live run (`live-verify`).
 ---
 
 # Edge audit (P5)
@@ -74,13 +74,70 @@ Per edge, by the vote merge row of [`isolated-verifier`](../../agents/isolated-v
 - GAP against HANDLED: open the `file:line` both cite and confirm which is true before writing it
   down. A finding only one raised (new edges included) that its evidence does not bear out is dropped
   with one line saying why.
-- NEEDS_RUN is not a resting state: it is settled by a test in P6 or a row in
-  [`live-verify`](../live-verify/SKILL.md) before the PR closes.
+- NEEDS_RUN is not a resting state: it is settled by the live lane below, by a test in P6 or by a
+  row in [`live-verify`](../live-verify/SKILL.md) before the PR closes.
 
 Save the merged array as `edge-audit-r<N>.json` in the handoff folder
 ([`_shared/stage-lead.md`](../_shared/stage-lead.md); not committed). Post the round record the
 canon gives, and put the confirmed GAP table (ID, verdict, `file:line`, theme, severity) in the PR
 body under `## Edge audit`.
+
+## Live lane
+
+The rows: the workplan's `live lane` rows, plus edges this round's merged verdicts left `NEEDS_RUN`
+or newly found, when they meet the three conditions of
+[`_shared/edge-scope.md`](../_shared/edge-scope.md) «Live lane» (its canon, the limit included). No
+row: skip the lane and write `live lane: none` under `## Edge audit` in the PR body.
+
+1. **When.** Once per head, after the reading round's verdicts are merged, on the head P4 ran (P5
+   changes no code, so the build is the same). When P6 moves the head, the lane runs again on the new
+   head after P4's rerun (if P4 is required), the rows that failed first. A second reading round on
+   the same head does not rerun it.
+2. **Who.** The canon's quorum of [`live-verifier`](../../agents/live-verifier.md)s for the P5 live
+   lane, one after another, each on its own fresh test server from
+   [`_shared/test-server.md`](../_shared/test-server.md) with the port and data folder the main
+   session picked. None sees another's verdict, the reading verdicts or your expectation.
+3. **Merge per row.**
+   - PASS needs every verifier's PASS; one FAIL is FAIL. Anything else — PASS with BLOCKED, or all
+     BLOCKED — is blocked.
+   - FAIL is a confirmed GAP even where the reading said HANDLED or INTENDED: what was seen running
+     beats what was read. It goes to P6 with its evidence folder, and P6 locks the same action in a
+     pytest (`tests/test_e2e_worker.py` for two processes).
+   - PASS is written as `live: passed` and the reading verdict stands. A row the reading confirmed as
+     GAP stays a GAP: the run may not have gone down the failing path.
+   - Blocked is neither a defect nor HANDLED. A reading GAP stays a GAP; any other row stays
+     `NEEDS_RUN`, for P6 to settle with a test. The reason it was blocked is written down.
+   - A `NEEDS_RUN` row that passes becomes HANDLED, with `live` and the evidence folder as its
+     evidence; one that fails becomes a GAP.
+   - When half the rows or more were blocked, say `live lane blocked <n>/<m>` in the PR body and in
+     the report to the owner.
+   - Each row is counted once, by its final verdict, in the round record and in the GAP table.
+4. **Records.** Each row of `edge-audit-r<N>.json` gains `live` (`passed`, `fail`, `blocked` or `—`)
+   and `live_evidence` (the folder); each verifier's answer is `edge-live-r<N>-<id>.md` in the handoff
+   folder; the round's `verify-round: … stage=P5` counts the lane's FAILs by severity together with the
+   reading's.
+
+```
+You run the live lane of the edge audit of remote_ci_monitor at <40-char head sha>. You did not write
+this code; look for what fails. Judge from what you ran and saw (commands, exit codes, job states from
+GET /jobs/<id>, files on disk), never from the code.
+Your test server: <abs snap-<n>/>.claude/skills/_shared/test-server.md, port <port>, data_dir
+<abs data_dir>, built from <abs worktree>/.venv at <head>. Keep every command, exit code and output as
+files in your data_dir.
+Rows (id · Given/When/Then · the condition and the means that makes it · what should be observed):
+<the rows>
+Make each condition only with the means named, and first check that it really happened (the worker
+really died, the server really stopped) before you judge the result.
+Per row: PASS — the condition happened and the result is as expected (evidence). FAIL — the condition
+happened and the result is wrong: a job lost or doubled, a wrong state, a traceback, a wrong exit
+code, a silent failure (evidence, and the path action → wrong result). BLOCKED — the condition could
+not be made (why). What you could not establish is BLOCKED with the reason, never PASS.
+Do not look for other verifiers' results.
+Output the JSON array only:
+[{"id","result":"PASS|FAIL|BLOCKED","evidence":"path · what was seen","failure_path","severity"}]
+severity: high, med or low by <abs snap-<n>/>.claude/agents/isolated-verifier.md «Severity»; null for
+PASS and BLOCKED.
+```
 
 ## What happens next
 

@@ -151,6 +151,9 @@ calls for them. Severity, rounds, convergence, escalation and triage are
 [isolated-verifier.md](../../agents/isolated-verifier.md); this skill adds only:
 
 - Freeze the head: no new round for that bundle until the verification round has ended.
+- Live runs take turns. A bundle's P5 live lane ([edge-audit](../edge-audit/SKILL.md) «Live lane»)
+  runs right after its own P4, on the same head; live runs of different bundles stay within the
+  parallel limit of test servers above.
 - Give each verifier the spec section, the PR's diff as a file (`diff-<n>.patch`) and a `git archive`
   snapshot of the head (`snap-<n>/`), both under `.verify/handoff/<branch with / as ->/` of that worktree
   ([stage-lead.md](../_shared/stage-lead.md) «What a read-only agent gets») — never a moving worktree and
