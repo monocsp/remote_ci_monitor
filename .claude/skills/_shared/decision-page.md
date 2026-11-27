@@ -33,6 +33,9 @@ page is also read back as written, with nothing lost to summarising.
   database version, wire format, exit code, CLI) or an explicit owner request says so plainly.
 - **A note field under each question**, so the owner can answer "b, but c if …" where it belongs.
   One field at the bottom takes only remarks that span questions.
+- **Plan-to-test results in people's words** — 커버리지 충족 · 미충족, 완전 · 부분 · 미커버, as
+  [scenario-trace.md](scenario-trace.md) «Words for people» maps them, never `SOUND` or `COVERED`
+  alone: an owner read `SOUND` as a severity grade (other project, 2026-11-26).
 
 Questions with something to show (a web screen, a terminal output, a diff) show it next to the
 question: for the web, a screenshot taken with the CDP helper on a test server and redacted by hand

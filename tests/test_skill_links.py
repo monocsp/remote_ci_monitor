@@ -330,7 +330,9 @@ def test_each_adopted_rule_sits_where_it_belongs(rel: str, needle: str) -> None:
     assert needle in text, f".claude/{rel} lacks {needle!r}"
 
 
-#: 셈이 든 규칙 — (정본, 이름, 규칙을 적는 문단의 꼴). 문단 = 빈 줄로 나뉜 덩어리.
+#: 셈이 든 규칙 — (정본, 이름, 규칙을 적는 문단의 꼴). 문단 = 빈 줄이나 목록 항목 머리로 나뉜
+#: 덩어리 · 표의 한 행. 목록 전체를 한 덩어리로 보면 다른 항목의 「three times」(같은 게이트
+#: 실패)가 UNSOUND 와 한 덩어리에 들어 거짓 빨강이 난다.
 COUNTED_RULES = (
     (
         AGENTS / "isolated-verifier.md",
@@ -346,7 +348,8 @@ COUNTED_RULES = (
 
 
 def _paragraphs(text: str) -> list[str]:
-    return [p for p in re.split(r"\n\s*\n", text) if p.strip()]
+    parts = re.split(r"\n\s*\n|\n(?=[ \t]*(?:\d+\.|[-*]|\|) )", text)
+    return [p for p in parts if p.strip()]
 
 
 @pytest.mark.parametrize(

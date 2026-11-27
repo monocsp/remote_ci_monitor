@@ -85,8 +85,9 @@ not decide" — not a pass, find out why.
 
 **6 Plan-to-test.** The machine trace over the expected-behaviour table with `--tests tests/`, then one fresh
 `isolated-verifier` that sees the table and the tagged tests, never `src/`
-([scenario-trace.md](../_shared/scenario-trace.md)). `UNSOUND` sends the tests back to a new lead round;
-three in a row go to the owner.
+([scenario-trace.md](../_shared/scenario-trace.md)). `UNSOUND` sends the tests back to a new lead round,
+and the next check is a re-review (the same file, «Re-reviews»); when it goes to the owner instead is
+[isolated-verifier.md](../../agents/isolated-verifier.md) «Rounds» 6.
 
 **7 PR.** The `pr` skill; the body names the finding, quotes the source of the expected behaviour, says
 whether the cause is proven or a hypothesis and links the receipt. `rcm/ci` as in `dev-batch` §3. Green,
