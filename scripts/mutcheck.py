@@ -8920,6 +8920,17 @@ MUTANTS = (
         new="            port = _int_or_none(port_override)\n",
         tests=("tests/test_live_proc.py::test_b8_3_an_override_rcm_cannot_read_is_refused",),
     ),
+    Mutant(
+        # 진짜 홈의 시험 폴더를 못 지워도 조용히 넘어간다 — `rcm-devtest-livep-*` 가 쌓인다
+        name="conftest-outside-tmp-ignores-cleanup",
+        path="tests/conftest.py",
+        old="        shutil.rmtree(folder)  # mutcheck: conftest-outside-tmp-ignores-cleanup\n",
+        new="        shutil.rmtree(folder, ignore_errors=True)\n",
+        tests=(
+            "tests/test_live_proc.py::"
+            "test_b8_4_a_test_folder_that_cannot_be_removed_fails_the_test",
+        ),
+    ),
 )
 
 
