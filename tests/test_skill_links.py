@@ -24,9 +24,11 @@
 - 2026-11-27 다른 프로젝트의 새 판에서 들인 규칙(다시 받는 계획-시험 대조, 사람에게 쓰는 커버리지
   낱말, P5 실기 레인, 압축 뒤 다시 열기, 머지 뒤 dev, 시계 주입, 변이 앵커)이 정본에 있고, 셈이 든
   규칙은 정본 밖에서 다시 적지 않는다(파일 끝 절).
-- 시험 서버 「Signals」 의 재확인 블록은 문서에서 꺼내 sh · zsh 로 실제로 돌린다. 적은 pid 와
-  시작 시각, 서버 · 워커면 명령줄의 `--config` 까지 맞을 때만 신호가 가고, 아니면 이유를 찍고
-  BLOCKED 로 끝난다. 그 블록은 운영 가드(`tools/guard_production.py`)의 그물에 걸리지 않는다.
+- 시험 서버 문서의 셸 블록은 모두 운영 가드(`tools/guard_production.py`)를 통과한다 — 막히면
+  적힌 대로 따라 할 수 없다(2026-11-27 batch-4: 띄우기 줄과 `server.toml` heredoc 이 막혔다).
+  설정 파일은 Write 도구로 쓰고, 띄우기 · 신호 · 정리는 `tools/live_proc.py` 를 부른다. 「Signals」
+  의 그 줄들은 문서에서 꺼내 가짜 rcm 으로 글자 그대로 돌린다(도구 자체의 규칙은
+  `tests/test_live_proc.py`).
 """
 
 from __future__ import annotations
@@ -38,11 +40,12 @@ import shutil
 import signal
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import pytest
 
-from remote_ci_monitor.config import load_server_config
+from remote_ci_monitor.config import load_server_config, load_worker_config
 
 ROOT = Path(__file__).resolve().parents[1]
 CLAUDE = ROOT / ".claude"
@@ -305,6 +308,22 @@ def test_the_title_scan_reads_each_form(text: str, refused: bool) -> None:
 #    고치면 셋이 옛 규칙으로 남는다.
 # 3) 스캐너가 `tests/` 경로와 맨 `python -m pytest` 도 본다.
 
+_LP = "./.venv/bin/python tools/live_proc.py"
+#: 「Signals」 가 시키는 도구 호출 — 띄우기 셋, 신호 둘, 정리 하나.
+SIGNAL_LINES = (
+    f"cd <abs worktree> && HOME=$D/home {_LP} start --dir $D --name server -- "
+    "./.venv/bin/rcm serve --config $D/server.toml",
+    "cd <abs worktree> && HOME=$D/home RCM_WORKER_TOKEN=$(cat $D/worker.token) "
+    f"{_LP} start --dir $D --name worker -- ./.venv/bin/rcm worker --config $D/worker.toml",
+    "cd <abs worktree> && HOME=$D/home RCM_SERVER=http://127.0.0.1:<port> "
+    f"RCM_TOKEN=$(cat $D/client.token) {_LP} start --dir $D --name client "
+    "--interactive-sigint -- ./.venv/bin/rcm run slow --by acceptance",
+    f"cd <abs worktree> && {_LP} signal --dir $D --name worker --sig TERM "
+    "--expect-config $D/worker.toml",
+    f"cd <abs worktree> && {_LP} signal --dir $D --name client --sig INT",
+    f"cd <abs worktree> && {_LP} stop-all --dir $D",
+)
+
 #: (파일, 그 파일에 있어야 하는 글) — 규칙의 정본과 그 정본을 가리키는 자리.
 ADOPTED = (
     # 다시 받는 계획-시험 대조: 앞 검토를 주고, 바뀌지 않은 행은 이월하고,
@@ -336,28 +355,19 @@ ADOPTED = (
     # 가리킨다. 신원은 pid 와 띄운 직후 적은 시작 시각이다 — 명령줄 대조만으로는 `--config` 가
     # 없는 클라이언트(`HOME` · `RCM_SERVER` 로 data_dir 을 받는다)가 영원히 통과하지 못했다.
     ("skills/_shared/test-server.md", "## Signals"),
-    # 바늘은 신원을 적는 줄과 다시 읽어 견주는 줄 그 자체다. `ps` 는 레포의 읽기 코드
-    # (`remote_worker.ps_start`)처럼 `LC_ALL=C TZ=UTC` 로 — 적을 때와 읽을 때 같은 글이 나온다.
-    *(
-        (
-            "skills/_shared/test-server.md",
-            f"LC_ALL=C TZ=UTC ps -p $(cat $D/{n}.pid) -o lstart= > $D/{n}.start",
-        )
-        for n in ("server", "worker", "client")
-    ),
-    (
-        "skills/_shared/test-server.md",
-        '[ "$(LC_ALL=C TZ=UTC ps -p $P -o lstart=)" = "$(cat $D/$N.start)" ]',
-    ),
-    # 서버 · 워커의 명령줄 조건은 산문이 아니라 블록의 비교다. 거부하면 이유를 찍는다.
-    ("skills/_shared/test-server.md", "CMD=$(LC_ALL=C TZ=UTC ps -p $P -o command=)"),
-    ("skills/_shared/test-server.md", 'grep -qF -- "--config $D/" && MINE=yes'),
-    ("skills/_shared/test-server.md", 'echo "command: $CMD"; echo BLOCKED'),
+    # 바늘은 띄우고 신호를 보내는 줄 그 자체다(2026-11-27 batch-5, 선택 C). 셸로 띄우던 줄은
+    # 운영 가드 훅에 막혔다. 도구가 pid 와 `LC_ALL=C TZ=UTC` 의 시작 시각을 적고 다시 견준다.
+    *(("skills/_shared/test-server.md", line) for line in SIGNAL_LINES),
+    ("skills/_shared/test-server.md", "`LC_ALL=C TZ=UTC ps -p <pid> -o lstart=`"),
     ("skills/_shared/test-server.md", "a client has no `--config`"),
     ("skills/_shared/test-server.md", "sends nothing, prints both start times"),
+    ("skills/_shared/test-server.md", "There is no lookup\nby name."),
     # 셸이 작업 제어 없이 뒤로 보낸 작업은 SIGINT 를 무시한 채 시작한다(파이썬은 그때 ctrl-C
-    # 처리기를 달지 않는다). 그래서 SIGINT 를 받을 클라이언트는 `set -m` 아래에서 띄운다.
-    ("skills/_shared/test-server.md", "sh -c 'set -m;"),
+    # 처리기를 달지 않는다). 그래서 SIGINT 를 받을 클라이언트는 기본 처분으로 돌려 띄운다.
+    ("skills/_shared/test-server.md", "`--interactive-sigint` gives the child SIGINT's default"),
+    # 설정 파일은 Write 도구로 — heredoc 블록은 운영 가드 훅에 막혔다.
+    ("skills/_shared/test-server.md", "write the two files with the **Write tool**"),
+    ("agents/live-verifier.md", "with the Write tool"),
     # 바늘은 금지 문장 그 자체다. 「never by name」 낱말만이면 굵은 머리말에도 맞는다.
     (
         "skills/_shared/test-server.md",
@@ -400,6 +410,12 @@ RETIRED = (
     ("skills/_shared/test-server.md", "must also show this `data_dir`'s config"),
     # 두 시각을 이유로 적으라고만 하고 찍는 줄이 없던 문장.
     ("skills/_shared/test-server.md", "with the\ntwo start times as its reason"),
+    # 셸로 띄우고 견주던 꼴 — 운영 가드 훅에 막혀 따라 할 수 없었다(batch-4).
+    ("skills/_shared/test-server.md", "& echo $! >"),
+    ("skills/_shared/test-server.md", "kill -$SIG"),
+    ("skills/_shared/test-server.md", "set -m"),
+    ("skills/_shared/test-server.md", "<<EOF"),
+    ("agents/live-verifier.md", "with its shell commands"),
 )
 
 
@@ -466,16 +482,17 @@ def test_the_ctrl_c_client_waits_on_a_slow_preset(tmp_path: Path) -> None:
     # ctrl-C 행을 따라 하려면 신호가 닿을 때 클라이언트가 아직 기다리고 있어야 한다. `ok` 는
     # 곧바로 끝나 SIGINT 가 빈 pid 에 간다. 그래서 클라이언트는 느린 가짜 프리셋으로 기다린다.
     text = TEST_SERVER_CANON.read_text(encoding="utf-8")
-    heredoc = re.search(r'^cat > "\$D/server\.toml" <<EOF\n(.*?)^EOF$', text, re.S | re.M)
-    assert heredoc, "test-server.md has no server.toml heredoc"
-    data_dir = tmp_path / "rcm-devtest-t"
+    block = TOML_BLOCK_RE.search(text)
+    assert block, "test-server.md has no ```toml block"
     config = tmp_path / "server.toml"
-    config.write_text(
-        heredoc.group(1).replace("$P", "8790").replace("$D", str(data_dir)), encoding="utf-8"
-    )
+    config.write_text(block.group(1), encoding="utf-8")
     presets = {p.name: p for p in load_server_config(config, environ={}).presets}
-    client = re.search(r"sh -c 'set -m;[^']*?rcm run (\S+) --by acceptance([^']*)'", text)
-    assert client, "test-server.md has no set -m client block"
+    client = re.search(
+        r"--name client --interactive-sigint -- \./\.venv/bin/rcm run (\S+) --by acceptance(.*)$",
+        text,
+        re.M,
+    )
+    assert client, "test-server.md has no --interactive-sigint client line"
     assert "--no-wait" not in client.group(2), client.group(0)
     preset = presets.get(client.group(1))
     assert preset, f"the client runs {client.group(1)!r}, not a preset of the heredoc"
@@ -494,15 +511,51 @@ def _load_guard_production():
     return module
 
 
-def test_the_signal_check_block_passes_the_production_guard() -> None:
-    # 재확인 블록은 Bash 도구로 그대로 돈다. 빌드 머신의 `tools/guard_production.py` 는 명령 자리의
-    # 글롭(`case` 의 `*)` 패턴)을 「rcm setup 에 닿을 수 있다」로 읽고 막는다 — 막히면 신호를 보낼
-    # 길이 없다. 그물(`_setup_net`)에 걸리지 않아야 한다.
+def _fill(block: str, worktree: Path, port: str = "8795") -> str:
+    return (
+        block.replace("<abs worktree>", str(worktree))
+        .replace("<topic>", "t")
+        .replace("<port>", port)
+    )
+
+
+def test_every_shell_block_of_the_test_server_passes_the_production_guard(tmp_path: Path) -> None:
+    # 문서의 셸 블록은 Bash 도구로 그대로 돈다. 운영 설치가 있는 빌드 머신의
+    # `tools/guard_production.py` 가 막으면 적힌 대로 따라 할 수 없다(batch-4: 띄우기 줄 셋과
+    # `server.toml` heredoc 이 막혔다). 블록 통째로도, 한 줄씩도 그물에 걸리지 않고 판정도 없다.
     guard = _load_guard_production()
-    text = TEST_SERVER_CANON.read_text(encoding="utf-8")
-    blocks = [b for b in _sh_blocks(text) if "kill -$SIG" in b]
-    assert len(blocks) == 1, blocks
-    assert not guard._setup_net(blocks[0]), blocks[0]
+    prod = guard.Production(config_dir=tmp_path / "prod-config", data_dir=tmp_path / "prod-data")
+    blocks = _sh_blocks(TEST_SERVER_CANON.read_text(encoding="utf-8"))
+    assert len(blocks) >= 5, blocks
+    refused = []
+    for block in blocks:
+        filled = _fill(block, ROOT)
+        lines = [line for line in filled.splitlines() if line.strip()]
+        for command in (filled, *lines):
+            verdict = guard.decide("Bash", {"command": command}, prod, ROOT, environ={})
+            if guard._setup_net(command) or verdict is not None:
+                refused.append((command, verdict))
+    assert not refused, refused
+
+
+def test_the_worker_config_block_loads_as_a_worker_config(tmp_path: Path) -> None:
+    blocks = TOML_BLOCK_RE.findall(TEST_SERVER_CANON.read_text(encoding="utf-8"))
+    assert len(blocks) >= 2, "test-server.md has no worker.toml block"
+    config = tmp_path / "worker.toml"
+    config.write_text(blocks[1], encoding="utf-8")
+    cfg = load_worker_config(config, environ={})
+    assert cfg.server.startswith("http://127.0.0.1:")
+    assert 8790 <= int(cfg.server.rsplit(":", 1)[1]) <= 8899
+    assert "rcm-devtest" in str(cfg.data_dir)
+
+
+#: 가짜 rcm — 준비를 찍고 잔다. 서버 · 워커 · 클라이언트를 모두 이것이 맡는다.
+FAKE_RCM = "import time; print('ready', flush=True); time.sleep(30)\n"
+
+
+def _signals_blocks(text: str) -> list[str]:
+    section = text[text.index("## Signals") : text.index("## Production is read-only")]
+    return _sh_blocks(section)
 
 
 def _ps(pid: int, field: str) -> str:
@@ -513,70 +566,91 @@ def _ps(pid: int, field: str) -> str:
     return out.stdout
 
 
+def _state(pid: int) -> str:
+    out = subprocess.run(["ps", "-p", str(pid), "-o", "stat="], capture_output=True, text=True)
+    return out.stdout.strip()
+
+
+def _ended(pid: int, timeout: float) -> bool:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        state = _state(pid)
+        if not state or state.startswith("Z"):
+            return True
+        time.sleep(0.05)
+    return False
+
+
+def _ready(log: Path) -> None:
+    deadline = time.monotonic() + 10
+    while time.monotonic() < deadline:
+        if log.exists() and "ready" in log.read_text(encoding="utf-8"):
+            return
+        time.sleep(0.05)
+    raise AssertionError(f"{log.name} never printed ready")
+
+
 @pytest.mark.parametrize("shell", ["sh", "zsh"])
-@pytest.mark.parametrize(
-    ("name", "config", "start", "signalled"),
-    [
-        ("worker", "{d}/worker.toml", "recorded", True),
-        ("server", "{d}/server.toml", "recorded", True),
-        ("client", None, "recorded", True),
-        # 시작 시각이 다르다 — 그 pid 는 이제 남의 것이다.
-        ("worker", "{d}/worker.toml", "Thu Jan  1 00:00:00 1970", False),
-        ("client", None, "Thu Jan  1 00:00:00 1970", False),
-        # 시작 시각은 같아도 명령줄에 이 data_dir 의 설정이 없다(운영 워커일 수 있다).
-        ("worker", "/elsewhere/worker.toml", "recorded", False),
-        ("server", None, "recorded", False),
-        # 적은 시작 시각 파일이 비었다.
-        ("worker", "{d}/worker.toml", "", False),
-    ],
-)
-def test_the_signal_check_block_signals_only_its_own_process(
-    tmp_path: Path, shell: str, name: str, config: str | None, start: str, signalled: bool
-) -> None:
-    # «Signals» 의 재확인 블록을 문서에서 꺼내 그대로 돌린다. 그 비교 줄을 지우면 남의 pid 에
-    # 신호가 가서 빨강이다.
+def test_the_signals_blocks_run_as_written(tmp_path: Path, shell: str) -> None:
+    # «Signals» 의 블록을 문서에서 꺼내 차례로 글자 그대로 돌린다: 서버 · 워커 띄우기 → 클라이언트
+    # 띄우기 → 워커 SIGTERM · 클라이언트 SIGINT → stop-all. rcm 은 가짜다. 도구는 진짜 홈의 운영
+    # 자리를 보고 `/tmp` 를 거부하므로 pytest 의 tmp_path 가 `/tmp` 아래인 머신에서는 건너뛴다.
     if shutil.which(shell) is None:
         pytest.skip(f"no {shell}")
+    if any(str(tmp_path.resolve()).startswith(r) for r in ("/tmp/", "/private/tmp/")):
+        pytest.skip("tools/live_proc.py refuses /tmp, where pytest keeps tmp_path here")
     text = TEST_SERVER_CANON.read_text(encoding="utf-8")
-    blocks = [b for b in _sh_blocks(text) if "kill -$SIG" in b]
-    assert len(blocks) == 1, blocks
-    block = re.sub(r"\bN=\w+", f"N={name}", blocks[0].replace("<topic>", "t"))
-    block = re.sub(r"\bSIG=\w+", "SIG=TERM", block)
-    d = tmp_path / ".local" / "share" / "rcm-devtest-t"
-    d.mkdir(parents=True)
-    argv = [sys.executable, "-c", "import time; time.sleep(30)"]
-    if config:
-        argv += ["--config", config.format(d=d)]
-    proc = subprocess.Popen(argv)
+    blocks = _signals_blocks(text)
+    assert len(blocks) == 4, blocks  # 서버 · 워커, 클라이언트, 신호, 정리
+    home = tmp_path / "home"
+    d = home / ".local" / "share" / "rcm-devtest-t"
+    (d / "home").mkdir(parents=True)
+    worktree = tmp_path / "wt"
+    (worktree / ".venv" / "bin").mkdir(parents=True)
+    (worktree / ".venv" / "bin" / "python").symlink_to(sys.executable)
+    (worktree / "tools").symlink_to(ROOT / "tools")
+    rcm = worktree / ".venv" / "bin" / "rcm"
+    rcm.write_text(f"#!{sys.executable}\n{FAKE_RCM}", encoding="utf-8")
+    rcm.chmod(0o755)
+    server_toml, worker_toml = TOML_BLOCK_RE.findall(text)[:2]
+    for name, body in (("server.toml", server_toml), ("worker.toml", worker_toml)):
+        body = body.replace("/home/example", str(home)).replace("devtest-example", "devtest-t")
+        (d / name).write_text(body, encoding="utf-8")
+    for name in ("worker.token", "client.token"):
+        (d / name).write_text("not-a-secret\n", encoding="utf-8")
+    env = {"PATH": os.environ["PATH"], "HOME": str(home)}
+
+    def run(block: str) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            [shell, "-c", _fill(block, worktree)], env=env, capture_output=True, text=True,
+            timeout=60,
+        )  # fmt: skip
+
+    def pid(name: str) -> int:
+        return int((d / f"{name}.pid").read_text(encoding="utf-8"))
+
     try:
-        (d / f"{name}.pid").write_text(f"{proc.pid}\n", encoding="utf-8")
-        recorded = _ps(proc.pid, "lstart") if start == "recorded" else (start and start + "\n")
-        (d / f"{name}.start").write_text(recorded, encoding="utf-8")
-        env = {"PATH": os.environ["PATH"], "HOME": str(tmp_path)}
-        out = subprocess.run(
-            [shell, "-c", block], env=env, capture_output=True, text=True, timeout=10
-        )
-        # 신호가 갔으면 곧 끝난다. 안 갔어야 하는 쪽도 잠깐 기다려 본다 — 바로 poll 하면 막
-        # 받은 SIGTERM 을 아직 처리하지 않은 프로세스가 살아 있는 것처럼 보인다.
-        try:
-            rc = proc.wait(timeout=5 if signalled else 0.5)
-        except subprocess.TimeoutExpired:
-            rc = None
-        if signalled:
-            assert rc == -signal.SIGTERM, out
-            assert "BLOCKED" not in out.stdout, out
-        else:
-            assert rc is None, out
-            lines = out.stdout.splitlines()
-            assert lines and lines[-1] == "BLOCKED", out
-            # 거부한 이유: 적은 시각 · 지금 시각 · 명령줄을 한 줄씩.
-            assert any(line.startswith("recorded start:") for line in lines), out
-            assert any(line.startswith("current start:") for line in lines), out
-            assert any(line.startswith("command:") and "time.sleep" in line for line in lines), out
+        for block in blocks[:2]:
+            out = run(block)
+            assert out.returncode == 0, out
+        for name in ("server", "worker", "client"):
+            assert (d / f"{name}.start").read_text(encoding="utf-8").strip(), name
+            _ready(d / f"{name}.log")
+        assert f"--config {d}/worker.toml" in _ps(pid("worker"), "command")
+        out = run(blocks[2])  # 워커 SIGTERM, 클라이언트 SIGINT
+        assert out.returncode == 0 and "BLOCKED" not in out.stdout, out
+        assert _ended(pid("worker"), 5) and _ended(pid("client"), 5), out
+        assert not _ended(pid("server"), 0.3), "the server got a signal meant for others"
+        out = run(blocks[2])  # 같은 신호를 다시 — 이제 그 pid 는 우리 것이 아니다
+        assert out.returncode == 3 and out.stdout.splitlines()[-1] == "BLOCKED", out
+        out = run(blocks[3])  # stop-all
+        assert out.returncode == 0, out
+        assert _ended(pid("server"), 5), out
     finally:
-        if proc.poll() is None:
-            proc.kill()
-            proc.wait(timeout=5)
+        for path in d.glob("*.pid"):
+            number = int(path.read_text(encoding="utf-8"))
+            if str(tmp_path) in _ps(number, "command"):
+                os.kill(number, signal.SIGKILL)
 
 
 def test_the_pr_cleanup_prunes_before_it_deletes_the_branch() -> None:
