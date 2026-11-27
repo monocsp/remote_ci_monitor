@@ -114,7 +114,8 @@ a workplan with traced scenario IDs (`workplan`), test-first PRs by a fresh lead
 (`build-pr`), two isolated verifiers per round (`.claude/agents/isolated-verifier.md` holds the
 severity, round and triage rules), a live run on a test server when the change is visible or crosses
 processes (`live-verify`, rules in `.claude/skills/_shared/test-server.md`), an edge audit
-(`edge-audit`), then the `pr` skill. Small changes use `dev-lite`; several PRs of one milestone at
+(`edge-audit`) whose live lane runs a few common, high-risk edges on test servers, then the `pr`
+skill. Small changes use `dev-lite`; several PRs of one milestone at
 once use `dev-batch`; defects found after the fact use `qa-batch` / `qa-defect-loop`. The tools
 behind them run from the worktree's `.venv`, never a bare `python3`, which has no pytest:
 `./.venv/bin/python tools/scenario_trace.py` (scenario IDs against tests),
