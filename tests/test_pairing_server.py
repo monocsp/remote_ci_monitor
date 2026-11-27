@@ -473,6 +473,49 @@ def test_pi18_a_data_dir_with_only_the_db_copy_refuses_to_start(tmp_path):
         s2.close()
 
 
+def disk_full_os() -> types.SimpleNamespace:
+    """`pairing` 모듈만 보는 `os` — `write` 가 ENOSPC 를 낸다(다른 모듈 · DB 는 진짜 `os`)."""
+
+    def write(fd, data):
+        raise OSError(errno.ENOSPC, "No space left on device")
+
+    names = {k: getattr(os, k) for k in dir(os) if not k.startswith("__")}
+    names["write"] = write
+    return types.SimpleNamespace(**names)
+
+
+def key_files(data: Path) -> list[str]:
+    return sorted(p.name for p in data.iterdir() if p.name.startswith("pair.key"))
+
+
+def test_pi35_f_g5_a_full_disk_while_writing_the_key_leaves_no_file(tmp_path, monkeypatch):
+    """G5: 키 임시 파일에 쓰다 디스크가 가득 차면 임시 파일을 지우고 그 오류를 올린다 —
+    `pair.key` 도 임시 파일도 남지 않는다."""
+    data = tmp_path / "data"
+    s = store_in(data)
+    monkeypatch.setattr(pairing_mod, "os", disk_full_os())
+    try:
+        with pytest.raises(OSError) as e:
+            load_or_create_pair_key(data, s)
+    finally:
+        s.close()
+    assert e.value.errno == errno.ENOSPC
+    assert key_files(data) == []
+
+
+def test_pi35_f_g5_rcm_serve_on_a_full_disk_exits_2_and_leaves_no_key(
+    tmp_path, capsys, monkeypatch
+):
+    data = tmp_path / "data"
+    store_in(data).close()
+    monkeypatch.setattr(pairing_mod, "os", disk_full_os())
+    rc = main(["serve", "--config", str(serve_config(tmp_path, data))])
+    err = capsys.readouterr().err
+    assert rc == USAGE_EXIT, err
+    assert "cannot start server: No space left on device" in err and "Traceback" not in err
+    assert key_files(data) == []
+
+
 # ══ HTTP: 짝짓기 창 · /pair* · hello · exchange · 거절 MAC ══════════════════════════════
 
 PUBLIC = "http://pair.example:8790"

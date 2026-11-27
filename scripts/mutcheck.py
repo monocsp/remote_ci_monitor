@@ -9358,6 +9358,20 @@ MUTANTS = (
             "test_pi46_k_g4_a_reject_mac_that_cannot_be_computed_is_logged_by_exception_name",
         ),
     ),
+    Mutant(
+        # 키 임시 파일에 쓰다 실패하면 그 파일을 남김 — 디스크가 가득 찬 기동마다 반쯤 쓴
+        # pair.key.tmp-* 가 쌓인다(P6 G5)
+        name="pair-key-temp-left-on-write-error",
+        path="src/remote_ci_monitor/pairing.py",
+        old="        _unlink_quietly(tmp)  # mutcheck: pair-key-temp-left-on-write-error\n",
+        new="        pass\n",
+        tests=(
+            "tests/test_pairing_server.py::"
+            "test_pi35_f_g5_a_full_disk_while_writing_the_key_leaves_no_file",
+            "tests/test_pairing_server.py::"
+            "test_pi35_f_g5_rcm_serve_on_a_full_disk_exits_2_and_leaves_no_key",
+        ),
+    ),
 )
 
 

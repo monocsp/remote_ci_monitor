@@ -156,8 +156,9 @@ def load_or_create_pair_key(
         os.write(fd, secrets.token_bytes(PAIR_KEY_BYTES))
         os.fsync(fd)
     except BaseException:
+        # 디스크가 가득 차거나 멈춤이 와도 반쯤 쓴 임시 파일을 남기지 않는다(G5)
         os.close(fd)
-        _unlink_quietly(tmp)
+        _unlink_quietly(tmp)  # mutcheck: pair-key-temp-left-on-write-error
         raise
     os.close(fd)
     if stage is not None:
