@@ -1147,3 +1147,181 @@ def test_pr4_facts_file_and_absent_values_read_as_not_observed(tmp_path: Path) -
     assert got.startswith("UNKNOWN ") and "summary_code: not observed" in got, got
     got = mod.judge("RL10", {**COMMON, **GOOD["RL10"], "x_dead": "timeout"})
     assert got.startswith("UNKNOWN "), got
+
+
+# ── batch-3: 첫 실기(2026-11-27)의 RL15 → RL43 줄줄이 UNKNOWN · RL29-web FAIL ─────────────
+
+
+def _written_server_toml(tmp_path: Path) -> Path:
+    """하네스가 실기에서 쓰는 server.toml(self-test 가 아닌 쪽)을 시험 폴더에 쓴다."""
+    base = tmp_path / "base"
+    for d in ("bin", "marks", "data"):
+        (base / d).mkdir(parents=True, exist_ok=True)
+    conf = base / "server.toml"
+    env = {
+        "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
+        "M5TB_PY": sys.executable,
+        "HOME": str(tmp_path),
+        "CONF": str(conf),
+        "P": "8797",
+        "B": str(base),
+        "DATA": str(base / "data"),
+        "MARKS": str(base / "marks"),
+    }
+    code = 'source "$1" && write_server_toml 0 && test -s "$CONF"'
+    r = subprocess.run(
+        ["bash", "-c", code, "bash", str(SCRIPT)],
+        capture_output=True,
+        text=True,
+        env=env,
+        timeout=15,
+        check=False,
+    )
+    assert r.returncode == 0, r.stderr
+    return conf
+
+
+def test_rl15_two_lane_worker_is_not_held_by_the_load_gate(tmp_path: Path) -> None:
+    # RL15 — 레인 둘인 워커의 둘째 레인은 서버 부하 게이트(server.py admit · core/admission.py
+    # decide: 30초 쿨다운 · CPU 창)를 지난다. 맥미니가 바쁘면(load 12, 다른 게이트) 둘째 잡이 30초
+    # 안에 시작하지 않아 RL15 가 「jobs did not start」였다. 하네스는 게이트를 시험하지 않는다
+    from remote_ci_monitor.config import load_server_config
+
+    cfg = load_server_config(_written_server_toml(tmp_path), check_tools=False)
+    assert cfg.server.admission == "always", cfg.server.admission
+
+
+def test_rl29_recent_list_holds_every_job_a_full_run_ends(tmp_path: Path) -> None:
+    # RL29-web — 웹은 최근 잡을 `recent_count`(기본 8)개까지만 받고 다섯을 보인다. 전체 실기는
+    # 잡을 서른 개 남짓 끝내므로 RL10 · RL34 · claim-lost 의 lost 잡이 화면에 없어 0 을 셌다
+    from remote_ci_monitor.config import load_server_config
+
+    cfg = load_server_config(_written_server_toml(tmp_path), check_tools=False)
+    submits = len(re.findall(r"\$\(submit ", script_text()))
+    assert cfg.server.recent_count >= 2 * submits, (cfg.server.recent_count, submits)
+
+
+def test_rl29_web_page_text_is_read_with_every_recent_row_shown(tmp_path: Path) -> None:
+    # RL29-web — 「show N more」를 펴고 글을 읽는다. 단추와 그 동작은 app.js 의 것이다
+    import json
+
+    app = (SRC / "web" / "app.js").read_text(encoding="utf-8")
+    assert "data-more-recent" in app and "state.showAllRecent = !state.showAllRecent" in app
+    mod = helper(tmp_path)
+    js = getattr(mod, "EXPAND_RECENT_JS", None)
+    assert js is not None, "the web helper never expands the recent list"
+    assert "[data-more-recent]" in js and "click()" in js, js
+    body = SCRIPT.read_text(encoding="utf-8")
+    start = body.index("def cmd_web(")
+    web = body[start : body.index("\ndef ", start + 1)]
+    assert web.index("EXPAND_RECENT_JS") < web.index("document.body.innerText"), web
+    node = shutil.which("node")
+    if node is not None:
+        r = subprocess.run([node, "-e", _JS_PARSE, json.dumps({"expand": js})],
+                           capture_output=True, text=True, timeout=20, check=True)  # fmt: skip
+        assert json.loads(r.stdout) == [], r.stdout
+
+
+#: reset_world 를 대역으로 부른다 — 서버 · 워커 · 중계 없이 무엇을 부르는지만 적는다
+_RESET_STUB = r"""
+source "$1"
+LOG=$2
+OUT=$3
+MARKS=$3/marks
+URL=http://127.0.0.1:1
+CTOK=-
+ATOK=-
+relay_do() { :; }
+stop_ours() { echo "stop $1" >>"$LOG"; }
+client() { echo "client $*" >>"$LOG"; }
+admin() { echo "admin $*" >>"$LOG"; }
+h() {
+  case "$1" in
+    openjobs) echo "${OPEN:-}" ;;
+    holds) echo "" ;;
+    waitstate) echo "cancelled" ;;
+    job) echo "rl15-ship" ;;
+    *) echo "h $*" >>"$LOG" ;;
+  esac
+}
+WORKER_PIDS=(111)
+reset_world
+"""
+
+
+def test_rl15_reset_between_steps_cancels_jobs_left_in_the_queue(tmp_path: Path) -> None:
+    # RL15 → RL1 · RL8 · RL2 · RL43 — 한 단계가 남긴 대기 잡(#19 rl15-ship)을 다음 단계의 첫
+    # 워커(rl1a)가 집어 그 뒤 단계마다 잡이 하나씩 밀렸다. reset_world 는 아무것도 취소하지 않았다
+    log, out = tmp_path / "calls.log", tmp_path / "out"
+    (out / "marks").mkdir(parents=True)
+    env = {"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "M5TB_PY": sys.executable,
+           "HOME": str(tmp_path), "OPEN": "19 21"}  # fmt: skip
+    argv = ["bash", "-c", _RESET_STUB, "bash", str(SCRIPT), str(log), str(out)]
+    r = subprocess.run(argv, capture_output=True, text=True, env=env, timeout=15, check=False)
+    assert r.returncode == 0, r.stderr
+    calls = log.read_text(encoding="utf-8").splitlines() if log.exists() else []
+    cancels = [c for c in calls if re.match(r"^(client|admin) cancel ", c)]
+    assert any(" 19" in c for c in cancels) and any(" 21" in c for c in cancels), calls
+    # 워커를 먼저 멈춘다 — 멈추기 전에 취소하면 도는 잡이 cancelled 로 끝나 단계의 lost 가 바뀐다
+    assert calls.index("stop 111") < calls.index(cancels[0]), calls
+    reset_log = out / "reset.log"
+    said = reset_log.read_text(encoding="utf-8") if reset_log.exists() else ""
+    assert "#19" in said and "#21" in said, said
+
+
+def test_rl15_open_jobs_come_from_the_status_pools(tmp_path: Path) -> None:
+    mod = helper(tmp_path)
+    fn = getattr(mod, "open_job_ids", None)
+    assert fn is not None, "the helper cannot list the jobs a step left open"
+    pool_keys = _dict_keys(SRC / "core" / "status.py", "pool_json")
+    assert {"queue", "scheduled"} <= pool_keys, sorted(pool_keys)
+    assert "pools" in _dict_keys(SRC / "core" / "status.py", "status_json")
+    doc = {"pools": [
+        {"name": "m5tb", "queue": [{"id": 19, "state": "queued"}, {"id": 18, "state": "running"}],
+         "scheduled": [{"id": 30}]},
+        {"name": "default", "queue": [], "scheduled": None},
+    ]}  # fmt: skip
+    assert fn(doc) == [18, 19, 30]
+    assert fn({"pools": [{"queue": None}]}) is None  # 못 읽은 큐는 빈 큐가 아니다
+    assert fn({}) is None
+
+
+def test_rl15_a_step_whose_jobs_did_not_start_says_why(tmp_path: Path) -> None:
+    # RL15 · RL1 · RL8 · RL2 · RL43 — 「jobs did not start」만으로는 하네스 탓인지 제품 탓인지
+    # 모른다. 그 잡이 어디서 돌았나 · 대기 사유 · 그 단계 워커 레인의 막힘을 한 줄로 말한다
+    status_py = (SRC / "core" / "status.py").read_text(encoding="utf-8")
+    assert '"hold_code": w.hold_code' in status_py and '"reason": row.reason' in status_py
+    assert {"ran_on", "state"} <= set(var("JOB_KEYS").split())
+    mod = helper(tmp_path)
+    fn = getattr(mod, "why_not_started", None)
+    assert fn is not None, "the helper has no why_not_started"
+    status = {
+        "server": {"workers": [
+            {"worker": "rl15", "lane": 1, "state": "busy", "job_id": 18, "hold_code": None},
+            {"worker": "rl15", "lane": 2, "state": "held", "job_id": None, "hold_code": "cpu_busy"},
+        ]},
+        "pools": [{"queue": [{"id": 19, "state": "queued", "reason": "lane_held"}]}],
+    }  # fmt: skip
+    queued = {"id": 19, "preset": "rl15-ship", "state": "queued", "ran_on": None}
+    level, text = fn([queued], status, ["rl15"])
+    assert level == "FAIL" and text.startswith("harness: "), (level, text)
+    assert "#19 rl15-ship queued" in text and "lane_held" in text, text
+    assert "rl15 lane 2 held (cpu_busy)" in text, text
+    # 앞 단계의 남은 잡이 이 단계 워커를 가져갔다 — 하네스 탓
+    stolen = {"id": 19, "preset": "rl15-ship", "state": "running", "ran_on": "rl1a"}
+    level, text = fn([stolen], {"server": {"workers": []}, "pools": []}, ["rl15"])
+    assert level == "FAIL" and "#19 rl15-ship running on rl1a, not on rl15" in text, text
+    # 이유를 모르면 UNKNOWN 이고 아는 만큼 말한다
+    level, text = fn([queued], {"server": {"workers": []}, "pools": []}, ["rl15"])
+    assert level == "UNKNOWN" and "#19 rl15-ship queued" in text, text
+    assert "rl15: not registered" in text, text
+    level, text = fn([{"id": 19}], None, ["rl15"])
+    assert level == "UNKNOWN" and "status unreadable" in text, text
+
+
+def test_rl15_runners_report_unstarted_jobs_through_not_started() -> None:
+    text = script_text()
+    assert 'UNKNOWN "jobs did not start"' not in text
+    for step, workers in (("RL15", "rl15"), ("RL1", "rl1a,rl1b"), ("RL8", "rl8a,rl8b"),
+                          ("RL2", "rl2a,rl2b"), ("RL43", "rl43a,rl43b,rl43e")):  # fmt: skip
+        assert re.search(rf"not_started {step} {workers} ", text), step
