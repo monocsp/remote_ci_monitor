@@ -814,7 +814,8 @@ WEB_JS = {
     # 띠가 숨었으면 0 — 「띠 없음」과 「높이 0」을 가르려고 band_hidden 을 따로 둔다
     "band_h": (
         f"(() => {{ const e = {_BAND}; "
-        "return e && !e.hidden ? Math.round(e.getBoundingClientRect().height) : 0; }})()"
+        # 이 조각은 f-string 이 아니다 — 닫는 괄호는 하나다
+        "return e && !e.hidden ? Math.round(e.getBoundingClientRect().height) : 0; })()"
     ),
     "band_text": f"(() => {{ const e = {_BAND}; return e && !e.hidden ? e.textContent : ''; }})()",
     "stuck_n": "document.querySelectorAll('[data-stuck] .sl:not(.muted)').length",
