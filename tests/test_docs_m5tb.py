@@ -111,9 +111,11 @@ def test_every_hold_env_key_of_a_notification_is_documented():
 
 
 def _unreleased() -> str:
+    """릴리스 뒤에는 M5t-b 항목이 `[Unreleased]` 가 아니라 그 버전의 절(0.12.0)에 있다 —
+    `[Unreleased]` 부터 M5t-b 앞의 마지막 판 `[0.11.1]` 절 앞까지를 본다."""
     text = (ROOT / "CHANGELOG.md").read_text()
     start = text.index("## [Unreleased]")
-    return text[start : text.index("\n## [", start + 1)]
+    return text[start : text.index("\n## [0.11.1]", start + 1)]
 
 
 def test_the_changelog_names_what_a_user_sees_change_in_this_release():
