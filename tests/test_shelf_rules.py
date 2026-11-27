@@ -460,11 +460,14 @@ def test_a140_agrees_with_the_m5e_rule_on_random_sets():
 
 
 def test_a84_fifty_thousand_paths_in_under_two_seconds():
+    # 이 스레드의 CPU 시간으로 잰다. 벽시계는 CPU 를 못 받고 기다린 시간도 세어, 부하가 무거운
+    # 맥미니에서 0.03초 일이 3.28초로 재졌다(dev rcm-ci 4351). O(n²) 는 CPU 로도 몇 분이다
+    names = shelf().name_collisions
     paths = [f"dir{i % 97}/file{i}.png" for i in range(50_000)]
     paths.append("dir3/FILE3.png")
-    started = time.monotonic()
-    got = shelf().name_collisions(paths)
-    assert time.monotonic() - started < 2.0
+    started = time.thread_time()
+    got = names(paths)
+    assert time.thread_time() - started < 2.0
     assert got == [("dir3/FILE3.png", "dir3/file3.png")]
 
 
