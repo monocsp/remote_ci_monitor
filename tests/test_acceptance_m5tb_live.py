@@ -1660,3 +1660,43 @@ def test_pr4_a_judge_that_crashes_is_unknown(tmp_path: Path, capsys: pytest.Capt
     except Exception as e:  # noqa: BLE001 — 고치기 전에는 여기로 온다
         out = f"raised {e!r}"
     assert out.startswith("UNKNOWN ") and "KeyError" in out, out
+
+
+def test_rl43_killtime_refuses_pid_zero_and_one(tmp_path: Path) -> None:
+    # RL43 (d) — `ps` 가 빈 줄을 주면 `h killtime KILL "${sup:-0}"` 가 os.kill(0, SIGKILL) 로
+    # 하네스 자신의 프로세스 그룹을 EXIT 트랩 없이 죽였다. 새 세션에서 돌려 고치기 전에도 이
+    # 시험의 자식만 죽는다
+    mod = helper(tmp_path)
+    for targets, watch in (("0", ""), ("1", ""), ("", "0")):
+        r = subprocess.run(
+            [sys.executable, "-I", mod.__file__, "killtime", "TERM", targets, watch, "1"],
+            capture_output=True,
+            text=True,
+            timeout=15,
+            start_new_session=True,
+            check=False,
+        )
+        assert r.returncode == 2 and "refused" in r.stdout, (targets, watch, r.returncode, r.stdout)
+
+
+def test_rl43_is_child_of_reads_the_parent_from_ps() -> None:
+    p = _sleeper()
+    try:
+        time.sleep(0.2)
+        assert sh("is_child_of", str(p.pid), str(os.getpid())).returncode == 0
+        assert sh("is_child_of", str(p.pid), "1").returncode == 1
+        for bad in ("", "0", "1", "x1"):
+            assert sh("is_child_of", bad, str(os.getpid())).returncode == 1, bad
+    finally:
+        p.kill()
+        p.wait(timeout=10)
+
+
+def test_rl43_the_supervisor_is_checked_as_the_worker_child_before_any_signal() -> None:
+    # RL43 (d) · RL15 — 감독자 pid 는 명령의 pgid 에서 읽는다. 그 pid 가 기록한 워커의 자식인지
+    # (`ps -o ppid`) 보고 나서야 CPU 를 재고 신호를 보낸다
+    for fn in ("run_supervisor_only", "run_orphan"):
+        body = _body(fn)
+        check = body.find('is_child_of "$sup" "$W_PID"')
+        assert 0 <= check < body.index("h killtime"), fn
+        assert "${sup:-0}" not in body, fn
