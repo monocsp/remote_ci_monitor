@@ -2036,6 +2036,10 @@ has_line() { # has_line <파일> <글> → 1 · 0 — 그 글이 그대로(고�
   if grep -qF -- "$2" "$1" 2>/dev/null; then echo 1; else echo 0; fi
 }
 
+has_line_in() { # has_line_in <글> <찾을 글> → 1 · 0 — 고정 문자열이 들어 있나
+  if [[ "$1" == *"$2"* ]]; then echo 1; else echo 0; fi
+}
+
 jv() { # jv <잡> <키> — 잡 문서의 칸 하나(점으로 깊이)
   h job "$URL" "$CTOK" "$1" "$2" 2>/dev/null || echo "<absent>"
 }
@@ -2540,7 +2544,15 @@ run_orphan() {
   fact RL15 ship_cmd_dead "$(if [ "$(alive "$px")" = 0 ]; then echo 1; else echo 0; fi)"
   z=$(submit rl15-plain)
   W_LANES=2 worker_start rl15 direct "$GRACE_J" "$data" || true
-  if h waitdead "$py" 30 >/dev/null; then t_dead=$(now); fact RL15 orphan_dead_after_restart 1; else fact RL15 orphan_dead_after_restart 0; fi
+  if h waitdead "$py" 30 >/dev/null; then
+    # 고아가 끝난 시각은 새 워커가 그 줄을 적은 시각이다. 하네스가 알아챈 시각은 worker_start 가
+    # 등록을 확인한 뒤라 다음 잡의 시작보다 늦다(2026-11-27 재실기: 줄 641.949 · 시작 641.992)
+    t_dead=$(h firstline "$W_LOG" "orphan #$y: stopped process group")
+    [ -n "$t_dead" ] || t_dead=$(now)
+    fact RL15 orphan_dead_after_restart 1
+  else
+    fact RL15 orphan_dead_after_restart 0
+  fi
   fact RL15 orphan_line "$(if grep -q "orphan #$y: stopped process group" "$W_LOG"; then echo 1; else echo 0; fi)"
   pz=$(pid_of "$z" 60)
   if [ -n "${t_dead:-}" ] && [ -n "$pz" ]; then
@@ -2858,14 +2870,15 @@ run_kill_worker() {
   done
   # 「확인이 필요한 작업」 칸의 글(en_stuck_text)에서 찾는다 — 큐 행의 번호와 섞지 않는다
   stuck=$(sed -n 's/^en_stuck_text=//p' "$OUT/facts/RL45-web.txt" | tail -1)
-  fact RL45-web found_hold_a "$(case "$stuck" in *"#$xa "*) echo 1 ;; *) echo 0 ;; esac)"
-  fact RL45-web found_hold_b "$(case "$stuck" in *"#$xb "*) echo 1 ;; *) echo 0 ;; esac)"
+  # 명령 치환 안에 case 를 두지 않는다 — macOS 의 bash 3.2 는 패턴의 `)` 를 치환의 끝으로 읽는다
+  fact RL45-web found_hold_a "$(if [[ "$stuck" == *"#$xa "* ]]; then echo 1; else echo 0; fi)"
+  fact RL45-web found_hold_b "$(if [[ "$stuck" == *"#$xb "* ]]; then echo 1; else echo 0; fi)"
   # 꼬리 한 줄 — 「and N more」의 N(없으면 0)과 「nothing else needs a look」이 있는지
   tail_text=$(sed -n 's/^en_stuck_tail=//p' "$OUT/facts/RL45-web.txt" | tail -1)
   more=$(printf '%s' "$tail_text" | sed -n "s/.*${WEB_AND_MORE_PRE}\([0-9][0-9]*\)${WEB_AND_MORE_POST}.*/\1/p" | head -1)
   if grep -q '^web=ok' "$OUT/facts/RL45-web.txt"; then
     fact RL45-web en_more_n "${more:-0}"
-    fact RL45-web en_nothing_else "$(case "$tail_text" in *"$WEB_NOTHING_ELSE"*) echo 1 ;; *) echo 0 ;; esac)"
+    fact RL45-web en_nothing_else "$(has_line_in "$tail_text" "$WEB_NOTHING_ELSE")"
   fi
   # 풀기 — client 토큰 2, admin 0, 홀드 없는 잡 1
   client release-hold "$xa" --reason "client try" >"$OUT/rl45-release-client.txt" 2>&1 && fact RL45 client_release_rc 0 || fact RL45 client_release_rc $?
@@ -3142,6 +3155,12 @@ runners_for() { # runners_for <ID,ID…>
   done
 }
 
+has_runner() { # has_runner <함수 목록(공백 · 줄바꿈)> <이름> — 목록에 그 이름이 있나
+  local r
+  for r in $1; do [ "$r" = "$2" ] && return 0; done
+  return 1
+}
+
 ALL_RUNNERS="run_hb_order run_fence run_supervisor_only run_sweep run_secret run_grace_view run_self_stop_timing run_finish_offline run_claim_lost run_orphan run_partition_past_g run_cancel_in_partition run_server_stop_past_g run_kill_worker run_lost_ends"
 
 main() {
@@ -3232,7 +3251,7 @@ main() {
   new_token "$CTOK" acceptance || die "client token failed"
   new_token "$ATOK" acceptance-admin --admin || die "admin token failed"
   relay_start || die "the relay did not start (out/relay.log)"
-  case " $runners " in *" run_kill_worker "*) run_f78_local ;; esac
+  has_runner "$runners" run_kill_worker && run_f78_local
   for r in $runners; do
     "$r" || log "$r stopped early"
   done
