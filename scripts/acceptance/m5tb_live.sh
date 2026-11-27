@@ -81,7 +81,7 @@ RL24|unit|-|v25 고정 DB
 RL25|unit|-|가짜 옛 서버
 RL26|unit|-|워커 시계 주입
 RL27|unit|-|서버 now_fn · mono_fn
-RL28|live|run_grace_view|유예 중(T~G): 사유 worker_unreachable_grace · finish_at null · running · rcm top 문장(원문 코드 없음) · /api/health 고정 · rcm wait --timeout 3 · 끊김/돌아옴 줄 지연 · 웹 띠 390px 80px 이하 · 두 언어 · 콘솔 오류 0
+RL28|live|run_grace_view|유예 중(T~G): 사유 worker_unreachable_grace · finish_at null · running · rcm top · rcm eta --job 문장(원문 코드 없음) · /api/health 고정 · rcm wait --timeout 3 · 끊김/돌아옴 줄 지연 · 웹 띠 390px 80px 이하 · 두 언어 · 콘솔 오류 0 · 끊긴 행은 시간을 안 셈 · 회색 레인 · 막대에 시간 눈금 없음(듣는 행이 대조군) — RL28-cancel: 유예 중 취소한 잡은 top · eta · wait 가 「돌아오면 취소」, 기다리던 wait 은 「cancel requested」로 바로잡음, 돌아온 뒤 cancelled
 RL29|live|run_lost_ends|다섯 lost 끝(worker_unreachable · worker_self_stopped · worker_replaced · worker_restarted_without_job · orphan_unverified): 종료 3 · rcm wait 의 lost 문장(core/outcome.py 가 그린 것) · 알림 훅 잡당 1회 · 웹 문장 · 콘솔 오류 0
 RL30|unit|-|설정 로드 · reload
 RL31|unit|-|ps · /proc 실패 주입 — 리더만 죽은 그룹은 RL15 가 실기로 본다
@@ -98,7 +98,7 @@ RL41|e2e|-|tests/test_e2e_worker_grace_m5tb.py test_rl41_*
 RL42|live|run_partition_past_g|표식 잡 유예 만료: 홀드 행 1(cause worker_unreachable) · hold 사건 1 · 같은 그룹 대기 잡 queued/needs_action · claim 0 · 서버 재시작 뒤에도 · 다른 그룹 잡은 돎 · 일반 잡 홀드 0 · 복귀가 푼 뒤 대기 잡 시작 — 보존 기간 정리는 단위
 RL43|live|run_supervisor_only+run_kill_worker|워커 kill -9: (a) SIGTERM 을 따르는 명령 ≤ 0.31초 (b) 무시하는 명령 ≤ 0.31 + grace_J (d) 감독자만 kill -9 → failed −9 · 홀드 0 · 취소 무변 (e) 일반 잡 생존 · G 뒤 lost + 홀드 · 종료 코드 7 · SIGKILL −9 · rcm release-hold 로 풀리고 대기 잡 시작 — (c) 는 단위
 RL44|unit|-|단위(HTTP) — (a) 는 RL15 가 실기로 본다
-RL45|live|run_kill_worker|열린 홀드 둘(대기 잡 있음 · 없음): needs_action · action.code · blocked_by · null ETA · /api/status · /api/health 2 항목 · ok 불변 · rcm wait 줄 · --return-on-action 4 · rcm check 경고 · doctor 줄 · --json 키 · 종료 코드 불변 · 웹 「확인이 필요한 작업」 4줄 이상 · client 403(2) · admin 0 · 홀드 없음 1
+RL45|live|run_kill_worker|열린 홀드 둘(대기 잡 있음 · 없음): needs_action · action.code · blocked_by · null ETA · /api/status · /api/health 2 항목 · ok 불변 · rcm wait 줄 · --return-on-action 4 · rcm check 경고 · doctor 줄 · --json 키 · 종료 코드 불변 · 홀드를 만든 잡의 rcm wait 줄 · 막힌 잡의 rcm eta 사유(N ahead 없음) · 웹 「확인이 필요한 작업」 4줄 이상 → 세 줄 + and N more(nothing else 없음) · client 403(2) · admin 0 · 홀드 없음 1 — RL45-empty: 빈 대기열 + 열린 홀드에서 rcm top · 웹이 「바로 시작」을 약속하지 않음
 RL46|unit|-|주입 시계
 RL47|unit|-|v25 고정 DB
 RL48|unit|-|설정 로드 · store claim
@@ -284,9 +284,38 @@ WORKER_LINES="no answer from the server for|lowered to|orphan #|stopped process 
 PR2_JOB_KEYS="log_complete late_result"
 PR2_LATE_KEYS="outcome exit_code finished_at received_at log_complete"
 PR3_REASON="worker_unreachable_grace"
-PR3_LINES="lost contact with|is back — the job goes on|late result:|needs action · group|irreversible hold"
+# PR3 의 사람 줄 — 실기에서 이 글로 grep 한다. 값은 여기서만 정하고, 시험이 진짜 생산자를 불러 만든
+# 글에 이 값이 들어 있는지 본다(rcm wait 의 _GraceWatch · action_line · hold_owner_line ·
+# late_result_line, rcm top 의 render, rcm eta 의 _fmt_eta_row, rcm check 의 _hold_rows,
+# rcm doctor 의 hold_line)
+LINE_LOST_CONTACT="lost contact with"
+LINE_GRACE_GOES_ON="the job goes on if the worker is back"
+LINE_GRACE_CANCEL="the job is cancelled when the worker is back"
+LINE_CANCEL_REQUESTED="cancel requested — "
+LINE_BACK_GOES_ON="is back — the job goes on"
+LINE_BACK_CANCEL="is back — the job is being cancelled"
+LINE_LATE="late result:"
+LINE_HELD_WAIT="needs action · group"
+LINE_HOLD_OWNER="is held — check the machine for a leftover process"
+LINE_CHECK_HOLD="irreversible hold"
+LINE_DOCTOR_HOLD="closed without a stop confirmation"
+LINE_ETA_HELD="is held by #"
+LINE_ETA_AHEAD=" ahead"
+LINE_TOP_EMPTY_HELD="a held group does not start until it is released"
+# PR3 의 웹 — 영어 화면의 글(i18n.js) · 레인 class · 「확인이 필요한 작업」 띠의 줄 수와 꼬리(app.js
+# stuckBand). 시험이 node 로 app.js 를 불러 견준다
+WEB_GRACE_GOES_ON="the job goes on if the worker is back within the grace period"
+WEB_GRACE_CANCEL="the job is cancelled when the worker is back, or ends as lost"
+WEB_STUCK_MAX="3"
+WEB_AND_MORE_PRE="and "
+WEB_AND_MORE_POST=" more"
+WEB_NOTHING_ELSE="nothing else needs a look"
+WEB_EMPTY_HELD="Queue is empty — a held group does not start until it is released."
+WEB_EMPTY_HINT=" starts immediately."
+WEB_LANE_UNHEARD="quiet"
+WEB_LANE_LIVE="run"
 # 하네스가 부르는 rcm 하위 명령과 그 옵션(시험이 cli.build_parser() 와 견준다). --no-follow 는 맨 앞
-CLI_USES="wait:--job,--timeout,--return-on-action release-hold:--reason,--json doctor:--role,--config,--json run:--by,--no-wait,--no-join cancel: top: logs: check: worker:--config serve:--config token:--config"
+CLI_USES="wait:--job,--timeout,--return-on-action release-hold:--reason,--json doctor:--role,--config,--json run:--by,--no-wait,--no-join cancel: top: logs: check: eta:--job worker:--config serve:--config token:--config"
 # 중계 명령(도우미 apply_relay) — tests/tcp_relay.py 의 TcpRelay 메서드로 간다
 RELAY_OPS="pause resume stop hold release unrefuse slow fast quit"
 
@@ -794,7 +823,56 @@ WEB_JS = {
         "return e ? e.textContent : ''; })()"
     ),
     "chips": "document.querySelectorAll('[data-hold-chip]').length",
+    # 띠의 꼬리 한 줄 — 「and N more」 · 「nothing else needs a look」 · 「unknown — …」
+    "stuck_tail": (
+        "(() => { const e = document.querySelectorAll('[data-stuck] .sl.muted'); "
+        "return e.length ? e[e.length - 1].textContent : ''; })()"
+    ),
 }
+#: 큐 행 하나에서 재는 것(RL28-web) — 끊긴 행은 시간을 세지 않고(틱 0 · 경과 글 그대로) 막대는 있되
+#: 시간 눈금이 없다. 듣는 행(대조군)은 센다
+ROW_KEYS = ("found", "cls", "reason", "ticks", "bars", "bar_ticks", "scaled", "el", "el_same")
+
+
+def row_js(jid: str) -> str:
+    """`tr#job-<jid>` 의 사실을 JSON 글로(행이 없으면 null)."""
+    if not jid.isdigit():
+        raise ValueError(f"job id {jid!r}")
+    return (
+        f"(() => {{ const r = document.getElementById('job-{jid}'); if (!r) return null; "
+        "const p = r.querySelector('.pbar'); const e = r.querySelector('td.elapsed'); "
+        "const why = r.querySelector('.reason'); "
+        "return JSON.stringify({cls: r.className, "
+        "reason: why ? (why.getAttribute('title') || why.textContent) : '', "
+        "ticks: r.querySelectorAll('[data-tick]').length, "
+        "bars: r.querySelectorAll('.pwrap').length, "
+        "bar_ticks: r.querySelectorAll('.pwrap[data-tick]').length, "
+        "scaled: p ? (p.getAttribute('data-basis') === 'time' ? 1 : 0) : 0, "
+        "el: e ? e.textContent : ''}); })()"
+    )
+
+
+def _rows(c: object, roles: list[tuple[str, str]], lang: str) -> None:
+    """역할마다 행 사실을 찍는다. 경과 글은 2.5초 뒤 한 번 더 읽어 그대로인지 본다."""
+    first: dict[str, dict[str, object] | None] = {}
+    for role, jid in roles:
+        raw = c.eval(row_js(jid))  # type: ignore[attr-defined]
+        first[role] = json.loads(raw) if isinstance(raw, str) else None
+    time.sleep(2.5)
+    for role, jid in roles:
+        got = first[role]
+        if got is None:
+            print(f"{lang}_{role}_found=0")
+            continue
+        raw = c.eval(row_js(jid))  # type: ignore[attr-defined]
+        again = json.loads(raw) if isinstance(raw, str) else None
+        print(f"{lang}_{role}_found=1")
+        for k in ROW_KEYS[1:-1]:
+            print(f"{lang}_{role}_{k}={show(got.get(k))}")
+        same = ABSENT if again is None else ("1" if again.get("el") == got.get("el") else "0")
+        print(f"{lang}_{role}_el_same={same}")
+
+
 #: 첫 상태 문서가 그려진 뒤 — 「확인이 필요한 작업」 칸은 그리기 전에 `—` 다(index.html)
 READY_JS = (
     "(() => { const e = document.querySelector('[data-stuck]'); "
@@ -803,8 +881,11 @@ READY_JS = (
 )
 
 
-def cmd_web(url: str, outdir: str, tag: str, width: str) -> int:
-    """390px 와 두 언어로 첫 화면을 연다. 사실을 `키=값` 줄로, 스크린샷 · 본문 글을 outdir 에."""
+def cmd_web(url: str, outdir: str, tag: str, width: str, rows: str = "") -> int:
+    """390px 와 두 언어로 첫 화면을 연다. 사실을 `키=값` 줄로, 스크린샷 · 본문 글을 outdir 에.
+
+    `rows` 는 `역할=잡번호,…` — 그 큐 행마다 ROW_KEYS 를 `<lang>_<역할>_<키>` 로 찍는다."""
+    roles = [tuple(x.split("=", 1)) for x in rows.split(",") if "=" in x]
     sys.path.insert(0, str(ROOT / "tests"))
     try:
         import test_web_browser as wb
@@ -826,6 +907,8 @@ def cmd_web(url: str, outdir: str, tag: str, width: str) -> int:
                 c.frames(2)
                 for k, js in WEB_JS.items():
                     print(f"{lang}_{k}={show(c.eval(js))}")
+                if roles:
+                    _rows(c, roles, lang)  # type: ignore[arg-type]
                 print(f"{lang}_errors={len(c.page_errors())}")
                 body = c.eval("document.body.innerText") or ""
                 (out / f"{tag}-{lang}.txt").write_text(body, encoding="utf-8")
@@ -1172,9 +1255,75 @@ def judge_rl28(f: dict[str, str]) -> str:
         t = float(f.get("T", "10") or 10)
         j.le("lost_line_delay", t + 15, "rcm wait 'lost contact' line delay")
         j.le("back_line_delay", 15, "rcm wait 'is back' line delay")
+        j.eq("eta_text", 1, "rcm eta --job says contact was lost")
     return j.result(
         f"running with reason {f.get('reason')}, no ETA, health fixed, rcm wait lines after "
         f"{f.get('lost_line_delay')}s / {f.get('back_line_delay')}s, --timeout exit 3"
+    )
+
+
+def judge_rl28_web(f: dict[str, str]) -> str:
+    """끊긴 행(유예 중 · 취소 중)은 시간을 세지 않고 회색 레인이고 막대에 시간 눈금이 없다. 같은
+    화면의 듣는 행(대조군)이 세지 않으면 「안 센다」는 아무것도 말하지 않는다 — UNKNOWN."""
+    base = judge_web(f, band_max=80, needles=("grace_said", "cancel_said"))
+    if not base.startswith("PASS"):
+        return base
+    j = Judge(f)
+    for lang in ("en", "ko"):
+        live = f"{lang}_live"
+        j.eq(f"{live}_found", 1, f"{lang} the control row (a worker that answers) is on the page")
+        if j.v(f"{live}_found") == "1":
+            for k, want, what in (
+                ("lane", "1", "lane"),
+                ("scaled", "1", "time scale on the bar"),
+                ("el_same", "0", "elapsed text changes"),
+            ):
+                if j.v(f"{live}_{k}") != want:
+                    j.unk.append(f"{lang} control row {what}: {f.get(f'{live}_{k}')}, want {want}")
+            for k, what in (
+                ("ticks", "ticking elements"),
+                ("bars", "a progress bar"),
+                ("bar_ticks", "a ticking bar"),
+            ):
+                n = j.num(f"{live}_{k}")
+                if n is None or n < 1:
+                    j.unk.append(f"{lang} control row has no {what} ({f.get(f'{live}_{k}')})")
+        for role in ("grace", "cancel"):
+            r = f"{lang}_{role}"
+            j.eq(f"{r}_found", 1, f"{lang} {role} row is on the page")
+            j.eq(f"{r}_lane", 1, f"{lang} {role} row lane is grey (not running)")
+            j.eq(f"{r}_ticks", 0, f"{lang} {role} row ticking elements")
+            j.ge(f"{r}_bars", 1, f"{lang} {role} row progress bar")
+            j.eq(f"{r}_bar_ticks", 0, f"{lang} {role} row bar ticks")
+            j.eq(f"{r}_scaled", 0, f"{lang} {role} row bar time scale")
+            j.eq(f"{r}_el_same", 1, f"{lang} {role} row elapsed text stays")
+    return j.result(
+        f"{base[5:]}; unreachable rows grey, not counting, bar without a time scale, while the "
+        "control row counts"
+    )
+
+
+def judge_rl28_cancel(f: dict[str, str]) -> str:
+    """끊긴 동안 취소한 잡: 화면마다 「돌아오면 취소된다」고 말하고 「이어진다」고 말하지 않는다
+    (결정 322). 돌아온 뒤 줄은 rcm wait 이 그 순간을 봤을 때만 나온다 — 봤는지만 적는다."""
+    j = Judge(f)
+    if not j.gate("pr3", "cancelling job lines in the grace"):
+        return j.result("")
+    j.eq("cancel_rc", 0, "rcm cancel in the grace")
+    j.eq("state_after_cancel", "cancelling", "state after the cancel")
+    j.eq("reason_after_cancel", "worker_unreachable_grace", "queue reason after the cancel")
+    j.eq("top_cancel", 1, "rcm top says it is cancelled when the worker is back")
+    j.eq("eta_cancel", 1, "rcm eta --job says it is cancelled when the worker is back")
+    j.eq("fresh_line", 1, "a new rcm wait says it is cancelled when the worker is back")
+    j.eq("fresh_goes_on", 0, "a new rcm wait says the job goes on")
+    j.eq("bg_cancel_line", 1, "the running rcm wait corrects itself (cancel requested)")
+    j.eq("bg_back_goes_on", 0, "the running rcm wait says the cancelled job goes on")
+    j.among("bg_back_cancel", ("0", "1"), "the running rcm wait's back line")
+    j.eq("final", "cancelled", "state after the worker came back")
+    seen = "seen" if f.get("bg_back_cancel") == "1" else "not seen (the job ended first)"
+    return j.result(
+        "top, eta and wait promise a cancel on the return, never that the job goes on; "
+        f"cancelled after the return; the running wait's back line {seen}"
     )
 
 
@@ -1308,9 +1457,13 @@ def judge_rl45(f: dict[str, str]) -> str:
     j.eq("nohold_release_rc", 1, "release-hold of a job with no hold")
     if j.gate("pr3", "human hold lines"):
         j.eq("wait_line", 1, "rcm wait names the group and the job to release")
-        j.ge("check_lines", 2, "rcm check irreversible hold warnings")
+        j.ge("check_lines", 2, "rcm check group hold warnings")
         j.ge("doctor_lines", 1, "rcm doctor needs action line")
         j.ge("doctor_json_holds", 1, "doctor --json irreversible_holds")
+        j.eq("owner_line", 1, "rcm wait of the hold's own job says its group is held")
+        j.eq("eta_held", 1, "rcm eta --job of the held job names the hold")
+        j.eq("eta_no_ahead", 1, "rcm eta --job of the held job counts no jobs ahead")
+        j.eq("top_empty_held", 1, "rcm top with an empty queue and a hold makes no start promise")
     return j.result(
         "held job needs_action with the hold's job and no ETA; both holds in status and health; "
         "--return-on-action 4; check · doctor exits unchanged; client 2, admin 0, no hold 1"
@@ -1318,22 +1471,55 @@ def judge_rl45(f: dict[str, str]) -> str:
 
 
 def judge_rl45_web(f: dict[str, str]) -> str:
+    """「확인이 필요한 작업」: 띠는 `stuck_max` 줄까지 그리고 넘치면 「and N more」, 「nothing else
+    needs a look」은 다 그렸을 때만이다(PR3 P6). `stuck_min` 은 하네스가 만든 줄(홀드 + 막힌 대기
+    잡) 수 — 띠가 센 줄(보인 것 + N)이 그보다 적으면 줄을 잃은 것이다."""
     base = judge_web(f, band_max=None, needles=("hold_a", "hold_b"))
     if not base.startswith("PASS"):
         return base
     j = Judge(f)
     j.ge("en_chips", 1, "held job chip")
-    total, shown = j.num("stuck_total"), j.num("en_stuck_n")
-    if total is None or shown is None:
-        j.unk.append("Needs a look line count: not observed")
-    elif total < 4:
-        j.unk.append(f"Needs a look had {total:g} lines, the case needs 4 or more")
-    elif shown < total and f.get("en_more") != "1":
-        j.bad.append(
-            f"Needs a look shows {shown:g} of {total:g} lines with no sign that more are hidden "
-            f"('{(f.get('en_stuck_text') or '')[:300]}')"
+    need, cap = j.num("stuck_min"), j.num("stuck_max")
+    shown, more, done = j.num("en_stuck_n"), j.num("en_more_n"), j.num("en_nothing_else")
+    text = (f.get("en_stuck_text") or "")[:300]
+    if None in (need, cap, shown, more, done):
+        j.unk.append("Needs a look lines: not observed")
+    elif need <= cap:  # type: ignore[operator]
+        j.unk.append(f"Needs a look had {need:g} lines, the case needs more than {cap:g}")
+    else:
+        if shown != cap:
+            j.bad.append(
+                f"Needs a look shows {shown:g} lines, want {cap:g} when more wait ('{text}')"
+            )
+        if shown + more < need:  # type: ignore[operator]
+            j.bad.append(
+                f"Needs a look accounts for {shown:g} + {more:g} of at least {need:g} lines — "
+                f"hidden lines are not counted ('{text}')"
+            )
+        if done != 0:
+            j.bad.append(f"Needs a look says all is shown while lines are hidden ('{text}')")
+    return j.result(
+        f"both holds shown, {f.get('en_stuck_n')} lines and 'and {f.get('en_more_n')} more' "
+        f"for at least {f.get('stuck_min')}"
+    )
+
+
+def judge_rl45_empty(f: dict[str, str]) -> str:
+    """대기열이 비었고 그룹 홀드가 열려 있으면 웹은 「바로 시작」을 약속하지 않는다(PR3 P6-2)."""
+    j0 = Judge(f)
+    if not j0.gate("pr3", "empty queue with a held group"):
+        return j0.result("")
+    base = judge_web(f, band_max=None, needles=("empty_held",))
+    j = Judge(f)
+    if j.v("queue_empty") != "1" or j.v("hold_open") != "1":
+        return (
+            f"UNKNOWN the case was not set up: queue empty {f.get('queue_empty')}, "
+            f"hold open {f.get('hold_open')}"
         )
-    return j.result(f"both holds shown, {f.get('en_stuck_n')} of {f.get('stuck_total')} lines")
+    if not base.startswith("PASS"):
+        return base
+    j.eq("en_empty_hint", 0, "the page still promises an immediate start")
+    return j.result("empty queue with an open hold: the page says the held group does not start")
 
 
 def judge_rl50(f: dict[str, str]) -> str:
@@ -1399,7 +1585,8 @@ JUDGES = {
     "RL15": judge_rl15,
     "RL18": judge_rl18,
     "RL28": judge_rl28,
-    "RL28-web": lambda f: judge_web(f, band_max=80, needles=()),
+    "RL28-web": judge_rl28_web,
+    "RL28-cancel": judge_rl28_cancel,
     "RL29": judge_rl29,
     "RL29-web": lambda f: judge_web(
         f, band_max=None, needles=tuple(n for n in (f.get("needles") or "").split())
@@ -1410,6 +1597,7 @@ JUDGES = {
     "RL43": judge_rl43,
     "RL45": judge_rl45,
     "RL45-web": judge_rl45_web,
+    "RL45-empty": judge_rl45_empty,
     "RL50": judge_rl50,
     "RL51": judge_rl51,
     "F78": judge_f78,
@@ -1728,8 +1916,12 @@ submit() { # submit <프리셋> → 잡 번호
     echo ""
 }
 
-web() { # web <태그> — 390px · 두 언어. CDP Chrome 은 진짜 HOME 이 있어야 http 페이지를 연다(test-server.md)
-  HOME="$REAL_HOME" "$PY" -I "$H" web "$URL" "$OUT/web" "$1" 390 2>>"$OUT/web.err" || true
+web() { # web <태그> [역할=잡,…] — 390px · 두 언어. CDP Chrome 은 진짜 HOME 이 있어야 http 페이지를 연다(test-server.md)
+  HOME="$REAL_HOME" "$PY" -I "$H" web "$URL" "$OUT/web" "$1" 390 "${2:-}" 2>>"$OUT/web.err" || true
+}
+
+has_line() { # has_line <파일> <글> → 1 · 0 — 그 글이 그대로(고정 문자열) 들어 있나
+  if grep -qF -- "$2" "$1" 2>/dev/null; then echo 1; else echo 0; fi
 }
 
 jv() { # jv <잡> <키> — 잡 문서의 칸 하나(점으로 깊이)
@@ -1996,20 +2188,31 @@ run_secret() {
   reset_world
 }
 
-# RL28 — 유예 중에 요청자가 보는 것
+# RL28 — 유예 중에 요청자가 보는 것. 잡 셋: y(유예 중 · 이어 감), y2(유예 중에 취소 · 결정 322),
+# y3(중계를 거치지 않는 워커 — 웹 행의 대조군: 시간을 센다)
 run_grace_view() {
-  local y py wpid t_pause t_resume a b i samples
+  local y py y2 py2 y3 py3 wpid wpid2 t_pause t_resume a b i samples lang role cls grey run ok
   log "RL28 start"
   common_facts RL28
+  common_facts RL28-cancel
   worker_start rl28 relay || return 0
+  worker_start rl28b relay || return 0
   y=$(submit rl28-plain)
   py=$(pid_of "$y" 30)
-  (
-    export RCM_SERVER="$URL" RCM_TOKEN
-    RCM_TOKEN=$(cat "$CTOK")
-    h run "$OUT/rl28-wait.json" "$OUT/rl28-wait.err" -- "$RCM" --no-follow wait --job "$y" --timeout 300
-  ) &
-  wpid=$!
+  y2=$(submit rl28-plain)
+  py2=$(pid_of "$y2" 30)
+  # 대조군 워커는 두 잡이 중계 워커에 붙은 뒤에 띄운다 — 먼저 띄우면 y · y2 를 집을 수 있다
+  worker_start rl28c direct || true
+  y3=$(submit rl28-plain)
+  py3=$(pid_of "$y3" 30)
+  for i in "$y" "$y2"; do
+    (
+      export RCM_SERVER="$URL" RCM_TOKEN
+      RCM_TOKEN=$(cat "$CTOK")
+      h run "$OUT/rl28-wait-$i.json" "$OUT/rl28-wait-$i.err" -- "$RCM" --no-follow wait --job "$i" --timeout 300
+    ) &
+    if [ "$i" = "$y" ]; then wpid=$!; else wpid2=$!; fi
+  done
   sleep 2
   t_pause=$(now)
   relay_do pause
@@ -2019,8 +2222,10 @@ run_grace_view() {
   fact RL28 finish_at "$(jv "$y" estimate.finish_at)"
   fact RL28 state_during "$(jv "$y" state)"
   client top >"$OUT/rl28-top.txt" 2>&1 || true
-  fact RL28 top_text "$(if grep -q 'lost contact with' "$OUT/rl28-top.txt"; then echo 1; else echo 0; fi)"
-  fact RL28 top_raw "$(if grep -q worker_unreachable_grace "$OUT/rl28-top.txt"; then echo 1; else echo 0; fi)"
+  fact RL28 top_text "$(has_line "$OUT/rl28-top.txt" "$LINE_LOST_CONTACT")"
+  fact RL28 top_raw "$(has_line "$OUT/rl28-top.txt" "$PR3_REASON")"
+  client eta --job "$y" >"$OUT/rl28-eta.txt" 2>&1 || true
+  fact RL28 eta_text "$(has_line "$OUT/rl28-eta.txt" "$LINE_LOST_CONTACT")"
   samples=""
   for i in 1 2 3 4 5; do
     samples="$samples$(h health "$URL" "$CTOK")
@@ -2035,25 +2240,58 @@ run_grace_view() {
   fact RL28 wait_timeout_rc "$RW_RC"
   fact RL28 wait_timeout 8
   fact RL28 wait_timeout_secs "$(h sub "$b" "$a")"
-  web rl28 >"$OUT/facts/RL28-web.txt"
-  for i in en ko; do
-    fact RL28-web "${i}_raw" "$(if grep -q worker_unreachable "$OUT/web/rl28-$i.txt" 2>/dev/null; then echo 1; else echo 0; fi)"
+  # 유예 중에 y2 를 취소한다 — 워커가 돌아오면 멈추고, 그 전에는 「이어진다」고 말하지 않는다
+  client cancel "$y2" >>"$OUT/rl28-cancel.log" 2>&1 && fact RL28-cancel cancel_rc 0 || fact RL28-cancel cancel_rc $?
+  sleep 2
+  fact RL28-cancel state_after_cancel "$(jv "$y2" state)"
+  fact RL28-cancel reason_after_cancel "$(jv "$y2" reason)"
+  client top >"$OUT/rl28-top-cancel.txt" 2>&1 || true
+  fact RL28-cancel top_cancel "$(has_line "$OUT/rl28-top-cancel.txt" "$LINE_GRACE_CANCEL")"
+  client eta --job "$y2" >"$OUT/rl28-eta-cancel.txt" 2>&1 || true
+  fact RL28-cancel eta_cancel "$(has_line "$OUT/rl28-eta-cancel.txt" "$LINE_GRACE_CANCEL")"
+  rwait "$y2" 3 rl28-wait-cancel-fresh
+  fact RL28-cancel fresh_line "$(has_line "$OUT/rl28-wait-cancel-fresh.err" "$LINE_GRACE_CANCEL")"
+  fact RL28-cancel fresh_goes_on "$(has_line "$OUT/rl28-wait-cancel-fresh.err" "$LINE_GRACE_GOES_ON")"
+  web rl28 "grace=$y,cancel=$y2,live=$y3" >"$OUT/facts/RL28-web.txt"
+  for lang in en ko; do
+    fact RL28-web "${lang}_raw" "$(if grep -q worker_unreachable "$OUT/web/rl28-$lang.txt" 2>/dev/null; then echo 1; else echo 0; fi)"
+    # 레인 class — 끊긴 행은 회색(WEB_LANE_UNHEARD)이고 도는 색(WEB_LANE_LIVE)이 아니다. 대조군은 도는 색
+    for role in grace cancel live; do
+      cls=" $(sed -n "s/^${lang}_${role}_cls=//p" "$OUT/facts/RL28-web.txt" | tail -1) "
+      case "$cls" in *" $WEB_LANE_UNHEARD "*) grey=1 ;; *) grey=0 ;; esac
+      case "$cls" in *" $WEB_LANE_LIVE "*) run=1 ;; *) run=0 ;; esac
+      if [ "$role" = live ]; then ok=$run; elif [ "$grey$run" = 10 ]; then ok=1; else ok=0; fi
+      fact RL28-web "${lang}_${role}_lane" "$ok"
+    done
   done
-  # 분단은 40초 — 일반 잡이라 자기 멈춤은 없고, G 보다 한참 짧다
+  # 이유 칸의 글(title 의 전문) — 영어 화면이 i18n 의 문장을 그렸나
+  fact RL28-web found_grace_said "$(sed -n 's/^en_grace_reason=//p' "$OUT/facts/RL28-web.txt" | tail -1 | grep -cF -- "$WEB_GRACE_GOES_ON" || true)"
+  fact RL28-web found_cancel_said "$(sed -n 's/^en_cancel_reason=//p' "$OUT/facts/RL28-web.txt" | tail -1 | grep -cF -- "$WEB_GRACE_CANCEL" || true)"
+  # 분단은 적어도 40초 — 일반 잡이라 자기 멈춤은 없고, G 보다 한참 짧다
   sleep "$(h sub "$(now)" "$t_pause" | awk -v w=40 '{ d = w - $1; print (d > 0 ? int(d) : 0) }')"
   t_resume=$(now)
   relay_do resume
   for i in $(seq 1 60); do
-    grep -q 'is back' "$OUT/rl28-wait.err" 2>/dev/null && break
+    grep -qF -- "$LINE_BACK_GOES_ON" "$OUT/rl28-wait-$y.err" 2>/dev/null && break
     sleep 0.5
   done
-  fact RL28 lost_line_delay "$(h sub "$(h firstline "$OUT/rl28-wait.err" 'lost contact with')" "$t_pause")"
-  fact RL28 back_line_delay "$(h sub "$(h firstline "$OUT/rl28-wait.err" 'is back')" "$t_resume")"
+  fact RL28 lost_line_delay "$(h sub "$(h firstline "$OUT/rl28-wait-$y.err" "$LINE_LOST_CONTACT")" "$t_pause")"
+  fact RL28 back_line_delay "$(h sub "$(h firstline "$OUT/rl28-wait-$y.err" "$LINE_BACK_GOES_ON")" "$t_resume")"
+  # y2 — 다시 붙은 워커가 취소 요청을 보고 멈춘다. 기다리던 rcm wait 은 그 사이 말을 바로잡았다
+  fact RL28-cancel final "$(waitstate "$y2" 30 terminal)"
+  wait "$wpid2" 2>/dev/null || true
+  fact RL28-cancel bg_cancel_line "$(has_line "$OUT/rl28-wait-$y2.err" "$LINE_CANCEL_REQUESTED")"
+  fact RL28-cancel bg_back_goes_on "$(has_line "$OUT/rl28-wait-$y2.err" "$LINE_BACK_GOES_ON")"
+  fact RL28-cancel bg_back_cancel "$(has_line "$OUT/rl28-wait-$y2.err" "$LINE_BACK_CANCEL")"
   judge RL28
   judge RL28-web
+  judge RL28-cancel
   client cancel "$y" >/dev/null 2>&1 || true
+  client cancel "$y3" >/dev/null 2>&1 || true
   wait "$wpid" 2>/dev/null || true
-  [ -n "$py" ] && h waitdead "$py" 20 >/dev/null || true
+  for i in "$py" "$py2" "$py3"; do
+    [ -n "$i" ] && h waitdead "$i" 20 >/dev/null || true
+  done
   reset_world
 }
 
@@ -2291,7 +2529,7 @@ run_partition_past_g() {
   fact RL5 state_after_late "$(jv "$y" state)"
   rwait "$y" 10 rl5-wait-late
   fact RL5 wait_rc_after_late "$RW_RC"
-  fact RL5 late_line "$(if grep -q 'late result:' "$OUT/rl5-wait-late.err"; then echo 1; else echo 0; fi)"
+  fact RL5 late_line "$(has_line "$OUT/rl5-wait-late.err" "$LINE_LATE")"
   judge RL1
   judge RL5
   judge RL42
@@ -2388,7 +2626,7 @@ run_server_stop_past_g() {
 
 # RL43 (a)(b)(e) · RL45 · 감독자 값(F78)
 run_kill_worker() {
-  local xa pa xb pb ye pe out wa wb we z z2 c1 c2 d1 d2 h1 h2 name conf hold_a hold_b stuck p
+  local xa pa xb pb ye pe out wa wb we z z2 c1 c2 d1 d2 h1 h2 name conf hold_a hold_b stuck p n more tail_text
   log "RL43/RL45 start"
   common_facts RL43
   common_facts RL45
@@ -2453,23 +2691,38 @@ run_kill_worker() {
   h1=$(cut -d'|' -f2 "$OUT/rl45-health.txt")
   rwait "$z" 10 rl45-wait
   fact RL45 wait_timeout_rc "$RW_RC"
-  fact RL45 wait_line "$(if grep -q 'needs action · group' "$OUT/rl45-wait.err"; then echo 1; else echo 0; fi)"
+  fact RL45 wait_line "$(has_line "$OUT/rl45-wait.err" "$LINE_HELD_WAIT")"
   rwait "$z" 30 rl45-wait-action --return-on-action
   fact RL45 wait_action_rc "$RW_RC"
+  # 홀드를 만든 잡(xa)의 rcm wait — 끝 줄에 그룹이 막혔다는 말과 푸는 명령
+  rwait "$xa" 10 rl45-wait-owner
+  fact RL45 owner_line "$(if [ "$(has_line "$OUT/rl45-wait-owner.err" "$LINE_HOLD_OWNER")$(has_line "$OUT/rl45-wait-owner.err" "rcm release-hold $xa")" = 11 ]; then echo 1; else echo 0; fi)"
+  # 막힌 대기 잡의 rcm eta --job — 홀드를 말하고, 오지 않을 순번(N ahead)을 세지 않는다
+  client eta --job "$z" >"$OUT/rl45-eta.txt" 2>&1 || true
+  fact RL45 eta_held "$(if [ "$(has_line "$OUT/rl45-eta.txt" "$LINE_ETA_HELD$xa")" = 1 ]; then echo 1; else echo 0; fi)"
+  fact RL45 eta_no_ahead "$(if [ "$(has_line "$OUT/rl45-eta.txt" "$LINE_ETA_AHEAD")" = 0 ] && [ -s "$OUT/rl45-eta.txt" ]; then echo 1; else echo 0; fi)"
   c1=0
   client check >"$OUT/rl45-check.txt" 2>&1 || c1=$?
-  fact RL45 check_lines "$(grep -c 'irreversible hold' "$OUT/rl45-check.txt" || true)"
+  fact RL45 check_lines "$(grep -cF -- "$LINE_CHECK_HOLD" "$OUT/rl45-check.txt" || true)"
   name=$(jv "$xa" ran_on)
   conf=$(conf_of "$name")
   [ -n "$conf" ] || conf=$(conf_of rl43a)
   d1=0
   "$RCM" --no-follow doctor --role worker --config "$conf" >"$OUT/rl45-doctor.txt" 2>&1 || d1=$?
   "$RCM" --no-follow doctor --role worker --config "$conf" --json >"$OUT/rl45-doctor.json" 2>"$OUT/rl45-doctor.err" || true
-  fact RL45 doctor_lines "$(grep -c '^needs action' "$OUT/rl45-doctor.txt" || true)"
+  fact RL45 doctor_lines "$(grep -cF -- "$LINE_DOCTOR_HOLD" "$OUT/rl45-doctor.txt" || true)"
   fact RL45 doctor_json_holds "$("$PY" -I -c 'import json, sys; d = json.load(open(sys.argv[1])); h = d.get("irreversible_holds"); print(len(h) if isinstance(h, list) else "<absent>")' "$OUT/rl45-doctor.json" 2>/dev/null || echo "<absent>")"
-  # 웹 — 홀드 둘 다 · 칩 · 줄 수(홀드 둘 + 막힌 대기 잡 둘 = 4)
+  # 웹 — 홀드 둘 다 · 칩 · 줄 수. 하네스가 만든 줄 = 열린 홀드 + 그 홀드에 막힌 대기 잡(4 를 기대한다)
+  n=0
+  for p in "$hold_a" "$hold_b"; do
+    if [ "$p" = 1 ]; then n=$((n + 1)); fi
+  done
+  for p in "$z" "$z2"; do
+    if [ "$(jv "$p" reason)" = needs_action ]; then n=$((n + 1)); fi
+  done
   web rl45 >"$OUT/facts/RL45-web.txt"
-  fact RL45-web stuck_total 4
+  fact RL45-web stuck_min "$n"
+  fact RL45-web stuck_max "$WEB_STUCK_MAX"
   for p in en ko; do
     fact RL45-web "${p}_raw" "$(if grep -q 'irreversible_hold\|worker_unreachable' "$OUT/web/rl45-$p.txt" 2>/dev/null; then echo 1; else echo 0; fi)"
   done
@@ -2477,7 +2730,13 @@ run_kill_worker() {
   stuck=$(sed -n 's/^en_stuck_text=//p' "$OUT/facts/RL45-web.txt" | tail -1)
   fact RL45-web found_hold_a "$(case "$stuck" in *"#$xa "*) echo 1 ;; *) echo 0 ;; esac)"
   fact RL45-web found_hold_b "$(case "$stuck" in *"#$xb "*) echo 1 ;; *) echo 0 ;; esac)"
-  fact RL45-web en_more "$(case "$stuck" in *" more"*) echo 1 ;; *) echo 0 ;; esac)"
+  # 꼬리 한 줄 — 「and N more」의 N(없으면 0)과 「nothing else needs a look」이 있는지
+  tail_text=$(sed -n 's/^en_stuck_tail=//p' "$OUT/facts/RL45-web.txt" | tail -1)
+  more=$(printf '%s' "$tail_text" | sed -n "s/.*${WEB_AND_MORE_PRE}\([0-9][0-9]*\)${WEB_AND_MORE_POST}.*/\1/p" | head -1)
+  if grep -q '^web=ok' "$OUT/facts/RL45-web.txt"; then
+    fact RL45-web en_more_n "${more:-0}"
+    fact RL45-web en_nothing_else "$(case "$tail_text" in *"$WEB_NOTHING_ELSE"*) echo 1 ;; *) echo 0 ;; esac)"
+  fi
   # 풀기 — client 토큰 2, admin 0, 홀드 없는 잡 1
   client release-hold "$xa" --reason "client try" >"$OUT/rl45-release-client.txt" 2>&1 && fact RL45 client_release_rc 0 || fact RL45 client_release_rc $?
   admin release-hold "$xa" --reason "checked by acceptance" --json >"$OUT/rl45-release.json" 2>&1 && fact RL45 admin_release_rc 0 || fact RL45 admin_release_rc $?
@@ -2486,6 +2745,26 @@ run_kill_worker() {
   fact RL45 release_reason_ok "$(if [ "$(jv "$xa" hold.release_reason)" = "checked by acceptance" ]; then echo 1; else echo 0; fi)"
   fact RL43 z_started "$(if [ -n "$(pid_of "$z" 60)" ]; then echo 1; else echo 0; fi)"
   admin release-hold "$ye" --reason "no hold" >"$OUT/rl45-release-none.txt" 2>&1 && fact RL45 nohold_release_rc 0 || fact RL45 nohold_release_rc $?
+  # RL45-empty — 대기열을 비우고(z · z2 취소) xb 의 홀드만 열어 둔다: rcm top 과 웹이 「바로
+  # 시작」을 약속하지 않는다
+  common_facts RL45-empty
+  client cancel "$z" >/dev/null 2>&1 || true
+  client cancel "$z2" >/dev/null 2>&1 || true
+  waitstate "$z" 30 terminal >/dev/null
+  waitstate "$z2" 30 terminal >/dev/null
+  h status "$URL" "$CTOK" "$OUT/rl45-status-empty.json" || true
+  fact RL45-empty queue_empty "$("$PY" -I -c 'import json, sys; d = json.load(open(sys.argv[1])); ps = d.get("pools") or []; ok = ps and all(isinstance(p.get("queue"), list) for p in ps); print(1 if ok and not any(p["queue"] for p in ps) else 0)' "$OUT/rl45-status-empty.json" 2>/dev/null || echo "<absent>")"
+  fact RL45-empty hold_open "$(has_hold "$xb")"
+  client top >"$OUT/rl45-top-empty.txt" 2>&1 || true
+  fact RL45 top_empty_held "$(has_line "$OUT/rl45-top-empty.txt" "$LINE_TOP_EMPTY_HELD")"
+  web rl45-empty >>"$OUT/facts/RL45-empty.txt"
+  for p in en ko; do
+    fact RL45-empty "${p}_raw" "$(if grep -q 'irreversible_hold\|worker_unreachable' "$OUT/web/rl45-empty-$p.txt" 2>/dev/null; then echo 1; else echo 0; fi)"
+  done
+  if grep -q '^web=ok' "$OUT/facts/RL45-empty.txt"; then
+    fact RL45-empty found_empty_held "$(has_line "$OUT/web/rl45-empty-en.txt" "$WEB_EMPTY_HELD")"
+    fact RL45-empty en_empty_hint "$(has_line "$OUT/web/rl45-empty-en.txt" "$WEB_EMPTY_HINT")"
+  fi
   admin release-hold "$xb" --reason "acceptance cleanup" >>"$OUT/reset.log" 2>&1 || true
   # 홀드가 모두 풀린 뒤 같은 머신 · 같은 워커 상태로 다시 잰다 — 종료 코드 · ok 가 홀드로 바뀌지 않았나
   sleep 2
@@ -2502,9 +2781,8 @@ run_kill_worker() {
   verdict RL43-c SKIP "(c) death before the supervisor's parent check needs an injected start delay — unit tests"
   judge RL45
   judge RL45-web
+  judge RL45-empty
   judge F78
-  client cancel "$z" >/dev/null 2>&1 || true
-  client cancel "$z2" >/dev/null 2>&1 || true
   reset_world
 }
 
@@ -2567,9 +2845,11 @@ EOF
 PID_LINE='echo $$ > "$RCM_MARK_DIR/$RCM_JOB_ID.pid"'
 CHILD_LINE='(trap "" TERM; exec sleep 400) & echo $! > "$RCM_MARK_DIR/$RCM_JOB_ID.child"'
 
-preset() { # preset <이름> <irreversible 0|1> <timeout> <sh 스크립트> — TOML 한 덩이
+preset() { # preset <이름> <irreversible 0|1> <timeout> <sh 스크립트> [expected_seconds] — TOML 한 덩이
   printf '\n[[presets]]\nname = "%s"\npool = "%s"\n' "$1" "$POOL"
   [ "$2" = 1 ] && printf 'irreversible = true\n'
+  # 예상 시간이 있으면 웹의 진행 막대가 시간 눈금을 단다(RL28-web 의 대조군 행)
+  [ -z "${5:-}" ] || printf 'expected_seconds = %s\n' "$5"
   printf "argv = [\"sh\", \"-c\", '%s']\ntimeout_seconds = %s\n" "$4" "$3"
   printf '[presets.env]\nRCM_MARK_DIR = "%s"\n' "$MARKS"
 }
@@ -2593,7 +2873,7 @@ write_server_toml() { # write_server_toml <self-test 0|1>
     preset rl43d-ship 1 900 "$long"
     preset rl51-child 1 900 "$child"
     preset rl51-slowexit 1 900 "$slowexit"
-    preset rl28-plain 0 900 "$tick"
+    preset rl28-plain 0 900 "$tick" 600
     preset rl34-ship 1 900 "$long"
     preset rl40-fin 0 300 "$fin"
     preset rl9-plain 0 900 "$long"

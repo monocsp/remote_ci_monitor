@@ -760,7 +760,8 @@ def test_pr4_the_harness_greps_through_the_line_variables_not_copies() -> None:
         assert uses, f"the harness defines {name} but never uses it"
         if len(value) < 12:
             continue  # 짧은 값(「 more」 · 「run」)은 다른 낱말에도 들어 있다 — 쓰임만 본다
-        copies = [ln for ln in code if value in ln and not ln.startswith(f'{name}="')]
+        # 다른 변수의 정의(더 긴 웹 문장이 CLI 조각을 품는다)는 베낀 것이 아니다
+        copies = [ln for ln in code if value in ln and not re.match(r'[A-Z][A-Z0-9_]*="', ln)]
         assert not copies, f"'{value}' is copied instead of using ${name}: {copies}"
     assert "PR3_LINES" not in text  # 옛 묶음 — 손으로 베낀 줄 목록이었다
 
