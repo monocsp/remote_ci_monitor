@@ -122,6 +122,12 @@ of a key bumps that number and is listed here.
   `lost` leaves the job as it is and shows up once as `late_result`; a worker finish's
   `finished_at` is kept between the job's start and the moment the server received it.
   ([#286](https://github.com/monocsp/remote_ci_monitor/pull/286))
+- **A live acceptance run for the result loop.** `scripts/acceptance/m5tb_live.sh` starts its own
+  test server, real `rcm worker` processes and a TCP relay on one machine, waits through real
+  disconnect graces, fencing, supervisor kills and group holds, and prints one `PASS`, `FAIL`,
+  `UNKNOWN` or `SKIP` line per check (`--list`, `--only`, `--self-test`). It refuses production
+  ports, folders and launchd labels before it creates anything. The 2026-11-27 run and its numbers
+  are in [the acceptance report](docs/acceptance/reports/2026-11-27-m5tb-acceptance.md).
 
 ### Fixed
 - **`/api/status` no longer answers 500 when its queue section fails.** That section is `null`
