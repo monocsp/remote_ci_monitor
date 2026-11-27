@@ -128,6 +128,14 @@ def test_pi29_changelog_announces_v27_and_the_pairing_routes():
     assert "**Database v27 and the server's identity key.**" in body
     assert "**The server side of pairing.**" in body
     assert "docs/configuration.md#the-servers-identity-key-pairkey" in body
+    # P3 r1: 기동 거절의 셋째 원인 — docs/configuration.md 와 같은 말로
+    assert "the filesystem of `data_dir` cannot make hard links" in body
+    for heading in (
+        "**Database v27 and the server's identity key.**",
+        "**The server side of pairing.**",
+    ):
+        entry = body.split(heading, 1)[1].split(" - **", 1)[0]  # 다음 항목 앞까지(flat 본문)
+        assert "([#293](https://github.com/monocsp/remote_ci_monitor/pull/293))" in entry, heading
 
 
 def test_pi29_pairing_tests_hold_no_secret_shaped_literals_and_only_test_addresses():

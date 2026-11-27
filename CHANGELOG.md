@@ -25,10 +25,12 @@ of a key bumps that number and is listed here.
 - **Database v27 and the server's identity key.** The server migrates on its first start: tokens
   gain the pool, pairing id, host and address of a machine that joins by pairing (all empty for
   existing tokens). `rcm serve` also creates `<data_dir>/pair.key` (32 bytes, 0600) and refuses to
-  start when that key is missing while paired tokens are still active, or when the key is a
-  symbolic link, the wrong size or readable by other users. Back the key up with the database. An
-  older rcm refuses the migrated database. See
+  start when that key is missing while paired tokens are still active, when the key is a
+  symbolic link, the wrong size or readable by other users, or when the filesystem of `data_dir`
+  cannot make hard links (the key is linked into place, never renamed over another). Back the key
+  up with the database. An older rcm refuses the migrated database. See
   [the server's identity key](docs/configuration.md#the-servers-identity-key-pairkey).
+  ([#293](https://github.com/monocsp/remote_ci_monitor/pull/293))
 
 ### Changed
 - **A remote job outlives a short loss of contact.** A worker the server has not heard for
@@ -67,6 +69,7 @@ of a key bumps that number and is listed here.
   refuse a paired token (401, `403 pair_proof_required`, `pair_proof_invalid` `bad_mac`,
   `409 pool_mismatch`, `session_fenced`, `protocol_required`) carry `pair_reject_mac` when the
   request sent `X-RCM-Pair-Nonce`. The `rcm pair` and `rcm setup --pair` commands come later.
+  ([#293](https://github.com/monocsp/remote_ci_monitor/pull/293))
 - **`irreversible = true` for presets whose work must not run twice at once.** The worker stops
   such a job itself before the grace runs out (`worker_self_stopped`), the command runs under a
   supervisor that ends its process group when the worker is killed, and a close without a
