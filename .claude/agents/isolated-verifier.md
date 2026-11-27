@@ -75,7 +75,8 @@ HIGH is any of the four below; all else is MED or LOW. Design-review grades: P0 
 
 ## Rounds, convergence, escalation (canon; proposed for rcm, in force until the owner changes them)
 
-1. Two verifiers per round, one after another, head frozen (P5's run in parallel: they only read); a
+1. Two verifiers per round, one after another, head frozen. P5's reading round runs in parallel, as
+   it only reads; its live lane runs one after another, as it runs commands on test servers. A
    finding from either counts, a tie is a defect. A round closes the stage only with HIGH 0 **and**
    unknown 0 (P5: rule 6) — unknown is no pass; QA B5 also needs `core: yes` from both (`unsure` is no).
 2. During rounds fix HIGH only. A MED/LOW not fixed is counted again each later round until resolved
