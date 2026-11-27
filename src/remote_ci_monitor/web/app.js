@@ -17,7 +17,8 @@
   // `check_pending` 은 없다 — 점검이 끝나면 저절로 풀린다.
   // M5s — `needs_action` 이 맨 앞이다: 잡이 스스로 「사람이 이것을 해 달라」고 말했다. 모델의
   // `ACTIONABLE_REASONS` 와 같은 목록이다(tests/test_web_schedule_m5s.py 가 잠근다).
-  var ACTIONABLE = ["needs_action", "worker_down", "no_capable_machine", "check_failed", "stuck", "upload_stalled", "not_scheduled", "blocked_by_group", "overdue", "paused"];
+  // M5t-b §4.8 — `worker_unreachable_grace`(끊김 유예 중인 잡)는 `worker_down` 바로 뒤다.
+  var ACTIONABLE = ["needs_action", "worker_down", "worker_unreachable_grace", "no_capable_machine", "check_failed", "stuck", "upload_stalled", "not_scheduled", "blocked_by_group", "overdue", "paused"];
   // `환경 바뀜` 칩이 사는 창(§8.3) — 지문이 이 안에서 바뀐 머신만
   var ENV_CHANGED_WINDOW_MS = 24 * 3600 * 1000;
   var TERMINAL = { succeeded: 1, failed: 1, timed_out: 1, cancelled: 1, lost: 1, expired: 1, retried: 1, exhausted: 1 };
@@ -369,6 +370,13 @@
         // 서버가 note 의 제어문자를 지웠고, 화면은 그리는 자리에서 escape 한다
         var act = row.action && typeof row.action === "object" ? row.action : {};
         parts.push(T(lang, "reason.needs_action"));
+        // 그룹 홀드(M5t-b §4.8)는 서버가 정한 코드다 — 원문 코드 대신 사람 말로, 홀드 잡으로 가는 링크
+        var held = heldBy(row);
+        if (held) {
+          parts.push(T(lang, "reason.held_group", { group: held.group, id: held.id }));
+          links.push({ jobId: held.id });
+          out.text = parts.join(" · "); out.actionable = true; out.cls = "action"; break;
+        }
         if (typeof act.code === "string" && act.code) parts.push(act.code);
         if (typeof act.note === "string" && act.note) parts.push(act.note);
         out.text = parts.join(" · "); out.actionable = true; out.cls = "action"; break;
@@ -376,6 +384,11 @@
       case "paused": out.text = T(lang, "reason.paused"); out.actionable = true; break;
       case "not_scheduled": out.text = T(lang, "reason.not_scheduled"); out.actionable = true; break;
       case "worker_down": out.text = T(lang, "reason.no_worker"); out.actionable = true; break;
+      case "worker_unreachable_grace":
+        // 끊김 유예(M5t-b §4.8 · 결정 276) — 잡은 돈다. 워커가 유예 안에 돌아오면 이어 간다.
+        // 취소 중인 잡은 이어지지 않는다 — 다시 붙은 워커가 멈춘다(결정 322, P6-1 G5)
+        out.text = T(lang, row.state === "cancelling" ? "reason.unreachable_cancelling" : "reason.unreachable_grace", { worker: typeof row.ran_on === "string" && row.ran_on ? row.ran_on : null });   // mutcheck: web-grace-cancel-says-goes-on
+        out.actionable = true; out.cls = "stalled"; break;
       default: out.text = T(lang, "reason.unknown");
     }
     return out;
@@ -523,12 +536,109 @@
     return { running: running, waiting: waiting, pools: pools.length };
   }
 
+  /** 홀드에 막힌 대기 행이면 {group, id}(M5t-b §4.8). `action.code` 가 `irreversible_hold` 이고
+      `blocked_by` 에 홀드 잡 번호와 그룹이 있을 때만 — 모르면 지어내지 않는다(오늘의 줄로). */
+  function heldBy(row) {
+    var act = row && row.action;
+    var bb = row && row.blocked_by;
+    if (!act || typeof act !== "object" || act.code !== "irreversible_hold") return null;
+    if (!bb || typeof bb !== "object" || !isNum(bb.job_id) || typeof bb.group !== "string" || !bb.group) return null;
+    return { group: bb.group, id: bb.job_id };
+  }
+  /** 상태 문서의 열린 그룹 홀드(M5t-b §4.8). 키가 없으면(옛 서버) `[]`, null 이면(서버가 못 읽음) null.
+      읽을 수 없는 항목이 하나라도 있어도 null 이다: 빼고 보이면 짧은 목록이 「그게 전부」로 읽힌다.
+      `rcm check` 의 `_hold_rows` · `rcm doctor` 의 `parse_holds` 와 같은 규칙이다. */
+  function holdsOf(status) {
+    if (!status || !("irreversible_holds" in status)) return [];
+    var h = status.irreversible_holds;
+    if (!Array.isArray(h)) return null;   // mutcheck: holds-null-read-as-none
+    var ok = h.filter(function (x) {
+      return x && typeof x === "object" && isNum(x.job_id) && Math.floor(x.job_id) === x.job_id && typeof x.group === "string" && x.group.trim() !== ""
+        // `worker: null` 은 로컬 레인이다 — 키가 없거나 다른 꼴이면 로컬과 구별할 수 없다(P6-1 G7)
+        && "worker" in x && (x.worker === null || typeof x.worker === "string");   // mutcheck: web-hold-missing-worker-read-as-local
+    });
+    return ok.length === h.length ? ok : null;   // mutcheck: holds-unreadable-entry-dropped
+  }
+  /** 빈 대기열의 문장 키(P6-2). null 이면 「rcm run <preset> 하면 바로 시작」이다. 열린 그룹 홀드가
+   *  있으면 그 그룹의 프리셋은 풀기 전에는 시작하지 않으므로 그 약속을 하지 않는다. 홀드를 못
+   *  읽었으면 모른다고 말한다(`rcm top` 과 같은 규칙, P6-1 G3). */
+  function queueEmptyKey(status) {
+    var server = (status && status.server) || {};
+    var localOnly = Array.isArray(server.workers) ? server.workers.filter(function (w) { return !w.worker; }) : [];
+    var allDown = localOnly.length && localOnly.every(function (w) { return w.state === "down"; });
+    if (server.paused || allDown) return "queue.empty_paused";
+    var holds = holdsOf(status);
+    if (holds === null) return "queue.empty_holds_unknown";
+    if (holds.length) return "queue.empty_held";   // mutcheck: web-held-empty-promises-start
+    return null;
+  }
+  /** 홀드 하나의 사람 문장 — 원인 코드는 드러내지 않는다. */
+  function holdText(hold, lang) {
+    return T(lang, "hold.needs_look", {
+      group: hold.group, id: hold.job_id, preset: hold.preset || DASH,
+      worker: typeof hold.worker === "string" && hold.worker ? hold.worker : null
+    });
+  }
+  /** 홀드 잡의 행에 다는 칩 하나(M5t-b §4.8). 그 잡에 열린 홀드가 없으면 null. */
+  function holdChip(status, jobId, lang) {
+    var holds = holdsOf(status) || [];
+    for (var i = 0; i < holds.length; i++) {
+      if (holds[i].job_id === jobId) return { text: T(lang, "hold.chip"), title: holdText(holds[i], lang) };
+    }
+    return null;
+  }
+  /** 로그 서랍의 머리 줄에 붙는 한 마디(M5t-b §4.6) — `log_complete` 가 **거짓**일 때만. */
+  function logCompleteNote(job, lang) {
+    return job && job.log_complete === false ? T(lang, "drawer.log_incomplete") : null;
+  }
+  // 서랍 머리 줄의 한 마디 — 목록 행이 있으면 그 행, 없으면 서랍이 읽은 잡 문서(P6-1 G8)
+  function drawerLogNote(row, doc, lang) {
+    return logCompleteNote(row || doc, lang);   // mutcheck: drawer-log-note-ignores-job-doc
+  }
+  /** 서랍 아랫줄의 글(P6-2 G8). 로그 답(`drawer.log`)이 아직 없으면 null 이다 — 쓰지 않는다. 로그
+   *  답과 잡 문서 중 어느 쪽이 늦게 와도 같은 글이 된다. */
+  function drawerSubText(drawer, row, lang) {
+    var log = drawer && drawer.log;
+    if (!log) return null;
+    var gap = drawerLogNote(row, drawer.doc, lang);
+    return T(lang, log.more ? "drawer.live" : "drawer.finished", { bytes: fmtBytes(log.next) }) + (gap ? " · " + gap : "");
+  }
+  /** 늦게 온 잡 문서를 서랍에 받는다. 그 사이 다른 잡의 서랍으로 바뀌었으면 받지 않는다(거짓). */
+  function drawerTakeDoc(drawer, id, job) {
+    if (!job || !drawer || drawer.jobId !== id) return false;
+    drawer.doc = job;
+    return true;
+  }
+  /** 워커에서 지금 소식이 오는 행인가(P6-1 G6). 끊김 유예 중이면 아는 것은 마지막으로 들은 값뿐이다 —
+   *  단계 · 경과 초를 스스로 세지 않고, 막대도 세지 않는다. */
+  function heardLive(row) {
+    return !(row && row.reason === "worker_unreachable_grace");   // mutcheck: web-unreachable-row-ticks
+  }
+  /** 행 왼쪽 레인의 형편 한 칸. 우선순위 `stuck > overdue > quiet > running` — 한 행에 채운 칩은 상태
+   *  필 하나뿐이고, 이상은 레인에서 한 번만 빨강으로 말한다. 끊긴 잡은 회색(`quiet`)이다: 도는지
+   *  모르고, 초과 · 멈춤도 마지막으로 들은 값으로는 판정하지 않는다(G6). 서버가 그 둘을 내지 않지만
+   *  옛 서버의 행도 같게 그린다. */
+  function laneClass(row) {
+    var est = (row && row.estimate) || {};
+    var busy = row && (row.state === "running" || row.state === "cancelling");
+    if (busy && !heardLive(row)) return "quiet";
+    if (est.stuck) return "stuck";
+    if (est.overdue) return "overdue";
+    if (est.quiet) return "quiet";
+    return busy ? "run" : null;
+  }
+
   // ── 요약 (항목 23 · 24 · 25) ──
   function notMoving(status, me, lang) {
     var q = queueOf(status);
     if (!Array.isArray(q)) return { kind: "unknown", lines: [] };
     var lines = [];
     var unknown = false;
+    // 열린 그룹 홀드마다 한 줄(M5t-b §4.8) — 그 그룹에 대기 잡이 없어도. 사람만 푼다: `needs_action` 자리
+    var holds = holdsOf(status);
+    (holds || []).forEach(function (h) {
+      lines.push({ jobId: h.job_id, reason: "irreversible_hold", text: holdText(h, lang), rank: 0 });
+    });
     q.forEach(function (row) {
       if (!("reason" in row)) { unknown = true; return; }
       if (row.reason === "running" || row.reason === "waiting_for_lane" || row.reason === "uploading" || row.reason === "materializing" || row.reason === "cancelling") return;
@@ -549,9 +659,27 @@
     // 표식이 있었을 수 있다. 줄이 없으면 「모른다」, 있으면 그 줄만 그리고 「나머지 없음」은 빼게 한다
     var schedUnknown = sc.kind === "error";
     if (schedUnknown && !lines.length) return { kind: "unknown", lines: [], why: "scheduled" };
+    // 홀드를 못 읽었으면(null) 같은 규칙이다 — 거기 사람이 풀어야 할 그룹이 있었을 수 있다
+    if (holds === null && !lines.length) return { kind: "unknown", lines: [], why: "holds" };
     lines.sort(function (a, b) { return a.rank - b.rank || (a.jobId || 0) - (b.jobId || 0); });
-    if (lines.length) return schedUnknown ? { kind: "list", lines: lines, partial: true } : { kind: "list", lines: lines };
+    if (lines.length && schedUnknown) return { kind: "list", lines: lines, partial: true };
+    if (lines.length && holds === null) return { kind: "list", lines: lines, partial: true, why: "holds" };
+    if (lines.length) return { kind: "list", lines: lines };
     return { kind: "ok", lines: [] };
+  }
+  /** 「확인이 필요한 작업」 띠가 그릴 줄(세 줄까지)과 꼬리 글. 넘치면 「그 밖에 N개 더」 —
+   *  「그 밖에 없음」은 정말 다 그렸고 모르는 것도 없을 때만이다(P6-1 G1, fail-open 금지). */
+  var STUCK_BAND_MAX = 3;
+  function stuckBand(nm, lang) {
+    var lines = (nm && nm.lines) || [];
+    var shown = lines.slice(0, STUCK_BAND_MAX);
+    var more = lines.length - shown.length;
+    var tail = [];
+    if (more > 0) tail.push(T(lang, "summary.and_more", { n: more }));
+    // 예약 · 홀드를 못 읽었으면 「그 밖에 없다」고 말하지 않는다 — 모르는 것이 남아 있다
+    if (nm && nm.partial) tail.push(T(lang, nm.why === "holds" ? "summary.holds_unknown" : "summary.scheduled_unknown"));
+    else if (more <= 0) tail.push(T(lang, "summary.nothing_else_stuck"));   // mutcheck: stuck-band-overflow-all-clear
+    return { lines: shown, tail: tail };
   }
 
   function isMine(row, me) {
@@ -1279,12 +1407,15 @@
       expected: null, startedAt: null, source: null };
     var prog = row.progress || null;
     var est = row.estimate || {};
-    var stuck = !!est.stuck;
+    // 끊긴 잡(P6-2 G6)은 마지막으로 들은 값만 안다 — 그 경과 · 출력 시각으로 멈춤 · 조용함 · 초과를
+    // 판정하지 않고 시간 눈금도 주지 않는다(지금의 경과를 모른다). 끝낸 단계 수는 사실이라 둔다.
+    var heard = heardLive(row);
+    var stuck = heard && !!est.stuck;
     // 형편의 우선순위: `preparing > stuck > over > finalizing > quiet > normal`.
     // `quiet`(조용함)은 관측이라 가장 약하다 — 「추정을 넘겼다」·「선언한 단계를 다 끝냈다」가
     // 더 행동 가능한 사실이다. 서버가 `stuck` 과 `quiet` 을 같이 보내면 **stuck 이 이긴다**:
     // 경보를 먹는 쪽(quiet 이 이기는 것)은 fail-open 이라 금지다.
-    var quiet = !!est.quiet && !stuck;
+    var quiet = heard && !!est.quiet && !stuck;
     if (prog && prog.phase === "materializing") { out.condition = "preparing"; return out; }
     // 스텝 안의 세부 진행이 있으면 그것이 눈금이다 — 스크립트가 **아는** 분모라 선언 스텝보다 곱다.
     // `done == total` 이어도 잡은 아직 돈다(그 스텝의 단위가 다 끝난 것뿐) — 99% 상한이 여기도
@@ -1310,7 +1441,7 @@
     var expected = isNum(est.expected_seconds) && est.expected_seconds > 0 && est.source !== "default"
       ? est.expected_seconds : null;
     var elapsed = isNum(est.elapsed_seconds) ? est.elapsed_seconds : null;
-    if (expected == null || elapsed == null) {
+    if (expected == null || elapsed == null || !heard) {   // mutcheck: web-unreachable-bar-over
       if (stuck) out.condition = "stuck";
       else if (quiet) out.condition = "quiet";
       return out;
@@ -3543,6 +3674,7 @@
     ordinal: ordinal, truncate: truncate, stateWord: stateWord, stateGlyph: stateGlyph, personLabel: personLabel,
     reasonText: reasonText, confidenceBadge: confidenceBadge, etaText: etaText,
     elapsedText: elapsedText, notMoving: notMoving, yourJobs: yourJobs, isMine: isMine,
+    holdChip: holdChip, logCompleteNote: logCompleteNote, drawerLogNote: drawerLogNote, drawerSubText: drawerSubText, drawerTakeDoc: drawerTakeDoc, queueEmptyKey: queueEmptyKey, stuckBand: stuckBand, heardLive: heardLive, laneClass: laneClass,
     scheduledOf: scheduledOf, scheduledRowModel: scheduledRowModel, notifyFailuresBadge: notifyFailuresBadge, cancelLocked: cancelLocked, hostPressure: hostPressure,
     jobStorageLine: jobStorageLine, hostRunsNoJobs: hostRunsNoJobs, hostFacts: hostFacts,
     queueHeader: queueHeader, sortQueue: sortQueue, workerPills: workerPills, workersCrowded: workersCrowded, workerName: workerName, hostCards: hostCards, headerNote: headerNote, progressHead: progressHead, progressHeadHtml: progressHeadHtml, queueGroups: queueGroups, runningStep: runningStep,
@@ -3585,7 +3717,7 @@
     // `machinesKey` 는 `/api/status` 의 머신 요약이 바뀌었는지 보는 열쇠다(바뀔 때만 다시 받는다).
     machines: null, machinesMissing: false, machinesKey: null, machinesLoading: false,
     es: null, retryTimer: null, pollTimer: null, refetchTimer: null, hiddenSince: null, lostShownAt: null,
-    drawer: { jobId: null, offset: 0, timer: null, lines: 0 }, cancelTarget: null, hl: null, tz: null,
+    drawer: { jobId: null, offset: 0, timer: null, lines: 0, doc: null, log: null }, cancelTarget: null, hl: null, tz: null,
     // 스토어 탭. `repos` 는 릴리스 프로파일이 있는 저장소(null = 아직 안 물어봄). 비밀 값은 여기 없다.
     view: "queue", store: { api: null, repos: null, reposStatus: null, repo: null, doc: null, secrets: null, screen: null,
       error: null, fetchError: null, fetching: false, verifying: false, loadedAt: null, timer: null, seq: 0, dialogSecret: null,
@@ -3982,13 +4114,17 @@
     // 24
     var nm = notMoving(st, state.me, L());
     var s;
-    if (nm.kind === "unknown") s = '<span class="muted">' + esc(tr(nm.why === "scheduled" ? "summary.scheduled_unknown" : "summary.queue_unknown")) + "</span>";
+    if (nm.kind === "unknown") s = '<span class="muted">' + esc(tr(nm.why === "scheduled" ? "summary.scheduled_unknown" : nm.why === "holds" ? "summary.holds_unknown" : "summary.queue_unknown")) + "</span>";
     else if (nm.kind === "ok") s = lost
       ? '<span class="muted">' + esc(tr("summary.last_known") + tr("summary.nothing_stuck")) + "</span>"
       : '<span class="ok">' + esc(tr("summary.nothing_stuck")) + "</span>";
-    else s = nm.lines.slice(0, 3).map(function (l) { return '<span class="sl" data-cut="sl" title="#' + l.jobId + " " + esc(l.text) + '">' + jl(l.jobId, "#" + l.jobId) + ' <span class="warn">' + esc(l.text) + "</span></span>"; }).join("")
-      // 예약을 못 읽었으면 「그 밖에 없다」고 말하지 않는다 — 모르는 것이 남아 있다
-      + '<span class="sl muted">' + esc(tr(nm.partial ? "summary.scheduled_unknown" : "summary.nothing_else_stuck")) + "</span>";
+    else {
+      // 세 줄까지 그리고, 넘치면 「그 밖에 N개 더」 — 「그 밖에 없음」은 다 그렸을 때만(stuckBand)
+      var band = stuckBand(nm, L());
+      s = band.lines.map(function (l) { return '<span class="sl" data-cut="sl" title="#' + l.jobId + " " + esc(l.text) + '">' + jl(l.jobId, "#" + l.jobId) + ' <span class="warn">' + esc(l.text) + "</span></span>"; }).join("")
+        // 꼬리는 한 줄이다 — 「N개 더」와 「모름」이 함께여도 띠 높이를 한 줄만 쓴다
+        + '<span class="sl muted">' + esc(band.tail.join(" · ")) + "</span>";
+    }
     $("[data-stuck]").innerHTML = (lost && nm.kind === "list" ? '<span class="muted">' + esc(tr("summary.last_known")) + "</span><br>" : "") + s;
     // 25
     var host = p && Array.isArray(p.hosts) ? p.hosts[0] : null;
@@ -4078,11 +4214,11 @@
       return;
     }
     if (!p.queue.length) {
-      var localOnly = Array.isArray(server.workers) ? server.workers.filter(function (w) { return !w.worker; }) : [];
-      var allDown = localOnly.length && localOnly.every(function (w) { return w.state === "down"; });
       var presets = Array.isArray(st.presets) ? st.presets.map(function (x) { return x.name; }).join(" · ") : "";
-      var emptyHtml = server.paused || allDown
-        ? esc(tr("queue.empty_paused"))
+      // 정지 · 워커 없음 · 열린 그룹 홀드 · 홀드 모름이면 「바로 시작」을 약속하지 않는다(P6-2)
+      var emptyKey = queueEmptyKey(st);
+      var emptyHtml = emptyKey
+        ? esc(tr(emptyKey))
         : esc(tr("queue.empty")) + "<code>rcm run &lt;preset&gt;</code>" + esc(tr("queue.empty_hint"));
       body.innerHTML = '<div class="empty">' + emptyHtml + (presets ? '<br><span class="sub">' + esc(tr("queue.presets", { names: presets })) + "</span>" : "") + "</div>" + sched;
       return;
@@ -4182,16 +4318,14 @@
     // 전체 진행 막대는 접힘과 무관하게 도는 행에 늘 붙는다 — 접기가 「어디까지 왔나」를 감추면
     // 접어 둘 수 없다. 단계 목록·로그 tail·액션만 ▸ 뒤에 있다.
     // 막대는 **진행 시간 칸 안**에 산다(별도의 막대 행이 아니다) — 한 작업이 한 줄이다.
-    var bar = progressBarHtml(row, L(), canTick());
+    // 끊김 유예 중인 행은 마지막으로 들은 값에서 멈춘다 — 스스로 세면 잡이 도는 것처럼 보인다(G6)
+    var live = canTick() && heardLive(row);
+    var bar = progressBarHtml(row, L(), live);
     var mine = isMine(row, state.me);
     var cls = [];
     if (mine) cls.push("mine");
-    // 왼쪽 레인 하나가 행의 형편을 말한다. 우선순위 `stuck > overdue > quiet > running` —
-    // 한 행에 채운 칩은 상태 필 하나뿐이고, 이상은 레인에서 한 번만 빨강으로 말한다.
-    if (est.stuck) cls.push("stuck");
-    else if (est.overdue) cls.push("overdue");
-    else if (est.quiet) cls.push("quiet");
-    else if (busy) cls.push("run");
+    var lc = laneClass(row);
+    if (lc) cls.push(lc);
     if (expanded || placeOpen) cls.push("exp");
     if (state.hl === row.id) cls.push("hl");
     if (row._dim) cls.push("dim");
@@ -4227,7 +4361,7 @@
     var reasonCell = '<span class="reason' + (r.actionable || busy ? " act" : "") + (r.cls ? " " + r.cls : "")
       + '" data-cut="reason" data-label="' + esc(tr("queue.col_reason")) + '" title="' + esc(r.text) + '">' + (r.cls === "blocked" ? icon("chain") + " " : "") + reasonHtml + "</span>";
     // 펼치지 않아도 지금 무엇을 하는지 읽혀야 한다(§4.6-라). 스텝 초는 기준점으로 스스로 센다.
-    var nowStep = busy && !expanded ? stepNowHtml(row.progress) : "";
+    var nowStep = busy && !expanded ? stepNowHtml(row.progress, live) : "";
     if (nowStep) reasonCell += '<div class="sub step-now">' + nowStep + "</div>";
     if (row.state === "uploading" && row.reason === "upload_stalled") reasonCell += '<div class="sub">' + esc(tr("row.stalled_note")) + "</div>";
     if (row._cancelRequested) reasonCell += '<div class="sub">' + esc(tr("row.cancel_requested")) + "</div>";
@@ -4240,7 +4374,7 @@
     if (!expanded && canActRow && !row._cancelRequested && row.state !== "cancelling") reasonCell += '<div class="sub"><button type="button" class="btn danger cancel" data-cancel="' + row.id + '">' + esc(tr("row.cancel")) + "</button></div>";
     else if (!expanded && locked && mine && !!state.token && !state.tokenBad && row.state !== "cancelling") reasonCell += '<div class="sub cancel-locked">' + esc(tr("row.cancel_locked")) + "</div>";
     var el = elapsedText(row, now(), L());
-    var elapsedCell = busy && isNum(est.elapsed_seconds)
+    var elapsedCell = busy && isNum(est.elapsed_seconds) && heardLive(row)
       ? '<span data-tick="elapsed" data-from="' + esc(row.started_at || "") + '">' + esc(el.main) + "</span>" + (el.sub ? '<div class="sub">' + esc(el.sub) + "</div>" : "")
       : (row.state === "queued" ? '<span data-tick="waiting" data-from="' + esc(row.created_at || "") + '">' + esc(el.main) + "</span>" : esc(el.main));
     if (bar) elapsedCell += bar;
@@ -4349,14 +4483,14 @@
   function canTick() { return !state.skewUnknown; }
 
   /** 도는 행 한 줄: 「스텝 2/4 analyze 12s」. 초는 1초 틱이 스스로 센다. */
-  function stepNowHtml(prog) {
+  function stepNowHtml(prog, live) {
     if (!prog || prog.phase === "materializing" || !prog.current_name) return "";
     var cur = runningStep(prog);
     if (!cur) return "";
     var total = isNum(prog.steps_total) ? prog.steps_total : "?";
     var i = isNum(prog.current_index) ? prog.current_index : prog.steps_done;
     var dur = fmtDuration(prog.current_seconds);
-    var secs = canTick() && cur.started_at
+    var secs = live && cur.started_at
       ? '<span data-tick="elapsed" data-from="' + esc(cur.started_at) + '">' + esc(dur) + "</span>"
       : esc(dur);
     // 이름과 시간을 두 칸으로 나눈다 — 이름만 한 줄 말줄임(전문은 title), 몇 초째는 늘 보인다.
@@ -4369,7 +4503,7 @@
     var prog = row.progress;
     if (!prog || prog.phase === "materializing") return "";
     var busyRow = row.state === "running" || row.state === "cancelling";
-    var head = progressHeadHtml(prog, L(), busyRow && canTick());
+    var head = progressHeadHtml(prog, L(), busyRow && canTick() && heardLive(row));
     var steps = Array.isArray(prog.steps) ? prog.steps : [];
     var total = isNum(prog.steps_total) ? prog.steps_total : steps.length;
     var failed = failedStepCount(prog);
@@ -4384,7 +4518,7 @@
       // 같은 잡의 서로 다른 두 값을 읽는다 — 의미는 행 아래 전체 막대 하나가 진다.
       h += '<div class="minibar" aria-hidden="true">' + segs + "</div>";
       h += '<div class="steps">';
-      var live = busyRow && canTick();
+      var live = busyRow && canTick() && heardLive(row);
       steps.forEach(function (s) {
         var c = s.state === "running" ? "run" : s.ok === false ? "fail" : "";
         var tick = live && s.state === "running" && s.started_at ? ' data-tick="elapsed" data-from="' + esc(s.started_at) + '"' : "";
@@ -4764,6 +4898,12 @@
     return html + "</div>";
   }
 
+  /** 홀드 잡의 칩(M5t-b §4.8) — 전문은 title 로. 홀드가 없으면 빈 글. */
+  function holdChipHtml(id) {
+    var c = holdChip(state.status, id, L());
+    return c ? ' <span class="chip hold" data-hold-chip="' + id + '" data-cut="chip" title="' + esc(c.title) + '">' + esc(c.text) + "</span>" : "";
+  }
+
   // ── 렌더: 최근 (항목 14 · 15 · 32) ──
   function renderRecent() {
     var p = pool0(state.status);
@@ -4788,7 +4928,7 @@
       html += '<div class="rrow' + (l.cls ? " " + esc(l.cls) : "") + (failedish ? " clickable" : "") + (state.hl === job.id ? " hl" : "") + '" data-job="' + job.id + '"' + (failedish ? ' data-rtoggle="' + job.id + '" role="button" tabindex="0" aria-expanded="' + (open ? "true" : "false") + '"' : "") + ">" +
         '<span class="id">#' + job.id + "</span>" +
         '<span class="pill ' + esc(l.cls) + '"><span class="g" aria-hidden="true">' + esc(l.glyph) + "</span> " + esc(l.pill) + "</span>" +
-        '<span class="k">' + keyWithLinkHtml(job.key || DASH, job.link, "kn") + (job._pool ? ' <span class="chip" data-cut="chip" title="' + esc(tr("pool.name", { name: job._pool })) + '">' + esc(tr("pool.name", { name: job._pool })) + "</span>" : "") + "</span>" +
+        '<span class="k">' + keyWithLinkHtml(job.key || DASH, job.link, "kn") + (job._pool ? ' <span class="chip" data-cut="chip" title="' + esc(tr("pool.name", { name: job._pool })) + '">' + esc(tr("pool.name", { name: job._pool })) + "</span>" : "") + holdChipHtml(job.id) + "</span>" +
         '<span class="s rq" data-cut="rq" title="' + esc((job.requester || {}).label || DASH) + '">' + esc(truncate((job.requester || {}).label || DASH, 40)) + "</span>" +
         '<span class="d">' + esc(l.duration) + "</span>" +
         '<span class="t">' + esc(l.when) + "</span>" +
@@ -5189,11 +5329,24 @@
   }
 
   // 로그 서랍 (항목 13)
+  // 서랍 아랫줄 — 마지막 로그 답(`state.drawer.log`)과 잡 문서로 다시 그린다. 로그 답이 아직 없거나
+  // 로그를 못 읽은 동안이면 그 자리의 말을 덮지 않는다(P6-2 G8)
+  function renderDrawerSub() {
+    var text = drawerSubText(state.drawer, findAnyJob(state.drawer.jobId), L());
+    if (text != null) $("[data-drawer-sub]").textContent = text;
+  }
   function openDrawer(id) {
     var d = $("#drawer");
     var row = findAnyJob(id);
-    state.drawer.jobId = id; state.drawer.offset = 0; state.drawer.lines = 0;
+    state.drawer.jobId = id; state.drawer.offset = 0; state.drawer.lines = 0; state.drawer.log = null;
     state.drawer.key = row ? (row.key || "") : "";
+    // 큐 · 최근 목록 밖의 잡(딥 링크 · 홀드 잡 링크)은 `log_complete` 를 잡 문서에서 읽는다 —
+    // 한 번만, 늦게 온 답은 그 사이 다른 잡의 서랍에 붙이지 않는다(P6-1 G8). 끝난 잡은 두 번째
+    // 로그 poll 이 없으므로 문서가 첫 로그 답보다 늦게 오면 아랫줄을 여기서 다시 그린다(P6-2 G8)
+    state.drawer.doc = null;
+    if (!row) api("/jobs/" + id).then(function (r) { return r.ok ? r.json() : null; }).then(function (job) {
+      if (drawerTakeDoc(state.drawer, id, job)) renderDrawerSub();   // mutcheck: drawer-late-doc-not-redrawn
+    }).catch(function () { /* 모르면 아무 말도 하지 않는다 — 「완전함」이라고도 하지 않는다 */ });
     $("[data-drawer-title]").textContent = tr("drawer.job", { id: id, key: state.drawer.key });
     $("[data-drawer-title]").title = tr("drawer.job", { id: id, key: state.drawer.key });
     var linkSlot = $("[data-drawer-link]");
@@ -5216,7 +5369,7 @@
     var id = state.drawer.jobId;
     if (id == null) return;
     api("/jobs/" + id + "/log?offset=" + state.drawer.offset).then(function (r) {
-      if (r.status === 401 || r.status === 403) { $("[data-drawer-sub]").textContent = r.status === 401 ? tr("row.add_token_for_log") : tr("row.not_your_job"); return null; }
+      if (r.status === 401 || r.status === 403) { state.drawer.log = null; $("[data-drawer-sub]").textContent = r.status === 401 ? tr("row.add_token_for_log") : tr("row.not_your_job"); return null; }
       if (!r.ok) throw new Error("http " + r.status);
       var more = r.headers.get("X-RCM-More") === "1";
       var next = parseInt(r.headers.get("X-RCM-Next-Offset") || "0", 10);
@@ -5241,9 +5394,12 @@
         state.drawer.lines += 1;
       }
       state.drawer.offset = res.next;
-      $("[data-drawer-sub]").textContent = res.more ? tr("drawer.live", { bytes: fmtBytes(res.next) }) : tr("drawer.finished", { bytes: fmtBytes(res.next) });
+      // 워커가 로그 일부를 남기지 못했으면(M5t-b §4.6) 머리 줄에 한 마디 — 잡 행의 `log_complete`
+      // (목록 밖 잡이면 잡 문서, drawerSubText)
+      state.drawer.log = { more: res.more, next: res.next };
+      renderDrawerSub();
       if (res.more) state.drawer.timer = setTimeout(pollLog, 2000);
-    }).catch(function () { $("[data-drawer-sub]").textContent = tr("drawer.load_failed"); state.drawer.timer = setTimeout(pollLog, 5000); });
+    }).catch(function () { state.drawer.log = null; $("[data-drawer-sub]").textContent = tr("drawer.load_failed"); state.drawer.timer = setTimeout(pollLog, 5000); });
   }
 
   // 취소 (항목 13 · 30)
@@ -6550,7 +6706,7 @@
   function jobCardHtml(item) {
     var row = item.row;
     if (!row) return "";
-    var live = !state.skewUnknown && (row.state === "running" || row.state === "cancelling");
+    var live = !state.skewUnknown && (row.state === "running" || row.state === "cancelling") && heardLive(row);
     var h = "";
     if (row.state === "running" || row.state === "cancelling") h += progressBarHtml(row, L(), live);
     var prog = row.progress;

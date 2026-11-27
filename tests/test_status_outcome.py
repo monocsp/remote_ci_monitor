@@ -183,6 +183,7 @@ NEW_RECENT = frozenset(
         "retried_as",
         "max_attempts",
         "ran_on",  # M5t-a 결정 248 f — 잡이 돈 머신(계산 값, 시작 전이면 null)
+        "log_complete",  # M5t-b §4.6 — 로그를 빠짐없이 받았나(참 · 거짓 · 모름)
     }
 )
 NEW_ROW = frozenset(

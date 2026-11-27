@@ -120,6 +120,9 @@ REASON_CANCELLING = "cancelling"
 REASON_PAUSED = "paused"
 REASON_NOT_SCHEDULED = "not_scheduled"
 REASON_WORKER_DOWN = "worker_down"
+#: 도는 원격 잡의 워커와 연락이 끊겼다 — 레인은 `down` 이지만 잡은 끊김 유예(G) 동안 `running`
+#: 으로 남는다(M5t-b §4.8 · 결정 276). 행동 가능하고 `worker_down` 바로 뒤다. 끝날 시각은 모른다.
+REASON_WORKER_UNREACHABLE_GRACE = "worker_unreachable_grace"
 #: 집었을 레인이 호스트 부하로 보류 중이다(M5f). **`ACTIONABLE_REASONS` 에는 안 올린다** —
 #: 의도된·자가 치유되는 상태라 `paused` 와 같은 종류다(오너 결정 45). 오래 닫혀 있으면
 #: `rcm check` 가 경고한다.
@@ -168,6 +171,7 @@ STUCK_NO_OUTPUT = "no_output"  # 단계 이야기를 안 하는 잡이 `no_outpu
 ACTIONABLE_REASONS = (
     REASON_NEEDS_ACTION,
     REASON_WORKER_DOWN,
+    REASON_WORKER_UNREACHABLE_GRACE,
     REASON_NO_CAPABLE_MACHINE,
     REASON_CHECK_FAILED,
     REASON_STUCK,

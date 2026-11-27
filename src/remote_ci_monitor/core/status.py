@@ -390,8 +390,10 @@ def recent_json(
     base_url: str | None = None,
     action: Action | None = None,
     local: LocalMachine | None = None,
+    log_complete: bool | None = None,
 ) -> dict[str, Any]:
-    """끝난 잡 한 행. `action` 은 순수 층이 모른다 — 마커를 읽은 호출자(서버 · 알림)가 넘긴다."""
+    """끝난 잡 한 행. `action` 은 순수 층이 모른다 — 마커를 읽은 호출자(서버 · 알림)가 넘긴다.
+    `log_complete` 도 그렇다(M5t-b §4.6 — 참 · 거짓 · 모름 null, DB 를 읽은 서버가 넘긴다)."""
     started = job.started_at
     finished = job.finished_at
     job_seconds = (finished - started).total_seconds() if started and finished else None
@@ -443,6 +445,8 @@ def recent_json(
         "start_deadline": iso(job.start_deadline),
         # M5s — 반복 사슬(결정 211). 사슬은 마지막 시도 한 행으로 보이고 `attempt` 가 시도 수다
         **chain_json(job),
+        # M5t-b — 서버가 그 잡의 로그를 빠짐없이 받았나(참 · 거짓 · 모름). 키 추가만
+        "log_complete": log_complete,
     }
 
 

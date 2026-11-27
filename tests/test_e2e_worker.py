@@ -235,6 +235,18 @@ def is_dead(pid: int) -> bool:
     return out == "" or out.startswith("Z")
 
 
+def _recorded_pgid(data_dir: Path, job_id: int) -> int | None:
+    """워커 세션 폴더의 `jobs/<id>/proc.json` 에 적힌 그룹 — 시작 시각까지 적힌 것만."""
+    for path in (data_dir / "worker-sessions").glob(f"*/jobs/{job_id}/proc.json"):
+        try:
+            rec = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        if isinstance(rec, dict) and isinstance(rec.get("pgid"), int) and rec.get("start"):
+            return rec["pgid"]
+    return None
+
+
 #: 새 세션으로 띄운 자식의 pid 를 남길 폴더 — `scripts/mutcheck.py` 가 변이마다 정하고, pytest 가
 #: 시간을 넘기면 그 자식들의 그룹도 죽인다. 비어 있으면 아무것도 남기지 않는다
 SESSION_PIDS_ENV = "RCM_TEST_SESSION_PIDS"
@@ -793,6 +805,11 @@ def test_killed_worker_leaves_the_job_lost_after_the_timeout_and_a_new_worker_ta
     jid = stack.submit(tree, "longl")
     stack.wait_state(jid, ("running",), 15)
     pid = stack.wait_pid(jid)
+    # batch-9 #4 워커가 `proc.json` 에 그룹(pgid · 시작 시각)을 적은 뒤에 죽인다. 잡 스크립트의
+    # pid 표식은 워커의 두 번째 기록(`ps` · fsync)보다 먼저 올 수 있다. 그 틈에 죽이면 기록은
+    # 「띄우는 중」뿐이라 다음 프로세스는 그룹을 모름으로 읽고 건드리지 않는다(결정 333 — 설계대로).
+    # 그러면 아래 15초 안에 고아가 서지 않는다(rcm-ci 4349)
+    wait_until(lambda: _recorded_pgid(stack.worker_data, jid) == pid, 10, f"proc.json of #{jid}")
     t0 = time.monotonic()
     os.kill(worker.proc.pid, signal.SIGKILL)  # 워커만 — 잡(sleep)은 고아로 남는다(진짜 크래시처럼)
     assert worker.wait_exit(5) == -signal.SIGKILL

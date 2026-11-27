@@ -133,6 +133,9 @@ EVENT_STATE = "state"
 EVENT_MARKER = "marker"
 #: 그룹 홀드 만들기 · 풀기 사건(M5t-b 결정 330). events 의 스키마는 그대로다
 EVENT_HOLD = "hold"
+#: 유예 · 취소로 닫힌 원격 잡에 같은 세션의 finish 가 늦게 왔다(M5t-b 결정 256 · 274). 잡 상태는
+#: 바꾸지 않고 이 사건 한 건만 남긴다 — events 의 스키마는 그대로다
+EVENT_LATE_RESULT = "late_result"
 #: 홀드를 푸는 쪽(M5t-b §4.9). `worker` 는 인증된 워커의 확인, `admin` 은 `rcm release-hold`
 RELEASE_WORKER = "worker"
 RELEASE_ADMIN = "admin"
@@ -1042,6 +1045,17 @@ def _opt_bool(v: Any) -> bool | None:
 
 def hash_token(secret: str) -> str:
     return hashlib.sha256(secret.encode()).hexdigest()
+
+
+def _log_complete(row: sqlite3.Row, log_bytes: int | None) -> int | None:
+    """끝나는 잡의 `log_complete` 칸(M5t-b §4.6) — 1 · 0 · NULL(모름)."""
+    if row["log_complete"] == 0:
+        return 0  # 짧은 파일에서 미리 고정됐다(T16) — 뒤의 어떤 보고도 되돌리지 않는다
+    if row["worker_name"] is None:
+        return 1  # 로컬 레인 — 서버가 직접 쓴다
+    if log_bytes is None:
+        return row["log_complete"]
+    return 1 if int(row["log_offset"] or 0) >= log_bytes else 0
 
 
 def _bundle_manifest(result: Any) -> str | None:
@@ -2696,7 +2710,14 @@ class Store:
         )
 
     def _set_state(
-        self, conn: sqlite3.Connection, job_id: int, state: str, at: float, **cols: Any
+        self,
+        conn: sqlite3.Connection,
+        job_id: int,
+        state: str,
+        at: float,
+        *,
+        finish_session: str | None = None,
+        **cols: Any,
     ) -> None:
         """상태 전이 + 열 갱신 + 전이 이벤트를 한 번에(호출자가 트랜잭션을 연다).
 
@@ -2713,7 +2734,12 @@ class Store:
                 "UPDATE shelf_items SET job_state=?, job_finished_at=? WHERE job_id=?",
                 (state, cols.get("finished_at", at), job_id),
             )
-        self._event(conn, job_id, EVENT_STATE, {"state": state}, at)
+        payload: dict[str, Any] = {"state": state}
+        if finish_session is not None:
+            # 이 전이를 만든 것이 그 세션의 finish 다(P6-1 G3) — 늦은 결과와 그 finish 의 다시 보낸
+            # 사본을 가른다. 읽는 쪽(`transitions`)은 `state` 만 본다
+            payload["finish_session"] = finish_session
+        self._event(conn, job_id, EVENT_STATE, payload, at)
 
     def create_job(
         self,
@@ -3530,6 +3556,10 @@ class Store:
             if worker_name is not None:
                 sets += ", worker_session_id=?, claim_seq=?, disconnect_grace_seconds=?"
                 params += [session_id, claim_seq, grace_seconds]
+                if session_id is not None:
+                    # 프로토콜 2 원격 잡은 커밋된 길이 0 에서 시작한다(M5t-b 결정 339-f) — NULL 이면
+                    # 첫 조각이 커밋 전에 읽는 쪽에 보이고 기동 정리도 그 조각을 건너뛴다
+                    sets += ", log_offset=0, log_file_bytes=0"  # mutcheck: first-piece-uncapped
             cur = conn.execute(
                 f"UPDATE jobs SET {sets} WHERE id=? AND state=?", (*params, job_id, QUEUED)
             )
@@ -3816,8 +3846,17 @@ class Store:
         bundle: Any | None = None,
         ttl_hours: int = 24,
         hold_cause: str | None = None,
+        log_bytes: int | None = None,
+        finish_session: str | None = None,
     ) -> bool:
         """종료 상태로. `only_from` 을 주면 그 상태에서만 바뀐다(경쟁 방지).
+
+        `finish_session` 은 이 닫힘이 그 워커 세션의 finish 라는 표시다(P6-1 G3). 전이 사건에
+        남겨, 같은 finish 를 다시 보낸 사본이 늦은 결과로 기록되지 않게 한다.
+
+        `log_complete`(M5t-b §4.6)도 같은 트랜잭션에서 쓴다: 이미 0 으로 고정됐으면(T16) 0, 로컬
+        레인 잡은 서버가 직접 쓰므로 참, 워커가 `log_bytes` 를 보냈으면 `log_offset ≥ log_bytes`,
+        그 밖(레거시 · 유예 · 취소로 서버가 닫음)은 NULL(모름) 그대로다.
 
         `hold_cause` 는 프로세스 죽음 확인이 **없는** 닫힘이라는 뜻이다(M5t-b 결정 330). 표식 잡이면
         같은 트랜잭션에서 그 그룹의 홀드를 넣는다 — 닫힘과 홀드 사이에 claim 이 끼지 못한다(R15).
@@ -3841,7 +3880,11 @@ class Store:
         ts = _ts(now)
         conn.execute("BEGIN IMMEDIATE")
         try:
-            row = conn.execute("SELECT state, cancel_by FROM jobs WHERE id=?", (job_id,)).fetchone()
+            row = conn.execute(
+                "SELECT state, cancel_by, worker_name, log_offset, log_complete "
+                "FROM jobs WHERE id=?",
+                (job_id,),
+            ).fetchone()
             if row is None or row["state"] in TERMINAL_STATES:
                 conn.execute("ROLLBACK")
                 return False
@@ -3875,6 +3918,8 @@ class Store:
                 cancelled_by=cancelled_by if cancelled_by is not None else row["cancel_by"],
                 lane=None,
                 phase=None,
+                log_complete=_log_complete(row, log_bytes),
+                finish_session=finish_session,
             )
             if hold_cause is not None:
                 self._hold_tx(conn, job_id, hold_cause, ts)
@@ -5286,6 +5331,209 @@ class Store:
             .fetchone()
             is not None
         )
+
+    # ── 원격 잡 로그 오프셋 (M5t-b §4.5 · 결정 323 · 338) ───────────────────
+
+    def log_row(self, job_id: int) -> dict[str, Any] | None:
+        """로그 쓰기 절차 step 4 — 잠금 안에서 다시 읽는 잡 행의 칸들."""
+        row = (
+            self._conn()
+            .execute(
+                "SELECT state, worker_name, worker_session_id, log_offset, log_file_bytes, "
+                "log_complete FROM jobs WHERE id=?",
+                (job_id,),
+            )
+            .fetchone()
+        )
+        return None if row is None else dict(row)
+
+    def pin_log_incomplete(self, job_id: int) -> None:
+        """`log.txt` 가 커밋된 길이보다 짧다(T16) — 그 잡의 로그는 끝까지 불완전하다."""
+        self._conn().execute("UPDATE jobs SET log_complete=0 WHERE id=?", (job_id,))
+
+    def commit_log(
+        self,
+        job_id: int,
+        *,
+        session: str,
+        expect_offset: int,
+        new_offset: int,
+        file_bytes: int,
+        markers: Sequence[tuple[str, str]],
+        at: datetime,
+    ) -> bool:
+        """로그 쓰기 절차 step 8 — 오프셋 · 파일 길이 · 마커를 한 트랜잭션에. 잡이 닫혔거나 세션이
+        펜싱됐거나(「세션이 아직 현재」, 결정 338) 오프셋이 움직였으면 0행이고 거짓이다."""
+        busy = ",".join("?" * len(BUSY_STATES))
+        ts = _ts(at)
+        conn = self._conn()
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            cur = conn.execute(
+                "UPDATE jobs SET log_offset=?, log_file_bytes=?, last_output_at=? "
+                f"WHERE id=? AND COALESCE(log_offset, 0)=? AND state IN ({busy}) "
+                "AND worker_session_id=? "
+                # mutcheck: log-commit-ignores-fence
+                "AND EXISTS (SELECT 1 FROM worker_sessions WHERE id=? AND fenced_at IS NULL)",
+                (
+                    new_offset,
+                    file_bytes,
+                    ts,
+                    job_id,
+                    expect_offset,
+                    *sorted(BUSY_STATES),
+                    session,
+                    session,
+                ),
+            )
+            if cur.rowcount != 1:
+                conn.execute("ROLLBACK")
+                return False
+            conn.executemany(
+                "INSERT INTO events (job_id, at, kind, payload) VALUES (?, ?, ?, ?)",
+                [
+                    (
+                        job_id,
+                        ts,
+                        EVENT_MARKER,
+                        json.dumps({"kind": k, "value": v}, separators=(",", ":")),
+                    )
+                    for k, v in markers
+                ],
+            )
+            conn.execute("COMMIT")
+            return True
+        except Exception:
+            conn.execute("ROLLBACK")
+            raise
+
+    def remote_log_rows(self) -> list[dict[str, Any]]:
+        """기동 정리 대상(§4.5) — 커밋 길이가 있는 busy 원격 잡과, 완전하다고 적힌 끝난 원격 잡."""
+        busy = ",".join("?" * len(BUSY_STATES))
+        rows = (
+            self._conn()
+            .execute(
+                "SELECT id, state, log_file_bytes, log_complete FROM jobs "
+                "WHERE worker_name IS NOT NULL AND log_file_bytes IS NOT NULL "
+                f"AND (state IN ({busy}) OR log_complete=1) ORDER BY id",
+                tuple(sorted(BUSY_STATES)),
+            )
+            .fetchall()
+        )
+        return [dict(r) for r in rows]
+
+    def log_file_bytes_for(self, job_ids: Iterable[int]) -> dict[int, int]:
+        """잡마다 커밋된 `log.txt` 길이(M5t-b 결정 339-f). NULL(로컬 · 레거시)인 잡은 빠진다."""
+        ids = [int(j) for j in job_ids]
+        out: dict[int, int] = {}
+        for i in range(0, len(ids), 500):
+            part = ids[i : i + 500]
+            marks = ",".join("?" * len(part))
+            for row in self._conn().execute(
+                f"SELECT id, log_file_bytes FROM jobs WHERE id IN ({marks}) "
+                "AND log_file_bytes IS NOT NULL",
+                part,
+            ):
+                out[int(row["id"])] = int(row["log_file_bytes"])
+        return out
+
+    def log_complete_for(self, job_ids: Iterable[int]) -> dict[int, bool | None]:
+        """잡마다 `log_complete`(참 · 거짓 · 모름 None). 없는 잡은 빠진다."""
+        ids = [int(j) for j in job_ids]
+        out: dict[int, bool | None] = {}
+        for i in range(0, len(ids), 500):
+            part = ids[i : i + 500]
+            marks = ",".join("?" * len(part))
+            for row in self._conn().execute(
+                f"SELECT id, log_complete FROM jobs WHERE id IN ({marks})", part
+            ):
+                raw = row["log_complete"]
+                out[int(row["id"])] = None if raw is None else bool(raw)
+        return out
+
+    def record_late_result(
+        self,
+        job_id: int,
+        *,
+        session: str,
+        payload: dict[str, Any],
+        log_bytes: int | None,
+        gone: bool | None,
+        by: str,
+        now: datetime,
+    ) -> tuple[bool, bool] | None:
+        """늦은 결과(M5t-b §4.6 · 결정 256 · 274) — `BEGIN IMMEDIATE` 하나 안에서 한다.
+
+        잡이 `lost` 이고 그 세션이 claim 했고 그 세션이 펜싱되지 않았을 때만 간다(아니면 None).
+        `late_result` 사건이 아직 없을 때만 한 건 넣고 `log_complete` 를 finish 의 규칙으로 쓴다.
+        잡 상태 · 요약 · 끝난 시각 · 로그 · 마커 · 산출물은 그대로다. `gone` 이 참이면 그 잡의 열린
+        홀드를 푼다(결정 330). 돌려주는 것은 (기록했나, 홀드를 풀었나)."""
+        ts = _ts(now)
+        conn = self._conn()
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            row = conn.execute(
+                "SELECT state, worker_session_id, worker_name, log_offset, log_complete "
+                "FROM jobs WHERE id=?",
+                (job_id,),
+            ).fetchone()
+            srow = conn.execute(
+                "SELECT fenced_at FROM worker_sessions WHERE id=?", (session,)
+            ).fetchone()
+            if (
+                row is None
+                or row["state"] != LOST
+                or row["worker_session_id"] != session
+                or srow is None
+                or srow["fenced_at"] is not None  # mutcheck: fenced-late-result-recorded
+            ):
+                conn.execute("ROLLBACK")
+                return None
+            # 그 잡을 `lost` 로 닫은 것이 이 세션의 finish 였다(자기 멈춤 · `snapshot_unreachable`
+            # 처럼 워커가 스스로 보고한 lost) — 2xx 를 잃고 다시 보낸 사본이다. 늦은 결과가 아니라
+            # 중복 finish 다(§4.6 RL21 a): 기록하지 않고 `log_complete` 도 다시 쓰지 않는다(P6-1 G3)
+            last = conn.execute(
+                "SELECT payload FROM events WHERE job_id=? AND kind=? ORDER BY id DESC LIMIT 1",
+                (job_id, EVENT_STATE),
+            ).fetchone()
+            closer = json.loads(last["payload"]).get("finish_session") if last else None
+            if closer == session:  # mutcheck: own-lost-finish-recorded-late
+                released = gone is True and self._release_hold_tx(
+                    conn, job_id, kind=RELEASE_WORKER, by=by, reason=None, ts=ts
+                )
+                conn.execute("COMMIT")
+                return False, bool(released)
+            recorded = False
+            seen = conn.execute(
+                "SELECT 1 FROM events WHERE job_id=? AND kind=?", (job_id, EVENT_LATE_RESULT)
+            ).fetchone()
+            if seen is None:  # mutcheck: late-result-twice
+                complete = _log_complete(row, log_bytes)
+                # mutcheck: late-result-changes-state
+                conn.execute("UPDATE jobs SET log_complete=? WHERE id=?", (complete, job_id))
+                body = {**payload, "log_complete": None if complete is None else bool(complete)}
+                self._event(conn, job_id, EVENT_LATE_RESULT, body, ts)
+                recorded = True
+            released = gone is True and self._release_hold_tx(
+                conn, job_id, kind=RELEASE_WORKER, by=by, reason=None, ts=ts
+            )
+            conn.execute("COMMIT")
+        except Exception:
+            conn.execute("ROLLBACK")
+            raise
+        return recorded, bool(released)
+
+    def late_result_of(self, job_id: int) -> dict[str, Any] | None:
+        """그 잡의 `late_result` 사건(많아야 하나)의 내용. 없으면 None."""
+        row = (
+            self._conn()
+            .execute(
+                "SELECT payload FROM events WHERE job_id=? AND kind=? ORDER BY id LIMIT 1",
+                (job_id, EVENT_LATE_RESULT),
+            )
+            .fetchone()
+        )
+        return None if row is None else json.loads(row["payload"])
 
     def open_holds(self) -> list[dict[str, Any]]:
         """열린 홀드(만든 순서). 칸은 `/api/status` 의 `irreversible_holds` 항목과 같다(§4.8)."""

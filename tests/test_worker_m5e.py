@@ -260,7 +260,7 @@ class FakeWorkerClient:
         self.calls.append(f"phase:{phase}")
         return {}
 
-    def log(self, job_id: int, data: bytes) -> dict[str, Any]:
+    def log(self, job_id: int, data: bytes, offset: int | None = None) -> dict[str, Any]:
         self.calls.append("log")
         self.logged.append(bytes(data))
         return {}

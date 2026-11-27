@@ -37,7 +37,7 @@ function queued(patch) {
 describe("ACTIONABLE — §7.3 order", () => {
   test("no_capable_machine and check_failed come right after worker_down", () => {
     assert.deepEqual(rcm.ACTIONABLE, [
-      "needs_action", "worker_down", "no_capable_machine", "check_failed", "stuck", "upload_stalled",
+      "needs_action", "worker_down", "worker_unreachable_grace", "no_capable_machine", "check_failed", "stuck", "upload_stalled",
       "not_scheduled", "blocked_by_group", "overdue", "paused",
     ]);
   });
