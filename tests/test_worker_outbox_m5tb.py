@@ -2262,25 +2262,34 @@ def test_b7_3_a_finish_sent_first_says_what_it_leaves_behind(tmp_path, fast):
 # ── batch-8: 빚진 finish 대기의 상한 · 「not sent」 줄의 갈래 ─────────────────────────
 
 
-class _ClocksStop(FakeServer):
-    """처음 `ticks` 번의 요청만 두 시계를 민다 — 그 뒤 두 시계가 다 선다. D 의 클라이언트는
-    사본이라 남은 횟수를 사본과 나눈다."""
+#: `_counted_clock` 이 한 번에 미는 단조 초
+_COUNTED_TICK = 40
 
-    def __init__(self, clock: WClock, *, tick: float, ticks: int) -> None:
-        super().__init__(clock, tick=tick)
-        self.left = [ticks]
 
-    def __copy__(self) -> _ClocksStop:
-        other = _ClocksStop.__new__(_ClocksStop)
-        other.__dict__.update(self.__dict__)
-        return other
+def _counted_clock(
+    w: rw.RemoteWorker, clock: WClock, loop: list[threading.Thread], ticks: int
+) -> None:
+    """D 큐 등록 대기 고리(`loop` 의 스레드)가 단조 시계를 읽을 때만, 그리고 살아 있는 큐의
+    마지막 시도가 서버의 오류 응답(`answered`)일 때만 단조 시계를 `_COUNTED_TICK` 초 민다 —
+    `ticks` 번까지. 그 뒤 시계는 선다. 벽시계는 서 있고, 보내는 스레드가 읽으면 그대로 준다.
 
-    def _next(self, route: str) -> None:
-        with self.lock:
-            self.left[0] -= 1
-            if self.left[0] < 0:
-                self.tick = 0.0
-        super()._next(route)
+    요청마다 미는 시계(옛 `_ClocksStop`)는 고리가 응답을 보기 전에 보내는 스레드가 첫 틱을
+    가져가면(고리가 기준 시각을 읽기 전 · 깃발이 서기 전) 그 40초를 세지 못해 280초에서 섰다 —
+    부하에서 50번에 2번 빨갰다(dev rcm-ci 4351). 이 시계는 고리가 「응답을 받는 중」이라고 볼
+    때만 가니, 민 틱은 고리가 센다. 세지 못하는 것은 기준 시각을 잡는 첫 읽기 하나뿐이다."""
+    left = [ticks]
+    say = w.mono_fn
+
+    def mono() -> float:
+        if threading.current_thread() not in loop:
+            return say()
+        senders = list(w._senders.values())
+        if left[0] > 0 and any(s.alive() and s.answered for s in senders):
+            left[0] -= 1
+            clock.mono += _COUNTED_TICK
+        return clock.mono
+
+    w.mono_fn = mono  # type: ignore[method-assign]
 
 
 def test_b8_1_a_registration_does_not_wait_on_a_finish_whose_end_is_ahead_of_the_clock(
@@ -2289,10 +2298,17 @@ def test_b8_1_a_registration_does_not_wait_on_a_finish_whose_end_is_ahead_of_the
     """# batch-8 #1 벽시계가 뒤로 가 D 큐의 `ended_at` 이 미래다. 그 잡의 나이는 음수라 finish 가
     먼저 가지 않는다. 등록 상한은 「빚진 finish」를 기다리는데, 음수 나이를 빚으로 보면 시계가
     따라잡을 때까지(여기서는 1년) 등록이 기다린다. 음수 나이는 빚진 finish 가 없다.
-    batch-9 #3: 등록 대기는 단조 시계로 잰다. 두 시계가 요청 8번(320초) 뒤에 멈추니, 빚으로 보면
-    단조 60초 상한도 오지 않아 등록이 끝나지 않는다. 대기 고리의 박자와 상관없이 갈린다."""
+    batch-9 #3: 등록 대기는 단조 시계로 잰다. 단조 시계는 고리가 응답을 세는 동안만 40초씩
+    300초 상한 + 한 틱 여유만큼 가고 선다. 빚으로 보면 상한에 닿은 뒤 단조 시계가 많아야 한 틱
+    (40초 < 60초)만 더 가니 빚진 finish 상한도 오지 않아 등록이 끝나지 않는다. 대기 고리의
+    박자 · 보내는 스레드의 빠르기와 상관없이 갈린다(dev rcm-ci 4351)."""
+    # 한 틱 여유: 기준 시각을 잡는 첫 읽기가 민 틱은 세지 않는다. 그래도 상한 뒤 남는 틱이
+    # 빚진 finish 상한에 못 미쳐야 음수 나이를 빚으로 보는 코드가 끝나지 않는다
+    needed = -(-rw.DEAD_SESSION_WAIT_SECONDS // _COUNTED_TICK)  # 상한에 닿는 틱 수(올림)
+    ticks = needed + 1
+    assert (ticks - needed) * _COUNTED_TICK < rw.OWED_FINISH_WAIT_SECONDS
     clock = WClock()
-    fake = _ClocksStop(clock, tick=40, ticks=8)
+    fake = FakeServer(clock)  # 요청은 시계를 밀지 않는다
     w1 = wworker(tmp_path, fake, clock)
     w1.prepare_sessions()
     ended_queue(w1, 7, b"x\n")
@@ -2301,7 +2317,14 @@ def test_b8_1_a_registration_does_not_wait_on_a_finish_whose_end_is_ahead_of_the
     clock.wall -= timedelta(days=365)  # 벽시계가 뒤로 갔다
     fake.script["log"] = [http(503)] * 1000000
     w2 = restart(tmp_path, fake, clock)
-    assert _run_bounded(w2.send_dead_queues, w2, 5), "registration waits for the clock"
+    loop: list[threading.Thread] = []
+    _counted_clock(w2, clock, loop, ticks)
+
+    def register_wait() -> None:
+        loop.append(threading.current_thread())
+        w2.send_dead_queues()
+
+    assert _run_bounded(register_wait, w2, 5), "registration waits for the clock"
     assert "finish" not in fake.routes()
     said = [x for x in w2.logs if "queue not delivered" in x]
     assert said == [
