@@ -875,7 +875,7 @@ GOOD: dict[str, dict[str, str]] = {
         "state_at_stop": "running", "self_stop_after": "63.2", "death_epoch": "1000.0",
         "finished_epoch": "1030.0", "final_state": "lost", "summary_code": "worker_unreachable",
         "failed_step": "null", "last_step": "null", "wait_rc": "3", "hold_at_close": "1",
-        "hold_released_after_return": "1",
+        "hold_released_after_return": "1", "lost_events": "1",
     },
     "RL2": {
         "x_dead_while_down": "1", "y_alive_while_down": "1", "y_state_after_start": "running",
@@ -906,9 +906,12 @@ GOOD: dict[str, dict[str, str]] = {
         "ship_hold": "0", "leader_alive": "1", "leader_line": "1", "leader_final": "lost",
         "leader_hold": "1", "identity": "ps",
     },
+    # RL18 — 다섯 곳마다 「읽었다」는 증거(종료 0 · HTTP 200 · 가린 값이나 알려진 글 하나 이상)
     "RL18": {
         "wait_rc": "0", "masked_seen": "200", "in_log": "0", "in_rcm_logs": "0",
-        "in_web_log": "0", "in_job_doc": "0", "in_sse": "0", "sse_bytes": "5000",
+        "in_web_log": "0", "in_job_doc": "0", "in_sse": "0",
+        "rcm_logs_rc": "0", "rcm_logs_seen": "200", "web_log_status": "200",
+        "web_log_seen": "200", "job_doc_status": "200", "job_doc_seen": "1", "sse_seen": "3",
         "log_equals_masked": "1", "resend_seen": "1", "log_complete": "true",
     },
     "RL28": {
@@ -938,7 +941,13 @@ GOOD: dict[str, dict[str, str]] = {
            for k, v in (("job", "5"), ("rc", "3"), ("failed_step", "null"), ("notify", "1"),
                         ("line", "1"))},
     },  # fmt: skip
-    "RL29-web": {**WEB_NO_BAND, "needles": "worker_unreachable", "found_worker_unreachable": "1"},
+    # RL29-web — 끝마다 두 언어의 문장(i18n.js 가 그린 것)을 그 언어 화면에서 찾는다
+    "RL29-web": {
+        **WEB_NO_BAND, "codes": "worker_unreachable", "needles": "worker_unreachable",
+        "needle_en_worker_unreachable": "worker rl1b unreachable for 90s",
+        "needle_ko_worker_unreachable": "워커 rl1b가 90초 동안 응답 없음",
+        "found_en_worker_unreachable": "1", "found_ko_worker_unreachable": "1",
+    },
     "RL34": {
         **{f"{m}_{k}": v for m, gj, thr, stop in (("d", "3", "62", "62.6"), ("b", "13", "52", "53"))
            for k, v in (("state_at_stop", "running"), ("grace_j", gj), ("threshold", thr),
@@ -1001,14 +1010,17 @@ GOOD: dict[str, dict[str, str]] = {
 }  # fmt: skip
 #: 한 사실을 틀리게 바꾸면 FAIL 이어야 한다(그 판정이 그 사실을 정말 본다)
 BAD: dict[str, list[dict[str, str]]] = {
+    # RL1 — 명령이 죽은 시각은 DB finished_at 보다 늦지 않다(명세: 차이 ≥ 0, 허용치 없음)
     "RL1": [{"state_at_stop": "lost"}, {"summary_code": "cancelled"}, {"death_epoch": "1040"},
-            {"wait_rc": "1"}, {"hold_released_after_return": "0"}],
+            {"wait_rc": "1"}, {"hold_released_after_return": "0"}, {"lost_events": "2"},
+            {"self_stop_after": "90"}, {"finished_epoch": "999.9"}],
     "RL2": [{"x_lost_events": "2"}, {"y_state_after_start": "lost"}],
     "RL5": [{"late_count": "2"}, {"state_after_late": "succeeded"}, {"alive_after_close": "0"}],
     "RL8": [{"x_code": "cancel_unconfirmed"}, {"y_final": "cancelled"}, {"y_late_count": "2"}],
     "RL10": [{"registers": "5"}, {"a_exit": "1"}, {"x_code": "worker_unreachable"}],
     "RL15": [{"leader_hold": "0"}, {"z_after_orphan": "0"}, {"ship_hold": "1"}],
-    "RL18": [{"in_sse": "1"}, {"in_log": "2"}, {"log_equals_masked": "0"}],
+    "RL18": [{"in_sse": "1"}, {"in_log": "2"}, {"log_equals_masked": "0"},
+             {"in_rcm_logs": "1", "rcm_logs_rc": "1"}],
     "RL28": [{"finish_at": "2026-11-27T00:00:00Z"}, {"top_raw": "1"}, {"wait_timeout_secs": "30"},
              {"eta_text": "0"}],
     "RL28-web": [{"ko_band_h": "96"}, {"en_errors": "1"}, {"ko_width": "500"},
@@ -1019,11 +1031,15 @@ BAD: dict[str, list[dict[str, str]]] = {
                     {"final": "succeeded"}, {"bg_cancel_line": "0"}, {"eta_cancel": "0"},
                     {"reason_after_cancel": "cancelling"}],
     "RL29": [{"worker_unreachable_notify": "2"}, {"worker_self_stopped_rc": "1"}],
-    "RL29-web": [{"found_worker_unreachable": "0"}],
-    "RL34": [{"d_stop_after": "95"}, {"b_code": "cancelled"}, {"b_lowered": "0"}],
+    "RL29-web": [{"found_en_worker_unreachable": "0"}, {"found_ko_worker_unreachable": "0"}],
+    # RL34 — 워커가 적은 값은 int(wgap) 이고 wgap ≥ 문턱이다: 문턱 아래면 일찍 멈춘 것이다
+    "RL34": [{"d_stop_after": "95"}, {"b_code": "cancelled"}, {"b_lowered": "0"},
+             {"d_threshold": "61"}],
     "RL40": [{"final_state": "lost"}, {"log_sha_match": "0"}],
     "RL42": [{"same_group_started": "2026-11-27T00:00:00Z"}, {"plain_hold_rows": "1"}],
-    "RL43": [{"a_detect": "1.5"}, {"b_detect": "0.4"}, {"e_alive": "0"}, {"d_exit": "0"}],
+    "RL43": [{"a_detect": "1.5"}, {"b_detect": "0.4"}, {"e_alive": "0"}, {"d_exit": "0"},
+             {"a_hold": "0"}, {"b_hold": "0"}, {"d_hold": "1"}, {"x7_exit": "0"},
+             {"x7_wait_rc": "0"}, {"d_dead": "5.2"}],
     "RL45": [{"client_release_rc": "0"}, {"wait_action_rc": "3"}, {"health_ok_same": "0"},
              {"owner_line": "0"}, {"eta_no_ahead": "0"}, {"eta_held": "0"},
              {"top_empty_held": "0"}],
@@ -1031,7 +1047,8 @@ BAD: dict[str, list[dict[str, str]]] = {
                  {"found_hold_b": "0"}, {"en_more_n": "0", "en_stuck_n": "2"}],
     "RL45-empty": [{"found_empty_held": "0"}, {"en_empty_hint": "1"}],
     "RL50": [{"x_state": "lost"}, {"second_state": "running"}],
-    "RL51": [{"b1_gone": "6.5"}, {"b2_gone": "5"}],
+    # RL51 — (b) 워커 kill -9 는 첫 SIGTERM(감지 ≤ 0.31) + grace_J + 0.5, (c) 도 (b) 와 같은 경계
+    "RL51": [{"b1_gone": "6.5"}, {"b2_gone": "5"}, {"b2_gone": "3.9"}, {"c_gone": "5.5"}],
     "F78": [{"a_detect": "0.6"}, {"true_supervised": "0.5"}],
 }  # fmt: skip
 
@@ -1057,7 +1074,7 @@ def test_pr4_judge_passes_good_facts_and_fails_each_bad_one(tmp_path: Path, step
         assert got.startswith("FAIL "), (change, got)
     # 사실 하나가 빠지면 PASS 가 아니다(UNKNOWN)
     for key in GOOD[step]:
-        if key in ("codes", "needles", "admin_name", "identity", "web"):
+        if key in ("admin_name", "identity", "web"):
             continue
         got = mod.judge(step, {k: v for k, v in good.items() if k != key})
         assert not got.startswith("PASS "), (key, got)
@@ -1490,3 +1507,156 @@ def test_pr4_changelog_unreleased_names_the_live_harness() -> None:
     start = text.index("## [Unreleased]")
     end = text.index("\n## [", start + 1)
     assert "scripts/acceptance/m5tb_live.sh" in text[start:end]
+
+
+# ── batch-5: 판정이 「못 읽은 것」을 「없음」으로 읽지 않는다(PLAN.md 「fail-open 금지」) ─────────
+
+
+def _body(fn: str) -> str:
+    """하네스 함수 하나의 본문."""
+    text = script_text()
+    start = text.index(f"\n{fn}() {{") + 1
+    return text[start : text.index("\n}\n", start)]
+
+
+def test_rl18_a_place_with_no_sign_it_was_read_is_unknown_not_clean(tmp_path: Path) -> None:
+    # RL18 — `rcm logs` 가 실패해도 파일은 쓰이고(`|| true`), getraw · jobdoc 은 오류 본문을
+    # 파일에 쓴다. 그 파일에서 비밀을 0 번 세면 「비밀 없음」이 아니라 모른다
+    mod = helper(tmp_path)
+    good = {**COMMON, **GOOD["RL18"]}
+    for change in ({"rcm_logs_rc": "1"}, {"rcm_logs_seen": "0"}, {"web_log_status": "404"},
+                   {"web_log_seen": "0"}, {"job_doc_status": "500"}, {"job_doc_seen": "0"},
+                   {"sse_seen": "0"}, {"masked_seen": "0"}, {"web_log_status": ""}):  # fmt: skip
+        got = mod.judge("RL18", {**good, **change})
+        assert got.startswith("UNKNOWN ") and "no sign it was read" in got, (change, got)
+    # 읽은 증거가 없어도 원문이 보이면 FAIL 이다
+    got = mod.judge("RL18", {**good, "in_web_log": "1", "web_log_status": "404"})
+    assert got.startswith("FAIL "), got
+
+
+def test_rl18_runner_records_the_read_evidence_of_each_place() -> None:
+    body = _body("run_secret")
+    for key in ("rcm_logs_rc", "rcm_logs_seen", "web_log_status", "web_log_seen",
+                "job_doc_status", "job_doc_seen", "sse_seen", "masked_seen"):  # fmt: skip
+        assert re.search(rf"\bfact RL18 {key}\b", body), key
+    assert not re.search(r"client logs [^\n]*\|\| true", body), "an rcm logs failure is dropped"
+    assert not re.search(r"h getraw [^\n]*>/dev/null", body), "the web log status is dropped"
+
+
+def test_rl29_web_without_a_sentence_to_look_for_is_unknown(tmp_path: Path) -> None:
+    # RL29-web — 끝난 잡이 없으면 needles 가 비어 판정이 폭 · 오류 · 원문 코드만으로 PASS 였다.
+    # 빈 문장은 `grep -qF ""` 로 아무 페이지에나 맞는다
+    mod = helper(tmp_path)
+    good = {**COMMON, **GOOD["RL29-web"]}
+    for change in ({"needles": ""}, {"needle_en_worker_unreachable": ""},
+                   {"needle_ko_worker_unreachable": "<absent>"},
+                   {"codes": "worker_unreachable worker_replaced"}):  # fmt: skip
+        got = mod.judge("RL29-web", {**good, **change})
+        assert got.startswith("UNKNOWN "), (change, got)
+    got = mod.judge("RL29-web", {**COMMON, **WEB_NO_BAND, "codes": var("LOST_CODES")})
+    assert got.startswith("UNKNOWN "), got
+
+
+def test_rl29_web_sentences_come_from_i18n_in_both_languages(tmp_path: Path) -> None:
+    # RL29-web — 보고서는 「두 언어」라 적었지만 영어 화면만 찾았다. 한국어 화면의 문장은
+    # core/outcome.py 가 아니라 i18n.js 가 그리므로 그 생산자로 바늘을 만든다
+    mod = helper(tmp_path)
+    fn = getattr(mod, "web_sentence", None)
+    assert fn is not None, "the helper cannot draw a lost ending the way the page does"
+    if shutil.which("node") is None:
+        pytest.skip("node is not installed")
+    args = {"name": "rl1b", "seconds": 90}
+    assert fn("en", "worker_unreachable", args) == "worker rl1b unreachable for 90s"
+    ko = fn("ko", "worker_unreachable", args)
+    assert ko.startswith("워커 rl1b") and "90초" in ko, ko
+    assert fn("ko", "no_such_code", args) == ""
+
+
+def test_rl29_web_runner_looks_in_both_languages_and_never_for_an_empty_needle() -> None:
+    body = _body("run_lost_ends")
+    assert 'fact RL29-web codes "$LOST_CODES"' in body, body
+    assert re.search(r'fact RL29-web "needle_\$\{lang\}_\$code"', body), body
+    assert re.search(r'fact RL29-web "found_\$\{lang\}_\$code"', body), body
+    assert 'grep -qF "$(' not in body  # 빈 글이 아무 페이지에나 맞던 꼴
+
+
+def test_rl1_counts_its_lost_events_and_reads_finished_at_from_the_db() -> None:
+    # RL1 — PASS 문장이 「lost 한 번」이라 말했지만 그 잡의 lost 사건 수를 재지 않았다(RL2 는
+    # x_lost_events 로 잰다). 잡 문서의 finished_at 은 초 단위로 잘리므로(core/status.py iso)
+    # 1.0초를 봐주는 대신 DB 의 REAL 값과 차이 ≥ 0 으로 견준다
+    body = _body("run_partition_past_g")
+    assert re.search(r"fact RL1 lost_events \"\$\(db \"SELECT count\(\*\) FROM events", body), body
+    assert 'fact RL1 finished_epoch "$(db "SELECT finished_at FROM jobs WHERE id=?" "$x")"' in body
+    assert "jobs.finished_at" in var("DB_COLUMNS").split()
+
+
+def test_rl15_next_job_is_ordered_after_the_orphan_by_the_worker_log_not_a_clock(
+    tmp_path: Path,
+) -> None:
+    # RL15 — z_after_orphan 은 잡 문서의 started_at(초 단위로 잘림)과 줄 시각을 −1.0초 봐주고
+    # 견줬다. 같은 워커 로그(stderr 한 줄기, 줄마다 flush)에서 고아 줄이 「claimed #z」 줄보다
+    # 앞인지 본다 — 시계도 허용치도 없다
+    mod = helper(tmp_path)
+    fn = getattr(mod, "lines_in_order", None)
+    assert fn is not None, "the helper cannot tell which of two log lines came first"
+    log = tmp_path / "w.log"
+    log.write_text(
+        "1.0 [rcm worker] orphan #18: stopped process group 1\n"
+        "1.1 [rcm worker] lane 2: claimed #20 rl15-plain\n"
+        "1.2 [rcm worker] lane 1: claimed #2 rl15-ship\n",
+        encoding="utf-8",
+    )
+    p = str(log)
+    assert fn(p, "orphan #18: stopped process group", "claimed #20 ") == "1"
+    assert fn(p, "claimed #2 ", "orphan #18: stopped process group") == "0"
+    assert fn(p, "orphan #18: stopped process group", "claimed #21 ") == mod.ABSENT
+    assert fn(str(tmp_path / "none.log"), "a", "b") == mod.ABSENT
+    body = _body("run_orphan")
+    want = (
+        'fact RL15 z_after_orphan "$(h inorder "$W_LOG" '
+        '"orphan #$y: stopped process group" "claimed #$z ")"'
+    )
+    assert want in body, body
+    assert "-1.0" not in body
+    assert "claimed #" in var("WORKER_LINES").split("|")
+
+
+def test_rl34_judge_bounds_come_from_the_worker_and_supervisor_constants(tmp_path: Path) -> None:
+    # RL34 · RL43 · RL51 · F78 — 판정이 15 · 10 · 0.31 을 손으로 적었다. 도우미의 이름 붙은
+    # 상수가 remote_worker.py · job_supervisor.py 의 값과 같고, 판정은 그 상수를 읽는다
+    from remote_ci_monitor import job_supervisor, remote_worker
+
+    mod = helper(tmp_path)
+    for name, want in (("HEARTBEAT_DEADLINE", remote_worker.HEARTBEAT_DEADLINE_SECONDS),
+                       ("SELF_STOP_SLACK", remote_worker.SELF_STOP_SLACK_SECONDS),
+                       ("WATCHDOG_TICK", remote_worker.WATCHDOG_TICK_SECONDS),
+                       ("SUPERVISOR_POLL", job_supervisor.SUPERVISOR_POLL_SECONDS)):  # fmt: skip
+        assert getattr(mod, name, None) == want, name
+    good = {**COMMON, **GOOD["RL34"]}
+    assert mod.judge("RL34", good).startswith("PASS ")
+    mod.HEARTBEAT_DEADLINE += 5  # 문턱이 57 이 되면 워커가 적은 62 는 늦다
+    got = mod.judge("RL34", good)
+    mod.HEARTBEAT_DEADLINE -= 5
+    assert got.startswith("FAIL "), got
+    mod.SUPERVISOR_POLL += 1  # 감지 상한이 1초 늘면 1.2초도 PASS 다
+    got = mod.judge("RL43", {**COMMON, **GOOD["RL43"], "a_detect": "1.2"})
+    mod.SUPERVISOR_POLL -= 1
+    assert got.startswith("PASS "), got
+
+
+def test_pr4_a_judge_that_crashes_is_unknown(tmp_path: Path, capsys: pytest.CaptureFixture) -> None:
+    # 판정 함수가 traceback 으로 끝나면 출력이 비어 판정 낱말이 FAIL 도 UNKNOWN 도 아니었다
+    mod = helper(tmp_path)
+
+    def boom(_f: dict[str, str]) -> str:
+        raise KeyError("x_code")
+
+    mod.JUDGES["RL10"] = boom
+    facts = tmp_path / "RL10.txt"
+    facts.write_text("x_code=worker_replaced\n", encoding="utf-8")
+    try:
+        mod.cmd_judge("RL10", str(facts))
+        out = capsys.readouterr().out
+    except Exception as e:  # noqa: BLE001 — 고치기 전에는 여기로 온다
+        out = f"raised {e!r}"
+    assert out.startswith("UNKNOWN ") and "KeyError" in out, out
