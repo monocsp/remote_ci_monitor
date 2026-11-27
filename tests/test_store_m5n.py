@@ -196,7 +196,7 @@ def downgrade_to_v22(path: Path, *, keep_columns: tuple[str, ...] = (), keep_mac
 
 def test_this_build_is_database_version_24():
     # v24(M5p)가 `jobs.keep` 을 맨 끝에 붙이고 보관함 표를 더한다(tests/test_store_m5p.py)
-    assert DB_VERSION == 26  # v25 는 M5s(tests/test_schedule_m5s.py) · v26 은 M5t-b
+    assert DB_VERSION == 27  # v25 는 M5s(tests/test_schedule_m5s.py) · v26 은 M5t-b · v27 은 M5t-c
 
 
 def test_a_fresh_database_has_the_v23_columns_tables_and_index(tmp_path):

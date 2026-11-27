@@ -354,7 +354,7 @@ def keep_info(path: Path) -> tuple[Any, ...]:
 
 
 def test_this_build_is_database_version_24():
-    assert DB_VERSION == 26  # v25 는 M5s · v26 은 M5t-b — v24 는 그 아래에 있다
+    assert DB_VERSION == 27  # v25 는 M5s · v26 은 M5t-b · v27 은 M5t-c — v24 는 그 아래에 있다
 
 
 def test_a18_v23_migrates_to_v24_after_a_v23_backup(data_dir):
