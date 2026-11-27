@@ -636,19 +636,202 @@ def test_pr4_pr2_keys_match_the_producer_once_pr2_is_here() -> None:
         assert f'"{key}"' in server, key
 
 
-def test_pr4_pr3_lines_match_the_producer_once_pr3_is_here() -> None:
+def _need_pr3() -> None:
     render = (SRC / "core" / "render_text.py").read_text(encoding="utf-8")
     if "def held_group" not in render:
         pytest.skip("PR3 (#285) is not on this tree — its lines were checked on its branch")
+
+
+def _produced_holds() -> list[dict[str, object]]:
+    """`/api/status` · `/api/health` 의 `irreversible_holds` 항목 — 진짜 생산자 `hold_item_json`."""
+    from datetime import UTC, datetime
+
+    from remote_ci_monitor.core.model import OpenHold
+    from remote_ci_monitor.core.status import hold_item_json
+
+    since = datetime(2026, 11, 27, 8, 50, tzinfo=UTC)
+    hold = OpenHold(job_id=5, group="irreversible:ship", scope="global", pool="m5tb",
+                    since=since, preset="rl43-ship", worker="rl43a",
+                    cause="worker_unreachable")  # fmt: skip
+    return [hold_item_json(hold)]
+
+
+def _produced_cli_lines() -> dict[str, tuple[str, ...]]:
+    """하네스의 줄 변수 이름 → 그 줄을 쓰는 진짜 생산자가 만든 글(하나 이상). 손으로 베끼지 않고
+    `rcm wait` · `rcm top` · `rcm eta` · `rcm check` · `rcm doctor` 의 생산 함수를 부른다."""
+    from remote_ci_monitor import cli
+    from remote_ci_monitor.core import doctor as core_doctor
+    from remote_ci_monitor.core import render_text as rt
+    from remote_ci_monitor.core.model import REASON_WORKER_UNREACHABLE_GRACE as GRACE
+    from remote_ci_monitor.doctor import parse_holds
+
+    run = {"id": 7, "state": "running", "reason": GRACE, "ran_on": "rl28"}
+    # rcm wait 이 기다리는 동안: 끊김 → (취소 요청) → 돌아옴
+    w = cli._GraceWatch(7)
+    lost = w.observe(run)
+    corrected = w.observe({**run, "state": "cancelling"})
+    back_cancel = w.observe({**run, "state": "cancelling", "reason": "cancelling"})
+    w = cli._GraceWatch(7)
+    w.observe(run)
+    back_on = w.observe({**run, "reason": "running"})
+    # 취소 뒤에 새로 기다리는 rcm wait 의 첫 줄
+    fresh_cancel = cli._GraceWatch(7).observe({**run, "state": "cancelling"})
+    held = {
+        "id": 9, "state": "queued", "position": 1, "reason": "needs_action",
+        "blocked_by": {"job_id": 5, "group": "irreversible:ship", "remaining_seconds": None},
+        "action": {"code": "irreversible_hold", "note": "x", "at": "2026-11-27T08:50:00Z"},
+        "estimate": {"waited_seconds": 3.0, "wait_seconds": None, "finish_at": None},
+    }  # fmt: skip
+    grace_row = {
+        "id": 7, "state": "running", "position": None, "reason": GRACE, "ran_on": "rl28",
+        "estimate": {"elapsed_seconds": 20.0, "finish_at": None, "source": "preset"},
+    }  # fmt: skip
+    holds = _produced_holds()
+    health = {"irreversible_holds": holds}
+    top_empty = rt.render(
+        {"schema_version": 1, "generated_at": "2026-11-27T09:00:00Z", "display_timezone": "UTC",
+         "server": {"lanes": 0, "workers": []}, "irreversible_holds": holds,
+         "pools": [{"name": "default", "queue": [], "recent": [], "medians": {}, "hosts": []}]}
+    )  # fmt: skip
+    got: dict[str, tuple[str, ...]] = {
+        "LINE_LOST_CONTACT": (str(lost), str(fresh_cancel), rt.unreachable_text("rl28")),
+        "LINE_GRACE_GOES_ON": (str(lost), rt.unreachable_text("rl28")),
+        "LINE_GRACE_CANCEL": (str(fresh_cancel), str(corrected),
+                              rt.unreachable_text("rl28", cancelling=True)),
+        "LINE_CANCEL_REQUESTED": (str(corrected),),
+        "LINE_BACK_GOES_ON": (str(back_on),),
+        "LINE_BACK_CANCEL": (str(back_cancel),),
+        "LINE_LATE": (str(rt.late_result_line(
+            {"late_result": {"outcome": "succeeded", "exit_code": 0}}, job_id=7)),),
+        "LINE_HELD_WAIT": (str(cli.action_line(9, held["action"], held["blocked_by"])),),
+        "LINE_HOLD_OWNER": (str(rt.hold_owner_line(
+            {"hold": {"released_at": None}, "concurrency_group": "irreversible:ship"}, job_id=5)),),
+        "LINE_CHECK_HOLD": tuple(row[0] for row in cli._hold_rows(health)),
+        "LINE_DOCTOR_HOLD": tuple(core_doctor.hold_line(h) for h in parse_holds(holds) or ()),
+        "LINE_ETA_HELD": (cli._fmt_eta_row(held, None),),
+        "LINE_ETA_AHEAD": (cli._fmt_eta_row(held, 2),),
+        "LINE_TOP_EMPTY_HELD": (top_empty,),
+    }  # fmt: skip
+    # 반대쪽 — 이 글이 나오면 안 되는 자리(판정이 0 을 기대한다)
+    assert var("LINE_BACK_GOES_ON") not in str(back_cancel), back_cancel
+    assert var("LINE_GRACE_GOES_ON") not in str(fresh_cancel), fresh_cancel
+    assert var("LINE_ETA_AHEAD") not in cli._fmt_eta_row(held, None)
+    assert var("LINE_LOST_CONTACT") in cli._fmt_eta_row(grace_row, None)
+    assert var("LINE_GRACE_CANCEL") in cli._fmt_eta_row({**grace_row, "state": "cancelling"}, None)
+    return got
+
+
+#: 하네스가 실기에서 찾는 사람 줄(CLI) — 이름마다 진짜 생산자의 글이 있다
+LINE_VARS = (
+    "LINE_LOST_CONTACT", "LINE_GRACE_GOES_ON", "LINE_GRACE_CANCEL", "LINE_CANCEL_REQUESTED",
+    "LINE_BACK_GOES_ON", "LINE_BACK_CANCEL", "LINE_LATE", "LINE_HELD_WAIT", "LINE_HOLD_OWNER",
+    "LINE_CHECK_HOLD", "LINE_DOCTOR_HOLD", "LINE_ETA_HELD", "LINE_ETA_AHEAD",
+    "LINE_TOP_EMPTY_HELD",
+)  # fmt: skip
+#: 웹 화면에서 찾는 글과 값 — app.js · i18n.js 를 node 로 불러 견준다
+WEB_VARS = (
+    "WEB_GRACE_GOES_ON", "WEB_GRACE_CANCEL", "WEB_STUCK_MAX", "WEB_AND_MORE_PRE",
+    "WEB_AND_MORE_POST", "WEB_NOTHING_ELSE", "WEB_EMPTY_HELD", "WEB_EMPTY_HINT",
+    "WEB_LANE_UNHEARD", "WEB_LANE_LIVE",
+)  # fmt: skip
+
+
+def test_pr4_pr3_lines_match_the_producer_once_pr3_is_here() -> None:
+    _need_pr3()
     from remote_ci_monitor.core.model import REASON_WORKER_UNREACHABLE_GRACE
 
     assert var("PR3_REASON") == REASON_WORKER_UNREACHABLE_GRACE
-    text = "".join(
-        (SRC / p).read_text(encoding="utf-8")
-        for p in ("cli.py", "core/render_text.py", "doctor.py", "core/doctor.py")
-    )
-    for line in var("PR3_LINES").split("|"):
-        assert line in text, f"no producer writes '{line}'"
+    produced = _produced_cli_lines()
+    assert set(produced) == set(LINE_VARS)
+    for name, texts in produced.items():
+        want = var(name)
+        assert want and texts, name
+        for text in texts:
+            assert want in text, f"{name}='{want}' is not in what the producer writes: '{text}'"
+
+
+def test_pr4_the_harness_greps_through_the_line_variables_not_copies() -> None:
+    """줄 변수는 한 자리에서만 정한다. grep 과 판정은 그 변수를 쓴다(값이 바뀌면 시험이 본다)."""
+    text = script_text()
+    code = [ln for ln in text.splitlines() if ln.strip() and not ln.lstrip().startswith("#")]
+    for name in (*LINE_VARS, *WEB_VARS):
+        value = var(name)
+        uses = [ln for ln in code if f"${name}" in ln or f"${{{name}" in ln]
+        assert uses, f"the harness defines {name} but never uses it"
+        if len(value) < 12:
+            continue  # 짧은 값(「 more」 · 「run」)은 다른 낱말에도 들어 있다 — 쓰임만 본다
+        copies = [ln for ln in code if value in ln and not ln.startswith(f'{name}="')]
+        assert not copies, f"'{value}' is copied instead of using ${name}: {copies}"
+    assert "PR3_LINES" not in text  # 옛 묶음 — 손으로 베낀 줄 목록이었다
+
+
+_WEB_PROBE = """
+globalThis.window = globalThis;
+const rcm = require(process.argv[1]);
+const I = require(process.argv[2]);
+const holds = JSON.parse(process.argv[3]);
+const G = "worker_unreachable_grace";
+const st = { schema_version: 1, generated_at: "2026-11-27T09:00:00Z",
+  server: { lanes: 0, workers: [] }, pools: [{ name: "default", queue: [], recent: [] }],
+  irreversible_holds: holds };
+const row = (p) => Object.assign({ id: 7, state: "running", reason: G, ran_on: "rl28",
+  started_at: "2026-11-27T08:59:30Z", lane: 1,
+  estimate: { elapsed_seconds: 30, expected_seconds: 600, source: "preset", finish_at: null }
+}, p || {});
+const line = (i) => ({ jobId: i, reason: "needs_action", text: "x" + i, rank: 0 });
+const now = Date.parse("2026-11-27T09:00:00Z");
+const out = {
+  grace: rcm.reasonText(row(), st, now, "en").text,
+  cancel: rcm.reasonText(row({ state: "cancelling" }), st, now, "en").text,
+  lane_unheard: rcm.laneClass(row()),
+  lane_cancel: rcm.laneClass(row({ state: "cancelling" })),
+  lane_live: rcm.laneClass(row({ reason: "running" })),
+  bar_unheard: rcm.progressBarHtml(row(), "en", true),
+  bar_live: rcm.progressBarHtml(row({ reason: "running" }), "en", true),
+  band_over: rcm.stuckBand({ kind: "list", lines: [1, 2, 3, 4, 5].map(line) }, "en"),
+  band_all: rcm.stuckBand({ kind: "list", lines: [line(1), line(2)] }, "en"),
+  empty_held: I.t("en", rcm.queueEmptyKey(st) || "queue.empty"),
+  empty_hint: I.t("en", "queue.empty_hint"),
+  empty_free: rcm.queueEmptyKey(Object.assign({}, st, { irreversible_holds: [] })),
+};
+process.stdout.write(JSON.stringify(out));
+"""
+
+
+def test_pr4_web_strings_and_the_needs_a_look_band_come_from_app_js() -> None:
+    """웹에서 찾는 글 · 레인 · 「확인이 필요한 작업」 칸의 줄 수와 꼬리를 app.js 함수에서 읽는다."""
+    _need_pr3()
+    import json
+
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("node is not installed — the web half runs in tests/web (node --test)")
+    r = subprocess.run(
+        [node, "-e", _WEB_PROBE, str(SRC / "web" / "app.js"), str(SRC / "web" / "i18n.js"),
+         json.dumps(_produced_holds())],
+        capture_output=True, text=True, timeout=20, check=True,
+    )  # fmt: skip
+    got = json.loads(r.stdout)
+    assert var("WEB_GRACE_GOES_ON") in got["grace"], got["grace"]
+    assert var("WEB_GRACE_CANCEL") in got["cancel"], got["cancel"]
+    assert var("WEB_GRACE_GOES_ON") not in got["cancel"], got["cancel"]
+    assert got["lane_unheard"] == got["lane_cancel"] == var("WEB_LANE_UNHEARD"), got
+    assert got["lane_live"] == var("WEB_LANE_LIVE"), got
+    # 도우미의 행 JS 가 읽는 표지 — 듣는 행은 시간 눈금 + 틱, 끊긴 행은 막대만(눈금 · 틱 없음)
+    assert 'data-basis="time"' in got["bar_live"] and 'data-tick="progress"' in got["bar_live"]
+    assert 'class="pwrap"' in got["bar_unheard"], got["bar_unheard"]
+    assert "data-tick" not in got["bar_unheard"] and 'data-basis="time"' not in got["bar_unheard"]
+    cap = int(var("WEB_STUCK_MAX"))
+    over = got["band_over"]
+    assert len(over["lines"]) == cap, over
+    assert over["tail"] == [var("WEB_AND_MORE_PRE") + str(5 - cap) + var("WEB_AND_MORE_POST")], over
+    assert got["band_all"]["tail"] == [var("WEB_NOTHING_ELSE")], got["band_all"]
+    assert var("WEB_EMPTY_HELD") in got["empty_held"], got["empty_held"]
+    assert got["empty_hint"] == var("WEB_EMPTY_HINT") and got["empty_free"] is None, got
+    helper_js = script_text()
+    for needle in ("getElementById('job-", ".pwrap[data-tick]", "data-basis", "td.elapsed",
+                   "[data-stuck] .sl.muted"):  # fmt: skip
+        assert needle in helper_js, needle
 
 
 # ── 판정: 모르는 것을 PASS 로 적지 않는다 ─────────────────────────────────────
@@ -706,9 +889,23 @@ GOOD: dict[str, dict[str, str]] = {
         "state_during": "running", "finish_at": "null", "health_stable": "1",
         "wait_timeout_rc": "3", "wait_timeout": "8", "wait_timeout_secs": "8.4",
         "reason": "worker_unreachable_grace", "top_text": "1", "top_raw": "0",
-        "lost_line_delay": "12.0", "back_line_delay": "2.0",
+        "lost_line_delay": "12.0", "back_line_delay": "2.0", "eta_text": "1",
     },
-    "RL28-web": dict(WEB_OK),
+    "RL28-web": {
+        **WEB_OK, "found_grace_said": "1", "found_cancel_said": "1",
+        **{f"{lang}_{role}_{k}": v for lang in ("en", "ko") for role in ("grace", "cancel")
+           for k, v in (("found", "1"), ("lane", "1"), ("ticks", "0"), ("bars", "1"),
+                        ("bar_ticks", "0"), ("scaled", "0"), ("el_same", "1"))},
+        **{f"{lang}_live_{k}": v for lang in ("en", "ko")
+           for k, v in (("found", "1"), ("lane", "1"), ("ticks", "2"), ("bars", "1"),
+                        ("bar_ticks", "1"), ("scaled", "1"), ("el_same", "0"))},
+    },
+    "RL28-cancel": {
+        "cancel_rc": "0", "state_after_cancel": "cancelling",
+        "reason_after_cancel": "worker_unreachable_grace", "top_cancel": "1", "eta_cancel": "1",
+        "fresh_line": "1", "fresh_goes_on": "0", "bg_cancel_line": "1", "bg_back_goes_on": "0",
+        "bg_back_cancel": "1", "final": "cancelled",
+    },
     "RL29": {
         "codes": "worker_unreachable worker_self_stopped",
         **{f"{c}_{k}": v for c in ("worker_unreachable", "worker_self_stopped")
@@ -751,10 +948,17 @@ GOOD: dict[str, dict[str, str]] = {
         "admin_name": "acceptance-admin", "released_by": "acceptance-admin",
         "release_reason_ok": "1", "nohold_release_rc": "1", "wait_line": "1",
         "check_lines": "2", "doctor_lines": "1", "doctor_json_holds": "1",
+        "owner_line": "1", "eta_held": "1", "eta_no_ahead": "1", "top_empty_held": "1",
     },
+    # 홀드 둘 + 막힌 대기 잡 둘 = 4줄 이상 → 띠는 세 줄 + 「and 1 more」, 「nothing else」는 없다
     "RL45-web": {
         **WEB_NO_BAND, "found_hold_a": "1", "found_hold_b": "1", "en_chips": "1",
-        "stuck_total": "4", "en_stuck_n": "4",
+        "stuck_min": "4", "stuck_max": "3", "en_stuck_n": "3", "en_more_n": "1",
+        "en_nothing_else": "0",
+    },
+    "RL45-empty": {
+        **WEB_NO_BAND, "found_empty_held": "1", "en_empty_hint": "0", "queue_empty": "1",
+        "hold_open": "1",
     },
     "RL50": {
         "held": "1", "refused": "1", "x_state": "running", "x_alive": "1", "x_hold": "0",
@@ -779,16 +983,27 @@ BAD: dict[str, list[dict[str, str]]] = {
     "RL10": [{"registers": "5"}, {"a_exit": "1"}, {"x_code": "worker_unreachable"}],
     "RL15": [{"leader_hold": "0"}, {"z_after_orphan": "0"}, {"ship_hold": "1"}],
     "RL18": [{"in_sse": "1"}, {"in_log": "2"}, {"log_equals_masked": "0"}],
-    "RL28": [{"finish_at": "2026-11-27T00:00:00Z"}, {"top_raw": "1"}, {"wait_timeout_secs": "30"}],
-    "RL28-web": [{"ko_band_h": "96"}, {"en_errors": "1"}, {"ko_width": "500"}],
+    "RL28": [{"finish_at": "2026-11-27T00:00:00Z"}, {"top_raw": "1"}, {"wait_timeout_secs": "30"},
+             {"eta_text": "0"}],
+    "RL28-web": [{"ko_band_h": "96"}, {"en_errors": "1"}, {"ko_width": "500"},
+                 {"en_grace_ticks": "1"}, {"ko_cancel_lane": "0"}, {"en_grace_el_same": "0"},
+                 {"en_grace_bar_ticks": "1"}, {"ko_grace_scaled": "1"}, {"found_cancel_said": "0"},
+                 {"en_grace_found": "0"}, {"en_grace_bars": "0"}],
+    "RL28-cancel": [{"top_cancel": "0"}, {"fresh_goes_on": "1"}, {"bg_back_goes_on": "1"},
+                    {"final": "succeeded"}, {"bg_cancel_line": "0"}, {"eta_cancel": "0"},
+                    {"reason_after_cancel": "cancelling"}],
     "RL29": [{"worker_unreachable_notify": "2"}, {"worker_self_stopped_rc": "1"}],
     "RL29-web": [{"found_worker_unreachable": "0"}],
     "RL34": [{"d_stop_after": "95"}, {"b_code": "cancelled"}, {"b_lowered": "0"}],
     "RL40": [{"final_state": "lost"}, {"log_sha_match": "0"}],
     "RL42": [{"same_group_started": "2026-11-27T00:00:00Z"}, {"plain_hold_rows": "1"}],
     "RL43": [{"a_detect": "1.5"}, {"b_detect": "0.4"}, {"e_alive": "0"}, {"d_exit": "0"}],
-    "RL45": [{"client_release_rc": "0"}, {"wait_action_rc": "3"}, {"health_ok_same": "0"}],
-    "RL45-web": [{"en_stuck_n": "3", "en_more": "0"}, {"found_hold_b": "0"}],
+    "RL45": [{"client_release_rc": "0"}, {"wait_action_rc": "3"}, {"health_ok_same": "0"},
+             {"owner_line": "0"}, {"eta_no_ahead": "0"}, {"eta_held": "0"},
+             {"top_empty_held": "0"}],
+    "RL45-web": [{"en_more_n": "0"}, {"en_nothing_else": "1"}, {"en_stuck_n": "4"},
+                 {"found_hold_b": "0"}, {"en_more_n": "0", "en_stuck_n": "2"}],
+    "RL45-empty": [{"found_empty_held": "0"}, {"en_empty_hint": "1"}],
     "RL50": [{"x_state": "lost"}, {"second_state": "running"}],
     "RL51": [{"b1_gone": "6.5"}, {"b2_gone": "5"}],
     "F78": [{"a_detect": "0.6"}, {"true_supervised": "0.5"}],
@@ -825,29 +1040,74 @@ def test_pr4_judge_passes_good_facts_and_fails_each_bad_one(tmp_path: Path, step
 def test_pr4_judge_without_pr2_or_pr3_is_unknown_not_pass(tmp_path: Path) -> None:
     mod = helper(tmp_path)
     for step, flag in (("RL5", "pr2"), ("RL18", "pr2"), ("RL40", "pr2"), ("RL28", "pr3"),
-                       ("RL45", "pr3"), ("RL29", "pr3")):  # fmt: skip
+                       ("RL45", "pr3"), ("RL29", "pr3"), ("RL28-cancel", "pr3"),
+                       ("RL45-empty", "pr3")):  # fmt: skip
         got = mod.judge(step, {**COMMON, **GOOD[step], flag: "0"})
         assert got.startswith("UNKNOWN ") and "this build has no" in got, (step, got)
 
 
 def test_pr4_web_judge_says_unknown_without_chrome(tmp_path: Path) -> None:
     mod = helper(tmp_path)
-    for step in ("RL28-web", "RL29-web", "RL45-web"):
+    for step in ("RL28-web", "RL29-web", "RL45-web", "RL45-empty"):
         for web in ("no-chrome", "failed RuntimeError: x", ""):
             got = mod.judge(step, {**COMMON, **GOOD[step], "web": web})
             assert got.startswith("UNKNOWN "), (step, web, got)
 
 
 def test_pr4_needs_a_look_with_hidden_lines_says_so(tmp_path: Path) -> None:
-    # 「확인이 필요한 작업」 4줄 이상 — 3줄만 보이고 「그 밖에 없다」면 FAIL, 「N 더」가 있으면 PASS
+    # 「확인이 필요한 작업」 4줄 이상 — 띠는 세 줄 + 「and N more」(PR3 P6). 세 줄에 「nothing else
+    # needs a look」이면 FAIL(숨긴 줄을 없다고 말한다), 「and 1 more」면 PASS 다. 셋 이하면
+    # 이 경우를 만들지 못한 것이라 UNKNOWN 이다
     mod = helper(tmp_path)
-    base = {**COMMON, **GOOD["RL45-web"], "en_stuck_n": "3"}
-    shown = "#4 group … · #5 group … · nothing else needs a look"
-    got = mod.judge("RL45-web", {**base, "en_more": "0", "en_stuck_text": shown})
+    base = {**COMMON, **GOOD["RL45-web"]}
+    shown = "#4 group … · #5 group … · #6 needs action · nothing else needs a look"
+    got = mod.judge("RL45-web", {**base, "en_more_n": "0", "en_nothing_else": "1",
+                                 "en_stuck_text": shown})  # fmt: skip
     assert got.startswith("FAIL ") and "nothing else needs a look" in got, got
-    assert mod.judge("RL45-web", {**base, "en_more": "1"}).startswith("PASS ")
-    got = mod.judge("RL45-web", {**base, "stuck_total": "3"})
+    assert mod.judge("RL45-web", base).startswith("PASS ")
+    got = mod.judge("RL45-web", {**base, "stuck_min": "3"})
     assert got.startswith("UNKNOWN "), got
+    # 줄이 다섯이면 「and 2 more」 — 세 줄 + 2 가 다섯을 다 센다
+    assert mod.judge("RL45-web", {**base, "stuck_min": "5", "en_more_n": "2"}).startswith("PASS ")
+    got = mod.judge("RL45-web", {**base, "stuck_min": "5", "en_more_n": "1"})
+    assert got.startswith("FAIL "), got
+
+
+def test_pr4_unreachable_row_without_a_ticking_control_row_is_unknown(tmp_path: Path) -> None:
+    # 듣는 행(대조군)도 안 센다면 「끊긴 행은 안 센다」는 아무것도 말하지 않는다 — PASS 가 아니다
+    mod = helper(tmp_path)
+    base = {**COMMON, **GOOD["RL28-web"]}
+    for change in ({"en_live_ticks": "0"}, {"ko_live_el_same": "1"}, {"en_live_bar_ticks": "0"},
+                   {"en_live_scaled": "0"}, {"ko_live_lane": "0"}):  # fmt: skip
+        got = mod.judge("RL28-web", {**base, **change})
+        assert got.startswith("UNKNOWN ") and "control" in got, (change, got)
+    got = mod.judge("RL28-web", {**base, "en_live_found": "0"})
+    assert got.startswith("FAIL "), got
+
+
+def test_pr4_new_pr3_facts_are_recorded_by_a_runner(tmp_path: Path) -> None:
+    """판정이 읽는 사실마다 그 사실을 적는 줄이 하네스에 있다 — 판정만 있고 아무도 안 적으면
+    실기는 늘 UNKNOWN 이다. 웹 행 사실은 도우미의 ROW_KEYS 가 적는다."""
+    text = script_text()
+    mod = helper(tmp_path)
+    web = set(WEB_NO_BAND) | set(WEB_OK)
+    asked = {
+        "RL28": ("eta_text",),
+        "RL28-web": ("found_grace_said", "found_cancel_said"),
+        "RL28-cancel": tuple(GOOD["RL28-cancel"]),
+        "RL45": ("owner_line", "eta_held", "eta_no_ahead", "top_empty_held"),
+        "RL45-web": ("stuck_min", "stuck_max", "en_more_n", "en_nothing_else"),
+        "RL45-empty": tuple(k for k in GOOD["RL45-empty"] if k not in web),
+    }
+    for step, keys in asked.items():
+        for key in keys:
+            found = re.search(rf"\bfact {re.escape(step)} {key}\b", text)
+            assert found, f"no runner writes {step} {key}"
+    rows = ("en_grace_", "en_live_")
+    row_keys = {k.split("_", 2)[2] for k in GOOD["RL28-web"] if k.startswith(rows)}
+    assert row_keys - {"lane"} <= set(mod.ROW_KEYS), sorted(row_keys - set(mod.ROW_KEYS))
+    assert re.search(r'fact RL28-web "\$\{lang\}_\$\{role\}_lane"', text)
+    assert re.search(r'web rl28 "grace=\$y,cancel=\$y2,live=\$y3"', text)
 
 
 def test_pr4_facts_file_and_absent_values_read_as_not_observed(tmp_path: Path) -> None:
