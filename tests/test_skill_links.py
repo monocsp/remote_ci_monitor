@@ -82,7 +82,8 @@ DEFINES_RE = re.compile(
 )
 #: 정의를 다시 적는 줄 — 심각도 낱말과 정본의 기준 낱말 둘 이상이 한 줄에.
 CRITERIA = ("fail-open", "traceback", "secret", "auth", "corrupt", "migrat", "mutcheck")
-TEST_SERVER_WORDS = ("8790", "8899", "rcm-devtest")
+#: `pkill` — 이름으로 죽이지 않는 규칙(「띄울 때 적은 pid 에만」)도 정본 한 곳에만 둔다.
+TEST_SERVER_WORDS = ("8790", "8899", "rcm-devtest", "pkill")
 TOML_BLOCK_RE = re.compile(r"^```toml\n(.*?)^```", re.S | re.M)
 #: 워크트리 `.venv` 가 아닌 명령 꼴. 허용: `./.venv/bin/python tools/…` ·
 #: `./.venv/bin/python scripts/mutcheck.py` · `./.venv/bin/ruff`.
@@ -297,7 +298,8 @@ ADOPTED = (
     # 다시 받는 계획-시험 대조: 앞 검토를 주고, 바뀌지 않은 행은 이월하고,
     # 새 약점은 반례가 있어야 받는다.
     ("skills/_shared/scenario-trace.md", "## Re-reviews"),
-    ("skills/_shared/scenario-trace.md", "counterexample"),
+    # 바늘은 규칙 문장 그 자체다. 낱말 하나면 표의 다른 칸에 남아, 문장을 지워도 초록이다.
+    ("skills/_shared/scenario-trace.md", "**A new weakness needs a counterexample.**"),
     ("skills/_shared/scenario-trace.md", "carried r<N-1>"),
     ("skills/_shared/scenario-trace.md", "## Ambiguous"),
     # 사람이 읽는 글에서는 SOUND · COVERED 대신 커버리지 말로 쓴다.
@@ -316,13 +318,21 @@ ADOPTED = (
     ("skills/edge-audit/SKILL.md", "edge-scope.md) «Live lane»"),
     ("skills/workplan/SKILL.md", "edge-scope.md) «Live lane»"),
     ("agents/isolated-verifier.md", "P5 live lane"),
+    # 「Rounds」 1: 읽는 라운드만 나란히, 실기 레인은 명령을 돌리니 차례로.
+    ("agents/isolated-verifier.md", "its live lane runs one after another"),
+    # 실기 레인의 신호는 띄울 때 적은 pid 에만 보낸다. 정본은 test-server, 나머지는 가리킨다.
+    ("skills/_shared/test-server.md", "never by name"),
+    ("skills/_shared/edge-scope.md", "the test worker's recorded pid"),
+    ("skills/edge-audit/SKILL.md", "test-server.md «Parallel servers and cleanup»"),
     # 압축 뒤에는 돌리던 스킬과 그 단계 절을 다시 연다.
-    ("skills/_shared/stage-lead.md", "reopen"),
+    ("skills/_shared/stage-lead.md", "reopen the `SKILL.md` you were running"),
     ("skills/dev-batch/SKILL.md", "«When a lead stops or is needed again»"),
     # 이번 세션에서 부딪친 것: 하네스만 바꾼 PR · 머지 뒤 dev · 시계 주입 · 변이 앵커.
     ("skills/pr/SKILL.md", "tests/test_skill_links.py"),
     ("skills/pr/SKILL.md", "`rcm/ci` on the merge commit"),
     ("skills/pr/SKILL.md", "git branch -d"),
+    ("skills/pr/SKILL.md", "the main session's `dev` worktree"),
+    ("skills/pr/SKILL.md", "git branch -r --contains"),
     ("agents/build-lead.md", "injected clock"),
     ("agents/build-lead.md", "pattern not found"),
     # QA: 코드 지적은 문서만 바꾼 커밋으로 닫지 않는다 · 그림 이름의 배율 접미사.
@@ -337,19 +347,61 @@ def test_each_adopted_rule_sits_where_it_belongs(rel: str, needle: str) -> None:
     assert needle in text, f".claude/{rel} lacks {needle!r}"
 
 
+#: (파일, 없어야 하는 글) — 고친 뒤 남으면 안 되는 옛 문장.
+RETIRED = (
+    # 「Rounds」 1 의 옛 말은 P5 전체가 나란히 돈다고 읽힌다(실기 레인은 차례로 돈다).
+    ("agents/isolated-verifier.md", "P5's run in parallel"),
+)
+
+
+@pytest.mark.parametrize(("rel", "gone"), RETIRED)
+def test_each_retired_sentence_is_gone(rel: str, gone: str) -> None:
+    text = (CLAUDE / rel).read_text(encoding="utf-8")
+    assert gone not in text, f".claude/{rel} still says {gone!r}"
+
+
+def test_the_edge_scope_page_gives_the_reason_not_a_quote() -> None:
+    # 규칙 쪽에는 다른 프로젝트 오너의 말과 날짜를 옮기지 않고 규칙의 이유만 쓴다.
+    text = (SKILLS / "_shared" / "edge-scope.md").read_text(encoding="utf-8")
+    assert not re.search(r"[\uac00-\ud7a3]", text), "edge-scope.md quotes Korean words"
+    assert "2026-11-26" not in text and "came from asked" not in text
+
+
+def test_the_pr_cleanup_prunes_before_it_deletes_the_branch() -> None:
+    # upstream 이 사라진 뒤 `git branch -d` 는 HEAD 와 견준다. 먼저 받아 와야 머지된 가지를 안다.
+    text = (SKILLS / "pr" / "SKILL.md").read_text(encoding="utf-8")
+    step = text[text.index("Clean up") :]
+    assert step.index("git fetch --prune") < step.index("git branch -d <type>")
+
+
 #: 셈이 든 규칙 — (정본, 이름, 규칙을 적는 문단의 꼴). 문단 = 빈 줄이나 목록 항목 머리로 나뉜
 #: 덩어리 · 표의 한 행. 목록 전체를 한 덩어리로 보면 다른 항목의 「three times」(같은 게이트
 #: 실패)가 UNSOUND 와 한 덩어리에 들어 거짓 빨강이 난다.
+#: 셈 — 숫자 낱말(영어 · 한국어)과 숫자. 「first · second · two」는 넣지 않는다. 「the first
+#: review」 「From the second review on」 같은 절차 말이 규칙으로 잡힌다.
+_COUNT = (
+    r"\b(?:twice|thrice|three|four|five|six|seven|eight|nine|ten"
+    r"|third|fourth|fifth|sixth|seventh|eighth|ninth|tenth|in a row)\b"
+    r"|\b\d+\s*(?:times|x|rounds?|reviews?)\b|\b\d+(?:st|nd|rd|th)\b"
+    r"|(?:두|세|네|다섯|여섯|일곱|[2-9])\s*번|연달아|연속"
+)
+#: 사람에게 올리는 말. 이 말 없이 「UNSOUND 가 일곱 번 나왔다」고 하면 규칙이 아니라 내력이다
+#: (`scenario-trace.md` 「Re-reviews」 첫 문단).
+_ESCALATE = r"\b(?:owner|person|people|human|escalat\w*|stops?)\b|사람|오너|멈"
+ESCALATION_RE = re.compile(rf"(?=.*\bUNSOUND\b)(?=.*(?:{_COUNT}))(?=.*(?:{_ESCALATE}))", re.S)
 COUNTED_RULES = (
     (
         AGENTS / "isolated-verifier.md",
         "plan-to-test escalation",
-        re.compile(r"(?=.*\bUNSOUND\b)(?=.*\b(twice|three|third|five|fifth|in a row)\b)", re.S),
+        ESCALATION_RE,
+        # 정본의 그 문단은 두 조건을 다 적는다: 같은 행이 두 번 연달아 · 다섯 번째.
+        (re.compile(r"\btwice in a row\b"), re.compile(r"\bfifth\b")),
     ),
     (
         SKILLS / "_shared" / "edge-scope.md",
         "live lane cap",
         re.compile(r"(?=.*\blive lane\b)(?=.*\b(five|5)\b)", re.S | re.I),
+        (re.compile(r"\bat most five rows per PR\b"),),
     ),
 )
 
@@ -360,13 +412,14 @@ def _paragraphs(text: str) -> list[str]:
 
 
 @pytest.mark.parametrize(
-    ("canon", "name", "pattern"), COUNTED_RULES, ids=[n for _, n, _ in COUNTED_RULES]
+    ("canon", "name", "pattern", "musts"), COUNTED_RULES, ids=[n for _, n, _, _ in COUNTED_RULES]
 )
 def test_counted_rules_are_written_only_in_their_canon(
-    canon: Path, name: str, pattern: re.Pattern[str]
+    canon: Path, name: str, pattern: re.Pattern[str], musts: tuple[re.Pattern[str], ...]
 ) -> None:
     paragraphs = _paragraphs(canon.read_text(encoding="utf-8"))
-    assert any(pattern.match(p) for p in paragraphs), f"{_rel(canon)} no longer states the {name}"
+    stated = [p for p in paragraphs if pattern.match(p) and all(m.search(p) for m in musts)]
+    assert stated, f"{_rel(canon)} no longer states the {name} ({[m.pattern for m in musts]})"
     elsewhere = {
         _rel(p): [
             q.strip()[:80] for q in _paragraphs(p.read_text(encoding="utf-8")) if pattern.match(q)
@@ -376,6 +429,26 @@ def test_counted_rules_are_written_only_in_their_canon(
     }
     restated = {k: v for k, v in elsewhere.items() if v}
     assert not restated, f"the {name} is restated outside {_rel(canon)}: {restated}"
+
+
+@pytest.mark.parametrize(
+    ("text", "caught"),
+    [
+        ("still UNSOUND twice in a row: the owner decides", True),
+        ("the fifth UNSOUND goes to the owner", True),
+        ("UNSOUND four times: escalate", True),
+        ("UNSOUND 3 times, then stop", True),
+        ("the 4th UNSOUND goes to a person", True),
+        ("UNSOUND 이 세 번이면 사람에게 올린다", True),
+        ("UNSOUND 다섯 번째면 오너에게", True),
+        # 셈이 없다 · 사람에게 올리는 말이 없다(내력) · 절차의 「second」.
+        ("`UNSOUND` sends the tests back to a new lead round", False),
+        ("came back `UNSOUND` seven times running while its WEAK count went 8, 11", False),
+        ("From the second review on, after an `UNSOUND`, the owner reads it", False),
+    ],
+)
+def test_the_escalation_pattern_reads_each_form(text: str, caught: bool) -> None:
+    assert bool(ESCALATION_RE.match(text)) is caught
 
 
 @pytest.mark.parametrize(
