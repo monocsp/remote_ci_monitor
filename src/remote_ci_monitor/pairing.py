@@ -633,12 +633,15 @@ class PairingMixin:
                     code="name_taken",
                     name=name,
                 )
-            win.state, win.closed_at = "used", now  # mutcheck: pair-code-reusable
+            pool = win.pool if kind == "worker" else None
+            # 답에 실을 값은 행을 쓰기 **전에** 만든다(G2). 여기서 실패하면 창은 열린 채이고
+            # 토큰도 없다. 행을 쓴 뒤에는 실패할 수 있는 일이 남지 않는다(MAC 은 순수 계산)
+            count = self.pair_presets_count(pool) if pool is not None else None
             pair_id = secrets.token_hex(16)
             pair_secret = cp.format_pair_secret(
                 pair_id, cp.derive_pair_secret(self.pair_key, pair_id)
             )
-            pool = win.pool if kind == "worker" else None
+            server_nonce = new_nonce()
             try:
                 token = self.store.add_paired_token(
                     name,
@@ -650,8 +653,8 @@ class PairingMixin:
                     now=now,
                     replace=win.replace,
                 )
-            except TokenNameTaken as e:
-                win.state, win.closed_at = "open", None  # 그 사이 rcm token add 가 이름을 가져갔다
+            # 그 사이 rcm token add 가 이름을 가져갔다(G1) — 창은 건드리지 않아 같은 코드가 남는다
+            except TokenNameTaken as e:  # mutcheck: pair-name-race-burns-code
                 raise PairRefusal(
                     409,
                     f"the coordinator already has a token named '{name}'",
@@ -670,6 +673,8 @@ class PairingMixin:
                     "new one (rcm pair) and run this again",
                     code="pair_failed",
                 ) from e
+            # 창은 토큰 행이 생긴 뒤에야 「쓰임」이다 — 잠금 안이라 다른 교환은 그 사이를 못 본다
+            win.state, win.closed_at = "used", now  # mutcheck: pair-code-reusable
             win.paired = {
                 "name": name,
                 "kind": kind,
@@ -679,8 +684,6 @@ class PairingMixin:
                 "at": now,
             }
             code_key = win.code_key
-        count = self.pair_presets_count(pool) if pool is not None else None
-        server_nonce = new_nonce()
         mac = cp.exchange_response_mac(
             code_key,
             kind=kind,

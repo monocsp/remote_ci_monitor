@@ -9305,6 +9305,21 @@ MUTANTS = (
             "test_pi46_i_undrained_chunked_or_encoded_bodies_get_no_mac",
         ),
     ),
+    Mutant(
+        # 교환이 답에 실을 값을 만들기 전에 창을 「쓰임」으로 — 그 계산이 실패하면 코드는 탔는데
+        # 토큰은 없다(P6 G2)
+        name="pair-exchange-burns-code-before-commit",
+        path="src/remote_ci_monitor/pairing.py",
+        old="            count = self.pair_presets_count(pool) if pool is not None else None\n",
+        new=(
+            '            win.state, win.closed_at = "used", now\n'
+            "            count = self.pair_presets_count(pool) if pool is not None else None\n"
+        ),
+        tests=(
+            "tests/test_pairing_server.py::"
+            "test_pi8_c_g2_the_answer_is_ready_before_the_token_row_is_written",
+        ),
+    ),
 )
 
 

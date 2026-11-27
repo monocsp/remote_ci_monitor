@@ -910,6 +910,27 @@ def test_pi8_b_a_used_window_leaves_a_listed_revocable_token(ps):
     assert ps.req("GET", "/worker/spec", token="p")[0] == 401
 
 
+def test_pi8_c_g2_the_answer_is_ready_before_the_token_row_is_written(ps, monkeypatch):
+    """G2: 답에 실을 값(`presets_count` 등)을 행을 쓰기 전에 만든다. 그 계산이 실패하면 창은
+    열린 채이고 토큰도 생기지 않는다 — 커밋한 뒤에 500 이 나 코드는 쓰였는데 토큰만 남는 일이
+    없다."""
+    doc = ps.opened("worker")
+    before = token_rows(ps)
+
+    def broken(pool: str) -> int:
+        raise RuntimeError("presets could not be counted")
+
+    monkeypatch.setattr(ps.app, "pair_presets_count", broken)
+    with pytest.raises(RuntimeError):
+        ps.app.pair_exchange(ps.exchange_body(doc["code"], "worker", "build-21"), "192.0.2.7")
+    assert ps.app.pair_window_state("worker")["state"] == "open"
+    assert token_rows(ps) == before
+    monkeypatch.undo()
+    status, out = ps.exchange(ps.exchange_body(doc["code"], "worker", "build-21"))
+    assert (status, out["name"]) == (200, "build-21")
+    assert token_rows(ps) == before + 1
+
+
 class CompareSpy:
     def __init__(self):
         self.calls = 0
