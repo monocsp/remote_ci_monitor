@@ -540,7 +540,7 @@ class PairServer(WorkerServer):
             "v": 1,
             "pair_id": pair_id,
             "nonce": nonce or secrets.token_hex(32),
-            "dialed": dialed or self.dialed,
+            "dialed": self.dialed if dialed is None else dialed,
         }
         return body, self.req("POST", "/pair/hello", json_body=body)
 
@@ -731,6 +731,13 @@ def test_pi50_a_without_scrypt_post_pair_is_501_and_hello_still_works(ps, monkey
 
 
 # ── PI5 hello 중계 · 재생 · Store 0 ────────────────────────────────────────
+
+
+def test_pi5_a_any_dialed_string_outside_the_set_is_421_not_a_shape_error(ps):
+    """`dialed` 의 꼴은 명세가 정하지 않았다 — 문자열이면 자기 주소 집합과 대조할 뿐이다(§4.2)."""
+    for dialed in ("", "http://" + "a" * 400 + ":1", "not a url"):
+        _, (status, body) = ps.hello(fresh_pair_id(), dialed=dialed)
+        assert (status, body["code"]) == (421, "host_not_this_server"), dialed
 
 
 def test_pi5_a_a_relayed_hello_naming_another_address_is_421_without_mac(ps):

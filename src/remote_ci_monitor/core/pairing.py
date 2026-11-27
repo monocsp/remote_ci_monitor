@@ -355,7 +355,6 @@ def hello_request_ok(body: Any) -> bool:
         and PAIR_ID_RE.fullmatch(body["pair_id"]) is not None
         and _hex64(body.get("nonce"))
         and isinstance(body.get("dialed"), str)
-        and 0 < len(body["dialed"]) <= 300
     )
 
 
