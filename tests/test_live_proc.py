@@ -442,3 +442,389 @@ def test_the_cli_has_no_lookup_by_name() -> None:
     for word in ("start", "signal", "stop-all"):
         assert word in out.stdout
     assert "pkill" not in out.stdout and "pgrep" not in out.stdout
+
+
+# --- batch-6: 격리 확인의 지적 ---------------------------------------------------
+# 사례마다 `# B6-<n>` 은 batch-6 in 파일의 항목 번호다. 도구 자체 검사와 `gp.decide` 가 겹치는
+# 사례는 어느 한쪽을 지워도 초록이라 지킴을 잠그지 못한다 — 그래서 한쪽만 잡는 사례를 따로 둔다.
+
+
+def _good_server(d: Path) -> list[str]:
+    return ["./.venv/bin/rcm", "serve", "--config", f"{d}/server.toml"]
+
+
+def _no_ps(tmp_path: Path) -> str:
+    return str(tmp_path / "no-such-ps")
+
+
+@pytest.mark.parametrize(
+    "extra",
+    [
+        ["--port", "8787"],
+        ["--port=8787"],
+        ["--port", "08787"],  # argparse 의 type=int 는 int() 그대로 — 앞의 0 도 8787 이다
+        ["--bind", "127.0.0.1:8787"],
+        ["--server", "http://127.0.0.1:8787"],
+    ],
+)
+def test_b6_1_port_8787_on_the_command_line_is_refused(
+    tmp_path: Path, d: Path, extra: list[str]
+) -> None:
+    # B6-1 — CLI 의 `--port` 는 설정 위에 얹힌다. 설정이 8790 이어도 `--port 8787` 이면 운영 포트다.
+    reason = _refusal(tmp_path / "home", d, [*_good_server(d), *extra])
+    assert reason and "8787" in reason, reason
+
+
+def test_b6_1_another_port_on_the_command_line_is_allowed(tmp_path: Path, d: Path) -> None:
+    # B6-1 — 대조: 운영이 아닌 포트는 그대로 띄운다.
+    assert _refusal(tmp_path / "home", d, [*_good_server(d), "--port", "8791"]) is None
+
+
+@pytest.mark.parametrize("toml", ["", 'title = "no server table"\n', "[other]\nport = 8790\n"])
+def test_b6_2_a_config_without_a_server_table_is_port_8787(
+    tmp_path: Path, d: Path, toml: str
+) -> None:
+    # B6-2 — `[server]` 가 없으면 `ServerConfig.port` 의 기본값 8787 로 뜬다.
+    (d / "bare.toml").write_text(toml, encoding="utf-8")
+    argv = ["./.venv/bin/rcm", "serve", "--config", f"{d}/bare.toml"]
+    reason = _refusal(tmp_path / "home", d, argv)
+    assert reason and "8787" in reason, reason
+
+
+@pytest.mark.parametrize(
+    "extra",
+    [
+        ["--por", "8787"],
+        ["--po=8787"],
+        ["--serv", "http://127.0.0.1:8787"],
+        ["--data-d", "{home}/.local/share/rcm"],
+        ["--data-=", "{home}/.local/share/rcm"],
+        ["--conf", "{home}/.config/rcm/server.toml"],
+        ["--confi={home}/.config/rcm/server.toml"],
+    ],
+)
+def test_b6_3_an_abbreviated_option_is_read_as_the_whole_option(
+    tmp_path: Path, d: Path, extra: list[str]
+) -> None:
+    # B6-3 — rcm 의 argparse 는 `allow_abbrev` 를 끄지 않아 `--por 8787` 이 `--port 8787` 이다.
+    home = tmp_path / "home"
+    (home / ".config" / "rcm").mkdir(parents=True)
+    words = [word.format(home=home) for word in extra]
+    argv = ["./.venv/bin/rcm", "serve", "--config", f"{d}/server.toml", *words]
+    assert _refusal(home, d, argv), argv
+
+
+def test_b6_3_an_abbreviated_option_with_a_test_value_is_allowed(tmp_path: Path, d: Path) -> None:
+    # B6-3 — 대조: 줄임말을 거부하는 것이 아니라 그 값을 본다.
+    assert _refusal(tmp_path / "home", d, [*_good_server(d), "--por", "8791"]) is None
+
+
+def test_b6_4_a_failing_ps_blocks_signal(tmp_path: Path, d: Path, procs: list) -> None:
+    # B6-4 — `ps` 를 못 돌리면 그 프로세스가 끝났는지 모른다. 「not running」이 아니라 ps 가 이유다.
+    proc = _start(d, "worker", [*SLEEPER, "--config", f"{d}/worker.toml"], procs)
+    with pytest.MonkeyPatch.context() as m:
+        m.setattr(lp, "PS_COMMAND", _no_ps(tmp_path), raising=False)
+        code, lines = _send(d, "worker", "TERM", expect_config=f"{d}/worker.toml")
+    _assert_blocked(code, lines)
+    reasons = [line for line in lines if line.startswith("reason:")]
+    assert reasons and "ps" in reasons[0] and "not running" not in reasons[0], lines
+    assert proc.poll() is None
+
+
+def test_b6_4_a_ps_that_hangs_blocks_stop_all(tmp_path: Path, d: Path, procs: list) -> None:
+    # B6-4 — 시간 초과도 같다: 아무것도 보내지 않고 BLOCKED, 종료 3.
+    proc = _start(d, "server", [*SLEEPER, "--config", f"{d}/server.toml"], procs)
+    slow = tmp_path / "slow-ps"
+    slow.write_text("#!/bin/sh\nsleep 5\n", encoding="utf-8")
+    slow.chmod(0o755)
+    out = io.StringIO()
+    with pytest.MonkeyPatch.context() as m:
+        m.setattr(lp, "PS_COMMAND", str(slow), raising=False)
+        m.setattr(lp, "PS_TIMEOUT", 0.2, raising=False)
+        code = lp.stop_all(d, grace=0.2, out=out)
+    lines = out.getvalue().splitlines()
+    assert code == 3, lines
+    assert any("server" in line and "BLOCKED" in line for line in lines), lines
+    assert not any("not running" in line or "stopped by" in line for line in lines), lines
+    assert proc.poll() is None, "stop-all signalled a process it could not confirm"
+
+
+def test_b6_4_ps_failing_after_sigterm_keeps_the_process_pending(
+    tmp_path: Path, d: Path, procs: list
+) -> None:
+    # B6-4 — SIGTERM 뒤 기다리는 동안 `ps` 가 죽으면 「stopped by SIGTERM」이 아니다.
+    # 확인 못 한 것은 남겨 두고(SIGKILL 도 보내지 않는다) BLOCKED 로 끝낸다.
+    stubborn = f"import signal, time; signal.signal(signal.SIGTERM, signal.SIG_IGN); {READY}"
+    worker = _start(d, "worker", [sys.executable, "-c", stubborn], procs)
+    _wait_ready(d, "worker")
+    real_kill = os.kill
+    sent: list[int] = []
+    out = io.StringIO()
+    with pytest.MonkeyPatch.context() as m:
+
+        def kill(pid: int, sig: int) -> None:
+            sent.append(sig)
+            real_kill(pid, sig)
+            m.setattr(lp, "PS_COMMAND", _no_ps(tmp_path), raising=False)
+
+        m.setattr(lp.os, "kill", kill)
+        code = lp.stop_all(d, grace=0.5, out=out)
+    lines = out.getvalue().splitlines()
+    assert code == 3, lines
+    assert not any("stopped by SIGTERM" in line for line in lines), lines
+    assert any("worker" in line and "BLOCKED" in line for line in lines), lines
+    assert sent == [signal.SIGTERM], sent
+    assert worker.poll() is None
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ["rm", "-rf", "{checkout}/src"],
+        ["git", "-C", "{checkout}", "switch", "-c", "elsewhere"],
+    ],
+)
+def test_b6_5_only_the_guard_hook_refuses_these(tmp_path: Path, d: Path, argv: list[str]) -> None:
+    # B6-5 — 도구 자체 검사는 `--dir` · 설정 · 포트만 본다. 운영 체크아웃을 지우거나 옮기는 명령은
+    # 훅의 판정(`gp.decide`)만 막는다 — 그 호출을 지우면 이 사례가 빨개진다.
+    checkout = tmp_path / "prod-checkout"
+    (checkout / "src").mkdir(parents=True)
+    prod = gp.Production(checkout=checkout)
+    words = [word.format(checkout=checkout) for word in argv]
+    reason = _refusal(tmp_path / "home", d, words, prod=prod)
+    assert reason and "guard_production" in reason, reason
+
+
+def test_b6_5_the_guard_hook_is_called_with_the_inner_command(
+    tmp_path: Path, d: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # B6-5 — `gp.decide` 가 불리지 않으면 빨개진다: 받은 명령 글과 그 판정이 거부 이유가 된다.
+    calls: list[tuple[str, dict]] = []
+
+    def decide(tool: str, payload: dict, *args: object, **kw: object) -> object:
+        calls.append((tool, payload))
+        return gp.Verdict("deny", "sentinel-from-the-hook")
+
+    monkeypatch.setattr(lp.gp, "decide", decide)
+    argv = [*SLEEPER, "a b"]
+    reason = _refusal(tmp_path / "home", d, argv)
+    assert calls == [("Bash", {"command": lp.shlex.join(argv)})], calls
+    assert reason and "sentinel-from-the-hook" in reason, reason
+
+
+@pytest.mark.parametrize(
+    ("argv", "environ"),
+    [
+        (["./.venv/bin/rcm", "serve", "--config", "{d}/server.toml"],
+         {"RCM_SERVER_DATA_DIR": "{home}/.local/share/rcm"}),
+        (["./.venv/bin/rcm", "serve", "--config", "{d}/server.toml"], {"RCM_SERVER_PORT": "8787"}),
+        (["./.venv/bin/rcm", "serve"], {"RCM_CONFIG": "{home}/.config/rcm/server.toml"}),
+        (["./.venv/bin/rcm", "run", "slow", "--by", "acceptance"], {}),
+        (["./.venv/bin/rcm", "status"], {"RCM_TOKEN": "x"}),
+    ],
+)  # fmt: skip
+def test_b6_5_environment_cases_are_refused(
+    tmp_path: Path, d: Path, argv: list[str], environ: dict[str, str]
+) -> None:
+    # B6-5 — 환경으로 운영에 닿는 꼴: 운영 data_dir · 운영 포트 · 운영 설정,
+    # 서버 주소 없는 클라이언트.
+    home = tmp_path / "home"
+    conf = home / ".config" / "rcm"
+    conf.mkdir(parents=True)
+    (conf / "server.toml").write_text(f'[server]\nport = 8790\ndata_dir = "{d}"\n', "utf-8")
+    words = [word.format(d=d) for word in argv]
+    env = {key: value.format(home=home) for key, value in environ.items()}
+    assert _refusal(home, d, words, environ=env), (words, env)
+
+
+def test_b6_5_a_test_config_through_rcm_config_is_allowed(tmp_path: Path, d: Path) -> None:
+    # B6-5 — 대조: `RCM_CONFIG` 가 시험 설정이면 `--config` 없는 `rcm serve` 도 띄운다.
+    environ = {"RCM_CONFIG": f"{d}/server.toml"}
+    assert _refusal(tmp_path / "home", d, ["./.venv/bin/rcm", "serve"], environ=environ) is None
+
+
+def test_b6_5_a_readable_production_config_is_refused_for_its_place(
+    tmp_path: Path, d: Path
+) -> None:
+    # B6-5 — 운영 설정 폴더의 파일은 포트 · data_dir 가 시험 값이어도 거부한다
+    # (읽을 수 없어서가 아니라 그 자리여서).
+    home = tmp_path / "home"
+    conf = home / ".config" / "rcm"
+    conf.mkdir(parents=True)
+    (conf / "server.toml").write_text(f'[server]\nport = 8790\ndata_dir = "{d}"\n', "utf-8")
+    reason = _refusal(home, d, ["./.venv/bin/rcm", "serve", "--config", f"{conf}/server.toml"])
+    assert reason and "inside" in reason and str(conf) in reason, reason
+
+
+def test_b6_5_pid_one_is_refused_even_with_its_own_start_time(
+    d: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # B6-5 — pid 1 의 진짜 시작 시각을 적어도 보내지 않는다
+    # (시작 시각 검사만으로는 이 사례를 못 막는다).
+    (d / "worker.pid").write_text("1\n", encoding="utf-8")
+    (d / "worker.start").write_text(_ps(1, "lstart"), encoding="utf-8")
+    sent: list[tuple[int, int]] = []
+    monkeypatch.setattr(lp.os, "kill", lambda pid, sig: sent.append((pid, sig)))
+    code, lines = _send(d, "worker", "TERM")
+    _assert_blocked(code, lines)
+    out = io.StringIO()
+    assert lp.stop_all(d, grace=0.1, out=out) == 3, out.getvalue()
+    assert sent == []
+
+
+def test_b6_5_an_unreaped_child_is_a_zombie_and_counts_as_gone(
+    d: Path, procs: list, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # B6-5 — 부모(이 pytest)가 거두지 않은 자식은 좀비로 남고 `ps` 는 그 시작 시각을 그대로 찍는다.
+    # 도구는 Z 갈래로 「끝남」을 본다 — 좀비에 신호를 보내 「보냈다」고 하지 않는다.
+    proc = _start(d, "client", [sys.executable, "-c", "pass"], procs)
+    deadline = time.monotonic() + 10
+    while not _ps(proc.pid, "stat").strip().startswith("Z"):
+        assert time.monotonic() < deadline, "the child never became a zombie"
+        time.sleep(0.05)
+    sent: list[tuple[int, int]] = []
+    with monkeypatch.context() as m:
+        m.setattr(lp.os, "kill", lambda pid, sig: sent.append((pid, sig)))
+        code, lines = _send(d, "client", "INT")
+        out = io.StringIO()
+        all_code = lp.stop_all(d, grace=0.1, out=out)
+    _assert_blocked(code, lines)
+    assert any("not running" in line for line in lines), lines
+    assert all_code == 0 and "client: not running" in out.getvalue(), out.getvalue()
+    assert sent == []
+
+
+def test_b6_7_a_child_that_ends_at_once_is_exit_1_with_its_log(d: Path) -> None:
+    # B6-7 — 곧바로 죽은 자식을 `started` · 종료 0 으로 말하지 않는다: 종료 1 과 로그 꼬리.
+    program = "import sys; print('boom-from-the-child', flush=True); sys.exit(5)"
+    out = subprocess.run(
+        [sys.executable, str(ROOT / "tools" / "live_proc.py"), "start", "--dir", str(d),
+         "--name", "client", "--", sys.executable, "-c", program],
+        capture_output=True, text=True, timeout=20,
+    )  # fmt: skip
+    assert out.returncode == 1, (out.stdout, out.stderr)
+    assert "FAILED" in out.stdout and "boom-from-the-child" in out.stdout, out.stdout
+
+
+def test_b6_7_ps_failing_right_after_the_start_reaps_the_child(
+    tmp_path: Path, d: Path, procs: list
+) -> None:
+    # B6-7 — 띄운 직후 시작 시각을 못 읽으면 신원이 없다. 산 자식을 거두고 종료 1.
+    made: list[subprocess.Popen] = []
+    real_popen = subprocess.Popen
+
+    def popen(*args: object, **kw: object) -> subprocess.Popen:
+        proc = real_popen(*args, **kw)  # type: ignore[call-overload]
+        made.append(proc)
+        procs.append(proc)
+        return proc
+
+    out = io.StringIO()
+    with pytest.MonkeyPatch.context() as m:
+        m.setattr(lp.subprocess, "Popen", popen)
+        m.setattr(lp, "PS_COMMAND", _no_ps(tmp_path), raising=False)
+        result = lp.start(d, "worker", [*SLEEPER, "--config", f"{d}/worker.toml"],
+                          places=_places(d.parents[2]), out=out)  # fmt: skip
+    assert result == 1, out.getvalue()
+    assert made and made[0].poll() is not None, "the unrecorded child is still running"
+    assert "FAILED" in out.getvalue()
+
+
+def _read_or_fail(call):
+    try:
+        return call()
+    except (OSError, UnicodeDecodeError) as error:
+        pytest.fail(f"raised {error!r} instead of BLOCKED")
+
+
+def test_b6_8_an_unreadable_record_is_blocked_and_stop_all_goes_on(d: Path, procs: list) -> None:
+    # B6-8 — 디렉터리인 pid 「파일」 하나에 stop-all 이 멈추지 않는다:
+    # 그 이름은 BLOCKED, 나머지는 거둔다.
+    (d / "bad.pid").mkdir()
+    server = _start(d, "server", [*SLEEPER, "--config", f"{d}/server.toml"], procs)
+    out = io.StringIO()
+    code = _read_or_fail(lambda: lp.stop_all(d, grace=1.0, out=out))
+    lines = out.getvalue().splitlines()
+    assert code == 3, lines
+    assert any(line.startswith("bad:") and "BLOCKED" in line for line in lines), lines
+    assert _rc(server, 5) == -signal.SIGTERM, lines
+
+
+@pytest.mark.parametrize("which", ["start-not-utf8", "pid-not-utf8", "pid-unreadable"])
+def test_b6_8_a_record_that_cannot_be_read_blocks_signal(d: Path, procs: list, which: str) -> None:
+    # B6-8 — UTF-8 아님 · 읽을 수 없음도 traceback 이 아니라 BLOCKED.
+    if which == "pid-unreadable" and os.geteuid() == 0:
+        pytest.skip("root reads a mode-000 file")
+    proc = _start(d, "worker", [*SLEEPER, "--config", f"{d}/worker.toml"], procs)
+    target = d / ("worker.start" if which.startswith("start") else "worker.pid")
+    if which.endswith("not-utf8"):
+        target.write_bytes(b"\xff\xfe\x00bad")
+    else:
+        target.chmod(0)
+    try:
+        code, lines = _read_or_fail(lambda: _send(d, "worker", "TERM"))
+    finally:
+        target.chmod(0o644)
+    _assert_blocked(code, lines)
+    assert proc.poll() is None
+
+
+def _start_with_blocked(d: Path, procs: list, sig: int, **kw) -> subprocess.Popen:
+    # 막힌 신호 마스크는 exec 를 지나 자식에게 간다(#267). 띄우는 동안만 막고 바로 되돌린다.
+    old = signal.pthread_sigmask(signal.SIG_BLOCK, {sig})
+    try:
+        proc = _start(d, "client", [sys.executable, "-c", f"import time; {READY}"], procs, **kw)
+    finally:
+        signal.pthread_sigmask(signal.SIG_SETMASK, old)
+    _wait_ready(d, "client")
+    return proc
+
+
+def test_b6_9_interactive_sigint_also_clears_a_blocked_mask(d: Path, procs: list) -> None:
+    # B6-9 — SIGINT 가 막힌 부모에서 띄워도 `--interactive-sigint` 의 자식은 SIGINT 로 끝난다.
+    proc = _start_with_blocked(d, procs, signal.SIGINT, interactive_sigint=True)
+    code, lines = _send(d, "client", "INT")
+    assert code == 0, lines
+    assert _rc(proc, 5) == -signal.SIGINT
+
+
+def test_b6_9_a_blocked_sigterm_is_not_inherited(d: Path, procs: list) -> None:
+    # B6-9 — 플래그 없이도 마스크는 비운다: 막힌 SIGTERM 을 물려받으면
+    # stop-all 의 SIGTERM 이 안 닿는다.
+    proc = _start_with_blocked(d, procs, signal.SIGTERM)
+    code, lines = _send(d, "client", "TERM")
+    assert code == 0, lines
+    assert _rc(proc, 5) == -signal.SIGTERM
+
+
+@pytest.mark.parametrize("failing", ["worker.pid", "worker.start"])
+def test_b6_10_a_failed_record_write_reaps_the_child(d: Path, procs: list, failing: str) -> None:
+    # B6-10 — pid · start 를 못 적으면 그 자식은 신원 없이 산다. 거두고 종료 1,
+    # 반쪽 기록은 남기지 않는다.
+    real_write = lp._write_atomically
+    pids: list[int] = []
+
+    def write(path: Path, text: str) -> None:
+        if path.name == "worker.pid":
+            pids.append(int(text))
+        if path.name == failing:
+            raise OSError(28, "No space left on device")
+        real_write(path, text)
+
+    out = io.StringIO()
+    with pytest.MonkeyPatch.context() as m:
+        m.setattr(lp, "_write_atomically", write)
+        result = _read_or_fail(
+            lambda: lp.start(
+                d,
+                "worker",
+                [*SLEEPER, "--config", f"{d}/worker.toml"],
+                places=_places(d.parents[2]),
+                out=out,
+            )  # fmt: skip
+        )
+    if isinstance(result, subprocess.Popen):
+        procs.append(result)
+    assert result == 1, out.getvalue()
+    assert pids and not _ps(pids[0], "lstart").strip(), "the unrecorded child is still running"
+    assert not (d / "worker.pid").exists() and not (d / "worker.start").exists()
