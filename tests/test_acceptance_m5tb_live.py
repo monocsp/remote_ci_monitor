@@ -1339,3 +1339,28 @@ def test_rl29_every_runner_can_be_rerun_with_only() -> None:
     r = sh("runners_for", "RL29")
     assert r.returncode == 0, r.stderr
     assert r.stdout.split() == ["run_claim_lost", "run_lost_ends"], r.stdout
+
+
+def test_rl15_orphan_death_is_timed_by_the_worker_line_not_by_the_harness_poll(
+    tmp_path: Path,
+) -> None:
+    # RL15 — 재실기(2026-11-27 01:24)에서 새 워커는 641.949 에 고아 줄
+    # 「orphan #8: stopped process group」을 적고 641.992 에 다음 잡을 집었다(제품은 맞다).
+    # 하네스는 worker_start 가 등록을 확인한 뒤에야 waitdead 를 시작해 그 끝난 시각(now)을
+    # 고아가 죽은 시각으로 써서 z_after_orphan 이 0 이었다
+    text = script_text()
+    start = text.index("run_orphan() {")
+    body = text[start : text.index("\n}\n", start)]
+    m = re.search(r't_dead=\$\(h firstline "\$W_LOG" "orphan #\$y: stopped process group"\)', body)
+    assert m, "run_orphan does not take the orphan's end from the worker's own log line"
+    mod = helper(tmp_path)
+    log = tmp_path / "w.log"
+    log.write_text(
+        "1795742641.971 [rcm worker] rcm worker rl15 · pool m5tb\n"
+        "1795742641.949 [rcm worker] orphan #8: stopped process group 59099\n",
+        encoding="utf-8",
+    )
+    r = subprocess.run([sys.executable, "-I", mod.__file__, "firstline", str(log),
+                        "orphan #8: stopped process group"],
+                       capture_output=True, text=True, timeout=15, check=True)  # fmt: skip
+    assert r.stdout.strip() == "1795742641.949", r.stdout
