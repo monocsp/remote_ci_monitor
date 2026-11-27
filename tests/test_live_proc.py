@@ -694,16 +694,23 @@ def test_b6_5_an_unreaped_child_is_a_zombie_and_counts_as_gone(
     assert sent == []
 
 
-def test_b6_7_a_child_that_ends_at_once_is_exit_1_with_its_log(d: Path) -> None:
+def test_b6_7_a_child_that_ends_at_once_is_exit_1_with_its_log(
+    d: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     # B6-7 — 곧바로 죽은 자식을 `started` · 종료 0 으로 말하지 않는다: 종료 1 과 로그 꼬리.
+    # B7-5 — 1초(SETTLE_SECONDS) 안에 죽기를 바라지 않는다: 부하에서는 파이썬이 뜨는 데만 1초를
+    # 넘긴다. 지켜보는 창을 넉넉히 늘려 자식이 반드시 그 안에서 끝나게 하고(도구는 끝나는 즉시
+    # 판정한다), 판정은 그 뒤에 본다. 같은 CLI 길(`main`)을 프로세스 안에서 부른다.
+    monkeypatch.setattr(lp, "SETTLE_SECONDS", 30.0)
     program = "import sys; print('boom-from-the-child', flush=True); sys.exit(5)"
-    out = subprocess.run(
-        [sys.executable, str(ROOT / "tools" / "live_proc.py"), "start", "--dir", str(d),
-         "--name", "client", "--", sys.executable, "-c", program],
-        capture_output=True, text=True, timeout=20,
-    )  # fmt: skip
-    assert out.returncode == 1, (out.stdout, out.stderr)
-    assert "FAILED" in out.stdout and "boom-from-the-child" in out.stdout, out.stdout
+    out = io.StringIO()
+    argv = ["start", "--dir", str(d), "--name", "client", "--", sys.executable, "-c", program]
+    began = time.monotonic()
+    code = lp.main(argv, places=_places(d.parents[2]), out=out)
+    assert code == 1, out.getvalue()
+    assert "FAILED" in out.getvalue() and "boom-from-the-child" in out.getvalue(), out.getvalue()
+    assert "exit 5" in out.getvalue(), out.getvalue()
+    assert time.monotonic() - began < 25, "the watch did not end when the child ended"
 
 
 def test_b6_7_ps_failing_right_after_the_start_reaps_the_child(
@@ -828,3 +835,227 @@ def test_b6_10_a_failed_record_write_reaps_the_child(d: Path, procs: list, faili
     assert result == 1, out.getvalue()
     assert pids and not _ps(pids[0], "lstart").strip(), "the unrecorded child is still running"
     assert not (d / "worker.pid").exists() and not (d / "worker.start").exists()
+
+
+# --- batch-7: 남은 빈틈 ---------------------------------------------------------
+# 사례마다 `# B7-<n>` 은 batch-7 in 파일의 항목 번호다. rcm 이 설정 값을 읽는 규칙
+# (`config._coerce_scalar`)과 덮어쓰기 순서(플래그 > 환경 > 설정 > 기본값)를 그대로 따른다.
+
+
+def _server_toml(d: Path, name: str, body: str) -> str:
+    (d / name).write_text(f'[server]\n{body}data_dir = "{d}"\n', encoding="utf-8")
+    return f"{d}/{name}"
+
+
+def _worker_toml(d: Path, name: str, server_line: str) -> str:
+    (d / name).write_text(f'{server_line}data_dir = "{d}/worker"\n', encoding="utf-8")
+    return f"{d}/{name}"
+
+
+@pytest.mark.parametrize("port", ['"8787"', '" 8787"', '"8787 "', '"08787"', '"\\t8787\\n"'])
+def test_b7_1_a_quoted_port_8787_is_refused(tmp_path: Path, d: Path, port: str) -> None:
+    # B7-1 — rcm 은 글로 적힌 포트를 `int(value.strip())` 로 읽는다(config.py `_coerce_scalar`).
+    # `port = "8787"` 은 정수 8787 과 같은 운영 포트다.
+    config = _server_toml(d, "quoted.toml", f"port = {port}\n")
+    reason = _refusal(tmp_path / "home", d, ["./.venv/bin/rcm", "serve", "--config", config])
+    assert reason and "8787" in reason, reason
+
+
+def test_b7_1_a_quoted_test_port_is_allowed(tmp_path: Path, d: Path) -> None:
+    # B7-1 — 대조: 글로 적힌 시험 포트는 그대로 띄운다.
+    config = _server_toml(d, "quoted.toml", 'port = " 8791 "\n')
+    assert _refusal(tmp_path / "home", d, ["./.venv/bin/rcm", "serve", "--config", config]) is None
+
+
+@pytest.mark.parametrize("port", ["true", "8787.0", '"x"', '"8787x"', "[8787]"])
+def test_b7_1_a_port_rcm_cannot_read_is_refused(tmp_path: Path, d: Path, port: str) -> None:
+    # B7-1 — rcm 이 설정 오류로 거부하는 꼴(참 · 실수 · 숫자 아님)은 무엇으로 뜰지 모른다
+    # — 띄우지 않는다.
+    config = _server_toml(d, "odd.toml", f"port = {port}\n")
+    reason = _refusal(tmp_path / "home", d, ["./.venv/bin/rcm", "serve", "--config", config])
+    assert reason and "port" in reason, reason
+
+
+@pytest.mark.parametrize(
+    "server_line",
+    ["", 'server = ""\n', 'server = "auto"\n', 'server = " AUTO "\n', 'server = "auto/"\n'],
+)
+def test_b7_2_a_worker_without_a_server_url_is_refused(
+    tmp_path: Path, d: Path, server_line: str
+) -> None:
+    # B7-2 — 워커 설정에 주소가 없거나 비었거나 `auto` 고 `--server` 도 없으면 `rcm worker` 는 mDNS
+    # 로 서버를 찾는다(cli.py `_worker_config` 의 `wants_discovery`) — 운영 서버를 찾을 수 있다.
+    config = _worker_toml(d, "w.toml", server_line)
+    reason = _refusal(tmp_path / "home", d, ["./.venv/bin/rcm", "worker", "--config", config])
+    assert reason and "discover" in reason, reason
+
+
+@pytest.mark.parametrize(
+    "flag", [["--server", "auto"], ["--server", ""], ["--server="], ["--serv", "Auto"]]
+)
+def test_b7_2_a_worker_told_to_discover_on_the_command_line_is_refused(
+    tmp_path: Path, d: Path, flag: list[str]
+) -> None:
+    # B7-2 — 플래그가 설정을 이긴다: 설정의 시험 주소 위에 `--server auto` 면 찾으러 간다.
+    argv = ["./.venv/bin/rcm", "worker", "--config", f"{d}/worker.toml", *flag]
+    reason = _refusal(tmp_path / "home", d, argv)
+    assert reason and "discover" in reason, reason
+
+
+@pytest.mark.parametrize(
+    ("extra", "environ"),
+    [
+        ([], {"RCM_SERVER": "auto"}),
+        ([], {"RCM_SERVER": " AUTO/"}),
+        (["--server", "auto"], {"RCM_SERVER": "http://127.0.0.1:8791"}),
+        (["--server", ""], {}),
+    ],
+)
+def test_b7_2_a_client_told_to_discover_is_refused(
+    tmp_path: Path, d: Path, extra: list[str], environ: dict[str, str]
+) -> None:
+    # B7-2 — 클라이언트도 같다: 이긴 주소(`--server` > `RCM_SERVER`)가 `auto` 거나 없으면 찾는다.
+    argv = ["./.venv/bin/rcm", "run", "slow", "--by", "acceptance", *extra]
+    reason = _refusal(tmp_path / "home", d, argv, environ=environ)
+    assert reason and ("discover" in reason), reason
+
+
+def test_b7_2_a_client_with_a_test_flag_over_auto_is_allowed(tmp_path: Path, d: Path) -> None:
+    # B7-2 — 대조: `RCM_SERVER=auto` 여도 `--server` 의 시험 주소가 이긴다.
+    argv = ["./.venv/bin/rcm", "run", "slow", "--server", "http://127.0.0.1:8791"]
+    assert _refusal(tmp_path / "home", d, argv, environ={"RCM_SERVER": "auto"}) is None
+
+
+@pytest.mark.parametrize(
+    "server_line",
+    ["", 'server = "auto"\n', 'server = "http://127.0.0.1:8787"\n'],
+)
+def test_b7_3_a_worker_flag_server_wins_over_the_config(
+    tmp_path: Path, d: Path, server_line: str
+) -> None:
+    # B7-3 — `rcm worker` 는 `--server` 를 설정 위에 얹는다(config.py `load_worker_config` 의
+    # overrides). 설정에 주소가 없어도 · `auto` 여도 · 8787 이어도 이긴 값은 시험 주소다.
+    config = _worker_toml(d, "w.toml", server_line)
+    argv = ["./.venv/bin/rcm", "worker", "--config", config, "--server", "http://127.0.0.1:8791"]
+    assert _refusal(tmp_path / "home", d, argv) is None
+
+
+@pytest.mark.parametrize(
+    ("toml", "extra", "environ"),
+    [
+        ("port-less", ["--port", "8791"], {}),
+        ("port-less", [], {"RCM_SERVER_PORT": "8791"}),
+        ("table-less", ["--port", "8791"], {}),
+        ("table-less", [], {"RCM_SERVER_PORT": " 8791"}),
+        ("port-8787", ["--port=8791"], {}),
+        ("port-8787", [], {"RCM_SERVER_PORT": "8791"}),
+    ],
+)
+def test_b7_3_the_server_port_override_wins_over_the_config(
+    tmp_path: Path, d: Path, toml: str, extra: list[str], environ: dict[str, str]
+) -> None:
+    # B7-3 — `rcm serve` 의 포트는 `--port` > `RCM_SERVER_PORT` > 설정 > 8787(config.py
+    # `load_server_config`). 이긴 값이 8791 이면 설정에 port 가 없어도 받는다.
+    bodies = {
+        "port-less": f'[server]\ndata_dir = "{d}"\n',
+        "table-less": 'title = "no server table"\n',
+        "port-8787": f'[server]\nport = 8787\ndata_dir = "{d}"\n',
+    }
+    (d / "o.toml").write_text(bodies[toml], encoding="utf-8")
+    argv = ["./.venv/bin/rcm", "serve", "--config", f"{d}/o.toml", *extra]
+    assert _refusal(tmp_path / "home", d, argv, environ=environ) is None
+
+
+def test_b7_3_an_override_that_names_8787_still_wins(tmp_path: Path, d: Path) -> None:
+    # B7-3 — 대조: 이긴 값이 8787 이면 설정이 8790 이어도 거부한다.
+    config = _server_toml(d, "s.toml", "port = 8790\n")
+    argv = ["./.venv/bin/rcm", "serve", "--config", config]
+    reason = _refusal(tmp_path / "home", d, argv, environ={"RCM_SERVER_PORT": " 8787 "})
+    assert reason and "8787" in reason, reason
+
+
+@pytest.mark.parametrize("which", ["ps-fails", "pid-is-a-directory"])
+def test_b7_4_an_unconfirmed_earlier_record_is_not_written_over(
+    tmp_path: Path, d: Path, procs: list, which: str
+) -> None:
+    # B7-4 — 앞의 기록을 확인하지 못하면(ps 실패 · 못 읽는 pid) 그 위에 새로 띄우지 않는다.
+    # 덮으면 아직 살아 있을지 모르는 프로세스의 신원을 잃는다.
+    if which == "ps-fails":
+        earlier = _start(d, "worker", [*SLEEPER, "--config", f"{d}/worker.toml"], procs)
+        before = (d / "worker.pid").read_text(encoding="utf-8")
+    else:
+        earlier = None
+        (d / "worker.pid").mkdir()
+        before = None
+    out = io.StringIO()
+    with pytest.MonkeyPatch.context() as m:
+        if which == "ps-fails":
+            m.setattr(lp, "PS_COMMAND", _no_ps(tmp_path), raising=False)
+        result = _read_or_fail(
+            lambda: lp.start(d, "worker", [*SLEEPER, "--config", f"{d}/worker.toml"],
+                             places=_places(d.parents[2]), out=out)
+        )  # fmt: skip
+    assert result == 4, out.getvalue()
+    assert "cannot be confirmed" in out.getvalue(), out.getvalue()
+    if before is not None:
+        assert (d / "worker.pid").read_text(encoding="utf-8") == before
+        assert earlier is not None and earlier.poll() is None
+    else:
+        assert (d / "worker.pid").is_dir()
+
+
+@pytest.mark.parametrize(
+    ("script", "said"),
+    [("exit 2\n", "exit 2"), ("echo 'ps: bad option' >&2\nexit 1\n", "bad option")],
+)
+def test_b7_4_an_odd_ps_exit_is_unknown_not_gone(
+    tmp_path: Path, d: Path, procs: list, script: str, said: str
+) -> None:
+    # B7-4 — `ps` 가 0 · 1 이 아닌 종료로 끝나거나 1 에 stderr 를 남기면 그것은
+    # 「없는 pid」가 아니다. 아무것도 찍지 않았어도 「not running」으로 읽지 않는다
+    # — signal 도 stop-all 도 BLOCKED.
+    proc = _start(d, "worker", [*SLEEPER, "--config", f"{d}/worker.toml"], procs)
+    odd = tmp_path / "odd-ps"
+    odd.write_text(f"#!/bin/sh\n{script}", encoding="utf-8")
+    odd.chmod(0o755)
+    out = io.StringIO()
+    with pytest.MonkeyPatch.context() as m:
+        m.setattr(lp, "PS_COMMAND", str(odd), raising=False)
+        code, lines = _send(d, "worker", "TERM", expect_config=f"{d}/worker.toml")
+        all_code = lp.stop_all(d, grace=0.2, out=out)
+    _assert_blocked(code, lines)
+    reasons = [line for line in lines if line.startswith("reason:")]
+    assert reasons and said in reasons[0] and "not running" not in reasons[0], lines
+    assert all_code == 3, out.getvalue()
+    assert "not running" not in out.getvalue(), out.getvalue()
+    assert proc.poll() is None
+
+
+def test_b7_4_rcm_server_bind_on_8787_is_refused(tmp_path: Path, d: Path) -> None:
+    # B7-4 — `RCM_SERVER_BIND` 도 `--bind` 와 같이 본다(설정의 bind 를 이긴다).
+    environ = {"RCM_SERVER_BIND": "127.0.0.1:8787"}
+    reason = _refusal(tmp_path / "home", d, _good_server(d), environ=environ)
+    assert reason and "8787" in reason and "bind" in reason, reason
+
+
+@pytest.mark.parametrize(
+    ("argv", "environ"),
+    [
+        ([sys.executable, "-c", "pass"], {"RCM_SERVER_PORT": "8787"}),
+        (["./.venv/bin/rcm", "serve", "--config", "{d}/server.toml", "--port", "8791"],
+         {"RCM_SERVER_PORT": "8787"}),
+        ([sys.executable, "-c", "pass", "--port", "8787"], {}),
+        (["./.venv/bin/rcm", "serve", "--config", "{d}/server.toml", "--port", "8787",
+          "--port", "8791"], {}),
+    ],
+)  # fmt: skip
+def test_b7_4_an_explicit_8787_is_refused_even_when_it_does_not_win(
+    tmp_path: Path, d: Path, argv: list[str], environ: dict[str, str]
+) -> None:
+    # B7-4 — 사람이 이 명령에 적은 8787(`RCM_SERVER_PORT` · `--port`)은 이긴 값이 아니어도 거부한다.
+    # 환경은 이 프로세스가 띄우는 rcm 에게도 물려지고(잡 안의 `rcm serve`), 감싼 스크립트의
+    # `--port` 는 안쪽 rcm 에게 넘어간다. 설정이 없는 명령 · 뒤의 플래그가 이기는 명령이라
+    # 설정 검사로는 못 잡는다 — 그 규칙만 지키는 사례.
+    words = [word.format(d=d) for word in argv]
+    reason = _refusal(tmp_path / "home", d, words, environ=environ)
+    assert reason and "8787" in reason, reason
