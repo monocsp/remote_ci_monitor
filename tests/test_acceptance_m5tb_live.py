@@ -1364,3 +1364,28 @@ def test_rl15_orphan_death_is_timed_by_the_worker_line_not_by_the_harness_poll(
                         "orphan #8: stopped process group"],
                        capture_output=True, text=True, timeout=15, check=True)  # fmt: skip
     assert r.stdout.strip() == "1795742641.949", r.stdout
+
+
+def test_rl45_web_facts_never_put_a_case_pattern_inside_command_substitution() -> None:
+    # RL45-web — macOS 의 /bin/bash 3.2 는 `$(case … in pat) …)` 에서 패턴의 `)` 를 치환의 끝으로
+    # 읽는다. 재실기에서 found_hold_a · found_hold_b · en_nothing_else 가 문법 오류 글이 되어
+    # RL45-web 이 FAIL 이었다. `bash -n` 은 치환 속을 늦게 읽어 이것을 못 잡는다
+    bad = [
+        f"{n}: {line.strip()}"
+        for n, line in enumerate(script_text().splitlines(), 1)
+        if re.search(r"\$\(\s*case\b", line)
+    ]
+    assert not bad, bad
+
+
+def test_f78_local_measurements_run_when_only_picks_rl43() -> None:
+    # F78 — `--only` 의 runners_for 는 함수를 줄마다 내는데 main 은 `" $runners "` 에서 공백으로
+    # 둘러싼 이름을 찾았다. 그래서 `--only RL43` 이면 F78 의 이 머신 값을 재지 않아 UNKNOWN 이었다
+    picked = sh("runners_for", "RL43")
+    assert picked.returncode == 0, picked.stderr
+    r = sh("has_runner", picked.stdout, "run_kill_worker")
+    assert r.returncode == 0, (picked.stdout, r.stderr)
+    assert sh("has_runner", picked.stdout, "run_orphan").returncode == 1
+    text = script_text()
+    main = text[text.index("main() {") :]
+    assert re.search(r'has_runner "\$runners" run_kill_worker && run_f78_local', main), main[:200]
