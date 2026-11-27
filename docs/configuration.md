@@ -1682,6 +1682,34 @@ instead of «no preset would come here»: see [rcm doctor](operating.md#check-a-
 `rcm setup --role coordinator --bind ADDRESS --yes` writes such a `server.toml` with its server
 service file: see [Set a machine up](operating.md#set-a-machine-up-rcm-setup).
 
+### The server's identity key: `pair.key`
+
+A machine that joins through pairing checks, before it sends its token, that it is talking to
+the coordinator it paired with. The server proves who it is with one key outside the database:
+`<data_dir>/pair.key`, 32 random bytes, mode 0600. `rcm serve` makes it on the first start and
+reads it on every start after. It never prints the key, and a copy of the database alone cannot
+pose as the server: the database holds only the `pair_id` of each paired token and the SHA-256
+of the token.
+
+`rcm serve` refuses to start (`cannot start server: …`, exit 2) when:
+
+- `pair.key` is missing while paired tokens are still active:
+  `pair.key is missing but N paired tokens are still active — restore pair.key from the backup taken with this data_dir, or reset pairing`.
+  It does not make a new key quietly: every paired machine would stop trusting the server.
+  Restore the key that was backed up with this `data_dir`, or reset pairing: revoke the paired
+  tokens (`rcm token revoke <name>`), then start again and pair the machines again.
+- `pair.key` is a symbolic link, is not 32 bytes, or other users can read it (`chmod 600`).
+- the filesystem of `data_dir` cannot make hard links (`does not support hard links`): the key is
+  written to a temporary file and linked into place so that two servers on one `data_dir` never
+  hold different keys. Put `data_dir` on a local disk, or write the key yourself:
+  `(umask 077; head -c 32 /dev/urandom > <data_dir>/pair.key)`.
+
+Back `pair.key` up together with the database. A machine checks the address it dialed: a server
+reached through a name or a proxy must set `public_url` to that address, or it answers
+`421 host_not_this_server`. The pairing routes (`POST /pair/hello`, `POST /pair/exchange`, and the
+admin routes `POST /pair`, `GET /pair`, `POST /pair/cancel`) are in
+[the workplan](m5tc-workplan.md) §4.2 and §4.4; the commands that use them come in a later release.
+
 ## Which machine runs a job
 
 Every worker — the server's own lanes (shown as `@local`) and each `rcm worker` — measures its own

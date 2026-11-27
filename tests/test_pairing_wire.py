@@ -268,9 +268,9 @@ def test_pi22_own_dialed_set_from_socket_public_url_and_advertised_name():
     s = cp.own_dialed_set("127.0.0.1", 8790, "https://rcm.example.ts.net", None)
     assert "https://rcm.example.ts.net:443" in s
     assert "http://rcm.example.ts.net:80" not in s
-    # (d) Tailscale 대역 IP + 이름 public_url
-    s = cp.own_dialed_set("100.64.0.7", 8790, "http://rcm.example.ts.net:8790", None)
-    assert s == {"http://100.64.0.7:8790", "http://rcm.example.ts.net:8790"}
+    # (d) Tailscale 대역 IP + 이름 public_url — 주소는 문서용 192.0.2.x 로 대신한다(§8)
+    s = cp.own_dialed_set("192.0.2.7", 8790, "http://rcm.example.ts.net:8790", None)
+    assert s == {"http://192.0.2.7:8790", "http://rcm.example.ts.net:8790"}
     # 0.0.0.0 은 소켓 주소로 나오지 않는다 — 받은 연결의 로컬 주소만 든다
     assert all("0.0.0.0" not in x for x in cp.own_dialed_set("192.0.2.10", 1, None, "h"))
 

@@ -6,6 +6,9 @@
 못 찾으면 그 자체로 실패다(코드가 바뀌어 감시가 풀린 것).
 
 변이 목록(개수는 `MUTANTS` 가 정본이다 — 문서의 숫자는 머지마다 썩는다):
+  M5t-c PR1 — `pair-*` · `reject-mac-*` 스물일곱: hello · 교환 · 짝짓기 창 · `pair.key` 수명 주기 ·
+     거절 MAC 의 검사를 하나씩 지운다(`core/pairing.py` · `pairing.py` · `server.py` · `store.py`,
+     `docs/m5tc-workplan.md` §7 「변이」 · `tests/test_pairing_*.py`)
   WW (Windows · WSL 안내) — `ww1-native-windows-not-refused`: 네이티브 Windows 에서 traceback
      으로 죽음 · `ww2-none-found-without-the-address-hint`: 서버를 못 찾았을 때 `--server` 길을
      말하지 않음 · `ww3-wsl-hint-never-added`: WSL 안에서 NAT 망을 말하지 않음
@@ -8941,6 +8944,365 @@ MUTANTS = (
         tests=(
             "tests/test_live_proc.py::"
             "test_b8_4_a_test_folder_that_cannot_be_removed_fails_the_test",
+        ),
+    ),
+    # ── M5t-c PR1 — 서버 신원 · 짝짓기 창 · 거절 MAC(docs/m5tc-workplan.md §7 「변이」) ──
+    Mutant(
+        # hello 검증이 mac 비교 없이 참 — 위장 서버의 hello 를 머신이
+        # 믿는다(PI5 · PI33)
+        name="pair-hello-mac-not-checked",
+        path="src/remote_ci_monitor/core/pairing.py",
+        old=("    return hmac.compare_digest(mac, hello_mac(k, pair_id, nonce, dialed, c))\n"),
+        new="    return True\n",
+        tests=(
+            "tests/test_pairing_wire.py::"
+            "test_pi5_a_response_computed_for_another_dialed_or_an_old_nonce_does_not_verify",
+            "tests/test_pairing_wire.py::test_pi33_hello_mac_covers_the_challenge",
+            "tests/test_pairing_server.py::"
+            "test_pi5_b_c_the_mac_binds_the_real_dialed_and_the_nonce",
+        ),
+    ),
+    Mutant(
+        # hello nonce 를 상수로 — 엿들은 응답을 다음 접속에 재생할 수
+        # 있다(PI5 c)
+        name="pair-hello-fixed-nonce",
+        path="src/remote_ci_monitor/pairing.py",
+        old="    return secrets.token_hex(32)  # mutcheck: pair-hello-fixed-nonce\n",
+        new='    return "0" * 64\n',
+        tests=("tests/test_pairing_server.py::test_pi5_c_the_nonce_generator_never_repeats",),
+    ),
+    Mutant(
+        # 서버가 dialed 를 자기 주소 집합과 대조하지 않음 — 다른 IP 의 중계가
+        # 통과한다(PI5 a · PI22)
+        name="pair-hello-dialed-check-skipped",
+        path="src/remote_ci_monitor/pairing.py",
+        old=("        if dialed not in own:  # mutcheck: pair-hello-dialed-check-skipped\n"),
+        new="        if False:\n",
+        tests=(
+            "tests/test_pairing_server.py::"
+            "test_pi5_a_a_relayed_hello_naming_another_address_is_421_without_mac",
+            "tests/test_pairing_server.py::test_pi22_f_a_tls_proxy_public_url_matches_https_443",
+        ),
+    ),
+    Mutant(
+        # hello MAC 에서 챌린지를 뺌 — 중계가 챌린지를 바꿔치기해도
+        # 모른다(V1-13 · PI33)
+        name="pair-hello-challenge-unbound",
+        path="src/remote_ci_monitor/core/pairing.py",
+        old="    return pair_mac(k, LABEL_HELLO, pair_id, nonce, dialed, challenge)\n",
+        new="    return pair_mac(k, LABEL_HELLO, pair_id, nonce, dialed)\n",
+        tests=("tests/test_pairing_wire.py::test_pi33_hello_mac_covers_the_challenge",),
+    ),
+    Mutant(
+        # 성공한 교환이 창을 닫지 않음 — 한 코드로 토큰이 여럿 나온다(PI8)
+        name="pair-code-reusable",
+        path="src/remote_ci_monitor/pairing.py",
+        old=(
+            '            win.state, win.closed_at = "used", now  # mutcheck: pair-code-reusable\n'
+        ),
+        new="            win.closed_at = now\n",
+        tests=(
+            "tests/test_pairing_server.py::"
+            "test_pi8_a_sixteen_concurrent_exchanges_issue_exactly_one_token",
+            "tests/test_pairing_server.py::"
+            "test_pi10_every_failure_is_the_same_404_and_bad_shapes_the_same_400",
+        ),
+    ),
+    Mutant(
+        # 증명이 맞는 아무 열린 창으로 본문 kind 대로 발급 — worker 코드로
+        # client 토큰(PI7 · T7)
+        name="pair-exchange-trusts-body-kind",
+        path="src/remote_ci_monitor/pairing.py",
+        old=(
+            "            win = windows.open_of(kind)  # mutcheck:"
+            " pair-exchange-trusts-body-kind\n"
+            "            proof_kind = kind\n"
+        ),
+        new=(
+            "            win = next((w for w in windows.windows if w.state =="
+            ' "open"), None)\n'
+            "            proof_kind = win.kind if win is not None else kind\n"
+        ),
+        tests=("tests/test_pairing_server.py::test_pi7_a_worker_code_cannot_mint_another_kind",),
+    ),
+    Mutant(
+        # 틀린 증명을 세지 않음 — 온라인 추측에 한도가 없다(PI9 · 288)
+        name="pair-wrong-code-not-counted",
+        path="src/remote_ci_monitor/pairing.py",
+        old=("                win.failures += 1  # mutcheck: pair-wrong-code-not-counted\n"),
+        new="                pass\n",
+        tests=(
+            "tests/test_pairing_server.py::"
+            "test_pi9_five_wrong_proofs_close_the_window_from_any_source",
+        ),
+    ),
+    Mutant(
+        # 증명 비교가 compare_digest 가 아니라 == — 시간 차로 증명이
+        # 샌다(PI9 spy)
+        name="pair-code-compare-not-constant-time",
+        path="src/remote_ci_monitor/pairing.py",
+        old="            matched = hmac.compare_digest(proof, want)\n",
+        new="            matched = proof == want\n",
+        tests=(
+            "tests/test_pairing_server.py::"
+            "test_pi9_five_wrong_proofs_close_the_window_from_any_source",
+        ),
+    ),
+    Mutant(
+        # POST /pair 의 require_admin 을 지움 — 익명이 창을
+        # 연다(PI20 · PI47)
+        name="pair-open-without-admin",
+        path="src/remote_ci_monitor/server.py",
+        old=(
+            "                t = self.app.require_admin(self._token())  # mutcheck:"
+            " pair-open-without-admin\n"
+        ),
+        new="                t = self._token()\n",
+        # PI20 의 탐침 시험은 PLAN.md 를 읽는다 — 변이 사본에는 docs 가 없어 관리 라우트 시험만 건다
+        tests=("tests/test_pairing_server.py::test_pi47_admin_routes_need_an_admin_token",),
+    ),
+    Mutant(
+        # 교환 로그 줄에 토큰을 넣음 — 서버 로그에 비밀이 남는다(PI17)
+        name="pair-secret-logged",
+        path="src/remote_ci_monitor/pairing.py",
+        old="        self.log(line)  # mutcheck: pair-secret-logged\n",
+        new='        self.log(f"{line} token {token}")\n',
+        tests=("tests/test_pairing_server.py::test_pi17_no_secret_in_logs_lists_or_status",),
+    ),
+    Mutant(
+        # 키가 없으면 살아 있는 짝 토큰이 있어도 새로 만듦 — 짝지은 머신이 모두 신원을
+        # 잃는다(PI35 a · 306)
+        name="pair-key-silently-regenerated",
+        path="src/remote_ci_monitor/pairing.py",
+        old="    if active:  # mutcheck: pair-key-silently-regenerated\n",
+        new="    if False:\n",
+        tests=(
+            "tests/test_pairing_server.py::"
+            "test_pi35_a_missing_key_with_active_paired_tokens_refuses_to_start",
+            "tests/test_pairing_server.py::"
+            "test_pi18_a_data_dir_with_only_the_db_copy_refuses_to_start",
+        ),
+    ),
+    Mutant(
+        # 임시 파일 + link 대신 pair.key 에 바로 씀 — 동시에 읽는 쪽이
+        # 0바이트 키를 본다(PI35 c)
+        name="pair-key-written-in-place",
+        path="src/remote_ci_monitor/pairing.py",
+        old="    tmp = data_dir / tmp_name  # mutcheck: pair-key-written-in-place\n",
+        new="    tmp = final\n",
+        tests=(
+            "tests/test_pairing_server.py::"
+            "test_pi35_c_concurrent_creation_reads_one_whole_key_and_leaves_no_temp_file",
+        ),
+    ),
+    Mutant(
+        # link 의 다른 OSError 에서 os.replace 로 물러섬 — 두 서버가
+        # 다른 키를 쥔다(PI35 e · F59)
+        name="pair-key-link-falls-back-to-rename",
+        path="src/remote_ci_monitor/pairing.py",
+        old=("        _unlink_quietly(tmp)  # mutcheck: pair-key-link-falls-back-to-rename\n"),
+        new=("        os.replace(tmp, final)\n        return read_pair_key(final)\n"),
+        tests=(
+            "tests/test_pairing_server.py::"
+            "test_pi35_e_a_filesystem_without_hard_links_refuses_and_never_renames",
+        ),
+    ),
+    Mutant(
+        # 키 읽기의 모드 검사를 지움 — 0644 키로 뜬다(PI35 d · PI17)
+        name="pair-key-mode-not-checked",
+        path="src/remote_ci_monitor/pairing.py",
+        old="        if mode & 0o077:  # mutcheck: pair-key-mode-not-checked\n",
+        new="        if False:\n",
+        tests=(
+            "tests/test_pairing_server.py::"
+            "test_pi35_d_a_wrong_key_file_refuses_without_printing_the_value",
+            "tests/test_pairing_server.py::test_pi17_rcm_serve_refuses_a_0644_key",
+        ),
+    ),
+    Mutant(
+        # pair_code_key 가 scrypt 대신 SHA256 — 엿본 증명으로
+        # 오프라인 추측이 싸다(PI33 · 319 a)
+        name="pair-code-key-unstretched",
+        path="src/remote_ci_monitor/core/pairing.py",
+        old="    return hashlib.scrypt(\n",
+        new=(
+            '    return hashlib.sha256(code.encode("ascii")).digest()\n    return hashlib.scrypt(\n'
+        ),
+        tests=("tests/test_pairing_wire.py::test_pi33_pair_code_key_is_scrypt_and_not_sha256",),
+    ),
+    Mutant(
+        # 교환의 형식 검사를 지움 — 홀로 선 서러게이트 · 숫자 host_name 이
+        # 500(PI40 · V2-5)
+        name="pair-exchange-shape-not-checked",
+        path="src/remote_ci_monitor/pairing.py",
+        old=(
+            "        if not cp.exchange_request_ok(body):  # mutcheck:"
+            " pair-exchange-shape-not-checked\n"
+        ),
+        new="        if not isinstance(body, dict):\n",
+        tests=(
+            "tests/test_pairing_server.py::"
+            "test_pi40_malformed_anonymous_bodies_are_fixed_400s_whether_or_not_a_window_is_open",
+        ),
+    ),
+    Mutant(
+        # GET /pair 보존을 opened_at 기준으로 — 막 끝난 60분 창이
+        # 목록에서 사라진다(PI11 · V2-10)
+        name="pair-list-keeps-by-opened-at",
+        path="src/remote_ci_monitor/pairing.py",
+        old=(
+            "            and w.closed_at >= keep_from  # mutcheck: pair-list-keeps-by-opened-at\n"
+        ),
+        new="            and w.opened_at >= keep_from\n",
+        tests=(
+            "tests/test_pairing_server.py::"
+            "test_pi11_closed_windows_stay_listed_for_an_hour_from_closed_at",
+        ),
+    ),
+    Mutant(
+        # 로그 · 목록에 host_name 원문을 씀 — 줄바꿈이 로그 줄을
+        # 만든다(PI12 · V2-14)
+        name="pair-label-not-cleaned",
+        path="src/remote_ci_monitor/pairing.py",
+        old='        shown = label or "—"  # mutcheck: pair-label-not-cleaned\n',
+        new='        shown = host_name or "—"\n',
+        tests=("tests/test_pairing_server.py::test_pi12_names_come_from_the_cleaned_host_name",),
+    ),
+    Mutant(
+        # --replace 를 폐기 + 바꾸기 두 문장으로 — 두 토큰이 함께 무효인
+        # 순간이 생긴다(PI19 b · 293)
+        name="pair-replace-two-statements",
+        path="src/remote_ci_monitor/store.py",
+        old=(
+            "            cur = conn.execute(\n"
+            '                "UPDATE tokens SET sha256=?, pair_id=?, pool=?,'
+            ' paired_host=?, paired_addr=?, "\n'
+        ),
+        new=(
+            '            conn.execute("UPDATE tokens SET revoked_at=? WHERE name=?",'
+            " (_ts(now), name))\n"
+            "            cur = conn.execute(\n"
+            '                "UPDATE tokens SET sha256=?, pair_id=?, pool=?,'
+            ' paired_host=?, paired_addr=?, "\n'
+        ),
+        tests=("tests/test_pairing_server.py::test_pi19_b_replace_rewrites_the_row_in_one_update",),
+    ),
+    Mutant(
+        # 폐기된 짝 토큰의 401 에 MAC 을 달지 않음(verify_token 으로만
+        # 찾음) — 폐기를 워커가 모른다(PI46 a · F65)
+        name="reject-mac-missing-on-revoked",
+        path="src/remote_ci_monitor/pairing.py",
+        old=(
+            "        pair_id = self.store.token_pair_id(secret)  # mutcheck:"
+            " reject-mac-missing-on-revoked\n"
+        ),
+        new=(
+            "        info = self.store.verify_token(secret)\n"
+            "        pair_id = info.pair_id if info is not None else None\n"
+        ),
+        tests=(
+            "tests/test_pairing_server.py::"
+            "test_pi46_a_a_revoked_paired_token_gets_a_mac_on_every_401",
+        ),
+    ),
+    Mutant(
+        # 서버의 거절 MAC 에서 nonce 를 뺌 — 옛 거절을 재생할 수 있다(PI46
+        # · 340)
+        name="reject-mac-unbound-nonce",
+        path="src/remote_ci_monitor/pairing.py",
+        old="        bound = nonce  # mutcheck: reject-mac-unbound-nonce\n",
+        new='        bound = ""\n',
+        tests=(
+            "tests/test_pairing_server.py::"
+            "test_pi46_a_a_revoked_paired_token_gets_a_mac_on_every_401",
+            "tests/test_pairing_server.py::"
+            "test_pi46_e_register_rejects_get_a_mac_only_for_the_listed_codes",
+        ),
+    ),
+    Mutant(
+        # pair 라우트 파싱이 JSONDecodeError 만 잡음 — 1 KiB 안의
+        # 깊이 초과가 500(PI40 · M8)
+        name="pair-body-recursion-500",
+        path="src/remote_ci_monitor/core/pairing.py",
+        old="    except (ValueError, RecursionError) as e:\n",
+        new="    except json.JSONDecodeError as e:\n",
+        tests=(
+            "tests/test_pairing_server.py::"
+            "test_pi40_malformed_anonymous_bodies_are_fixed_400s_whether_or_not_a_window_is_open",
+            "tests/test_pairing_wire.py::"
+            "test_pi40_shape_check_refuses_every_malformed_exchange_body",
+        ),
+    ),
+    Mutant(
+        # POST /pair 가 모르는 키를 받음 — 오타가 조용히 기본값으로
+        # 연다(PI47 · V2-2)
+        name="pair-admin-unknown-key-accepted",
+        path="src/remote_ci_monitor/pairing.py",
+        old="        if unknown:  # mutcheck: pair-admin-unknown-key-accepted\n",
+        new="        if False:\n",
+        tests=(
+            "tests/test_pairing_server.py::test_pi47_a_bad_admin_bodies_are_400_and_open_nothing",
+        ),
+    ),
+    Mutant(
+        # scrypt 없는 서버가 POST /pair 에서 500 — 501
+        # pair_unsupported 대신 AttributeError(PI50 ·
+        # F69)
+        name="pair-unsupported-crashes",
+        path="src/remote_ci_monitor/pairing.py",
+        old=("        if not cp.scrypt_available():  # mutcheck: pair-unsupported-crashes\n"),
+        new="        if False:\n",
+        tests=(
+            "tests/test_pairing_server.py::"
+            "test_pi50_a_without_scrypt_post_pair_is_501_and_hello_still_works",
+        ),
+    ),
+    Mutant(
+        # _send_error 가 401 에만 MAC 을 담 — 등록 403 · 409 와
+        # 펜싱이 검증되지 않는다(PI46 e · h · 343)
+        name="reject-mac-register-omitted",
+        path="src/remote_ci_monitor/pairing.py",
+        old="    listed = (  # mutcheck: reject-mac-register-omitted\n",
+        new="    listed = False and (\n",
+        tests=(
+            "tests/test_pairing_server.py::"
+            "test_pi46_e_register_rejects_get_a_mac_only_for_the_listed_codes",
+            "tests/test_pairing_server.py::"
+            "test_pi46_h_fenced_and_protocol_409s_of_a_paired_token_carry_a_mac",
+        ),
+    ),
+    Mutant(
+        # 서버와 verify_pair_reject 가 거절 MAC 에서 본문 sha256
+        # 을 뺌 — 경로 위에서 바꾼 등록 본문의 거절이 검증된다(PI46 · 342)
+        name="reject-mac-ignores-body",
+        path="src/remote_ci_monitor/core/pairing.py",
+        old=(
+            "        k, LABEL_REJECT, method, canonical_path, str(int(status)),"
+            " code, reason, nonce, body_hash\n"
+        ),
+        new=(
+            "        k, LABEL_REJECT, method, canonical_path, str(int(status)),"
+            " code, reason, nonce\n"
+        ),
+        tests=(
+            "tests/test_pairing_wire.py::test_pi46_verify_pair_reject_binds_nonce_body_and_key",
+            "tests/test_pairing_server.py::"
+            "test_pi46_a_a_revoked_paired_token_gets_a_mac_on_every_401",
+        ),
+    ),
+    Mutant(
+        # 끝까지 읽지 못한 본문(크다 · chunked)이나 Content-Encoding
+        # 요청에도 MAC 을 담(PI46 i · 342)
+        name="reject-mac-on-undrained-body",
+        path="src/remote_ci_monitor/server.py",
+        old=(
+            "        undrained = encoded or not self.body.complete  # mutcheck:"
+            " reject-mac-on-undrained-body\n"
+        ),
+        new="        undrained = False\n",
+        tests=(
+            "tests/test_pairing_server.py::"
+            "test_pi46_i_undrained_chunked_or_encoded_bodies_get_no_mac",
         ),
     ),
 )

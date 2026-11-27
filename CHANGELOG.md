@@ -22,6 +22,13 @@ of a key bumps that number and is listed here.
 - **Database v26.** The server migrates on its first start (worker sessions, the values a job's
   claim freezes, and the new group-hold table). An older rcm refuses the migrated database.
   ([#284](https://github.com/monocsp/remote_ci_monitor/pull/284))
+- **Database v27 and the server's identity key.** The server migrates on its first start: tokens
+  gain the pool, pairing id, host and address of a machine that joins by pairing (all empty for
+  existing tokens). `rcm serve` also creates `<data_dir>/pair.key` (32 bytes, 0600) and refuses to
+  start when that key is missing while paired tokens are still active, or when the key is a
+  symbolic link, the wrong size or readable by other users. Back the key up with the database. An
+  older rcm refuses the migrated database. See
+  [the server's identity key](docs/configuration.md#the-servers-identity-key-pairkey).
 
 ### Changed
 - **A remote job outlives a short loss of contact.** A worker the server has not heard for
@@ -51,6 +58,15 @@ of a key bumps that number and is listed here.
   ([#286](https://github.com/monocsp/remote_ci_monitor/pull/286))
 
 ### Added
+- **The server side of pairing.** An admin opens a short pairing window with `POST /pair`
+  (one per kind, 10 minutes by default and at most 60, kept only in the server's memory); the
+  one-time code is in that answer only. A new machine sends a proof made from the code, never the
+  code itself, to `POST /pair/exchange` and gets its token and a server identity secret; five
+  wrong proofs close the window, and every failure is the same `404 no_pairing_window`. A paired
+  machine checks the server with `POST /pair/hello` before it sends its token. The answers that
+  refuse a paired token (401, `403 pair_proof_required`, `pair_proof_invalid` `bad_mac`,
+  `409 pool_mismatch`, `session_fenced`, `protocol_required`) carry `pair_reject_mac` when the
+  request sent `X-RCM-Pair-Nonce`. The `rcm pair` and `rcm setup --pair` commands come later.
 - **`irreversible = true` for presets whose work must not run twice at once.** The worker stops
   such a job itself before the grace runs out (`worker_self_stopped`), the command runs under a
   supervisor that ends its process group when the worker is killed, and a close without a

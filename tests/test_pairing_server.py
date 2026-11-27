@@ -808,13 +808,13 @@ def test_pi22_b_c_urls_for_a_lan_bind_and_for_any_address(tmp_path):
     finally:
         s.close()
     s = PairServer(tmp_path / "b", public_url="", bind="0.0.0.0", advertise=True)
-    s.app.pair_ips_fn = lambda: ["192.0.2.10", "100.64.0.7"]
+    s.app.pair_ips_fn = lambda: ["192.0.2.10", "192.0.2.7"]
     try:
         host = socket.gethostname().split(".")[0].lower()
         urls = s.opened("worker")["urls"]
         assert urls == [
             f"http://192.0.2.10:{s.port}",
-            f"http://100.64.0.7:{s.port}",
+            f"http://192.0.2.7:{s.port}",
             f"http://{host}.local:{s.port}",
         ]
         assert all("0.0.0.0" not in u for u in urls)
