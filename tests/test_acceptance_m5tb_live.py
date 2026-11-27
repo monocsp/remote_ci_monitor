@@ -596,6 +596,31 @@ def test_pr4_web_helper_uses_the_cdp_helper_it_names() -> None:
     assert "t !== '—'" in helper_js and "[data-hold-chip]" in helper_js
 
 
+_JS_PARSE = """
+const s = JSON.parse(process.argv[1]);
+const bad = [];
+for (const [k, v] of Object.entries(s)) {
+  try { new Function("return " + v); } catch (e) { bad.push(k + ": " + e.message); }
+}
+process.stdout.write(JSON.stringify(bad));
+"""
+
+
+def test_pr4_web_js_the_helper_sends_to_chrome_parses(tmp_path: Path) -> None:
+    """도우미가 CDP 로 보내는 식은 JS 로 읽혀야 한다. 문법이 틀리면 Chrome 이 예외를 던지고 웹
+    단계가 통째로 UNKNOWN 이 된다(f-string 의 `}}` 가 일반 글 조각에 남은 일이 있었다)."""
+    import json
+
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("node is not installed")
+    mod = helper(tmp_path)
+    snippets = {**mod.WEB_JS, "READY_JS": mod.READY_JS, "row_js": mod.row_js("12")}
+    r = subprocess.run([node, "-e", _JS_PARSE, json.dumps(snippets)], capture_output=True,
+                       text=True, timeout=20, check=True)  # fmt: skip
+    assert json.loads(r.stdout) == [], r.stdout
+
+
 def test_pr4_supervisor_and_secret_entry_points_exist(tmp_path: Path) -> None:
     mod = helper(tmp_path)
     import remote_ci_monitor
