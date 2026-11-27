@@ -2331,6 +2331,18 @@ MUTANTS = (
         ),
     ),
     Mutant(
+        # mkdtemp 를 신호 미룸 밖에서 부른다 — 만든 바로 뒤에 끊기면 tmp 를 몰라 임시 폴더가 남는다.
+        # 시험은 신호를 주 스레드로 보내야 이것을 늘 잡는다(dev rcm-ci 4351, 프로세스로 보낸
+        # 신호는 막지 않은 다른 스레드가 받아 마스크를 건너뛰었다)
+        name="redgreen-mkdtemp-not-held",
+        path="tools/redgreen.py",
+        old="        with _held():  # 만든 바로 뒤에 끊겨도 tmp 를 안다 — finally 가 치운다\n",
+        new="        if True:\n",
+        tests=(
+            "tests/test_redgreen.py::test_a_signal_right_after_mkdtemp_still_removes_the_folder",
+        ),
+    ),
+    Mutant(
         # 표 바로 뒤의 앞 `|` 없는 행을 보지 않는다 — GFM 은 행으로 그리는데 대조하지 않고
         # 통과한다(4라운드 H1)
         name="scenario-trace-unpiped-row-ignored",

@@ -18,6 +18,7 @@ import shutil
 import signal
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -469,7 +470,12 @@ def test_a_signal_right_after_mkdtemp_still_removes_the_folder(repo, capsys, mon
 
     def made_then_cut(*args, **kw):
         out = real(*args, **kw)
-        os.kill(os.getpid(), signal.SIGTERM)
+        # 신호는 주 스레드로 보낸다 — 스레드가 하나인 redgreen 프로세스가 받는 꼴이다. 시험
+        # 프로세스에는 다른 스레드(xdist 의 수신 스레드 · 다른 시험이 남긴 데몬)가 있어
+        # `os.kill(자기)` 는 신호를 막지 않은 그 스레드가 받을 수 있다. 그러면 처리기가 `_held`
+        # 안의 아무 때나(`git worktree add` 를 띄운 직후) 돌아 git 이 정리 뒤에 등록 · 폴더를
+        # 다시 만든다(dev rcm-ci 4351 · 「still registered: <red>」)
+        signal.pthread_kill(threading.main_thread().ident, signal.SIGTERM)
         return out
 
     monkeypatch.setattr(rg.tempfile, "mkdtemp", made_then_cut)
