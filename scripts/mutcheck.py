@@ -9332,6 +9332,18 @@ MUTANTS = (
             "test_pi12_c_g1_a_name_taken_between_the_check_and_the_write_keeps_the_code",
         ),
     ),
+    Mutant(
+        # 취소가 창 잠금을 잡지 않음 — 교환이 증명을 맞춘 뒤 행을 쓰기 전에 취소가 끼면 둘 다
+        # 200 이고 취소된 창으로 토큰이 나간다(P6 G3)
+        name="pair-cancel-without-lock",
+        path="src/remote_ci_monitor/pairing.py",
+        old="        with windows.lock:  # mutcheck: pair-cancel-without-lock\n",
+        new="        if True:\n",
+        tests=(
+            "tests/test_pairing_server.py::"
+            "test_pi8_d_g3_cancel_and_exchange_are_serialised_by_one_lock",
+        ),
+    ),
 )
 
 

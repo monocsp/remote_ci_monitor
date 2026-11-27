@@ -572,7 +572,8 @@ class PairingMixin:
         if wid is not None and (not isinstance(wid, str) or not cp.WINDOW_ID_RE.fullmatch(wid)):
             raise _bad_admin("id must be the window id rcm pair printed")
         windows = self._pair_windows
-        with windows.lock:
+        # 교환과 같은 잠금 — 교환 200 → 취소 404, 또는 취소 200 → 교환 404 뿐이다(G3)
+        with windows.lock:  # mutcheck: pair-cancel-without-lock
             now = self.now_fn()
             windows.expire(now)
             win = windows.open_of(kind)

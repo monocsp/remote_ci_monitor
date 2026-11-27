@@ -931,6 +931,109 @@ def test_pi8_c_g2_the_answer_is_ready_before_the_token_row_is_written(ps, monkey
     assert token_rows(ps) == before + 1
 
 
+class OrderLock:
+    """창 잠금 대신 넣는 잠금(G3). 스레드 이름으로 두 가지를 한다: `arrive[name]` 은 그 스레드가
+    잠금을 **기다리기 시작할 때** 켜고, `hold[name] = (held, go)` 는 그 스레드가 잠금을 쥔 채
+    `go` 까지 멈추게 한다. 기다림의 10초는 결과를 정하지 않는 안전 한도다."""
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self.arrive: dict[str, threading.Event] = {}
+        self.hold: dict[str, tuple[threading.Event, threading.Event]] = {}
+
+    def __enter__(self) -> OrderLock:
+        name = threading.current_thread().name
+        if name in self.arrive:
+            self.arrive[name].set()
+        self._lock.acquire()
+        if name in self.hold:
+            held, go = self.hold[name]
+            held.set()
+            go.wait(10)
+        return self
+
+    def __exit__(self, *exc) -> None:
+        self._lock.release()
+
+
+def run_named(name: str, fn, results: dict, done: threading.Event) -> threading.Thread:
+    """`fn()` 을 그 이름의 스레드로 — 결과는 답 dict 또는 `PairRefusal` 의 (상태, code)."""
+
+    def body() -> None:
+        try:
+            results[name] = fn()
+        except pairing_mod.PairRefusal as e:
+            results[name] = (e.status, e.extra.get("code"))
+        finally:
+            done.set()
+
+    t = threading.Thread(target=body, name=name)
+    t.start()
+    return t
+
+
+def test_pi8_d_g3_cancel_and_exchange_are_serialised_by_one_lock(ps, monkeypatch):
+    """G3: 열기 · 취소 · 교환은 한 잠금으로 차례를 선다. 취소와 교환이 겹쳐도 결과는 두 순서
+    중 하나다 — 교환 200 → 취소 404, 또는 취소 200 → 교환 404. 둘 다 200(취소된 창으로 토큰
+    발급)이 없다. 배리어로 두 순서를 하나씩 강제한다."""
+    lock = OrderLock()
+    monkeypatch.setattr(ps.app._pair_windows, "lock", lock)
+    before = token_rows(ps)
+
+    # ① 교환이 잠금 안(증명이 맞은 뒤, 행을 쓰기 전)에서 멈춘 사이 취소가 온다
+    doc = ps.opened("worker")
+    inside, go = threading.Event(), threading.Event()
+    real_count = ps.app.pair_presets_count
+
+    def paused_count(pool: str) -> int:
+        inside.set()
+        go.wait(10)
+        return real_count(pool)
+
+    monkeypatch.setattr(ps.app, "pair_presets_count", paused_count)
+    results: dict = {}
+    ex_done, cancel_seen = threading.Event(), threading.Event()
+    body = ps.exchange_body(doc["code"], "worker", "build-41")
+    ex = run_named("exchange-1", lambda: ps.app.pair_exchange(body, "192.0.2.8"), results, ex_done)
+    assert inside.wait(10)
+    lock.arrive["cancel-1"] = cancel_seen
+    cancel = run_named(
+        "cancel-1", lambda: ps.app.pair_cancel({"kind": "worker"}), results, cancel_seen
+    )
+    assert cancel_seen.wait(10)  # 취소가 잠금 앞에 왔다(잠금이 없으면 이미 끝났다)
+    go.set()
+    ex.join(10)
+    cancel.join(10)
+    assert results["cancel-1"] == (404, "no_open_window"), results
+    assert isinstance(results["exchange-1"], dict) and results["exchange-1"]["name"] == "build-41"
+    assert ps.app.pair_window_state("worker")["state"] == "used"
+    monkeypatch.setattr(ps.app, "pair_presets_count", real_count)
+
+    # ② 취소가 잠금을 쥔 사이 교환이 온다
+    doc = ps.opened("worker")
+    held, go2 = threading.Event(), threading.Event()
+    lock.hold["cancel-2"] = (held, go2)
+    results, c_done, ex_seen = {}, threading.Event(), threading.Event()
+    cancel = run_named("cancel-2", lambda: ps.app.pair_cancel({"kind": "worker"}), results, c_done)
+    held.wait(10)
+    body = ps.exchange_body(doc["code"], "worker", "build-42")
+    lock.arrive["exchange-2"] = ex_seen
+    ex = run_named("exchange-2", lambda: ps.app.pair_exchange(body, "192.0.2.9"), results, ex_seen)
+    assert ex_seen.wait(10)
+    go2.set()
+    cancel.join(10)
+    ex.join(10)
+    assert results["exchange-2"] == (404, "no_pairing_window"), results
+    assert results["cancel-2"]["reason"] == "cancelled", results
+    assert ps.app.pair_window_state("worker") == {
+        "id": doc["id"],
+        "state": "closed",
+        "reason": "cancelled",
+        "failures": 0,
+    }
+    assert token_rows(ps) == before + 1
+
+
 class CompareSpy:
     def __init__(self):
         self.calls = 0
