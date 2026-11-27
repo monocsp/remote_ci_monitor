@@ -2743,8 +2743,8 @@ run_self_stop_timing() {
     t=$(h waitdead "$px" $((G + 20)) || true)
     fact RL34 "${m}_stop_after" "$t"
     fact RL34 "${m}_state_at_stop" "$(jv "$x" state)"
-    fact RL34 "${m}_threshold" "$(sed -n "s/.*#$x: no answer from the server for \([0-9]*\)s.*/\1/p" "$W_LOG" | head -1)"
-    t=$(sed -n "s/.*#$x: grace_seconds [0-9]* lowered to \([0-9]*\).*/\1/p" "$W_LOG" | head -1 || true)
+    fact RL34 "${m}_threshold" "$(sed -n "s/.*#$x: no answer from the server for \([0-9]*\)s.*/\1/p" "$W_LOG" | sed -n 1p)"
+    t=$(sed -n "s/.*#$x: grace_seconds [0-9]* lowered to \([0-9]*\).*/\1/p" "$W_LOG" | sed -n 1p || true)
     fact RL34 "${m}_grace_j" "${t:-$grace}"
     [ "$m" = b ] && fact RL34 b_lowered "$(if [ -n "$t" ]; then echo 1; else echo 0; fi)"
     relay_do resume
@@ -2779,7 +2779,7 @@ run_finish_offline() {
   rwait "$j" 120 rl40-wait
   fact RL40 wait_rc "$RW_RC"
   fact RL40 final_state "$(jv "$j" state)"
-  local_log=$(find "$W_DATA" -path "*/jobs/$j/log.txt" 2>/dev/null | head -1 || true)
+  local_log=$(find "$W_DATA" -path "*/jobs/$j/log.txt" -print -quit 2>/dev/null || true)
   # 워커 쪽 사본이 없으면 견줄 것이 없다 — 0(다름)이 아니라 모른다
   if [ -z "$local_log" ]; then
     fact RL40 log_sha_match "<absent>"
@@ -2930,7 +2930,7 @@ run_partition_past_g() {
   rwait "$y" 10 rl5-wait
   fact RL5 wait_rc "$RW_RC"
   fact RL5 alive_after_close "$(alive "$py")"
-  lf=$(find "$B/w" -path "*/jobs/$y/log.txt" 2>/dev/null | head -1 || true)
+  lf=$(find "$B/w" -path "*/jobs/$y/log.txt" -print -quit 2>/dev/null || true)
   s1=$(wc -c <"${lf:-/dev/null}" | tr -d ' ')
   sleep 3
   s2=$(wc -c <"${lf:-/dev/null}" | tr -d ' ')
@@ -3179,7 +3179,7 @@ run_kill_worker() {
   fact RL45-web found_hold_b "$(if [[ "$stuck" == *"#$xb "* ]]; then echo 1; else echo 0; fi)"
   # 꼬리 한 줄 — 「and N more」의 N(없으면 0)과 「nothing else needs a look」이 있는지
   tail_text=$(sed -n 's/^en_stuck_tail=//p' "$OUT/facts/RL45-web.txt" | tail -1)
-  more=$(printf '%s' "$tail_text" | sed -n "s/.*${WEB_AND_MORE_PRE}\([0-9][0-9]*\)${WEB_AND_MORE_POST}.*/\1/p" | head -1)
+  more=$(printf '%s' "$tail_text" | sed -n "s/.*${WEB_AND_MORE_PRE}\([0-9][0-9]*\)${WEB_AND_MORE_POST}.*/\1/p" | sed -n 1p)
   if grep -q '^web=ok' "$OUT/facts/RL45-web.txt"; then
     fact RL45-web en_more_n "${more:-0}"
     fact RL45-web en_nothing_else "$(has_line_in "$tail_text" "$WEB_NOTHING_ELSE")"
