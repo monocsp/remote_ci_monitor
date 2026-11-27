@@ -7,6 +7,17 @@ of a key bumps that number and is listed here.
 
 ## [Unreleased]
 
+### Changed
+- **A worker token reads only its own pool's presets.** `GET /worker/spec` now lists the presets
+  of the token's pool, every `any-capable` preset and no `local_only` preset: the pool a paired
+  token is bound to, otherwise the pool the worker registered with, otherwise `?pool=<name>` or
+  `default`. Another pool's preset names and `env` values no longer reach that worker. A token
+  made by pairing is bound to its window's pool: registering with another `pool` is
+  `409 pool_mismatch`, and registering without the pairing proof is `403 pair_proof_required`
+  (`403 pair_proof_invalid` with `reason` `bad_mac`, `expired` or `reused` when the proof is
+  wrong). The server log names both addresses when a worker registers from a new one. See
+  [a worker token's pool](docs/configuration.md#a-worker-tokens-pool-and-the-registration-proof).
+
 ## [0.12.0] - 2026-11-27
 
 ### Breaking changes

@@ -1710,6 +1710,40 @@ reached through a name or a proxy must set `public_url` to that address, or it a
 admin routes `POST /pair`, `GET /pair`, `POST /pair/cancel`) are in
 [the workplan](m5tc-workplan.md) §4.2 and §4.4; the commands that use them come in a later release.
 
+### A worker token's pool and the registration proof
+
+A worker token reads only the presets of its own pool from `GET /worker/spec`: a preset whose
+`pool` or `pools` names that pool, every `placement = "any-capable"` preset, and never a
+`local_only` preset. Which pool that is:
+
+| token | pool `/worker/spec` filters by |
+|---|---|
+| made by pairing | the pool of the pairing window (`default` when the window named none) |
+| made by `rcm token add --worker`, registered | the pool the worker registered with |
+| made by `rcm token add --worker`, not registered yet | `GET /worker/spec?pool=<name>`, or `default` without it |
+
+No token reads the presets of every pool at once. Another pool's preset names and `env` values
+never leave the server for that token.
+
+A worker token made by pairing is bound to that pool. Registering with any other `pool` is
+refused before anything changes (no session, no fencing, no job closed):
+`409 pool_mismatch` with `this worker token is bound to pool '<P>' — set pool = "<P>" in worker.toml or pair again`.
+Set `pool` in `worker.toml` to the pool named there, or pair the machine again with the pool you
+want.
+
+A paired worker also proves, each time it registers, that it holds the secret it got when it
+paired; the token alone is not enough. A worker without that proof gets
+`403 pair_proof_required` (`this worker token was paired — its pairing proof is missing: upgrade rcm on this worker and pair it`),
+and a proof that does not check out gets `403 pair_proof_invalid` with `reason` `bad_mac`,
+`expired` or `reused`. Tokens made with `rcm token add --worker` register as before, with the
+token alone.
+
+When a worker registers from another address than its previous registration, the server log
+says so: `worker <name> registered from <address> — its previous registration came from <address>`.
+A token copied to another machine shows up there; revoke it with `rcm token revoke <name>`. The
+server keeps these addresses in memory only, so the first registration after a restart is not
+compared.
+
 ## Which machine runs a job
 
 Every worker — the server's own lanes (shown as `@local`) and each `rcm worker` — measures its own
