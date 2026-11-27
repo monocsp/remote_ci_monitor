@@ -139,8 +139,12 @@ whatever `tools/guard_production.py` would refuse as a Bash call. The port and t
 address are judged by the value that wins in rcm's own order: for `rcm serve`, `--port`, then
 `RCM_SERVER_PORT`, then the config's `port`, then the default 8787 (so a config with no `[server]`
 table or no `port` is 8787 unless `--port` or `RCM_SERVER_PORT` names another); for `rcm worker`,
-`--server`, then the config's `server`; for a client, `--server`, then `RCM_SERVER`. A quoted port
-(`port = "8787"`) is read as rcm reads it, and a port rcm cannot read is refused. An 8787 you wrote
+`--server`, then the config's `server`; for a client, `--server`, then `RCM_SERVER`. Only the rcm
+command that reads an override gets it: a wrapper (any command that is not `rcm` itself, such as
+`python wrap.py --config x --port 8791`) and `rcm token` are judged by the config as written, since
+a wrapper may not pass `--port` or `--server` on to the rcm it starts. A quoted port
+(`port = "8787"`) is read as rcm reads it, and a port or an override rcm cannot read (`--port abc`,
+an empty `RCM_SERVER_PORT`) is refused. An 8787 you wrote
 on the command or in the environment (`--port`, `--bind`, `--server`, `RCM_SERVER_PORT`,
 `RCM_SERVER_BIND`, `RCM_SERVER`) is refused even where it does not win. A worker or client whose
 winning address is empty or `auto` is refused: it would discover a server on the network, maybe
@@ -199,6 +203,12 @@ cd <abs worktree> && ./.venv/bin/python tools/live_proc.py stop-all --dir $D
 
 Never by name: `pkill rcm`, `killall` or a `pgrep` pattern also hit the production launchd server
 and worker on this build machine.
+
+The tests of `tools/live_proc.py` make their folders under the account's real home, as
+`~/.local/share/rcm-devtest-livep-<random>` (`outside_tmp` in `tests/conftest.py`), because CI's
+temporary folder is under `/tmp`; a test whose folder cannot be removed fails. A folder left by a
+killed run is not removed by the next run, since one of that name may be another run's: look at
+it and remove it by hand.
 
 ## Production is read-only, only with the owner's OK, and only by the main session
 
