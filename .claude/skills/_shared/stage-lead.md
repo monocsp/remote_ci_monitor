@@ -111,7 +111,7 @@ follows the same order: red test committed first, the fix next, this receipt. Ex
 | the answer or a verifier changes the frozen workplan | a new `plan-lead`, plan verification and approval again, then a new lead; the blocked one is not resumed |
 | `partial`, plan HIGH, plan-to-test UNSOUND, `rcm/ci` red, a GAP left by re-verification | what remains, or the findings (HIGH only for a plan), go into a new in file for a new lead |
 | a lead stopped, crashed or the session lost it | first make sure it is stopped: its completion notification came, or `TaskStop` stopped it, and its progress file no longer grows (same size a minute apart). Then, before anything else, save its work and restore the tree with the block below (untracked files are moved into `<h>/<stage>-<n>-untracked/`, never `rm -rf`); a new lead, both paths in its in file, applies them first: `git apply --allow-empty <patch>` (an empty patch otherwise exits 128), then `tar -xf <tar>` in the worktree |
-| session compacted | read the highest-`n` files; `out.json` complete means the main session's step is next |
+| session compacted | reopen the `SKILL.md` you were running and the section of the current stage, then read the highest-`n` files; `out.json` complete means the main session's step is next. After compaction only the start of a skill comes back, so the stage's steps are gone until reopened (other project, 2026-11-25) |
 
 ```sh
 git -C <wt> diff --binary HEAD > <h>/<stage>-<n>-stopped.patch

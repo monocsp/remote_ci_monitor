@@ -36,7 +36,11 @@ The rules for every lead (handoff files, the out.json contract, what leads never
    (Korean is double width for E501), `node --test tests/web/<changed>.test.js` for web code, and
    the doc-lock tests the `docs` skill names when docs change. Tests stay under 20 seconds or carry
    `@pytest.mark.slow`; no network, no reverse DNS. The full suite, `scripts/mutcheck.py` and
-   `scripts/smoke_install.sh` are `rcm-ci`'s.
+   `scripts/smoke_install.sh` are `rcm-ci`'s. A test about time drives an injected clock (a `now`
+   argument, the worker's monotonic clock function, a fake that you advance by hand) and never a real
+   sleep or a deadline on the wall clock: `rcm-ci` runs the suite in parallel on a loaded machine, and
+   real waits there turned green tests red (2026-11-20; the worker tests of 2026-11-26 were rebuilt
+   to push the clock by hand).
 6. **A live check**, when the in file asks for one, runs on a server set up by
    `.claude/skills/_shared/test-server.md`, with the port and `data_dir` the in file gives. There,
    `rcm run … --no-wait` and `rcm wait --job <N> --timeout <seconds>` are yours (stage-lead rule 2);
@@ -69,6 +73,12 @@ The rules for every lead (handoff files, the out.json contract, what leads never
 cause as one sentence in `notes`, write a generative or ordering test that is red first, and fix at
 the cause (canon: `.claude/agents/isolated-verifier.md` «Rounds» 5). Fix only the confirmed list;
 prefer what loses data or crashes first.
+
+**Mutants.** A mutant in `scripts/mutcheck.py` finds its place by text in the source. When another PR
+moves or rewrites those lines, `rcm-ci` reports `pattern not found` for it (2026-11-26: a batch PR
+rewrote a success path and an older mutant lost its anchor). The in file then names the mutant: anchor
+it again on the new lines in its own `test(mutcheck)` commit, breaking the same rule as before, and run
+`./.venv/bin/python scripts/mutcheck.py --only <name>` once to see the tests go red.
 
 **After your commit,** the main session makes the `tools/redgreen.py` receipt (it adds worktrees
 outside yours, which you may not), and in `gap-fix` and `qa-fix` may run `regression-test-author`'s

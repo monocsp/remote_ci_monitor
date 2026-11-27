@@ -89,6 +89,12 @@ plus the general patterns of that section (e-mail shape, `/Users/<name>`, token 
 image by eye. The patterns file never enters the repository — a list of private values is itself a leak.
 Each step's result is one line under the PR body's checks, without the patterns.
 
+An e-mail-shaped hit that is an image name's scale suffix (`queue@2x.png`, `card@3x.webp`: a word,
+`@`, a digit and `x`, then an image extension) is not an address. Pass it only when the whole hit has
+that shape; anything else around the `@` is read as an address (other project, 2026-11-26: its
+checker flagged `@3x` names, and its first exception was too wide and had to be narrowed to this
+shape).
+
 ## 5 PR and close
 
 A docs-only branch named with the `branch` skill, the `pr` skill, `rcm/ci` green, then

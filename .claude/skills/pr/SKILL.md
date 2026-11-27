@@ -71,7 +71,12 @@ documents that stay in the repository are written in 평어체.
    user-visible change. In the development loop (`dev-loop` and the skills it routes to) run only
    the changed files' tests and `./.venv/bin/ruff` on the changed files; the full suite and mutcheck
    are `rcm-ci`'s, and `rcm/ci` decides (`.claude/skills/_shared/stage-lead.md` «Rules for every
-   lead» 6: full local runs loaded the build machine on 2026-11-20). Load the `korean-writing` skill and write the title's summary and the body
+   lead» 6: full local runs loaded the build machine on 2026-11-20). A change only to `.claude/`,
+   `AGENTS.md` or `CONTRIBUTING.md` has no changed test file of its own; its narrow run is the tests
+   that read those files, `./.venv/bin/python -m pytest tests/test_skill_links.py
+   tests/test_agent_skills.py -q`, plus the doc-lock tests the `docs` skill names (another project's
+   harness-only PR, 2026-11-25, ran only the changed tool's own test and went red in the gate on a
+   check that reads the same files). Load the `korean-writing` skill and write the title's summary and the body
    by its rules (its §6 check before you paste them). Push with the pinned account:
    ```sh
    export GH_TOKEN=$(gh auth token --user monocsp)
@@ -134,6 +139,14 @@ documents that stay in the repository are written in 평어체.
 4. Clean up — the branch is done (`--delete-branch` deleted it on GitHub), the worktree is done:
    ```sh
    git worktree remove ../remote_ci_monitor-<what-it-does>
+   git branch -d <type>/<what-it-does>
    git fetch --prune
    ```
-5. Say in the chat: PR number, merge commit, what CI ran, and what the next branch is.
+   `git branch -d`, never `-D`: it refuses a branch whose commits are not merged. No `--force` on the
+   removal and no `rm -rf`: a refusal means something is still in that worktree, so look at it first.
+   Remove only the worktree this session made; one that holds QA evidence waits for B6
+   (`qa-defect-loop` «Then»).
+5. Watch `rcm/ci` on the merge commit on `dev` — the watcher submits it like any push. Two PRs green
+   on their own can make `dev` red together, and a red `dev` stops the next merge until a fix PR is in
+   (`dev-batch` §5).
+6. Say in the chat: PR number, merge commit, what CI ran on it, and what the next branch is.
