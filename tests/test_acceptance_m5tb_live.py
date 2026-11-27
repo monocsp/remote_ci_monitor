@@ -1700,3 +1700,90 @@ def test_rl43_the_supervisor_is_checked_as_the_worker_child_before_any_signal() 
         check = body.find('is_child_of "$sup" "$W_PID"')
         assert 0 <= check < body.index("h killtime"), fn
         assert "${sup:-0}" not in body, fn
+
+
+def _sourced(tmp_path: Path, code: str) -> subprocess.CompletedProcess[str]:
+    """하네스를 source 하고 OUT 을 시험 폴더로 둔 채 bash 조각 하나를 돌린다."""
+    out = tmp_path / "out"
+    (out / "facts").mkdir(parents=True, exist_ok=True)
+    env = {"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "M5TB_PY": sys.executable,
+           "HOME": str(tmp_path), "OUT": str(out), "REAL_HOME": "/nonexistent"}  # fmt: skip
+    r = subprocess.run(
+        ["bash", "-c", 'source "$1" && FAILS=0 && eval "$2"', "bash", str(SCRIPT), code],
+        capture_output=True,
+        text=True,
+        env=env,
+        timeout=15,
+        check=False,
+    )
+    for missing in ("No such file or directory", "command not found"):
+        assert missing not in r.stderr, r.stderr
+    return r
+
+
+def _summary(tmp_path: Path) -> dict[str, list[str]]:
+    rows: dict[str, list[str]] = {}
+    for line in (tmp_path / "out" / "summary.txt").read_text(encoding="utf-8").splitlines():
+        word = [*line.split(), ""]  # 낱말이 빈 줄도 읽는다(빈 판정 낱말)
+        rows.setdefault(word[0], []).append(word[1])
+    return rows
+
+
+def test_pr4_a_step_that_ends_without_a_verdict_gets_an_unknown_line(tmp_path: Path) -> None:
+    # 여러 단계가 `worker_start … || return 0` 꼴로 판정 줄 없이 돌아왔고 main 은 종료 0 이었다.
+    # 끝에 단계 표의 실기 ID(와 그 하위 판정)마다 판정 줄이 있는지 보고 빠진 것은 UNKNOWN 이다
+    (tmp_path / "out").mkdir()
+    (tmp_path / "out" / "summary.txt").write_text(
+        "RL15      PASS    orphan stopped\nRL28      PASS    grace\n", encoding="utf-8"
+    )
+    r = _sourced(tmp_path, 'finish_summary "run_orphan run_grace_view run_kill_worker"')
+    assert r.returncode == 0, r.stderr
+    rows = _summary(tmp_path)
+    assert rows["RL15"] == ["PASS"] and rows["RL28"] == ["PASS"], rows
+    for sid in ("RL28-web", "RL28-cancel", "RL43", "RL45", "RL45-web", "RL45-empty", "F78"):
+        assert rows.get(sid) == ["UNKNOWN"], (sid, rows)
+    assert "RL1" not in rows and "RL29" not in rows  # 돌리지 않은 단계는 묻지 않는다
+    text = (tmp_path / "out" / "summary.txt").read_text(encoding="utf-8")
+    assert "no verdict" in text, text
+
+
+def test_pr4_sub_verdicts_are_the_judges_with_a_tail(tmp_path: Path) -> None:
+    mod = helper(tmp_path)
+    assert set(var("SUB_VERDICTS").split()) == {k for k in mod.JUDGES if "-" in k}
+
+
+@pytest.mark.parametrize(
+    ("lines", "rc"),
+    [
+        ("RL1       PASS    a\nRL2       SKIP    b\n", "0"),
+        ("RL1       PASS    a\nRL2       UNKNOWN b\n", "3"),
+        ("RL1       FAIL    a\nRL2       UNKNOWN b\n", "1"),
+        ("", "3"),
+    ],
+)
+def test_pr4_exit_code_is_not_zero_with_an_unknown_row(tmp_path: Path, lines: str, rc: str) -> None:
+    # 빠진 행 · UNKNOWN 이 하나라도 있으면 0 이 아니다(FAIL 1 이 먼저, 그다음 3). 판정 줄이 하나도
+    # 없으면 아무것도 확인하지 않은 것이다
+    (tmp_path / "out").mkdir()
+    (tmp_path / "out" / "summary.txt").write_text(lines, encoding="utf-8")
+    r = _sourced(tmp_path, 'summary_rc "$OUT/summary.txt"')
+    assert r.stdout.strip() == rc, (r.stdout, r.stderr)
+
+
+def test_pr4_main_ends_with_the_verdict_check_and_its_exit_code() -> None:
+    main = _body("main")
+    assert 'finish_summary "$runners"' in main, main[-600:]
+    assert main.count('summary_rc "$OUT/summary.txt"') >= 2, "self-test and the full run"
+    assert '[ "$FAILS" = 0 ]' not in main
+    head = script_text().split("set -euo pipefail", 1)[0]
+    assert re.search(r"UNKNOWN[^\n]*3", head), "the header does not name exit code 3"
+
+
+def test_pr4_a_verdict_line_without_a_verdict_word_is_unknown(tmp_path: Path) -> None:
+    # 도우미가 traceback 으로 끝나 판정 줄이 비면 낱말이 비어 FAIL 도 UNKNOWN 도 아니었다
+    r = _sourced(
+        tmp_path, 'verdict_line RL10 "" && verdict_line RL2 "Traceback (most recent call last):"'
+    )
+    assert r.returncode == 0, r.stderr
+    rows = _summary(tmp_path)
+    assert rows == {"RL10": ["UNKNOWN"], "RL2": ["UNKNOWN"]}, rows
