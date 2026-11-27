@@ -1135,6 +1135,31 @@ def test_pi12_c_names_taken_at_open_and_at_exchange(ps):
     assert ps.exchange(ps.exchange_body(doc["code"], "worker", "build-77"))[0] == 200
 
 
+def test_pi12_c_g1_a_name_taken_between_the_check_and_the_write_keeps_the_code(ps, monkeypatch):
+    """G1: 교환의 이름 확인(`token_row`)과 행 쓰기 사이에 `rcm token add` 가 같은 이름을
+    가져가면 Store 가 `TokenNameTaken` 을 낸다 — 409 `name_taken` 이고 창은 열린 채라 같은 코드로
+    다른 이름의 교환이 200 이다(503 `pair_failed` 로 창을 닫아 코드를 태우지 않는다)."""
+    doc = ps.opened("worker")
+    real = ps.store.add_paired_token
+    calls: list[str] = []
+
+    def racing(name: str, **kw):
+        calls.append(name)
+        if len(calls) == 1:
+            ps.store.add_token(name, now=T0, kind="worker")  # 그 사이의 rcm token add
+        return real(name, **kw)
+
+    monkeypatch.setattr(ps.store, "add_paired_token", racing)
+    before = token_rows(ps)
+    status, body = ps.exchange(ps.exchange_body(doc["code"], "worker", "build-31"))
+    assert (status, body.get("code"), body.get("name")) == (409, "name_taken", "build-31"), body
+    assert ps.app.pair_window_state("worker")["state"] == "open"
+    assert token_rows(ps) == before + 1  # rcm token add 의 행 하나뿐
+    status, out = ps.exchange(ps.exchange_body(doc["code"], "worker", "build-32"))
+    assert (status, out["name"]) == (200, "build-32"), out
+    assert calls == ["build-31", "build-32"]
+
+
 @pytest.mark.parametrize(
     ("host_name", "want"),
     [

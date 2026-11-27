@@ -9320,6 +9320,18 @@ MUTANTS = (
             "test_pi8_c_g2_the_answer_is_ready_before_the_token_row_is_written",
         ),
     ),
+    Mutant(
+        # 교환의 TokenNameTaken 가지가 없음 — 이름 확인과 행 쓰기 사이에 rcm token add 가 같은
+        # 이름을 쓰면 503 pair_failed 가지가 창을 닫아 코드를 태운다(P6 G1)
+        name="pair-name-race-burns-code",
+        path="src/remote_ci_monitor/pairing.py",
+        old="            except TokenNameTaken as e:  # mutcheck: pair-name-race-burns-code\n",
+        new="            except () as e:\n",
+        tests=(
+            "tests/test_pairing_server.py::"
+            "test_pi12_c_g1_a_name_taken_between_the_check_and_the_write_keeps_the_code",
+        ),
+    ),
 )
 
 
