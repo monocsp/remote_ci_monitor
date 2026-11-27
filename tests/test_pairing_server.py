@@ -1181,6 +1181,13 @@ def test_pi10_read_routes_are_the_same_bytes_with_and_without_a_window(ps):
     ps.opened("worker")
     ps.opened("client")
     assert snapshot() == closed
+    # SSE /events 의 첫 프레임(hello)도 같은 바이트다. 스트림은 끊은 뒤에도 서버가 잠시 세어
+    # (`sse_connections`) 위의 읽기 비교가 끝난 다음에 본다 — 열린 창 둘을 취소해 닫기 전과 뒤
+    opened = sse_first_frame(ps)
+    for kind in ("worker", "client"):
+        assert ps.req("POST", "/pair/cancel", token="admin", json_body={"kind": kind})[0] == 200
+    assert sse_first_frame(ps) == opened
+    assert opened[0] == 200 and opened[1].startswith(b"event: hello\n")
 
 
 # ── PI11 시계 · 재시작 · reload · 목록 보존 ───────────────────────────────────
