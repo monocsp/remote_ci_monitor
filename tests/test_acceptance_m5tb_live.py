@@ -1914,3 +1914,25 @@ def test_pr4_report_states_the_bounds_the_judges_now_use() -> None:
     assert "첫 SIGTERM" in rl51 and "heartbeat" in rl51, rl51
     assert "4.01" not in rl51, rl51  # 옛 상한 grace_J + 0.31 + 0.7
     assert "RL51-a" in rows, sorted(rows)
+
+
+def test_pr4_report_numbers_come_from_the_last_run_under_the_current_judges(tmp_path: Path) -> None:
+    # 판정을 고친 뒤의 실기가 보고서의 숫자다 — 실기 표의 마지막 행이 지금 하네스의 판정 수
+    # (판정 함수 수 · SKIP 줄 수)와 맞고, 「단계별 판정」 표 · 증거 목록이 그 실기를 가리킨다
+    text = report_text()
+    runs = re.findall(
+        r"^\| (\S+) \| 2026-11-27 (\d\d):(\d\d) \| [^|]+ \| [^|]+ \| "
+        r"PASS (\d+) · SKIP (\d+) · FAIL (\d+) · UNKNOWN (\d+), 종료 (\d+) \|$",
+        text,
+        re.M,
+    )
+    assert runs, "the report's run table has no row with PASS · SKIP · FAIL · UNKNOWN and an exit"
+    name, hh, mm, passed, skipped, failed, unknown, rc = runs[-1]
+    mod = helper(tmp_path)
+    assert (int(passed), int(skipped)) == (len(mod.JUDGES), len(skip_ids())), runs[-1]
+    assert (failed, unknown, rc) == ("0", "0", "0"), runs[-1]
+    assert f"## 단계별 판정 ({name} 실기)" in text, f"the verdict table is not the {name} run's"
+    assert re.search(rf"^[0-9a-f]{{64}}  m5tb-live-20261127-{hh}{mm}\.txt$", text, re.M), (
+        "the evidence list has no hash of the last run's console output"
+    )
+    assert "이 자리에 적는다" not in text, "the rerun placeholder is still in the report"
