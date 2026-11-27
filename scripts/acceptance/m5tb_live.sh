@@ -276,7 +276,7 @@ HOLD_ITEM_KEYS="job_id preset group scope worker cause"
 # 다섯 lost 끝(core/outcome.py CODES)
 LOST_CODES="worker_unreachable worker_self_stopped worker_replaced worker_restarted_without_job orphan_unverified"
 # 시험 DB 의 칸(store.py 스키마) — 읽기 전용으로만 연다
-DB_COLUMNS="jobs.state jobs.summary_code irreversible_holds.job_id irreversible_holds.cause irreversible_holds.released_at events.job_id events.kind events.payload worker_sessions.worker_name"
+DB_COLUMNS="jobs.state jobs.summary_code jobs.finished_at irreversible_holds.job_id irreversible_holds.cause irreversible_holds.released_at events.job_id events.kind events.payload worker_sessions.worker_name"
 # 알림 훅이 적는 환경(core/notify.py)
 NOTIFY_ENV="RCM_JOB_ID RCM_STATE RCM_EVENT RCM_HOLD"
 # 워커 로그 줄(remote_worker.py) — 판정이 찾는 글
@@ -353,6 +353,30 @@ ROOT = Path(os.environ.get("M5TB_ROOT") or Path(__file__).resolve().parents[3])
 TERMINAL = ("succeeded", "failed", "timed_out", "cancelled", "lost", "expired")
 ABSENT = "<absent>"
 
+# ── 판정 경계의 재료 ─────────────────────────────────────────────────────────
+# 제품의 값 — 시험이 remote_worker.py · job_supervisor.py 의 상수와 같은지 견준다. 판정은 부를
+# 때마다 이 이름을 읽는다(모듈을 import 하지 않아 판정이 순수 함수로 남는다)
+HEARTBEAT_DEADLINE = 15  # remote_worker.HEARTBEAT_DEADLINE_SECONDS(T_req)
+SELF_STOP_SLACK = 10  # remote_worker.SELF_STOP_SLACK_SECONDS
+WATCHDOG_TICK = 1  # remote_worker.WATCHDOG_TICK_SECONDS
+SUPERVISOR_POLL = 0.25  # job_supervisor.SUPERVISOR_POLL_SECONDS
+# 명세의 값 — docs/m5tb-workplan.md
+DETECT_EPS = 0.06  # §4.1 「감독자가 t_d + 0.25 + ε 에 알아챈다(F78 실측 ε ≤ 0.06초)」
+GRACE_OVERSHOOT = 0.05  # F78 「종료 대기 = grace_J(측정 넘침 ≤ 폴링 + 0.05초)」
+RL43_D_AFTER_GRACE = 2.0  # RL43 (d) 「리더 끝 + grace_J + 2초 안에 사라진다」
+RL51_AFTER_GRACE = 0.5  # RL51 (b)(c) 「첫 SIGTERM + grace_J + 0.5초 안에 사라진다」
+# 하네스가 재는 자리의 몫 — 신호를 보낸 뒤 5ms 마다 kill(0) · 좀비면 ps 한 번(F84 최대 0.015초)
+MEASURE_SLACK = 0.04
+# RL51 (b)(c) 는 첫 SIGTERM 을 볼 수 없어 `rcm cancel` 이 돌아온 때부터 잰다. 취소는 다음
+# heartbeat 응답(≤ HB)이 워커에 싣고, 그 왕복과 러너가 그룹에 SIGTERM 을 보내기까지를 0.5초로 둔다
+CANCEL_PATH = 0.5
+
+
+def detect_max() -> float:
+    """부모 SIGKILL → 감독자가 알아채 SIGTERM 을 보내기까지의 상한(F78 0.07~0.31초)."""
+    return SUPERVISOR_POLL + DETECT_EPS
+
+
 # ── HTTP ──────────────────────────────────────────────────────────────────
 
 
@@ -412,8 +436,15 @@ def cmd_job(url: str, tok: str, jid: str, *keys: str) -> int:
 
 
 def cmd_jobdoc(url: str, tok: str, jid: str, dest: str) -> int:
-    status, doc = get(url, tok, f"/jobs/{jid}")
+    """잡 문서를 dest 에 쓰고 HTTP 상태를 찍는다(닿지 않으면 0). 오류 본문도 쓰이므로 판정은
+    그 파일을 상태 200 일 때만 「읽었다」고 본다."""
+    try:
+        status, doc = get(url, tok, f"/jobs/{jid}")
+    except OSError:
+        print(0)
+        return 1
     Path(dest).write_text(json.dumps(doc, ensure_ascii=False, indent=1), encoding="utf-8")
+    print(status)
     return 0 if status == 200 else 1
 
 
@@ -579,6 +610,8 @@ def cmd_getraw(url: str, tok: str, path: str, dest: str) -> int:
     except urllib.error.HTTPError as e:
         Path(dest).write_bytes(e.read())
         print(e.code)
+    except OSError:  # 닿지 않음 — 200 이 아니므로 판정은 「읽지 못함」으로 본다
+        print(0)
     return 0
 
 
@@ -747,6 +780,26 @@ def cmd_firstline(path: str, needle: str) -> int:
     return 0
 
 
+def lines_in_order(path: str, first: str, second: str) -> str:
+    """first 가 든 첫 줄이 second 가 든 첫 줄보다 앞이면 1, 뒤면 0, 둘 중 하나라도 없으면 <absent>.
+
+    워커 로그는 stderr 한 줄기이고 줄마다 flush 한다(remote_worker.py) — 줄 순서가 쓴 순서다."""
+    try:
+        lines = Path(path).read_text(encoding="utf-8", errors="replace").splitlines()
+    except OSError:
+        return ABSENT
+    a = next((i for i, x in enumerate(lines) if first in x), None)
+    b = next((i for i, x in enumerate(lines) if second in x), None)
+    if a is None or b is None:
+        return ABSENT
+    return "1" if a < b else "0"
+
+
+def cmd_inorder(path: str, first: str, second: str) -> int:
+    print(lines_in_order(path, first, second))
+    return 0
+
+
 def cmd_count(path: str, needle: str) -> int:
     try:
         print(Path(path).read_bytes().count(needle.encode()))
@@ -806,6 +859,46 @@ def cmd_render(code: str, args_json: str) -> int:
         args = None
     text = render(code, args if isinstance(args, dict) else None)
     print("" if text is None else text)
+    return 0
+
+
+#: 웹이 lost 끝을 그리는 생산자(app.js outcomeText → i18n.js `outcome.<코드>`)를 node 로 부른다
+_I18N_JS = """
+globalThis.window = globalThis;
+const I = require(process.argv[1]);
+const [lang, code, args] = [process.argv[2], process.argv[3], JSON.parse(process.argv[4])];
+const key = "outcome." + code;
+process.stdout.write(I.has(key) ? String(I.t(lang, key, args)) : "");
+"""
+
+
+def web_sentence(lang: str, code: str, args: dict[str, object] | None) -> str:
+    """그 언어 화면이 그 요약 코드에 그리는 문장. node 가 없거나 모르는 코드면 빈 글(모름)."""
+    import shutil
+
+    import remote_ci_monitor  # 서버가 내주는 바로 그 i18n.js(이 빌드의 web/)
+
+    node = shutil.which("node")
+    i18n = Path(remote_ci_monitor.__file__).parent / "web" / "i18n.js"
+    if node is None or not i18n.is_file():
+        return ""
+    r = subprocess.run(
+        [node, "-e", _I18N_JS, str(i18n), lang, code, json.dumps(args or {})],
+        capture_output=True,
+        text=True,
+        timeout=20,
+        check=False,
+    )
+    return r.stdout.strip() if r.returncode == 0 else ""
+
+
+def cmd_needle(lang: str, code: str, args_json: str) -> int:
+    """웹 화면에서 찾을 글 — web_sentence 의 앞 40자(긴 문장은 줄이 바뀌어도 앞은 그대로다)."""
+    try:
+        args = json.loads(args_json) if args_json not in ("", "null", ABSENT) else None
+    except ValueError:
+        args = None
+    print(web_sentence(lang, code, args if isinstance(args, dict) else None)[:40])
     return 0
 
 
@@ -1175,12 +1268,16 @@ def judge_rl1(f: dict[str, str]) -> str:
     g = _g(f)
     j.eq("state_at_stop", "running", "server state when the command died")
     j.lt("self_stop_after", g - 5, "partition → command gone")
+    # 명세: 멈춘 시각 ≤ DB finished_at(차이 ≥ 0). finished_epoch 는 DB 의 REAL 칸이다 — 잡 문서의
+    # finished_at 은 초 단위로 잘린다(core/status.py iso). death_epoch 는 하네스가 소멸을 본 뒤의
+    # 시각이라 실제 소멸보다 늦다(엄한 쪽)
     death, fin = j.num("death_epoch"), j.num("finished_epoch")
     if death is None or fin is None:
         j.unk.append("command death vs DB finished_at: not observed")
-    elif death > fin + 1.0:
-        j.bad.append(f"command died {death - fin:.1f}s after the server closed the job")
+    elif death > fin:
+        j.bad.append(f"command died {death - fin:.3f}s after the server closed the job")
     j.eq("final_state", "lost", "final state")
+    j.eq("lost_events", 1, "state→lost events")
     j.among("summary_code", ("worker_unreachable", "worker_self_stopped"), "summary_code")
     j.nulls("failed_step", "failed_step")
     j.nulls("last_step", "last_step")
@@ -1327,19 +1424,28 @@ def judge_rl15(f: dict[str, str]) -> str:
 def judge_rl18(f: dict[str, str]) -> str:
     j = Judge(f)
     j.eq("wait_rc", 0, "rcm wait exit")
-    j.ge("masked_seen", 1, "masked values in log.txt")
-    for k, what in (
-        ("in_log", "server log.txt"),
-        ("in_rcm_logs", "rcm logs"),
-        ("in_web_log", "web log route"),
-        ("in_job_doc", "job document"),
+    # 원문 0 번은 그곳을 정말 읽었을 때만 「비밀 없음」이다. 증거: 명령 종료 0 · HTTP 200 과, 그
+    # 글에 있어야 할 것(가린 값 `****` · 잡의 프리셋 이름 · SSE 의 그 잡 사건)이 하나 이상
+    for k, what, proofs in (
+        ("in_log", "server log.txt", (("masked_seen", None),)),
+        ("in_rcm_logs", "rcm logs", (("rcm_logs_rc", "0"), ("rcm_logs_seen", None))),
+        ("in_web_log", "web log route", (("web_log_status", "200"), ("web_log_seen", None))),
+        ("in_job_doc", "job document", (("job_doc_status", "200"), ("job_doc_seen", None))),
+        ("in_sse", "SSE /events", (("sse_seen", None),)),
     ):
-        j.eq(k, 0, f"secret in {what}")
-    # SSE 를 하나도 못 받았으면 「비밀이 없다」가 아니라 모른다
-    if (j.num("sse_bytes") or 0) <= 0:
-        j.unk.append("SSE /events: nothing captured")
-    else:
-        j.eq("in_sse", 0, "secret in SSE /events")
+        found = j.num(k)
+        if found is not None and found > 0:
+            j.bad.append(f"secret in {what}: {found:g}")  # 읽은 증거가 없어도 보였으면 보인 것이다
+            continue
+        missing = [
+            f"{p} {f.get(p, 'not recorded')}"
+            for p, want in proofs
+            if (j.v(p) != want if want is not None else (j.num(p) or 0) < 1)
+        ]
+        if missing:
+            j.unk.append(f"{what}: no sign it was read ({', '.join(missing)})")
+        else:
+            j.eq(k, 0, f"secret in {what}")
     if j.gate("pr2", "byte-exact log and resend"):
         j.eq("log_equals_masked", 1, "log.txt equals the masked output")
         j.eq("resend_seen", 1, "the worker resent a piece (relay cut)")
@@ -1473,6 +1579,38 @@ def judge_rl29(f: dict[str, str]) -> str:
     return j.result(f"{len(codes)} lost endings: exit 3, their sentence, one notify call each")
 
 
+def judge_rl29_web(f: dict[str, str]) -> str:
+    """다섯 lost 끝마다 두 언어 화면에 그 언어의 문장(i18n.js 가 그린 앞 40자)이 있다.
+
+    찾을 끝이 없거나(`needles` 에 없는 코드) 찾을 글이 비면 모른다 — 빈 글은 아무 화면에나
+    맞는다."""
+    j = Judge(f)
+    codes = (f.get("codes") or "").split()
+    needles = set((f.get("needles") or "").split())
+    found: list[str] = []
+    if not codes:
+        j.unk.append("no codes listed")
+    for code in codes:
+        if code not in needles:
+            j.unk.append(f"{code}: no job ended so — nothing to look for on the page")
+            continue
+        for lang in ("en", "ko"):
+            if j.v(f"needle_{lang}_{code}") is None:
+                j.unk.append(f"{lang} {code}: no sentence to look for")
+            else:
+                found.append(f"{lang}_{code}")
+    base = judge_web(f, band_max=None, needles=tuple(found))
+    if base.startswith("FAIL") or not j.unk:
+        return base
+    rest = "" if base.startswith("PASS") else f"; {base.split(' ', 1)[1]}"
+    return "UNKNOWN " + "; ".join(j.unk) + rest
+
+
+def remote_threshold(g: float, grace_j: float) -> float:
+    """자기 멈춤 문턱 G − m_J, m_J = T_req + grace_J + 여유(remote_worker.self_stop_threshold)."""
+    return g - (HEARTBEAT_DEADLINE + grace_j + SELF_STOP_SLACK)
+
+
 def judge_rl34(f: dict[str, str]) -> str:
     j = Judge(f)
     g = _g(f)
@@ -1483,9 +1621,14 @@ def judge_rl34(f: dict[str, str]) -> str:
         if gj is None or thr is None:
             j.unk.append(f"{what}: threshold line or grace_J not observed")
         else:
-            want = g - (15 + gj + 10)
-            if thr > want + 1:
+            # 워커가 적는 값은 int(wgap) 이다: 감시 틱(WATCHDOG_TICK)마다 wgap ≥ 문턱을 보므로
+            # 문턱 이상, 문턱 + 틱 이하다(remote_worker.py 의 watchdog)
+            want = remote_threshold(g, gj)
+            if thr > want + WATCHDOG_TICK:
                 j.bad.append(f"{what}: stopped at {thr:g}s without the server, threshold {want:g}")
+            elif thr < want:
+                j.bad.append(f"{what}: stopped at {thr:g}s, before its threshold {want:g}")
+            # 멈춘 뒤 러너가 SIGTERM → grace_J → SIGKILL 하므로 grace_J, 그리고 감시 틱 1 + 측정 2
             j.le(f"{m}_stop_after", thr + gj + 3, f"{what}: cut → command gone")
         j.lt(f"{m}_stop_after", g - 5, f"{what}: command gone before heard + G")
         j.eq(f"{m}_code", "worker_self_stopped", f"{what}: summary_code")
@@ -1517,13 +1660,23 @@ def judge_rl40(f: dict[str, str]) -> str:
 def judge_rl43(f: dict[str, str]) -> str:
     j = Judge(f)
     gj = j.num("grace_j")
-    j.le("a_detect", 0.35, "(a) worker kill -9 → SIGTERM-following command gone")
+    # (a) 감독자 감지(F78 ≤ 0.31) 뒤 SIGTERM 에 곧 끝난다 (b) 그 뒤 grace_J 를 다 기다려 SIGKILL
+    # (d) 리더 끝 + grace_J + 2초(명세) — 감독자를 SIGKILL 한 순간이 리더 끝이다
+    j.le(
+        "a_detect",
+        detect_max() + MEASURE_SLACK,
+        "(a) worker kill -9 → SIGTERM-following command gone",
+    )
     if gj is None:
         j.unk.append("(b) grace_J: not known")
     else:
-        j.le("b_detect", gj + 0.35, "(b) SIGTERM-ignoring command gone")
+        j.le("b_detect", gj + detect_max() + MEASURE_SLACK, "(b) SIGTERM-ignoring command gone")
         j.ge("b_detect", gj - 0.5, "(b) SIGTERM-ignoring command outlived its grace")
-        j.le("d_dead", gj + 2.5, "(d) supervisor kill -9 → command gone")
+        j.le(
+            "d_dead",
+            gj + RL43_D_AFTER_GRACE + MEASURE_SLACK,
+            "(d) supervisor kill -9 → command gone",
+        )
     j.eq("e_alive", 1, "(e) plain job alive after the kill")
     j.eq("a_final", "lost", "(a) state after G")
     j.eq("a_code", "worker_unreachable", "(a) summary_code")
@@ -1650,9 +1803,15 @@ def judge_rl51(f: dict[str, str]) -> str:
     if gj is None:
         j.unk.append("grace_J: not known")
     else:
-        j.le("b1_gone", gj + hb + 1.0, "(b) worker alive, cancel → ignoring child gone")
-        j.le("b2_gone", gj + 0.31 + 0.7, "(b) worker kill -9 → ignoring child gone")
-        j.le("c_gone", gj + 4 + hb, "(c) command used most of its grace → child gone")
+        # 명세: 남은 자식이 첫 SIGTERM + grace_J + 0.5초 안에 사라진다. 워커가 죽은 경우는 그
+        # SIGTERM 이 감독자 감지(F78) 뒤라 kill -9 에서 잰다. 산 경우는 첫 SIGTERM 을 볼 수 없어
+        # `rcm cancel` 이 돌아온 때부터 재므로 다음 heartbeat(≤ HB)와 그 왕복(CANCEL_PATH)이
+        # 앞에 붙는다
+        after_cancel = gj + hb + CANCEL_PATH + RL51_AFTER_GRACE
+        j.le("b1_gone", after_cancel, "(b) worker alive, cancel → ignoring child gone")
+        after_kill = gj + detect_max() + RL51_AFTER_GRACE + MEASURE_SLACK
+        j.le("b2_gone", after_kill, "(b) worker kill -9 → ignoring child gone")
+        j.le("c_gone", after_cancel, "(c) command used most of its grace → child gone")
     j.eq("b1_state", "cancelled", "(b) state after the cancel")
     j.eq("c_state", "cancelled", "(c) state after the cancel")
     return j.result(
@@ -1664,11 +1823,11 @@ def judge_rl51(f: dict[str, str]) -> str:
 def judge_f78(f: dict[str, str]) -> str:
     j = Judge(f)
     gj = j.num("grace_j")
-    j.le("a_detect", 0.31 + 0.04, "parent SIGKILL → SIGTERM command gone")
+    j.le("a_detect", detect_max() + MEASURE_SLACK, "parent SIGKILL → SIGTERM command gone")
     b = j.num("b_detect")
     if gj is None or b is None:
         j.unk.append("ignoring command: not measured")
-    elif b - gj > 0.31 + 0.05:
+    elif b - gj > detect_max() + GRACE_OVERSHOOT:
         j.bad.append(f"ignoring command gone {b - gj:.3f}s after grace_J")
     j.le("sup_cpu_30s", 0.1, "supervisor CPU over 30 s")
     j.le("python_I_start", 0.1, "python -I start")
@@ -1698,9 +1857,7 @@ JUDGES = {
     "RL28-web": judge_rl28_web,
     "RL28-cancel": judge_rl28_cancel,
     "RL29": judge_rl29,
-    "RL29-web": lambda f: judge_web(
-        f, band_max=None, needles=tuple(n for n in (f.get("needles") or "").split())
-    ),
+    "RL29-web": judge_rl29_web,
     "RL34": judge_rl34,
     "RL40": judge_rl40,
     "RL42": judge_rl42,
@@ -1722,7 +1879,12 @@ def judge(step: str, facts: dict[str, str]) -> str:
 
 
 def cmd_judge(step: str, path: str) -> int:
-    print(judge(step, read_facts(path)))
+    """판정 한 줄. 판정 함수가 예외로 끝나면 빈 출력이 아니라 UNKNOWN 이다."""
+    try:
+        line = judge(step, read_facts(path))
+    except Exception as e:  # noqa: BLE001 — 판정이 깨진 것은 모르는 것이다
+        line = f"UNKNOWN the judge crashed: {type(e).__name__}: {str(e)[:200]}"
+    print(line)
     return 0
 
 
@@ -1744,6 +1906,7 @@ COMMANDS = {
     "spawn": cmd_spawn,
     "run": cmd_run,
     "firstline": cmd_firstline,
+    "inorder": cmd_inorder,
     "count": cmd_count,
     "sha": cmd_sha,
     "epoch": cmd_epoch,
@@ -1751,6 +1914,7 @@ COMMANDS = {
     "sub": cmd_sub,
     "sql": cmd_sql,
     "render": cmd_render,
+    "needle": cmd_needle,
     "putsecret": cmd_putsecret,
     "maskedsha": cmd_masked_sha,
     "relay": cmd_relay,
@@ -2274,7 +2438,7 @@ run_sweep() {
 
 # RL18 — 릴리스 비밀이 어디에도 원문으로 남지 않는다
 run_secret() {
-  local secret j n sse_pid i
+  local secret j n sse_pid i rc
   log "RL18 start"
   common_facts RL18
   secret="rl18-$("$PY" -I -c 'import secrets; print(secrets.token_hex(16))')"
@@ -2302,9 +2466,13 @@ run_secret() {
   done
   rwait "$j" 120 rl18-wait
   fact RL18 wait_rc "$RW_RC"
-  client logs "$j" >"$OUT/rl18-logs.txt" 2>&1 || true
-  h getraw "$URL" "$CTOK" "/jobs/$j/log?offset=0" "$OUT/rl18-weblog.bin" >/dev/null
-  h jobdoc "$URL" "$CTOK" "$j" "$OUT/rl18-job.json" || true
+  # 다섯 곳마다 「읽었다」는 증거를 같이 적는다 — 실패한 명령 · 오류 본문에서 원문 0 번은
+  # 「비밀 없음」이 아니다(judge_rl18)
+  rc=0
+  client logs "$j" >"$OUT/rl18-logs.txt" 2>"$OUT/rl18-logs.err" || rc=$?
+  fact RL18 rcm_logs_rc "$rc"
+  fact RL18 web_log_status "$(h getraw "$URL" "$CTOK" "/jobs/$j/log?offset=0" "$OUT/rl18-weblog.bin" 2>>"$OUT/rl18.err")"
+  fact RL18 job_doc_status "$(h jobdoc "$URL" "$CTOK" "$j" "$OUT/rl18-job.json" 2>>"$OUT/rl18.err")"
   sleep 2 # 끝 사건까지 SSE 에 실리게
   kill "$sse_pid" 2>/dev/null || true
   wait "$sse_pid" 2>/dev/null || true
@@ -2314,7 +2482,13 @@ run_secret() {
   fact RL18 in_job_doc "$(h count "$OUT/rl18-job.json" "$secret")"
   fact RL18 in_sse "$(h count "$OUT/rl18-sse.bin" "$secret")"
   fact RL18 sse_bytes "$(wc -c <"$OUT/rl18-sse.bin" 2>/dev/null | tr -d ' ' || echo 0)"
+  # 그 글에 있어야 할 것: log.txt · rcm logs · 웹 로그는 가린 값, 잡 문서는 프리셋 이름, SSE 는 그 잡의
+  # 사건(`"job_id":N,` — core 의 job_changed 사건)
   fact RL18 masked_seen "$(h count "$DATA/jobs/$j/log.txt" "****")"
+  fact RL18 rcm_logs_seen "$(h count "$OUT/rl18-logs.txt" "****")"
+  fact RL18 web_log_seen "$(h count "$OUT/rl18-weblog.bin" "****")"
+  fact RL18 job_doc_seen "$(h count "$OUT/rl18-job.json" rl18-plan)"
+  fact RL18 sse_seen "$(h count "$OUT/rl18-sse.bin" "\"job_id\":$j,")"
   fact RL18 log_equals_masked "$(if [ "$(h sha "$DATA/jobs/$j/log.txt")" = "$(h maskedsha "$B/secret.txt" 600)" ]; then echo 1; else echo 0; fi)"
   fact RL18 resend_seen "$(if grep -q retrying "$W_LOG"; then echo 1; else echo 0; fi)"
   fact RL18 log_complete "$(jv "$j" log_complete)"
@@ -2555,9 +2729,10 @@ run_orphan() {
   fi
   fact RL15 orphan_line "$(if grep -q "orphan #$y: stopped process group" "$W_LOG"; then echo 1; else echo 0; fi)"
   pz=$(pid_of "$z" 60)
-  if [ -n "${t_dead:-}" ] && [ -n "$pz" ]; then
-    fact RL15 z_after_orphan "$(h sub "$(h epoch "$(jv "$z" started_at)")" "$t_dead" | awk '{ print ($1 >= -1.0 ? 1 : 0) }')"
-  fi
+  # 「claim 전에 끝냄」은 시계가 아니라 같은 워커 로그의 줄 순서로 본다 — 고아 줄 다음에 z 를 집은
+  # 줄이 있어야 한다. 잡 문서의 started_at 은 초 단위로 잘려(core/status.py iso) 견줄 수 없다
+  [ -n "$pz" ] && fact RL15 z_after_orphan "$(h inorder "$W_LOG" "orphan #$y: stopped process group" "claimed #$z ")"
+  [ -n "${t_dead:-}" ] && fact RL15 orphan_end_epoch "$t_dead"
   fact RL15 plain_final "$(waitstate "$y" 30 terminal)"
   fact RL15 ship_final "$(waitstate "$x" 30 terminal)"
   fact RL15 ship_hold "$(has_hold "$x")"
@@ -2621,7 +2796,8 @@ run_partition_past_g() {
   fact RL1 summary_code "$(jv "$x" summary_code)"
   fact RL1 failed_step "$(jv "$x" failed_step)"
   fact RL1 last_step "$(jv "$x" last_step)"
-  fact RL1 finished_epoch "$(h epoch "$(jv "$x" finished_at)")"
+  # DB 의 REAL 칸 — 잡 문서의 finished_at 은 초 단위로 잘린다(core/status.py iso)
+  fact RL1 finished_epoch "$(db "SELECT finished_at FROM jobs WHERE id=?" "$x")"
   fact RL5 summary_code "$(jv "$y" summary_code)"
   rwait "$x" 10 rl1-wait
   fact RL1 wait_rc "$RW_RC"
@@ -2660,6 +2836,8 @@ run_partition_past_g() {
   fact RL1 hold_released_after_return "$t"
   fact RL42 same_group_started_after_release "$(if [ -n "$(pid_of "$z" 60)" ]; then echo 1; else echo 0; fi)"
   fact RL1 state_end "$(jv "$x" state)"
+  # 「lost 한 번」 — 돌아온 워커의 finish 가 풀어 준 뒤에 센다(RL2 의 x_lost_events 와 같은 질의)
+  fact RL1 lost_events "$(db "SELECT count(*) FROM events WHERE job_id=? AND kind='state' AND payload LIKE '%\"lost\"%'" "$x")"
   sleep 3
   fact RL5 alive_after_return "$(alive "$py")"
   client cancel "$z" >/dev/null 2>&1 || true
@@ -2931,7 +3109,7 @@ run_kill_worker() {
 
 # RL29 — 다섯 lost 끝을 사람 · 훅 · 웹으로
 run_lost_ends() {
-  local code jid args text needles=""
+  local code jid args text lang needles=""
   log "RL29 start"
   common_facts RL29
   fact RL29 codes "$LOST_CODES"
@@ -2948,13 +3126,21 @@ run_lost_ends() {
     fact RL29 "${code}_line" "$(if [ -n "$text" ] && grep -qF "#$jid lost: $text" "$OUT/rl29-$code.err"; then echo 1; else echo 0; fi)"
     fact RL29 "${code}_notify" "$(grep -c "^job=$jid state=lost " "$B/notify.log" 2>/dev/null || true)"
     needles="$needles $code"
-    printf '%s\n' "$text" >"$OUT/rl29-needle-$code.txt"
+    printf '%s\n' "$args" >"$OUT/rl29-args-$code.txt"
   done
   judge RL29
   web rl29 >"$OUT/facts/RL29-web.txt"
+  fact RL29-web codes "$LOST_CODES"
   fact RL29-web needles "$needles"
+  # 끝마다 그 언어 화면이 그리는 문장(i18n.js)의 앞 40자를 그 언어 화면 글에서 찾는다. 찾을 글이
+  # 비면 찾지 않는다 — 빈 글은 아무 화면에나 맞는다(judge_rl29_web 이 UNKNOWN 으로 본다)
   for code in $needles; do
-    fact RL29-web "found_$code" "$(if grep -qF "$(head -1 "$OUT/rl29-needle-$code.txt" | cut -c1-40)" "$OUT/web/rl29-en.txt" 2>/dev/null; then echo 1; else echo 0; fi)"
+    for lang in en ko; do
+      text=$(h needle "$lang" "$code" "$(cat "$OUT/rl29-args-$code.txt")" 2>>"$OUT/web.err" || true)
+      fact RL29-web "needle_${lang}_$code" "$text"
+      [ -n "$text" ] || continue
+      fact RL29-web "found_${lang}_$code" "$(has_line "$OUT/web/rl29-$lang.txt" "$text")"
+    done
   done
   for code in en ko; do
     fact RL29-web "${code}_raw" "$(if grep -qE "$(printf '%s' "$LOST_CODES" | tr ' ' '|')" "$OUT/web/rl29-$code.txt" 2>/dev/null; then echo 1; else echo 0; fi)"
