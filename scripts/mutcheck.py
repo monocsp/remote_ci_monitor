@@ -8861,6 +8861,65 @@ MUTANTS = (
             "test_b7_4_an_explicit_8787_is_refused_even_when_it_does_not_win",
         ),
     ),
+    Mutant(
+        # 감싼 명령 · `rcm token` 의 `--port` · `RCM_SERVER_PORT` 도 설정을 이긴다고 본다 — 그
+        # 플래그를 넘기지 않는 스크립트 안의 rcm 이 설정대로 8787 로 뜬다(batch-8 MED 1)
+        name="live-proc-wrapper-port-credited",
+        path="tools/live_proc.py",
+        old='    takes_port = subcommand == "serve"  # mutcheck: live-proc-wrapper-port-credited\n',
+        new="    takes_port = True\n",
+        tests=(
+            "tests/test_live_proc.py::"
+            "test_b8_1_an_override_counts_only_for_the_rcm_command_that_reads_it",
+        ),
+    ),
+    Mutant(
+        # 감싼 명령 · `rcm serve` 의 `--server` 도 설정의 주소를 이긴다고 본다(batch-8 MED 1)
+        name="live-proc-wrapper-server-credited",
+        path="tools/live_proc.py",
+        old=(
+            '    takes_server = subcommand == "worker" or client'
+            "  # mutcheck: live-proc-wrapper-server-credited\n"
+        ),
+        new="    takes_server = True\n",
+        tests=(
+            "tests/test_live_proc.py::"
+            "test_b8_1_an_override_counts_only_for_the_rcm_command_that_reads_it",
+        ),
+    ),
+    Mutant(
+        # 포트의 타입을 보지 않는다 — `true` · `8790.0` · `[8790]` 이 8787 이 아니라서 통과한다
+        name="live-proc-port-type-unchecked",
+        path="tools/live_proc.py",
+        old="    if isinstance(value, bool) or not isinstance(value, int | str):\n",
+        new="    if False:\n",
+        tests=(
+            "tests/test_live_proc.py::"
+            "test_b8_2_a_port_of_the_wrong_type_is_refused_even_when_it_is_not_8787",
+        ),
+    ),
+    Mutant(
+        # 표도 주소도 아닌 `server = 8790` 을 포트로 읽는다 — rcm 이 거부하는 설정이 통과한다
+        name="live-proc-odd-server-key-read-as-port",
+        path="tools/live_proc.py",
+        old=(
+            "            raise ValueError("
+            'f"[server] is neither a table nor a URL, but {section!r}")\n'
+        ),
+        new="            port = section\n",
+        tests=(
+            "tests/test_live_proc.py::"
+            "test_b8_2_a_server_key_that_is_neither_table_nor_url_is_refused",
+        ),
+    ),
+    Mutant(
+        # 읽을 수 없는 덮어쓰기(`--port abc` · `RCM_SERVER_PORT=""`)를 「포트 없음」으로 넘긴다
+        name="live-proc-unreadable-override-accepted",
+        path="tools/live_proc.py",
+        old="            port = int(port_override)\n",
+        new="            port = _int_or_none(port_override)\n",
+        tests=("tests/test_live_proc.py::test_b8_3_an_override_rcm_cannot_read_is_refused",),
+    ),
 )
 
 
