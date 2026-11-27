@@ -82,8 +82,9 @@ DEFINES_RE = re.compile(
 )
 #: 정의를 다시 적는 줄 — 심각도 낱말과 정본의 기준 낱말 둘 이상이 한 줄에.
 CRITERIA = ("fail-open", "traceback", "secret", "auth", "corrupt", "migrat", "mutcheck")
-#: `pkill` — 이름으로 죽이지 않는 규칙(「띄울 때 적은 pid 에만」)도 정본 한 곳에만 둔다.
-TEST_SERVER_WORDS = ("8790", "8899", "rcm-devtest", "pkill")
+#: `pkill` · `killall` · `pgrep` — 이름으로 죽이지 않는 규칙(「띄울 때 적은 pid 에만」)도 정본
+#: 한 곳에만 둔다.
+TEST_SERVER_WORDS = ("8790", "8899", "rcm-devtest", "pkill", "killall", "pgrep")
 TOML_BLOCK_RE = re.compile(r"^```toml\n(.*?)^```", re.S | re.M)
 #: 워크트리 `.venv` 가 아닌 명령 꼴. 허용: `./.venv/bin/python tools/…` ·
 #: `./.venv/bin/python scripts/mutcheck.py` · `./.venv/bin/ruff`.
@@ -320,10 +321,24 @@ ADOPTED = (
     ("agents/isolated-verifier.md", "P5 live lane"),
     # 「Rounds」 1: 읽는 라운드만 나란히, 실기 레인은 명령을 돌리니 차례로.
     ("agents/isolated-verifier.md", "its live lane runs one after another"),
-    # 실기 레인의 신호는 띄울 때 적은 pid 에만 보낸다. 정본은 test-server, 나머지는 가리킨다.
-    ("skills/_shared/test-server.md", "never by name"),
-    ("skills/_shared/edge-scope.md", "the test worker's recorded pid"),
-    ("skills/edge-audit/SKILL.md", "test-server.md «Parallel servers and cleanup»"),
+    # 실기 레인의 신호는 띄울 때 적은 pid 에만 보낸다. 정본은 test-server «Signals», 나머지는
+    # 가리킨다. 신원은 pid 와 띄운 직후 적은 시작 시각이다 — 명령줄 대조만으로는 `--config` 가
+    # 없는 클라이언트(`HOME` · `RCM_SERVER` 로 data_dir 을 받는다)가 영원히 통과하지 못했다.
+    ("skills/_shared/test-server.md", "## Signals"),
+    ("skills/_shared/test-server.md", "-o lstart= > $D/worker.start"),
+    ("skills/_shared/test-server.md", "a client has no `--config`"),
+    ("skills/_shared/test-server.md", "send nothing and the row is BLOCKED"),
+    # 셸이 작업 제어 없이 뒤로 보낸 작업은 SIGINT 를 무시한 채 시작한다(파이썬은 그때 ctrl-C
+    # 처리기를 달지 않는다). 그래서 SIGINT 를 받을 클라이언트는 `set -m` 아래에서 띄운다.
+    ("skills/_shared/test-server.md", "sh -c 'set -m;"),
+    # 바늘은 금지 문장 그 자체다. 「never by name」 낱말만이면 굵은 머리말에도 맞는다.
+    (
+        "skills/_shared/test-server.md",
+        "Never by name: `pkill rcm`, `killall` or a `pgrep` pattern also hit the production",
+    ),
+    ("skills/edge-audit/SKILL.md", "test-server.md «Signals»"),
+    ("skills/live-verify/SKILL.md", "test-server.md) «Signals»"),
+    ("agents/live-verifier.md", "test-server.md) «Signals»"),
     # 압축 뒤에는 돌리던 스킬과 그 단계 절을 다시 연다.
     ("skills/_shared/stage-lead.md", "reopen the `SKILL.md` you were running"),
     ("skills/dev-batch/SKILL.md", "«When a lead stops or is needed again»"),
@@ -351,6 +366,9 @@ def test_each_adopted_rule_sits_where_it_belongs(rel: str, needle: str) -> None:
 RETIRED = (
     # 「Rounds」 1 의 옛 말은 P5 전체가 나란히 돈다고 읽힌다(실기 레인은 차례로 돈다).
     ("agents/isolated-verifier.md", "P5's run in parallel"),
+    # 옛 신원 확인 — 명령줄만 보면 클라이언트는 이 data_dir 의 설정을 보일 수 없다.
+    ("skills/_shared/test-server.md", "still shows this `data_dir`'s config"),
+    ("skills/edge-audit/SKILL.md", "«Parallel servers and cleanup»"),
 )
 
 
@@ -364,7 +382,31 @@ def test_the_edge_scope_page_gives_the_reason_not_a_quote() -> None:
     # 규칙 쪽에는 다른 프로젝트 오너의 말과 날짜를 옮기지 않고 규칙의 이유만 쓴다.
     text = (SKILLS / "_shared" / "edge-scope.md").read_text(encoding="utf-8")
     assert not re.search(r"[\uac00-\ud7a3]", text), "edge-scope.md quotes Korean words"
-    assert "2026-11-26" not in text and "came from asked" not in text
+    # 옛 문장의 앞머리(batch-1). 그 문장은 줄바꿈으로 「came from」 과 「asked」 가 갈라져 있었다.
+    assert "2026-11-26" not in text and "The owner of the project these skills" not in text
+
+
+#: 실기 레인에서 프로세스에 신호를 보내는 수단 — 이 낱말이 든 행 · 항목은 pid 규칙 절을 가리킨다.
+SIGNAL_RE = re.compile(r"SIGTERM|SIGINT|kill -9|stop the test server")
+
+
+def test_every_signal_row_of_the_live_lane_points_at_the_pid_rule() -> None:
+    # 표의 네 행(서버 재시작 · 워커 죽이기 · 서버를 잃기 · ctrl-C)이 모두 적은 pid 와 «Signals» 를
+    # 말한다. 행 수도 잠근다 — 신호 낱말을 지우면 행이 골라지지 않아 초록이 된다.
+    text = (SKILLS / "_shared" / "edge-scope.md").read_text(encoding="utf-8")
+    rows = [line for line in text.splitlines() if line.startswith("| ") and SIGNAL_RE.search(line)]
+    assert len(rows) == 4, rows
+    for row in rows:
+        assert "recorded pid" in row and "test-server.md` «Signals»" in row, row
+
+
+def test_live_verify_points_its_signals_at_the_pid_rule() -> None:
+    # live-verify 의 「필요한 때」 목록과 §2 의 워커 항목 — 신호를 말하는 항목마다 «Signals» 링크.
+    text = (SKILLS / "live-verify" / "SKILL.md").read_text(encoding="utf-8")
+    items = [p for p in _paragraphs(text) if SIGNAL_RE.search(p)]
+    assert len(items) >= 2, items
+    for item in items:
+        assert "test-server.md) «Signals»" in item, item
 
 
 def test_the_pr_cleanup_prunes_before_it_deletes_the_branch() -> None:
