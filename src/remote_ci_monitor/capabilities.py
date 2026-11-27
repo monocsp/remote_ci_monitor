@@ -24,6 +24,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Any
 
+from remote_ci_monitor.config import _NAME_RE
 from remote_ci_monitor.core import capability as cap
 from remote_ci_monitor.core.capability import (
     CapabilityReport,
@@ -326,8 +327,41 @@ class CapabilitiesMixin:
         with self._cap_lock:
             self._reloads += 1
 
-    def worker_spec(self) -> dict[str, Any]:
-        """`GET /worker/spec` — 프로브와 프리셋 요구 사항. claim payload 와 같은 범위만 싣는다.
+    def spec_presets_for_pool(self, pool: str) -> list[Preset]:
+        """그 풀의 워커가 `/worker/spec` 에서 받는 프리셋(M5t-c §4.5 · 결정 294). 거르기 규칙은 이
+        함수 하나다 — `/worker/spec`, 짝짓기 창을 열 때와 교환 응답의 `presets_count` 가 같이 쓴다.
+
+        `placement = "any-capable"` 이거나 그 풀이 프리셋의 `pool` · `pools` 에 있을 때, 그리고 후보
+        함수가 원격 머신을 빼지 않을 때(`local_only`, 결정 254)만 싣는다. 풀 없이 전체를 주는 길은
+        없다(N2)."""
+        remote = _bare_view("")
+        return [
+            p
+            for p in self.config.presets
+            if (p.placement == PLACEMENT_CAPABLE or p.pool == pool or pool in p.pools)
+            and self.machines_for(p, [remote])
+        ]
+
+    def spec_pool_for(self, token: Any, query_pool: str | None) -> str:
+        """그 worker 토큰이 읽는 `/worker/spec` 의 풀(M5t-c §4.5 · 결정 284 · 294).
+
+        `tokens.pool`(짝짓기로 묶인 풀) → (NULL 이면) 그 이름의 `workers` 행 풀 → (등록 전이면) 질의
+        `?pool=`(없으면 `default`). 묶인 토큰은 질의를 보지 않는다. 묶이지 않은 토큰이 질의로 다른
+        풀을 읽는 것은 그 풀로 등록하는 것과 같은 권한이다(N2)."""
+        if token.pool is not None:
+            return str(token.pool)
+        row = self.store.get_worker(token.name)  # type: ignore[attr-defined]
+        if row is not None:
+            return str(row.pool)
+        if query_pool is None:
+            return DEFAULT_POOL
+        if not _NAME_RE.match(query_pool):
+            raise CapabilityError(400, "pool must be a name (letters, digits, . _ -)")
+        return query_pool
+
+    def worker_spec(self, pool: str) -> dict[str, Any]:
+        """`GET /worker/spec` — 프로브와 그 풀의 프리셋 요구 사항. claim payload 와 같은 범위만
+        싣는다.
 
         M5t-a(§4.5 「대상 프리셋」 · TD15 · TD51)가 프리셋마다 `pool` · `pools` · `placement` ·
         `checks` 와 `source_modes` · `repo`(git_ref 프리셋의 git 요구와 `repo_missing`, 위임 결정
@@ -336,7 +370,11 @@ class CapabilitiesMixin:
 
         `unreachable_checks` 는 그 프리셋의 `checks` 가운데 원격 워커에서 돌 수 없는 점검과 이유
         코드다(TO18, 위임 결정 2). 서버의 후보 함수(`check_reachable`)가 채운다. 목록에 무엇이
-        빠졌는지로 짐작하게 두지 않는다 — 명세를 풀로 거르게 되면(M5t-c) 빠진 것의 뜻이 바뀐다."""
+        빠졌는지로 짐작하게 두지 않는다.
+
+        M5t-c(§4.5 · 결정 294): 프리셋은 `spec_presets_for_pool(pool)` 로 거른다. 어느 풀인지는
+        부르는 쪽(`worker_spec_for`)이 토큰에서 정한다. 원격 후보에서 빠지는 프리셋(`local_only`)은
+        env 와 함께 싣지 않는다(결정 254)."""
         remote = _bare_view("")
         return {
             # 워커 프로토콜 판(M5t-b 결정 270) — 새 워커가 등록 **전에** 본다. 없으면 옛 서버다
@@ -347,8 +385,6 @@ class CapabilitiesMixin:
                 {"name": p.name, "argv": list(p.argv), "timeout_seconds": p.timeout_seconds}
                 for p in self.config.probes
             ],
-            # 원격 워커가 받는 명세다 — 후보 함수가 원격을 빼는 프리셋(`local_only`)은 env 와 함께
-            # 싣지 않는다(결정 254)
             "presets": [
                 {
                     "name": p.name,
@@ -367,8 +403,7 @@ class CapabilitiesMixin:
                         if not self.check_reachable(remote, c)
                     ],
                 }
-                for p in self.config.presets
-                if self.machines_for(p, [remote])
+                for p in self.spec_presets_for_pool(pool)
             ],
             "tools": [
                 {"name": t.name, "docs": t.docs, "install": dict(t.install)}

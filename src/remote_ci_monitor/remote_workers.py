@@ -97,6 +97,12 @@ WORKER_PROTOCOL = 2
 PROTOCOL_REQUIRED = "worker protocol 2 required: upgrade rcm on this worker"
 SESSION_FENCED = "this worker process was replaced by a newer one with the same token"
 SESSION_FOREIGN = "session belongs to another worker"
+#: 짝지은 토큰의 등록에 증명이 없을 때(M5t-c §4.2 「등록 증명」). 옛 빌드가 이 문장을 그대로 찍는다
+#: (F41) — 고치는 법까지 한 문장에 담는다
+PAIR_PROOF_REQUIRED = (
+    "this worker token was paired — its pairing proof is missing: upgrade rcm on this worker "
+    "and pair it (rcm setup --role worker --pair)"
+)
 #: 본문이 없는 워커 라우트(log · tree · artifacts)의 세션 헤더(§4.10)
 SESSION_HEADER = "X-RCM-Worker-Session"
 #: 세션 id 의 모양 — `fullmatch` 로만 쓴다. `$` 는 끝 줄바꿈 앞에서도 맞는다(P6 GAP7)
@@ -425,6 +431,9 @@ class RemoteWorkersMixin:
         # 요청 스레드가 처리 중인 finish 본문 — 닫힌 잡의 답(`_closed_answer`)이 늦은 결과를 남길 때
         # 읽는다(M5t-b §4.6)
         self._finish_body = threading.local()
+        # M5t-c(T6): 워커 이름마다 마지막으로 등록한 주소 — 다른 주소의 재등록을 서버 로그에 남긴다.
+        # 메모리에만 둔다(재시작하면 첫 등록은 비교할 것이 없다). 사전 접근은 `_remote_lock` 아래
+        self._register_addrs: dict[str, str] = {}
 
     def _sync_irreversible(self) -> None:
         """설정의 표식 프리셋 표를 저장소에 넣는다(M5t-b 결정 257 · 330). 기동과 reload 마다 부른다.
@@ -655,6 +664,8 @@ class RemoteWorkersMixin:
     # ── 등록 ────────────────────────────────────────────────────────────────
 
     def worker_register(self, token: TokenInfo, body: Any) -> dict[str, Any]:
+        """`POST /worker/register`. 순서는 M5t-b 2판 §4.2 이고 4 자리에 M5t-c 의 증명 · 풀
+        검사가 있다(F30). 요청이 온 주소는 라우트가 성공 뒤 `note_register_addr` 로 넘긴다."""
         if not isinstance(body, dict):
             raise _api_error(400, "body must be a JSON object")
         pool = body.get("pool", DEFAULT_POOL)
@@ -683,8 +694,38 @@ class RemoteWorkersMixin:
         if session is None:
             # 버전 검사 **뒤**다(RL13). 옛 워커(프로토콜 1)는 새 서버에 등록하지 못한다(결정 262)
             raise self._protocol_required()
-        # ── M5t-c 의 `pair_proof` 검사 자리(M5t-c 결정 287 · F52): 버전 · 프로토콜 검사 뒤, 아래의
-        # 어떤 부작용(세션 넣기 · 펜싱 · 능력 지우기 · 호스트 사실 교체 · 잡 닫기)보다도 앞 ──
+        # ── M5t-c 의 `pair_proof` · 풀 검사(결정 287 · 294 · F30 의 4): 버전 · 프로토콜 검사
+        # 뒤, 아래의 어떤 부작용(세션 넣기 · 펜싱 · 능력 지우기 · 호스트 사실 교체 · 잡 닫기)보다도
+        # 앞 ──
+        self._check_pairing(token, body, session, pool)
+        return self._register_session(
+            token,
+            body,
+            session,
+            previous,
+            unverified,
+            pool=pool,
+            lanes=lanes,
+            host_name=host_name,
+            version=version,
+        )
+
+    def _register_session(
+        self,
+        token: TokenInfo,
+        body: dict[str, Any],
+        session: str,
+        previous: list[str],
+        unverified: list[str],
+        *,
+        pool: str,
+        lanes: int,
+        host_name: str | None,
+        version: str | None,
+    ) -> dict[str, Any]:
+        """등록 순서의 5~7(F30): 펜싱된 세션 · 같은 세션의 멱등 재등록 · 새 세션 열기. 앞의 검사
+        (본문 · 버전 · 프로토콜 · M5t-c 증명 · 풀)는 `worker_register` 가 끝냈다. 아래 경주 길은
+        이 함수만 다시 부른다 — 증명을 다시 보면 이미 쓴 챌린지라 `reused` 가 된다."""
         now = self.now_fn()
         host_name = host_name[:200] if host_name else None
         existing = self.store.get_session(session)
@@ -725,7 +766,17 @@ class RemoteWorkersMixin:
             # 레인 둘). 이 요청은 그 세션의 재등록이다 — 위의 멱등 길로 다시 답한다
             if self.store.get_session(session) is None:  # mutcheck: register-race-500
                 raise
-            return self.worker_register(token, body)
+            return self._register_session(
+                token,
+                body,
+                session,
+                previous,
+                unverified,
+                pool=pool,
+                lanes=lanes,
+                host_name=host_name,
+                version=version,
+            )
         replaced = self._live_replaced(opened.fenced, {*previous, *unverified})
         self._forget_session_memory(opened.fenced)
         self._hear(session)
@@ -758,6 +809,60 @@ class RemoteWorkersMixin:
         if opened.closed or opened.released:
             self.wake.set()
         return self._register_answer(row, fenced=replaced)
+
+    def _check_pairing(
+        self, token: TokenInfo, body: dict[str, Any], session: str, pool: str
+    ) -> None:
+        """M5t-c 의 등록 검사(F30 의 4): 증명(287 · 313) 다음 풀(294). 실패는 `ApiError` 로만
+        낸다 — 거절 MAC 은 `_send_error` 한 곳이 단다(340 · 342). 이 함수는 아무것도 바꾸지
+        않는다(쓴 챌린지 집합은 통과한 증명만 바꾼다, V2-6).
+
+        짝지은 토큰(`pair_id` 있음)은 `pair_proof` 가 있어야 한다. K 는 **토큰 행의** `pair_id` 로
+        만든다 — 본문의 어떤 값도 `pair_id` 로 쓰지 않는다(313). 옛 토큰(`pair_id` NULL)은 보지
+        않는다(본문의 `pair_proof` 도 무시한다)."""
+        if token.pair_id is not None:  # mutcheck: register-proof-skipped
+            proof = body.get("pair_proof")
+            if proof is None:
+                raise _api_error(403, PAIR_PROOF_REQUIRED, code="pair_proof_required")
+            challenge = proof.get("challenge") if isinstance(proof, dict) else None
+            mac = proof.get("mac") if isinstance(proof, dict) else None
+            reason = self.check_register_proof(  # type: ignore[attr-defined]
+                token.pair_id, challenge, mac, session
+            )
+            if reason is not None:
+                raise _api_error(
+                    403,
+                    f"pairing proof rejected ({reason})",
+                    code="pair_proof_invalid",
+                    reason=reason,
+                )
+        bound = token.pool
+        if bound is not None and pool != bound:  # mutcheck: register-pool-check-skipped
+            # `reason` 은 거절 MAC 이 덮는 칸이라 묶인 풀 이름을 한 번 더 싣는다(§4.5, 4라운드
+            # V2-3)
+            raise _api_error(
+                409,
+                f"this worker token is bound to pool '{bound}' — "
+                f'set pool = "{bound}" in worker.toml or pair again',
+                code="pool_mismatch",
+                bound_pool=bound,
+                reason=bound,
+            )
+
+    def note_register_addr(self, name: str, addr: str | None) -> None:
+        """등록이 성공한 주소를 적고, 앞 등록과 다르면 서버 로그에 두 주소를 한 줄로 남긴다(M5t-c
+        T6 · PI23 c). 탈취한 토큰이나 통째로 복사한 `worker.toml` 을 알아보는 길이다(302).
+        라우트가 `worker_register` 가 성공한 뒤에 부른다 — 거절된 등록은 주소를 바꾸지 않는다."""
+        if not addr:
+            return
+        with self._remote_lock:
+            before = self._register_addrs.get(name)
+            self._register_addrs[name] = addr
+        if before is not None and before != addr:
+            self.log(
+                f"worker {name} registered from {addr} — its previous registration came from "
+                f"{before}"
+            )
 
     def _live_replaced(self, fenced: list[str], listed: set[str]) -> int | None:
         """이 등록이 펜싱한 다른 세션 가운데 살아 있던 것으로 보이는 수(P6 GAP8, 명세 §9). 워커가

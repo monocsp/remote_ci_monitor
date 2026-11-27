@@ -26,7 +26,7 @@ from typing import Any
 
 from remote_ci_monitor.config import ANY_BINDS, LOOPBACK_BINDS, advertise_enabled
 from remote_ci_monitor.core import pairing as cp
-from remote_ci_monitor.core.model import DEFAULT_POOL, PLACEMENT_CAPABLE
+from remote_ci_monitor.core.model import DEFAULT_POOL
 from remote_ci_monitor.core.status import iso
 from remote_ci_monitor.store import StoreError, TokenNameTaken
 
@@ -442,16 +442,8 @@ class PairingMixin:
         return urls
 
     def pair_presets_count(self, pool: str) -> int:
-        """그 풀로 갈 프리셋 수 — `/worker/spec` 의 풀 거르기 규칙(§4.5)과 같다: `capable` 이거나
-        그 풀이 프리셋의 `pool` · `pools` 에 있고, 후보 함수가 원격을 빼지 않을 때(`local_only`)."""
-        from remote_ci_monitor.capabilities import remote_can_take
-
-        return sum(
-            1
-            for p in self.config.presets
-            if (p.placement == PLACEMENT_CAPABLE or p.pool == pool or pool in p.pools)
-            and remote_can_take(self.config, p)
-        )
+        """그 풀로 갈 프리셋 수 — `/worker/spec` 과 같은 거르기 함수 하나(§4.5 「한 함수」)."""
+        return len(self.spec_presets_for_pool(pool))  # type: ignore[attr-defined]
 
     def pair_open(self, body: Any, opened_by: str, port: int) -> dict[str, Any]:
         """`POST /pair`(admin) — 창을 열고 코드를 한 번 돌려준다(§4.4 「관리 라우트」)."""

@@ -289,7 +289,8 @@ def test_pi23_c_an_old_explicit_token_registers_without_proof_and_the_address_is
     first = pp.session(name)
     info = pp.store.verify_token(pp.tokens[name])
     assert info.pair_id is None
-    pp.app.worker_register(info, pp.register_body(first), addr="192.0.2.7")
+    pp.app.worker_register(info, pp.register_body(first))
+    pp.app.note_register_addr(name, "192.0.2.7")  # 다른 머신에서 한 앞 등록
     pp.logs.clear()
     # 다른 머신(루프백)의 새 프로세스 — 증명이 없어도(본문의 쓰레기 증명은 무시) 등록되고 펜싱한다
     pp.new_process(name)
@@ -310,9 +311,8 @@ def test_pi23_c_a_paired_worker_moving_address_is_logged_too(pp):
     w = pp.pair_worker()
     info = pp.store.verify_token(w["token"])
     sid = secrets.token_hex(16)
-    pp.app.worker_register(
-        info, pp.register_body(sid, pair_proof=pp.proof(w, sid)), addr="192.0.2.9"
-    )
+    pp.app.worker_register(info, pp.register_body(sid, pair_proof=pp.proof(w, sid)))
+    pp.app.note_register_addr(w["name"], "192.0.2.9")
     pp.logs.clear()
     pp.proof_registered(w)
     assert (
