@@ -7,7 +7,8 @@
   `bin/m5tb_helper.py` 를 써서 부르는데, 세 번째 실기의 시험 폴더에 남은 도우미는 이 커밋의 하네스가
   쓰는 것과 바이트 단위로 같았다. 두 번째 실기는 판정을 고치기 전의 `02b6bc3` 에서 돌았다. 그 뒤
   pipefail 줄 다섯 곳만 고친 `6bf4fffd480afa01527b7376bde9bb278874bc8e` 에서는 부분 실기를 한 번
-  돌렸다(아래 「마지막 head 의 부분 실기」).
+  돌렸고, 하네스가 그와 같은 `2afa0f1f4451c7a22eb6f502695492dce4fb40bd` 에서 한 번 더 돌렸다(아래
+  「마지막 head 의 부분 실기」).
 - 명세: `docs/m5tb-workplan.md` 의 §5 PR4 행, §6 의 10 · 13 · 19, §7.1 의 실기 대상 행, 측정값 F78 ·
   F83 · F84. M5t-b 는 원격 잡의 결과가 연락이 끊겨도 한 번만, 맞게 돌아오게 하는 작업이다.
 - 다시 돌리는 법: 워크트리에서 `M5TB_PORT=8797 bash scripts/acceptance/m5tb_live.sh` 를 돌린다. G 만료를
@@ -22,7 +23,7 @@
 고친 판정으로 돌린 세 번째 실기에서도 FAIL 과 UNKNOWN 이 없었고 종료 코드는 0 이었다. 실기 판정
 22개가 PASS 였고, 하네스가 일부러 돌리지 않는 몫 8개는 SKIP 이며 SKIP 마다 그 경우를 덮는 시험을
 적었다. 아래 표와 증거는 따로 적지 않으면 세 번째 실기의 것이다. 그 뒤 마지막 head 가 바꾼 줄을
-지나는 단계만 `--only` 로 다시 돌렸고 그 단계들은 PASS 였다. 남은 것은 Linux 머신에서의 `/proc`
+지나는 단계만 `--only` 로 두 번 다시 돌렸고, 바뀐 다섯 줄을 지난 단계는 모두 PASS 였다. 남은 것은 Linux 머신에서의 `/proc`
 신원 확인과 그 머신의 `ps` 꼴 확인이다. 이 머신에는 Linux 가 없다.
 
 ## 판정을 고친 뒤 다시 돌린 실기
@@ -86,6 +87,27 @@
 결과는 PASS 5 · SKIP 3(RL34-bf · RL40-5xx · RL42-gc) · FAIL 0 · UNKNOWN 2, 종료 3 이다. 증거는 아래
 「증거 파일」의 둘째 목록에 있다.
 
+남은 다섯째 줄을 돌리려고 2026-11-27 12:39(KST)에 `--only RL45` 로 부분 실기를 한 번 더 돌렸고 2분
+11초 걸렸다. 하네스는 `6bf4fff` 와 같고, 그 뒤의 커밋 `2afa0f1` 은 시험과 문서만 바꿨다. 다른 프로젝트의
+게이트 잡과 겹쳐 이 Mac 의 부하가 약 28 이었다.
+
+- RL45-web 은 PASS 다. `run_kill_worker` 가 고친 `sed -n 1p` 줄로 화면 끝의 「and 1 more」에서 1 을
+  읽었다(`facts/RL45-web.txt` 의 `en_more_n=1`). 이로써 마지막 head 가 바꾼 다섯 줄이 모두 실기로
+  지났다. 같은 단계의 RL45 와 RL45-empty 도 PASS 다.
+- RL43 과 F78 은 UNKNOWN 이다. 두 판정은 단계 표에서 `run_supervisor_only+run_kill_worker` 에 걸려
+  있는데, `--only RL45` 는 `run_kill_worker` 만 고른다(`runners_for`). 그래서 RL43 (d) 의 감독자
+  `kill -9` · 종료 7 값과 F78 의 감독자 CPU 30초 값을 적는 `run_supervisor_only` 가 돌지 않았다.
+  `timeline.txt` 에 그 단계의 「RL43 (d) start」 줄이 없다. 판정은 빈 값을 PASS 로 넘기지 않고 「not
+  measured」 · 「not observed」로 UNKNOWN 을 냈다. 같은 실기에서 `run_kill_worker` 가 적는 RL43 (a) ·
+  (b) 값(0.031초, 3.103초)은 있었다. RL43-c 는 늘 그렇듯 SKIP 이다.
+- `run_supervisor_only` 는 세 번째 실기 뒤로 바뀌지 않았다. `git diff 341c5d3 2afa0f1 -- src web scripts`
+  가 바꾼 곳은 `scripts/acceptance/m5tb_live.sh` 의 다섯 줄뿐이고, 그 줄은 `run_self_stop_timing` ·
+  `run_finish_offline` · `run_partition_past_g` · `run_kill_worker` 안에 있다. 세 번째 실기에서 RL43 은
+  (d) 0.888초로, F78 은 감독자 값 모두 PASS 였다.
+
+결과는 PASS 3(RL45 · RL45-web · RL45-empty) · SKIP 1(RL43-c) · FAIL 0 · UNKNOWN 2, 종료 3 이다. 증거는
+아래 「증거 파일」의 셋째 목록에 있다.
+
 ## 무엇을 어디서 어떻게 돌렸나
 
 시험은 모두 Apple Silicon Mac 한 대(macOS 27.2)에서 했다. 이 Mac 에서는 운영 rcm 이 서비스로 돌며 포트
@@ -112,6 +134,7 @@
 | 둘째 | 2026-11-27 10:43 | 18분 47초 | 없음(부하 약 3) | 옛 판정. PASS 22 · SKIP 7 · FAIL 0 · UNKNOWN 0, 종료 0 |
 | 셋째 | 2026-11-27 11:51 | 18분 46초 | 다른 프로젝트의 게이트 잡(부하 약 7) | PASS 22 · SKIP 8 · FAIL 0 · UNKNOWN 0, 종료 0 |
 | 넷째(부분) | 2026-11-27 12:24 | 7분 22초 | 다른 프로젝트의 게이트 잡 둘(부하 약 50) | `--only RL34,RL40,RL5,RL29`, 마지막 head `6bf4fff`. 바뀐 줄을 지난 단계 PASS, RL29 · RL29-web 은 RL10 · RL15 가 돌지 않아 찾을 잡이 없어 UNKNOWN. PASS 5 · SKIP 3 · FAIL 0 · UNKNOWN 2, 종료 3 |
+| 다섯째(부분) | 2026-11-27 12:39 | 2분 11초 | 다른 프로젝트의 게이트 잡(부하 약 28) | `--only RL45`, 하네스가 `6bf4fff` 와 같은 `2afa0f1`. 남은 바뀐 줄(`run_kill_worker` 의 RL45-web)을 지나 바뀐 다섯 줄이 모두 실기로 지났다. RL43 · F78 은 `--only RL45` 가 `run_supervisor_only` 를 고르지 않아 감독자 값이 없어 UNKNOWN 이고, 그 함수는 셋째 실기 뒤로 그대로다. PASS 3 · SKIP 1 · FAIL 0 · UNKNOWN 2, 종료 3 |
 
 하네스 출력의 시각은 UTC 다(셋째 실기 `02:51:33` 이 KST 11:51:33).
 SKIP 수는 단계가 `verdict <ID> SKIP` 으로 낸 줄을 센 것이고, `main` 이 `summary.txt` 끝에 덧붙이는 `row, not live` 줄은 세지 않는다.
@@ -397,6 +420,23 @@ a03963ce71c0ac9bd0f4973011705f242bdaa6c5611a149c4111e449c250cf01  web/rl29-en.pn
 1b33f3e91aa216ba52c00399c694811d57a1a7c0369c54f58bdb92ba2d5660e9  web/rl29-en.txt
 d0dd045072d8689a63d5fbc41f1b7424aa446b2bb67717fe8cd1bd5afaeffd76  web/rl29-ko.txt
 532aa2faf34d9d345e479d3a6bd35be277a7612d8a28f125606d508177dade20  m5tb-live-20261127-1224.txt
+```
+
+`--only RL45` 부분 실기의 증거 폴더는 `<HOME>/.local/share/rcm-devtest-m5tb/live-e5bd9430/out` 이고
+이름은 그 폴더 기준이다. 맨 아래 줄은 그 실기의 콘솔 출력이고 위 목록의 콘솔 출력들과 같은 폴더에
+있다. `judge.err` 는 비어 있다. `facts/RL45.txt` 는 잰 시간이 없는 사실만 담아 세 번째 실기의 것과
+sha256 이 같다.
+
+```text
+0c1f944a13daf6ff2fdab5efdec9e1fb2279932c2bb813622e80fe0a98e73cb1  summary.txt
+84b9e339d75eeb4cbb1deb01bd28562345c8955bdaad75d64f14af61903fa717  timeline.txt
+e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  judge.err
+af5e82ed9010327af16e5e4f5f70e0cc612d39f4269953781c7ae837ffe78587  facts/RL43.txt
+724db5551a98734aae58f82dbdd5574decc6221202865936d3b1afa90f5e7f31  facts/F78.txt
+3dcf8a5410212f1918aa9774cbe1e22f27fe4e3e358aa587f5db02287bab221a  facts/RL45.txt
+243e4922df0f44ed63ad75c30b6e38a616e854170002a5331f4cdeecc318d5b2  facts/RL45-web.txt
+b91612d925b170b5533f4f0c96c74b55f76e24437500abfbe6ff0dd34dd01adb  facts/RL45-empty.txt
+93115ea9009b4c62a088b296b45a13f766530d123225cf97b3fdefe840fe5b03  m5tb-live-20261127-1239.txt
 ```
 
 폴더에는 이 밖에 단계별 `rcm wait` 출력(`rl*-wait*.json`, `.err`), 워커 로그(`worker-<이름>-<n>.log`),

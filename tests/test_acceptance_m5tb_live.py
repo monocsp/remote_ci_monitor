@@ -1984,3 +1984,32 @@ def test_pr4_report_rl10_cites_only_what_the_harness_records() -> None:
     cells = " ".join(report_rows()["RL10"])
     if re.search(r"\d+\.\d+초", cells):
         assert "timeline.txt" in cells and "first process gone after" in cells, cells
+
+
+# ── batch-8: 마지막 head 가 바꾼 줄은 모두 부분 실기로 지났다 ─────────────────────────────────────
+
+
+def test_pr4_report_partial_runs_cover_every_function_the_pipefail_fix_changed() -> None:
+    # 6bf4fff 는 `| head -1` 다섯 줄을 `| sed -n 1p` · `find … -print -quit` 로 바꿨다.
+    # 그 꼴의 줄이 든 단계 함수마다, 실기 표의 `--only` 부분 실기 가운데 하나가 그 함수를
+    # 고른 단계를 돌렸어야 한다
+    funcs: set[str] = set()
+    current = ""
+    for line in script_text().splitlines():
+        m = re.match(r"^(\w+)\(\) \{", line)
+        if m:
+            current = m.group(1)
+        elif "| sed -n 1p" in line or "-print -quit" in line:
+            funcs.add(current)
+    assert len(funcs) >= 4, sorted(funcs)
+    row = r"^\| \S+ \| 2026-11-27 \d\d:\d\d \| [^|]+ \| [^|]+ \| `--only ([A-Z0-9,-]+)`"
+    only = re.findall(row, report_text(), re.M)
+    ran = {
+        f
+        for ids in only
+        for s in steps()
+        if s[1] == "live" and s[0] in ids.split(",")
+        for f in s[2].split("+")
+    }
+    missing = sorted(funcs - ran)
+    assert missing == [], f"no partial run went through {missing}"
