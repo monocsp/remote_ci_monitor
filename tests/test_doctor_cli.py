@@ -1007,6 +1007,7 @@ TOP_KEYS = {
     "undecided",
     "warnings",
     "exit",
+    "irreversible_holds",  # M5t-b §4.8 — 이 머신의 그룹 홀드(PR3)
 }
 
 

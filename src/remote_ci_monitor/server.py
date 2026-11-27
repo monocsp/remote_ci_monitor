@@ -4078,6 +4078,8 @@ class App(RemoteWorkersMixin, CapabilitiesMixin, ShelfAppMixin):
             now=now,
             priority=priority,
             pool=pool,
+            # 열린 그룹 홀드도 넘긴다 — `_queue_rows` 와 같은 입력(P6-1 G2)
+            open_holds=snap.open_holds or [],  # mutcheck: eta-open-holds-dropped
         )
         doc = queue_row_json(row, base_url=None)
         doc["id"] = None

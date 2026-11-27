@@ -142,6 +142,11 @@
   //  4. 라틴 글자(대소문자 무시): 글자 이름의 읽는 소리로. 받침 **있는 것은 `l`(엘) · `m`(엠) ·
   //     `n`(엔) · `r`(알) 넷뿐**이고 나머지 22개는 없다. `f` 는 「에프」의 끝 글자 `프` 에
   //     받침이 없어 **받침 없는 쪽**이다(`perf가` · `mail이`).
+  //     예외 하나: 세 글자 이상 이어진 라틴 낱말이 「모음(a e i o u y) + r」로 끝나면 받침 없는
+  //     쪽이다. 한국어로 적을 때 영어 낱말 끝의 그 r 는 받침이 되지 않는다(worker 워커 · runner
+  //     러너 · docker 도커 · color 컬러). 그래서 `mac2-worker와` 다. 두 글자 이하(`AR`)와 자음 + r
+  //     (`HDR`)는 약어로 보고 글자 이름 그대로 읽는다. 다른 끝(`-ng` · `-k` · `-p`)은 낱말 읽기가
+  //     글자로 정해지지 않아 손대지 않는다.
   //  5. 그 밖(한자 · 이모지 · 빈 문자열 · 전부 건너뛴 경우): `null` → 받침 없는 쪽(가/를/는/와).
   //     「이(가)」로 되돌아가지 않는다 — 괄호를 없애는 것이 이 규칙의 목적이다.
   var JOSA_SKIP = /[\s.,!?;:'"`’”\)\]\}\(\[\{…·\-_]/;
@@ -165,6 +170,13 @@
   // 규칙 6 을 쓰는 쌍 — ㄹ 받침을 받침 없는 쪽으로 읽는다.
   var JOSA_RIEUL_OPEN = { "으로/로": true };
 
+  /** `s[end]` 가 끝인 라틴 낱말이 세 글자 이상이고 「모음 + r」로 끝나는가(규칙 4 의 예외). */
+  function latinWordEndsInVowelR(s, end) {
+    var start = end;
+    while (start > 0 && /[A-Za-z]/.test(s.charAt(start - 1))) start--;
+    return end - start + 1 >= 3 && /[aeiouy]/i.test(s.charAt(end - 1));
+  }
+
   /** 마지막 글자의 끝소리 — `null`(모름) · `"none"` · `"rieul"` · `"other"`. 안 던진다. */
   function finalSound(word) {
     if (word === null || word === undefined) return null;
@@ -180,6 +192,7 @@
       if (ch >= "0" && ch <= "9") return !JOSA_DIGIT[ch] ? "none" : JOSA_RIEUL_DIGIT[ch] ? "rieul" : "other";
       var low = ch.toLowerCase();
       if (low >= "a" && low <= "z") {
+        if (low === "r" && latinWordEndsInVowelR(s, i)) return "none";   // 규칙 4 의 예외
         return JOSA_LATIN[low] !== true ? "none" : JOSA_RIEUL_LATIN[low] ? "rieul" : "other";
       }
       return null;   // 판정할 수 없는 글자 — 건너뛰지 않고 여기서 멈춘다(규칙 5)
@@ -257,6 +270,8 @@
     "summary.add_token": "Add a token to highlight your jobs",
     "summary.queue_unknown": "unknown — queue unavailable",
     "summary.scheduled_unknown": "unknown — scheduled jobs unavailable",
+    // M5t-b §4.8 — 서버가 그룹 홀드를 못 읽었다(null). 「없음」이 아니다
+    "summary.holds_unknown": "unknown — group holds unavailable",
     "summary.no_jobs": "No jobs of yours in the queue",
     "summary.and_more": function (a) { return "and " + a.n + " more"; },
     "summary.last_known": "last known: ",
@@ -280,6 +295,9 @@
     "queue.empty_paused": "Queue is empty but paused — nothing will start.",
     "queue.empty": "Queue is empty — ",
     "queue.empty_hint": " starts immediately.",
+    // 열린 그룹 홀드가 있으면 「바로 시작」을 약속하지 않는다(P6-2, `rcm top` 의 P6-1 G3 과 같은 말)
+    "queue.empty_held": "Queue is empty — a held group does not start until it is released.",
+    "queue.empty_holds_unknown": "Queue is empty — group holds unknown.",
     "queue.presets": function (a) { return "presets: " + a.names; },
     "queue.more": function (a) { return "and " + a.n + " more"; },
     "queue.group_running": function (a) { return "Running now (" + a.n + ")"; },
@@ -368,6 +386,8 @@
     "drawer.live": function (a) { return "live · " + a.bytes; },
     "drawer.finished": function (a) { return "finished · " + a.bytes; },
     "drawer.load_failed": "couldn’t load — retrying",
+    // M5t-b §4.6 — 워커가 로그의 일부를 남기지 못했다(`log_complete` 거짓)
+    "drawer.log_incomplete": "log incomplete — the worker could not keep all of it",
     "cancel.confirm_title": function (a) { return "Cancel #" + a.id + " " + a.key + " (" + a.who + ")?"; },
     "cancel.joiner_body": function (a) {
       return "You joined this job. You will leave the join list; the job keeps running for " + a.who + ".";
@@ -466,6 +486,30 @@
     "reason.not_scheduled": "idle lane did not pick it up",
     "reason.needs_action": "needs action",
     "reason.no_worker": "no worker",
+    // M5t-b §4.8 · 결정 276 — 끊김 유예 중인 잡. 원문 코드는 드러내지 않는다
+    "reason.unreachable_grace": function (a) {
+      return "lost contact with " + (a.worker || "the worker") +
+        " — the job goes on if the worker is back within the grace period";
+    },
+    // 취소 중인 잡(결정 322) — 다시 붙은 워커가 멈추므로 이어지지 않는다(P6-1 G5)
+    "reason.unreachable_cancelling": function (a) {
+      return "lost contact with " + (a.worker || "the worker") +
+        " — the job is cancelled when the worker is back, or ends as lost after the grace period";
+    },
+    // 그룹 홀드에 막힌 대기 잡(M5t-b §4.8) — `needs action` 뒤에 붙는다
+    "reason.held_group": function (a) {
+      return "group " + a.group + " is held by #" + a.id + " — rcm release-hold " + a.id +
+        " after checking the machine";
+    },
+    // 「확인이 필요한 작업」의 홀드 항목(M5t-b §4.8). `worker` 가 없으면 서버의 로컬 레인 잡이다
+    "hold.needs_look": function (a) {
+      var where = a.worker || "the server's local lane";
+      var look = a.worker || "the server";
+      return "Group " + a.group + " is held: job #" + a.id + " (" + a.preset + ") on " + where +
+        " closed without a stop confirmation. Check " + look +
+        " for a leftover process, then run rcm release-hold " + a.id + ".";
+    },
+    "hold.chip": "group held",
     // M5n — 머신 배치. 머신 · 프리셋 · 도구 · 점검 이름은 서버가 보낸 그대로 끼운다.
     "reason.no_capable_machine": "no capable machine",
     "reason.check_failed": "check failed",
@@ -1436,11 +1480,14 @@
     "workers.band": function (a) { return a.n + " workers — scroll with the arrow keys"; },
     "workers.more": function (a) { return "Show " + a.n + " off-screen"; },
     "workers.hidden_list": function (a) { return a.n + " off-screen:"; },
+    // M5t-b(결정 253 · 256) — 원격 잡은 끊김 유예 동안 계속 돈다. 유예 값은 /api/status 에 없어서
+    // 숫자를 넣지 않는다(지어내지 않는다). 띠는 390px 에서 80px 를 넘지 않는다(가독성 R1 7번) — 그룹
+    // 홀드는 「확인이 필요한 작업」이 따로 말하므로 띠에 넣지 않는다
     "header.workers_unreachable_one": function (a) {
-      return "Worker " + a.name + " unreachable — the results of its running jobs are lost";
+      return "Worker " + a.name + " unreachable — its jobs go on if back within the grace period, else end as lost";
     },
     "header.workers_unreachable_many": function (a) {
-      return a.n + " workers unreachable — the results of their running jobs are lost";
+      return a.n + " workers unreachable — their jobs go on if back within the grace period, else end as lost";
     },
     "header.workers_names": "Show names",
     "queue.show_fewer": "show fewer"
@@ -1492,6 +1539,7 @@
     "summary.add_token": "토큰을 넣으면 내 작업이 표시됩니다",
     "summary.queue_unknown": "알 수 없음 — 큐를 읽지 못했습니다",
     "summary.scheduled_unknown": "알 수 없음 — 예약을 읽지 못했습니다",
+    "summary.holds_unknown": "알 수 없음 — 그룹 홀드를 읽지 못했습니다",
     "summary.no_jobs": "큐에 내 작업이 없습니다",
     "summary.and_more": function (a) { return a.n + "개 더"; },
     "summary.last_known": "마지막으로 알던 값: ",
@@ -1515,6 +1563,8 @@
     "queue.empty_paused": "큐가 비었지만 멈춰 있습니다 — 아무것도 시작하지 않습니다.",
     "queue.empty": "큐가 비었습니다 — ",
     "queue.empty_hint": " 하면 바로 시작합니다.",
+    "queue.empty_held": "큐가 비었습니다 — 막힌 그룹은 풀기 전에는 시작하지 않습니다.",
+    "queue.empty_holds_unknown": "큐가 비었습니다 — 그룹 홀드를 알 수 없습니다.",
     "queue.presets": function (a) { return "작업 유형: " + a.names; },
     "queue.more": function (a) { return a.n + "개 더 보기"; },
     "queue.group_running": function (a) { return "작업 중 (" + a.n + ")"; },
@@ -1600,6 +1650,7 @@
     "drawer.live": function (a) { return "실시간 · " + a.bytes; },
     "drawer.finished": function (a) { return "종료 · " + a.bytes; },
     "drawer.load_failed": "불러오지 못했습니다 — 다시 시도합니다",
+    "drawer.log_incomplete": "로그가 불완전함 — 워커가 일부를 남기지 못함",
     "cancel.confirm_title": function (a) {
       return withJosa("#" + a.id + " " + a.key + " (" + a.who + ")", "을/를") + " 취소할까요?";
     },
@@ -1698,6 +1749,28 @@
     "reason.not_scheduled": "빈 레인이 집지 않음",
     "reason.needs_action": "사람이 할 일",
     "reason.no_worker": "워커 없음",
+    "reason.unreachable_grace": function (a) {
+      return (a.worker ? "워커 " + withJosa(a.worker, "와/과") : "워커와") +
+        " 연락이 끊김 · 유예 시간 안에 돌아오면 이어서 진행";
+    },
+    "reason.unreachable_cancelling": function (a) {
+      return (a.worker ? "워커 " + withJosa(a.worker, "와/과") : "워커와") +
+        " 연락이 끊김 · 돌아오면 취소되고 유예 시간을 넘기면 결과를 잃음";
+    },
+    // 그룹 이름은 서버가 보낸 글자라 읽는 소리를 모를 수 있다(`irreversible:ship가`) — 이름 바로 뒤에
+    // 조사를 붙이지 않는 문장으로 쓴다(P3 r1). 조사는 소리가 정해진 잡 번호 뒤에만 붙인다
+    "reason.held_group": function (a) {
+      return "그룹 " + a.group + " — " + withJosa("#" + a.id, "이/가") + " 막고 있음 · 머신을 확인한 뒤 rcm release-hold " + a.id;
+    },
+    "hold.needs_look": function (a) {
+      var where = a.worker || "서버의 로컬 레인";
+      var look = a.worker || "서버";
+      // 명령에는 조사를 붙이지 않는다 — `rcm release-hold 812를` 을 복사하면 종료 2 다(P6-1 G11)
+      return "그룹 " + a.group + " 막힘: 작업 #" + a.id + "(" + a.preset + ")" + josa(String(a.id), "이/가") + " " +
+        where + "에서 멈춤 확인 없이 닫힘. " + look + "에 남은 프로세스가 있는지 확인한 뒤 푸는 명령: rcm release-hold " +
+        a.id;
+    },
+    "hold.chip": "그룹 막힘",
     // M5n — 머신 배치. 머신 · 프리셋 · 도구 · 점검 이름은 서버가 보낸 그대로 끼운다.
     "reason.no_capable_machine": "실행 가능한 머신 없음",
     "reason.check_failed": "머신 점검 실패",
@@ -2650,10 +2723,10 @@
     "workers.more": function (a) { return "화면 밖 " + a.n + "개 보기"; },
     "workers.hidden_list": function (a) { return "화면 밖 " + a.n + "개:"; },
     "header.workers_unreachable_one": function (a) {
-      return "워커 " + a.name + " 연결 끊김 — 진행 중이던 작업의 결과를 알 수 없습니다";
+      return "워커 " + a.name + " 연결 끊김 — 유예 시간 안에 돌아오면 작업이 이어지고 넘기면 결과를 잃음";
     },
     "header.workers_unreachable_many": function (a) {
-      return "워커 " + a.n + "대 연결 끊김 — 진행 중이던 작업의 결과를 알 수 없습니다";
+      return "워커 " + a.n + "대 연결 끊김 — 유예 시간 안에 돌아오면 작업이 이어지고 넘기면 결과를 잃음";
     },
     "header.workers_names": "이름 보기",
     "queue.show_fewer": "적게 보기"

@@ -199,6 +199,7 @@ def test_actionable_order_puts_the_new_reasons_right_after_worker_down():
     assert model.ACTIONABLE_REASONS == (
         "needs_action",  # M5s — 잡이 직접 「사람이 할 일」을 말했다(맨 앞)
         "worker_down",
+        "worker_unreachable_grace",  # M5t-b §4.8 — 유예 중인 잡(F58)
         "no_capable_machine",
         "check_failed",
         "stuck",

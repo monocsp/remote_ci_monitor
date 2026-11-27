@@ -2558,3 +2558,34 @@ PR #286 본문의 「Differs from the spec」 과 같은 목록이다. 항목은
 | 32a | 죽은 세션 큐의 등록 대기 300초와 그 뒤 60초는 워커의 단조 시계(`mono_fn`)로 셉니다. §4.1.3 타이머 표의 「D 큐 등록 대기 · 단조」와 같고, batch-9 전에는 벽시계로 셌습니다. finish 상한 300초와 재전송 창 24시간은 표대로 디스크의 `ended_at` 벽시계입니다. |
 | 31 | 다시 시작한 큐의 오프셋 질의를 막힌 로그 단계로 셉니다(결정 324 는 로그 · 산출물만 말했습니다). |
 | 32 | finish 가 먼저 가면서 남기는 것(phase, 로그 꼬리, 묶음)이 있으면 큐마다 한 번 `#N report: the finish goes first 300s after the job ended; not sent: …` 를 남깁니다. |
+
+### PR3 끊긴 워커와 그룹 홀드의 사람용 화면 (#285)
+
+PR #285 본문의 「Differs from the spec」 과 같은 목록이다. 항목은 구현 라운드(batch-1~8, P6-1~P6-2)에서 적은 것을 옮겼다.
+
+| # | 명세와 다름 / 명세에 없음 |
+|---|---|
+| 1 | `late_result` 사람용 줄은 `rcm wait` 한 줄만 냅니다(`#N late result: succeeded (exit 0) — not counted as this job's result`). 명세가 말한 `rcm status <job>` 명령은 없습니다. |
+| 2 | 명세에 없던 `rcm wait` 의 「돌아옴」 줄 `#N worker W is back — the job goes on` 을 더했습니다. 「연락이 끊김」 줄이 마지막 말로 남으면 잡이 아직 끊긴 것으로 읽히기 때문입니다. |
+| 3 | lost 잡의 원인 한 줄을 `rcm wait` 끝에 냅니다(RL29). |
+| 4 | 홀드에 막힌 대기 행의 이유 줄은 `needs action · group G is held by #N — rcm release-hold N after checking the machine` 입니다(웹은 #N 링크). |
+| 5 | `irreversible_holds: null` 은 웹에서 `unknown — group holds unavailable`, `rcm check` 에서 warn 한 줄로 보입니다. 키가 없는 옛 서버에서는 아무것도 보이지 않습니다. |
+| 6 | `rcm doctor --json` 의 `irreversible_holds` 는 worker 역할이면 이 토큰의 홀드, coordinator-worker 면 로컬 레인 홀드, 그 밖에는 null 입니다. 종료 코드에 들지 않습니다. |
+| 7 | 한국어 웹 문구는 「잡혀 있음」 대신 「막혀 있음」, 칩은 「그룹 막힘」입니다(한국어 화면에 「잡」을 남기지 않는 시험 C-39). |
+| 8 | 끊김 · 돌아옴 · 홀드 줄은 기다리는 동안 찍는 줄이라 `rcm wait` 과 `rcm run` 이 같이 찍습니다. 잡이 끝난 뒤의 줄(lost 원인, 늦은 결과, 불완전한 로그)은 `rcm wait` 에만 나오고, `rcm run` 의 끝 출력은 골든 시험이 잠근 그대로입니다. |
+| 9 | 끊긴 잡 뒤에서 같은 동시성 그룹으로 기다리는 잡도 `wait_seconds` · `finish_at` · `blocked_by.remaining_seconds` 가 null 이고, ETA 계산에서 레인을 차지하지 않습니다. 명세(§4.8, 결정 276)는 끊긴 잡 자신의 끝 시각만 적었습니다. 모르는 끝에서 나온 숫자는 fail-open 이라 넓혔습니다(P3 1라운드 MED). 골든 픽스처가 이 규칙으로 23개 행이 더 바뀌었습니다(13행은 null, 10행은 레인이 비어 같거나 이르게 끝남). |
+| 10 | 홀드 목록에 읽을 수 없는 항목이 하나라도 있으면 세 화면 모두 목록 전체를 「모름」으로 보입니다(`rcm check` 의 `could not read every group hold the server sent — unknown`, 웹 `unknown — group holds unavailable`, doctor `--json` null). 짧아진 목록이 완전한 목록으로 읽히지 않게 하려는 것입니다. |
+| 11 | `rcm doctor` 텍스트는 worker · coordinator-worker 역할에서 홀드를 모르면 `warn  group holds: unknown — …` 한 줄을 냅니다. 종료 코드는 그대로입니다. |
+| 12 | 한국어 홀드 문장은 그룹 이름 바로 뒤에 조사를 붙이지 않습니다(`그룹 irreversible:ship — #812가 막고 있음`). 그룹 이름의 읽는 법을 모르기 때문입니다. |
+| 13 | §7.4 밖의 변이 넷(hold-wait-line-raw-code, hold-check-row-missing, doctor-holds-not-this-machine, log-incomplete-line-dropped)을 더했습니다. |
+| 14 | 웹 띠에서 「되돌릴 수 없는 프리셋은 그룹이 홀드된다」 꼬리를 뺐습니다. 넣으면 390px 에서 띠가 94~95px 로 80px 잠금을 넘습니다. 홀드는 「확인이 필요한 작업」이 따로 말합니다. |
+| 15 | 조사 규칙에 「모음 + r」 예외 하나를 더했습니다. 「와(과)」 병기형은 괄호 조사 금지 시험(C-38)이 막아 쓰지 않았습니다. |
+| 16 | `rcm eta <프리셋>` 의 가상 잡이 열린 홀드를 보고 프리셋의 그룹 범위를 싣습니다(`Server.eta` 인자 하나, `eta_for_new`). 명세 §5 는 PR3 이 server.py 를 건드리지 않는다고 했습니다. host · global 범위 그룹 프리셋의 ETA 가 실제 제출과 같아집니다. |
+| 17 | 홀드가 열렸는데 기본 큐가 비면 `rcm top` 은 `queue — empty · a held group does not start until it is released` 와 홀드마다 한 줄을, 웹은 `Queue is empty — a held group does not start until it is released.` 를 보입니다. 홀드를 모르면 `… group holds unknown` 입니다. |
+| 18 | 끊긴 워커의 취소 중인 잡: `lost contact with W — the job is cancelled when the worker is back, or ends as lost after the grace period`, 돌아옴 줄은 `… is back — the job is being cancelled`. 끊긴 동안 취소가 오면 `#N cancel requested — …` 한 줄을 더합니다. 명세 §4.8 의 한 문장과 다르고, 결정 322 를 따릅니다. |
+| 19 | 끊김 유예 중인 잡의 추정치는 `finish_at` 말고도 overdue · stuck · `stuck_code` · quiet 를 내지 않고, 웹 행은 시간을 세지 않으며 진행 막대에 시간 눈금이 없습니다(명세는 결정 276 의 `finish_at` null 만 적었습니다). |
+| 20 | `worker` 키가 없는 홀드 항목은 읽을 수 없는 항목으로 봅니다(목록 전체를 모름). |
+| 21 | 목록 밖 잡의 웹 로그 서랍은 `/jobs/N` 을 한 번 읽어 `log_complete` 를 봅니다. |
+| 22 | 홀드를 만든 잡의 `rcm wait` 은 lost 줄 뒤에 `#N group G is held — check the machine for a leftover process, then ask an admin to run rcm release-hold N` 를 냅니다(종료 3 그대로). |
+| 23 | 「확인이 필요한 작업」 띠는 세 줄 + `and N more` 이고, `nothing else needs a look` 은 다 그렸고 모르는 것이 없을 때만입니다. |
+| 24 | 한국어 홀드 항목의 명령에는 조사를 붙이지 않습니다(`… 푸는 명령: rcm release-hold 812`). |

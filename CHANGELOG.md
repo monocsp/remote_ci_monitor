@@ -77,6 +77,41 @@ of a key bumps that number and is listed here.
 - **`rcm release-hold N [--reason TEXT] [--json]`** releases a group hold after an admin checked
   the machine (exit 0 released, 1 no open hold, 2 refused, 3 unreachable or a server error).
   ([#284](https://github.com/monocsp/remote_ci_monitor/pull/284))
+- **A job whose worker is out of reach says so in words.** While the disconnect grace runs, its
+  reason is `worker_unreachable_grace` (listed right after `worker_down`, ETA `—`, and so is the
+  ETA of a job waiting behind it in the same group): the web and `rcm top` say
+  `lost contact with <worker> — the job goes on if the worker is back within the grace period`,
+  and `rcm wait` and `rcm run` print one line while they wait when contact is lost and one when
+  the worker is back, and keep waiting. A `lost` job's `rcm wait` adds its reason as one line
+  (`#N lost: worker build-02 unreachable for 660s`), a late report from the worker as
+  `#N late result: succeeded (exit 0) — not counted as this job's result`, and an incomplete log
+  as one line in `rcm wait`, at the end of `rcm logs N` and in the web log view's header.
+  ([#285](https://github.com/monocsp/remote_ci_monitor/pull/285))
+- **Group holds are shown to people.** The web's «Needs a look» lists every open hold (even with
+  no job waiting) and the held job's row carries a `group held` chip; `rcm wait` and `rcm run`
+  (while they wait) and `rcm top` name the group and the job to release instead of the code;
+  `rcm check` prints one `irreversible hold` warning per hold (the exit code does not change);
+  `rcm doctor` on a worker or coordinator-worker prints a `needs action` line for each hold of a
+  job that ran there, or one line saying the holds are unknown, and adds `irreversible_holds` to
+  `--json` (`doctor_version` stays 1). A hold list with an entry rcm cannot read is shown as
+  unknown everywhere, never as a shorter list.
+  ([#285](https://github.com/monocsp/remote_ci_monitor/pull/285))
+- **Holds and lost contact reach every estimate.** `rcm eta` for a preset of a held group, or for a
+  job waiting on one, gives no wait, finish or `N ahead` and says why; with an empty queue
+  `rcm top` no longer promises an immediate start while a group is held; the held job's own
+  `rcm wait` names the group and `rcm release-hold N`. A job that was being cancelled when its
+  worker went out of reach is cancelled when the worker is back, and the screens now say so. While
+  contact is lost a job is never `overdue` or `stuck`, and the web row stops counting its time.
+  ([#285](https://github.com/monocsp/remote_ci_monitor/pull/285))
+- **Fewer false promises around holds and lost contact.** With a group held, the web's empty queue
+  says `Queue is empty — a held group does not start until it is released.` (or
+  `… group holds unknown.`) instead of «starts immediately». While contact is lost, the web
+  progress bar shows no time scale and never `past the estimate` or `quiet`. `rcm eta <preset>`
+  now reads the preset's `concurrency_scope` as a submitted job does: for a `host` scope group it
+  only waits for that group's jobs on the same machine, so it can show an earlier start than
+  before. When a cancel is asked for after `rcm wait` said the job goes on, it prints
+  `#N cancel requested — the job is cancelled when the worker is back, or ends as lost after the
+  grace period`. ([#285](https://github.com/monocsp/remote_ci_monitor/pull/285))
 - **Hold notifications.** Every notification carries `RCM_EVENT`, `RCM_HOLD`, `RCM_HOLD_GROUP` and
   `RCM_HOLD_NOTE` (and `event` · `hold` in a webhook body); a `[[notify]]` rule with
   `on = ["irreversible_hold"]` is called once for each new hold. The default `on` is unchanged.
@@ -92,6 +127,15 @@ of a key bumps that number and is listed here.
 - **`/api/status` no longer answers 500 when its queue section fails.** That section is `null`
   and the rest of the document is served, as for the other sections.
   ([#284](https://github.com/monocsp/remote_ci_monitor/pull/284))
+- **The web's unreachable-worker banner no longer says the running jobs are lost.** It says they
+  go on if the worker is back within the disconnect grace and end `lost` otherwise
+  (`Worker mac2-worker unreachable — its jobs go on if back within the grace period, else end as
+  lost`), in both languages.
+  ([#285](https://github.com/monocsp/remote_ci_monitor/pull/285))
+- **Korean screens pick the right particle after a name like `mac2-worker`.** A Latin word of
+  three letters or more that ends in a vowel and `r` now takes the form without a final consonant
+  (`워커 mac2-worker와`, not `mac2-worker과`); short acronyms such as `HDR` are still read letter by
+  letter. ([#285](https://github.com/monocsp/remote_ci_monitor/pull/285))
 
 ## [0.11.1] - 2026-11-26
 

@@ -9,6 +9,8 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
+import pytest
+
 from remote_ci_monitor import config as config_mod
 from remote_ci_monitor.core.notify import notify_env
 
@@ -333,6 +335,294 @@ def test_p63_3_the_irreversible_section_says_a_late_cancel_keeps_the_failed_clos
     body = flat(section(CONFIGURATION, IRREVERSIBLE))
     assert "A cancel that has not stopped the command yet does not change that" in body
     assert "the job ends `failed`, as any job that does not retry does" in body
+
+
+# ── PR3: 사람용 화면(§4.8) ─────────────────────────────────────────────────────
+
+UNREACHABLE = "When a worker cannot be reached"
+HELD = "When a group is held: `rcm release-hold`"
+
+
+def test_rl28_operating_quotes_the_unreachable_lines_rcm_prints():
+    """# RL28 문서의 줄이 `rcm top` · `rcm wait` 이 실제로 찍는 줄과 같다."""
+    from remote_ci_monitor.core.render_text import unreachable_text
+
+    body = flat(section(OPERATING, UNREACHABLE))
+    assert "`worker_unreachable_grace`" in body and "its ETA is `—`" in body
+    assert unreachable_text("build-02") in body
+    assert f"#812 {unreachable_text('worker build-02')}" in body
+    assert "#812 worker build-02 is back — the job goes on" in body
+
+
+def test_rl29_operating_names_the_five_lost_endings_and_the_late_result_line():
+    """# RL29 다섯 끝의 `summary_code` 와 늦은 결과 · 불완전한 로그 줄."""
+    from remote_ci_monitor.core.render_text import (
+        late_result_line,
+        log_incomplete_line,
+        lost_line,
+    )
+
+    body = flat(section(OPERATING, UNREACHABLE))
+    for code in (
+        "worker_unreachable",
+        "worker_self_stopped",
+        "worker_replaced",
+        "worker_restarted_without_job",
+        "orphan_unverified",
+    ):
+        assert f"`{code}`" in body, code
+    lost = {
+        "state": "lost",
+        "summary_code": "worker_unreachable",
+        "summary_args": {"name": "build-02", "seconds": 660},
+    }
+    assert lost_line(lost, job_id=812) in body
+    late = {"late_result": {"outcome": "succeeded", "exit_code": 0}}
+    assert late_result_line(late, job_id=812) in body
+    assert log_incomplete_line({"log_complete": False}, job_id=812) in body
+
+
+def test_rl45_operating_says_where_a_hold_shows_and_quotes_the_lines():
+    """# RL45 웹 · `rcm wait` · `rcm top` · `rcm check` · `rcm doctor` 의 홀드 줄."""
+    from remote_ci_monitor.cli import HOLD_ROW, action_line
+    from remote_ci_monitor.core.doctor import hold_line
+
+    body = flat(section(OPERATING, HELD))
+    action = {"code": "irreversible_hold", "note": "group held — run rcm release-hold 812"}
+    blocked = {"job_id": 812, "group": "irreversible:ship"}
+    assert action_line(821, action, blocked) in body
+    assert flat(f"`warn  {HOLD_ROW}`") in body
+    doctor = hold_line({"job_id": 812, "preset": "ship", "group": "irreversible:ship"})
+    assert doctor.split(": ", 1)[1].replace("812", "N") in body
+    assert "`group held` chip" in body and "exit 4" in body
+    assert "`unknown — group holds unavailable`" in body
+    # P3 r1: doctor 텍스트의 「모름」 한 줄은 실제 문구 그대로
+    from remote_ci_monitor.core.doctor import HOLDS_UNKNOWN_LINE
+
+    assert f"`{HOLDS_UNKNOWN_LINE}`" in body
+    # P3 r1: 못 읽는 항목 하나면 세 곳 모두 목록 전체가 모름 — `rcm check` 의 실제 문구를 인용한다
+    from remote_ci_monitor.cli import _hold_rows
+
+    unknown = _hold_rows({"irreversible_holds": [{"job_id": "x"}]})
+    assert len(unknown) == 1 and f"`{unknown[0][2]}`" in body, unknown
+    assert "`irreversible_holds: null`" in body
+
+
+def test_rl28_both_usage_guides_show_the_grace_and_the_two_wait_lines():
+    """# RL28 사용 안내 두 거울의 「When a worker stops」 가 유예 중 화면과 `rcm wait` 의 두 줄을
+    같은 뜻 · 같은 번호로 말한다. 옛 「자동으로 재개되지 않는다」 는 남지 않는다."""
+    from remote_ci_monitor.core.render_text import unreachable_text
+
+    usage = (ROOT / "docs" / "usage.md").read_text()
+    usage_ko = (ROOT / "docs" / "usage.ko.md").read_text()
+    for text, heading in ((usage, "When a worker stops"), (usage_ko, "워커가 멈추면")):
+        raw = section(text, heading)
+        body = flat(raw)
+        assert re.findall(r"^(\d+)\. ", raw, re.M) == ["1", "2", "3"], heading
+        # 이름과 잡 번호는 web-worker-down.png 장면(tools/screenshots/capture.py 의 down)과 같다
+        assert unreachable_text("mac2-worker") in body, heading
+        assert "`—`" in body, heading
+        assert "(configuration.md#a-lost-connection-disconnect_grace_seconds)" in body, heading
+        assert "(operating.md#when-a-worker-cannot-be-reached)" in body, heading
+        assert f"#11 {unreachable_text('worker mac2-worker')}\n" in raw, heading
+        assert "#11 worker mac2-worker is back — the job goes on\n" in raw, heading
+        assert "`lost`" in body, heading
+    assert "not resumed automatically" not in usage
+    assert "자동으로 재개되지도 않는다" not in usage_ko
+    # 조사 고침(batch-3) 뒤로는 이름까지 인용한다 — 「mac2-worker과」가 아니다
+    assert "`워커 mac2-worker와 연락이 끊김 · 유예 시간 안에 돌아오면 이어서 진행`" in flat(
+        section(usage_ko, "워커가 멈추면")
+    )
+
+
+def test_rl28_both_usage_guides_quote_the_banner_as_it_is_now():
+    """# RL28 「When a worker stops」 1번은 띠를 지금 문장대로 인용한다(i18n.js 의
+    `header.workers_unreachable_one`). 옛 「결과를 잃는다 · 알 수 없다」는 남지 않는다."""
+    en = (
+        "`Worker mac2-worker unreachable — its jobs go on if back within the grace period,"
+        " else end as lost`"
+    )
+    ko = "`워커 mac2-worker 연결 끊김 — 유예 시간 안에 돌아오면 작업이 이어지고 넘기면 결과를 잃음`"
+    usage = flat(section((ROOT / "docs" / "usage.md").read_text(), "When a worker stops"))
+    usage_ko = flat(section((ROOT / "docs" / "usage.ko.md").read_text(), "워커가 멈추면"))
+    assert en in usage
+    assert en in usage_ko and ko in usage_ko
+    i18n = (ROOT / "src" / "remote_ci_monitor" / "web" / "i18n.js").read_text()
+    assert en.strip("`").replace("mac2-worker", '" + a.name + "') in i18n
+    assert ko.strip("`").replace("mac2-worker", '" + a.name + "') in i18n
+    for text in (usage, usage_ko):
+        assert "running jobs are lost" not in text
+        assert "결과를 알 수 없습니다" not in text
+
+
+def test_operating_says_an_unreported_job_waits_on_disk_not_a_minute():
+    """§4.5(PR2) — 못 보낸 보고는 디스크 큐에 남아 24시간 안에 다시 보낸다. 옛 「1분 뒤 포기」
+    문장은 돌아오지 않는다(드레인 끝의 1분 기다림은 남는다 — 그 뒤 큐는 디스크에 있다)."""
+    body = flat(OPERATING)
+    assert "gives the report up" not in body
+    assert "After that minute it logs" not in body
+    assert "keeps it in its heartbeats" not in body
+    assert "in a queue on disk" in body
+    assert "`job #<id> still not reported — restarting anyway`, leaves the queue on disk" in body
+    assert "for up to 24 hours after the job ends" in body
+    assert (
+        "`#<id> report: log and artifacts not delivered in 24h — sending the finish without them`"
+        in body
+    )
+
+
+def test_operating_drain_paragraph_follows_spec_4_5_and_has_the_300_second_cap():
+    """P3 r1 — 드레인 문단은 명세 §4.5(docs/m5tb-workplan.md 「재전송 창」)의 순서대로: 24시간이
+    지나면 로그 · 산출물 없이 finish 를 `log_bytes` 와 함께 보내고, finish 마저 24시간 안에 못
+    보내면 큐 항목을 버리고 로그 한 줄. 다시 시작한 워커가 등록 전에 큐를 보내는 데는 서버가
+    응답하는 시간으로 300초 상한(결정 337 · RL46). 인용하는 로그 문구는 PR2 의
+    remote_worker.py 에 있는 것만이다."""
+    body = flat(OPERATING)
+    send = (
+        "`#<id> report: log and artifacts not delivered in 24h — sending the finish without them`"
+    )
+    drop = "`#<id> report: finish not delivered in 24h — dropping the report`"
+    assert send in body and drop in body
+    assert body.index(send) < body.index(drop)
+    assert "with the size of the log it had (`log_bytes`)" in body
+    assert "for at most 300 seconds of server error answers" in body
+    assert "connection failures do not count" in body
+    assert (
+        "`dead session <session> queue not delivered after 300s of server errors — registering;"
+        " job #<id> will close as restarted-without-job`" in body
+    )
+    assert "`worker_restarted_without_job`" in body
+
+
+def test_rl28_docs_say_rcm_run_prints_the_waiting_lines_too():
+    """# RL28 P3 r1: 끊김 · 돌아옴 · 홀드 줄은 기다리는 동안의 줄이라 `rcm run` 도 찍는다(같은
+    `_wait`). 끝난 뒤의 줄(유실 원인 · 늦은 결과 · 불완전한 로그)만 `rcm wait` 의 것이다."""
+    unreachable = flat(section(OPERATING, UNREACHABLE))
+    held = flat(section(OPERATING, HELD))
+    row = "| `rcm wait` and `rcm run`, while they wait (stderr) |"
+    assert row in unreachable and row in held
+    changelog = flat((ROOT / "CHANGELOG.md").read_text())
+    assert "`rcm wait` and `rcm run` print one line while they wait when contact is lost" in (
+        changelog
+    )
+    assert "`rcm wait` and `rcm run` (while they wait) and `rcm top` name the group" in changelog
+    usage = flat(section((ROOT / "docs" / "usage.md").read_text(), "When a worker stops"))
+    assert "`rcm wait` and `rcm run` keep waiting through the grace" in usage
+    usage_ko = flat(section((ROOT / "docs" / "usage.ko.md").read_text(), "워커가 멈추면"))
+    assert "`rcm wait` 과 `rcm run` 은 유예 동안에도 계속 기다리고" in usage_ko
+
+
+PR3_ENTRIES = (
+    "**A job whose worker is out of reach says so in words.**",
+    "**Group holds are shown to people.**",
+    "**The web's unreachable-worker banner no longer says the running jobs are lost.**",
+    "**Korean screens pick the right particle after a name like `mac2-worker`.**",
+)
+
+
+@pytest.mark.parametrize("head", PR3_ENTRIES)
+def test_changelog_pr3_entries_link_their_pull_request(head):
+    """P3 r1: CHANGELOG 의 이 PR 항목 넷은 PR 링크를 단다(docs 스킬 체크리스트 1)."""
+    text = (ROOT / "CHANGELOG.md").read_text()
+    start = text.index(head)
+    end = min(i for i in (text.find("\n- ", start), text.find("\n\n", start)) if i != -1)
+    entry = text[start:end]
+    assert "([#285](https://github.com/monocsp/remote_ci_monitor/pull/285))" in entry, entry
+
+
+def test_operating_doctor_json_key_table_has_irreversible_holds():
+    """P3 r1 — `rcm doctor --json` 키 표에 `irreversible_holds` 행(역할에 따라 목록 또는 null)."""
+    rows = [ln for ln in OPERATING.splitlines() if ln.startswith("| `irreversible_holds` |")]
+    assert len(rows) == 1, rows
+    row = rows[0]
+    assert "`worker`" in row and "`coordinator-worker`" in row and "`null`" in row
+
+
+def test_operating_dead_session_placeholder_is_not_the_job_number():
+    """P3 r2 — 드레인 문단의 `dead session …` 자리 표시자는 잡 번호 `<id>` 와 다른 이름이다. PR2 는
+    세션 id 앞 8자(`s.dead.session_id[:8]`)를 찍으므로 그 뜻을 한 마디로 적는다."""
+    body = flat(OPERATING)
+    assert "`dead session <id>" not in body
+    assert "`<session>` is the first 8 characters of the old worker session's id" in body
+
+
+def test_rl28_operating_says_a_waiter_behind_an_unreachable_job_has_no_eta_and_takes_no_lane():
+    """# RL28 P3 r2 — 끊긴 잡 뒤에서 같은 그룹으로 기다리는 잡은 ETA 가 「—」이고 레인을 차지하지
+    않는다. 그래서 같은 레인의 뒤 잡 ETA 는 그 대기 잡이 레인을 쓰지 않는다고 보고 계산되고, 워커가
+    돌아오면 늦어질 수 있다(지어낸 숫자가 아니라 가정이 있는 ETA)."""
+    body = flat(section(OPERATING, UNREACHABLE))
+    assert "A job waiting in the same concurrency group behind it has no ETA either (`—`)" in body
+    assert "takes no lane in the estimate" in body
+    assert "assume that waiting job does not use the lane" in body
+    assert "may come later than shown once the worker is back" in body
+
+
+# ── P6-1: P5 엣지 감사의 GAP 이 문서에 남긴 것 ──────────────────────────────────
+
+
+def test_g10_operating_says_a_fenced_split_session_shows_running_until_the_grace():
+    """# RL28 P6-1 G10: 명세 §9(m5tb-workplan.md:2170) — 펜싱된 분단 중에는 끊김 줄 없이
+    running(ETA 포함)으로 보이다가 G 에 닫힌다. 「When a worker cannot be reached」에 그 한계를."""
+    body = flat(section(OPERATING, UNREACHABLE))
+    assert "a network split" in body
+    assert (
+        "its jobs show `running`, with an ETA and no lost-contact line, until the grace runs out"
+        in body
+    )
+    assert "configuration.md#a-lost-connection-disconnect_grace_seconds" in body
+
+
+def test_g5_g6_operating_says_a_cancelling_job_stops_and_nothing_counts_while_unreachable():
+    """# RL28 P6-1 G5 · G6: 취소 중인 잡의 문장(rcm top · rcm wait 이 찍는 그대로)과, 끊긴 동안은
+    웹이 세지 않고 초과 · 멈춤을 판정하지 않는다는 것."""
+    from remote_ci_monitor.core.render_text import unreachable_text
+
+    body = flat(section(OPERATING, UNREACHABLE))
+    assert unreachable_text("build-02", cancelling=True) in body
+    assert "#812 worker build-02 is back — the job is being cancelled" in body
+    assert "never `overdue` or `stuck`" in body
+    assert "stops counting" in body
+
+
+def test_g2_g3_g4_g7_g9_operating_quotes_the_new_hold_lines():
+    """# RL45 P6-1: `rcm eta` · 빈 큐의 `rcm top` · 홀드를 만든 잡의 `rcm wait` 줄과, `worker`
+    키가 없는 항목은 읽을 수 없는 항목이라는 것. 줄은 코드가 찍는 그대로 인용한다."""
+    from remote_ci_monitor.core.render_text import hold_owner_line, hold_top_lines
+
+    body = flat(section(OPERATING, HELD))
+    assert "`rcm eta`" in body and "no `N ahead`" in body
+    assert "`queue — empty · a held group does not start until it is released`" in body
+    top = hold_top_lines([{"job_id": 812, "group": "irreversible:ship", "worker": None}])
+    assert top is not None and f"`{top[0].strip()}`" in body, top
+    owner = hold_owner_line(
+        {"hold": {"released_at": None}, "concurrency_group": "irreversible:ship"}, job_id=812
+    )
+    assert owner is not None and f"`{owner}`" in body, owner
+    assert "no job number, no group, or no `worker` key" in body
+
+
+def test_p6_2_operating_quotes_the_web_empty_queue_while_a_group_is_held():
+    """# RL45 P6-2: 웹 빈 대기열도 홀드가 있으면(또는 모르면) 「바로 시작」을 약속하지 않는다.
+    문서는 웹 카탈로그(i18n.js)의 영어 문장을 그대로 인용한다."""
+    body = flat(section(OPERATING, HELD))
+    catalog = (ROOT / "src" / "remote_ci_monitor" / "web" / "i18n.js").read_text()
+    for line in (
+        "Queue is empty — a held group does not start until it is released.",
+        "Queue is empty — group holds unknown.",
+    ):
+        assert f"`{line}`" in body, line
+        assert f'"{line}"' in catalog, line
+
+
+def test_p6_2_operating_quotes_the_late_cancel_line_and_the_still_progress_bar():
+    """# RL28 P6-2: 「이어진다」 뒤에 온 취소의 `rcm wait` 줄과, 끊긴 동안 막대에 시간 눈금이 없다는
+    것. 줄은 코드가 찍는 그대로 인용한다."""
+    from remote_ci_monitor.core.render_text import unreachable_cancel_text
+
+    body = flat(section(OPERATING, UNREACHABLE))
+    assert f"`#812 {unreachable_cancel_text()}`" in body
+    assert "never `overdue` or `stuck` in that time, nor `quiet`" in body
+    assert "no time scale (`progress —`)" in body
 
 
 PR2_LINK = "([#286](https://github.com/monocsp/remote_ci_monitor/pull/286))"

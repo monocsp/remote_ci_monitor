@@ -254,6 +254,7 @@ DOC = {
     "undecided": [],
     "warnings": ["git: old"],
     "exit": 1,
+    "irreversible_holds": [],
 }
 HUMAN = [
     "rcm doctor · worker · measured in a clean service environment",
