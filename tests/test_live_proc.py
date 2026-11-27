@@ -1059,3 +1059,12 @@ def test_b7_4_an_explicit_8787_is_refused_even_when_it_does_not_win(
     words = [word.format(d=d) for word in argv]
     reason = _refusal(tmp_path / "home", d, words, environ=environ)
     assert reason and "8787" in reason, reason
+
+
+def test_b7_6_the_test_folder_passes_the_tools_own_tmp_rule(d: Path) -> None:
+    # B7-6 — rcm-ci 잡 4380: 그 잡은 TMPDIR 을 /private/tmp 아래에 두어 pytest 의 tmp_path 도
+    # 거기 있다. 도구는 /tmp 아래의 --dir 를 거부하므로(시스템이 도중에 지울 수 있다) 시험 폴더가
+    # tmp_path 아래면 진짜 CLI 를 부르는 시험이 그 머신에서만 REFUSED 로 빨개진다. 시험 폴더는
+    # 도구의 기본 /tmp 규칙(`Places.tmp_roots` 기본값)을 통과해야 한다.
+    places = lp.Places(home=d.parents[2], prod=gp.Production())
+    assert lp.refusal(d, SLEEPER, places, cwd=d, environ={}) is None, d
