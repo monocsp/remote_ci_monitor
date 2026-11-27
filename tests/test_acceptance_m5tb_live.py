@@ -1787,3 +1787,82 @@ def test_pr4_a_verdict_line_without_a_verdict_word_is_unknown(tmp_path: Path) ->
     assert r.returncode == 0, r.stderr
     rows = _summary(tmp_path)
     assert rows == {"RL10": ["UNKNOWN"], "RL2": ["UNKNOWN"]}, rows
+
+
+def _child_marks(tmp_path: Path) -> tuple[subprocess.Popen[bytes], Path]:
+    """RL51 의 표지 — <잡>.child 에 자식 pid, 그 시작 시각은 <잡>.child.start(run_sweep 이 쓰는
+    자리), <잡>.start 에는 잡 자신의(다른) 시작 시각."""
+    p = _sleeper()
+    time.sleep(0.2)
+    marks = tmp_path / "out" / "marks"
+    marks.mkdir(parents=True, exist_ok=True)
+    (marks / "7.child").write_text(f"{p.pid}\n", encoding="utf-8")
+    (marks / "7.child.start").write_text(sh("proc_start", str(p.pid)).stdout, encoding="utf-8")
+    (marks / "7.start").write_text("Thu Jan  1 00:00:00 1970\n", encoding="utf-8")
+    return p, marks
+
+
+@pytest.mark.parametrize("where", ["reset_world", "cleanup"])
+def test_rl51_a_term_ignoring_child_mark_is_reaped_with_its_own_start(
+    tmp_path: Path, where: str
+) -> None:
+    # RL51 — reset_world · cleanup 은 `${f%.*}.start` 를 찾아 <잡>.child 에 <잡>.start(잡 자신의
+    # 시작 시각)를 견줬다. run_sweep 은 자식의 시작 시각을 <잡>.child.start 에 쓰므로 자식은
+    # 신원이 맞지 않아 남았다(sleep 400)
+    p, _ = _child_marks(tmp_path)
+    try:
+        if where == "reset_world":
+            env = {"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "M5TB_PY": sys.executable,
+                   "HOME": str(tmp_path), "OPEN": ""}  # fmt: skip
+            argv = ["bash", "-c", _RESET_STUB, "bash", str(SCRIPT), str(tmp_path / "calls.log"),
+                    str(tmp_path / "out")]  # fmt: skip
+            r = subprocess.run(
+                argv, capture_output=True, text=True, env=env, timeout=15, check=False
+            )
+        else:
+            code = (
+                'B="$OUT/b"; MARKS="$OUT/marks"; WORKER_PIDS=(); LAUNCHERS=(); '
+                "stop_ours() { :; }; cleanup"
+            )
+            r = _sourced(tmp_path, code)
+        assert r.returncode == 0, r.stderr
+        p.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        pytest.fail(f"{where} left the RL51 child {p.pid} running")
+    finally:
+        if p.poll() is None:
+            p.kill()
+            p.wait(timeout=10)
+
+
+def test_rl51_run_sweep_records_every_child_start_as_it_reads_the_child() -> None:
+    # 셋째 경우는 워커 신원을 확인한 뒤에야 .child.start 를 썼다 — 확인이 틀리면 자식을 못 거둔다
+    assert _body("run_sweep").count('child=$(child_of "$j")') == 3
+    reader = _body("child_of")
+    assert '"$MARKS/$1.child.start"' in reader, reader
+
+
+def test_pr4_a_busy_port_is_found_without_lsof(tmp_path: Path) -> None:
+    # main 은 `lsof` 로만 「포트 사용 중」을 봤다 — lsof 가 없으면 조용히 통과했다
+    import socket
+
+    path = "/bin:/usr/bin"
+    assert subprocess.run(["sh", "-c", "command -v lsof"], env={"PATH": path},
+                          capture_output=True, check=False).returncode != 0  # fmt: skip
+    busy = socket.socket()
+    busy.bind(("127.0.0.1", 0))
+    busy.listen()
+    port = str(busy.getsockname()[1])
+    try:
+        assert sh("port_free", port, extra={"PATH": path}).returncode == 1, "a listener"
+    finally:
+        busy.close()
+    free = socket.socket()
+    free.bind(("127.0.0.1", 0))
+    port = str(free.getsockname()[1])
+    free.close()
+    assert sh("port_free", port, extra={"PATH": path}).returncode == 0, "a free port"
+    # 검사기가 돌지 못하면(파이썬이 없음) 비었다고 하지 않는다
+    assert sh("port_free", port, extra={"PATH": path, "M5TB_PY": "/usr/bin/false"}).returncode == 1
+    main = _body("main")
+    assert re.search(r'port_free "\$P" \|\| die', main), main[:1200]
