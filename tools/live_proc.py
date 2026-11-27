@@ -23,12 +23,15 @@
 거부한다. 안쪽 명령의 `--config` 가 운영 설정이거나, 포트 8787(설정의 기본값이기도 하다 —
 `[server]` 가 없거나 `port` 가 없으면 8787 이다)을 쓰거나, 운영 data_dir 를 열면 거부한다.
 설정 위에 얹히는 `--port` · `--bind` · `--server` 의 8787 도, 그리고 rcm 의 argparse 가 받는
-줄임말(`--por` · `--conf` · `--data-d`)도 그 옵션으로 읽는다. `rcm serve|worker|token` 은
-`--config` 를 꼭 받고, 클라이언트 명령은 서버 주소(`RCM_SERVER` · `--server`)를 꼭 받는다
-— 없으면 발견으로 운영을 찾는다. 그리고 운영 가드 훅의 판정(`guard_production.decide`)을
-안쪽 명령에 그대로 묻는다 — 이 도구가 훅을 돌아가는 길이 되지 않게. 운영 설치는 훅과 같은
-함수(`find_production`)로 찾되 홈은 `HOME` 이 아니라 계정의 진짜 홈이다 — 이 도구는
-`HOME=<data_dir>/home` 아래에서 불린다.
+줄임말(`--por` · `--conf` · `--data-d`)도 그 옵션으로 읽는다. 설정의 포트는 rcm 처럼 읽고
+(`port = "8787"` 도 8787), 판정은 rcm 의 덮어쓰기 순서에서 이긴 값으로 한다(`--port 8791` 이면
+port 없는 설정도 받는다). 다만 사람이 적은 8787(`--port` · `RCM_SERVER_PORT` · `--server` ·
+`RCM_SERVER`)은 이기지 않아도 거부한다. `rcm serve|worker|token` 은 `--config` 를 꼭 받고,
+클라이언트 명령은 서버 주소(`RCM_SERVER` · `--server`)를 꼭 받는다. 워커 · 클라이언트의 이긴
+주소가 없거나 `auto` 면 거부한다 — 발견으로 운영 서버를 찾을 수 있다. 그리고 운영 가드 훅의
+판정(`guard_production.decide`)을 안쪽 명령에 그대로 묻는다 — 이 도구가 훅을 돌아가는 길이
+되지 않게. 운영 설치는 훅과 같은 함수(`find_production`)로 찾되 홈은 `HOME` 이 아니라 계정의
+진짜 홈이다 — 이 도구는 `HOME=<data_dir>/home` 아래에서 불린다.
 
 표준 라이브러리만 쓴다.
 """
@@ -213,8 +216,37 @@ def _url_port(url: str) -> int | None:
     return port
 
 
-def _config_refusal(path: Path, places: Places) -> str | None:
-    """`--config` 파일 하나를 본다: 운영 설정 · 포트 8787 · 운영 data_dir 를 거부한다."""
+def _discovers(url: str) -> bool:
+    """rcm 의 `wants_discovery`(config.py)와 같은 읽기: 끝의 `/` 를 뗀 주소가 비었거나 `auto` 면
+    같은 망에서 서버를 mDNS 로 찾는다 — 운영 서버를 찾을 수 있다."""
+    return url.rstrip("/").strip().lower() in ("", "auto")
+
+
+def _port_value(value: Any) -> int:
+    """`[server] port` 를 rcm 의 `_coerce_scalar(…, int)`(config.py)와 같게 읽는다: 정수는 그대로,
+    글은 앞뒤 공백을 떼고 `int()`(`"8787"` · `" 8787"` 도 8787). 참 · 거짓 · 실수 · 그 밖은 rcm 이
+    설정 오류로 거부하는 꼴이라 무엇으로 뜰지 모른다 — ValueError."""
+    if isinstance(value, bool) or not isinstance(value, int | str):
+        raise ValueError(f"port must be an integer, not {value!r}")
+    if isinstance(value, str):
+        return int(value.strip())  # mutcheck: live-proc-quoted-port-unread
+    return value
+
+
+def _config_refusal(
+    path: Path,
+    places: Places,
+    *,
+    subcommand: str | None,
+    port_override: str | None,
+    server_override: str | None,
+) -> str | None:
+    """`--config` 파일 하나를 본다: 운영 설정 · 포트 8787 · 서버 찾기 · 운영 data_dir 를 거부한다.
+
+    포트와 서버 주소는 rcm 의 덮어쓰기 순서대로 이긴 값을 본다(2026-11-27 batch-7):
+    `rcm serve` 는 `--port` > `RCM_SERVER_PORT` > `[server] port` > 8787(`load_server_config`),
+    `rcm worker` 는 `--server` > 설정의 `server`(`load_worker_config` 의 overrides), 클라이언트는
+    `--server` > `RCM_SERVER` > 설정. `*_override` 는 부르는 쪽이 고른 이긴 플래그 · 환경 값이다."""
     place = _production_place(path, places, tmp=False)
     if place is not None:
         return f"--config {path} is inside {place}"
@@ -226,16 +258,34 @@ def _config_refusal(path: Path, places: Places) -> str | None:
     except (OSError, tomllib.TOMLDecodeError) as error:
         return f"cannot read --config {path} ({error}); it is unknown what it would open"
     section = raw.get("server")
+    # 붙을 서버의 주소를 적는 설정(worker.toml · client.toml)인가, 서버 자신의 설정인가.
+    # `server` 가 없으면 하위 명령으로 가른다 — 워커 · 클라이언트에게 없는 주소는 「찾아라」다.
+    client = subcommand is not None and subcommand not in NEEDS_CONFIG
+    url_kind = isinstance(section, str) or (section is None and (subcommand == "worker" or client))
     try:
-        if isinstance(section, dict):  # server.toml — 포트가 없으면 기본값 8787 이다
-            port = section.get("port", PRODUCTION_PORT)
-        elif isinstance(section, str):  # worker.toml — 붙을 서버의 주소
-            port = _url_port(section)
+        if url_kind:
+            if server_override is not None:
+                url = server_override
+            else:
+                url = section if isinstance(section, str) else ""
+            if _discovers(url):  # mutcheck: live-proc-worker-discovery-accepted
+                return (
+                    f"--config {path} gives no server address (server is {url!r}) and nothing "
+                    "overrides it, so it would discover a server on the network, maybe "
+                    "production's; give --server or a test URL in the config"
+                )
+            port = _url_port(url)
+        elif port_override is not None:  # 플래그 · 환경이 설정을 이긴다
+            port = int(port_override)
+        elif isinstance(section, dict):  # server.toml — 포트가 없으면 기본값 8787 이다
+            port = _port_value(section.get("port", PRODUCTION_PORT))
+        elif section is not None:  # 표도 주소도 아니다 — rcm 이 설정 오류로 거부한다
+            raise ValueError(f"[server] is neither a table nor a URL, but {section!r}")
         else:  # `[server]` 가 아예 없다 — `ServerConfig.port` 의 기본값 8787 로 뜬다
             port = PRODUCTION_PORT
     except ValueError as error:
         return f"cannot read the port in --config {path} ({error})"
-    if port == PRODUCTION_PORT:
+    if port == PRODUCTION_PORT:  # mutcheck: live-proc-config-port-accepted
         return f"--config {path} uses port {PRODUCTION_PORT}, production's (or leaves it unset)"
     data_dir = gp._config_data_dir(path)
     if data_dir is None:
@@ -269,8 +319,23 @@ def refusal(
         return (
             f"`rcm {subcommand}` needs an explicit --config (without one it can find production's)"
         )
+    # rcm 의 덮어쓰기 순서에서 설정을 이기는 값(argparse 는 같은 옵션의 마지막을 쓴다).
+    ports = _options(argv, ("--port",))
+    port_override = ports[-1] if ports else environ.get("RCM_SERVER_PORT")
+    flag_servers = _options(argv, ("--server",))
+    client = subcommand is not None and subcommand not in NEEDS_CONFIG
+    if client:  # `load_client_config`: 빈 `--server` · 빈 `RCM_SERVER` 는 이기지 못한다
+        chosen = (flag_servers[-1] if flag_servers else "") or environ.get("RCM_SERVER") or None
+    else:  # `rcm worker` 는 `--server ""` 도 얹는다. `RCM_SERVER` 는 읽지 않는다
+        chosen = flag_servers[-1] if flag_servers else None
     for config in configs:
-        reason = _config_refusal(_abs(config, cwd), places)
+        reason = _config_refusal(
+            _abs(config, cwd),
+            places,
+            subcommand=subcommand,
+            port_override=port_override,
+            server_override=chosen,
+        )
         if reason is not None:
             return reason
     data_dirs = _options(argv, ("--data-dir", "--data"))
@@ -292,13 +357,18 @@ def refusal(
     for value in binds:
         if _bind_port(value) == PRODUCTION_PORT:
             return f"bind address {value} is on production's port {PRODUCTION_PORT}"
-    servers = _options(argv, ("--server",))
+    servers = list(flag_servers)
     if environ.get("RCM_SERVER"):
         servers.append(environ["RCM_SERVER"])
-    if subcommand is not None and subcommand not in NEEDS_CONFIG and not servers:
+    if client and chosen is None:
         return (
             f"`rcm {subcommand}` needs RCM_SERVER or --server "
             "(without one the client may discover production)"
+        )
+    if client and chosen is not None and _discovers(chosen):  # mutcheck: live-proc-client-discovery
+        return (
+            f"`rcm {subcommand}` would discover a server on the network (server {chosen!r}), "
+            "maybe production's; give RCM_SERVER or --server a test URL"
         )
     for server in servers:
         try:
