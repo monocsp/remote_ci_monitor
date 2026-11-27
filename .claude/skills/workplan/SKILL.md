@@ -108,7 +108,9 @@ whole workplan:
    `cd <abs worktree> && ./.venv/bin/python tools/scenario_trace.py docs/<code>-workplan.md`.
 
 Edge rows are chosen by reach condition, and irreversible results always get a row —
-[`_shared/edge-scope.md`](../_shared/edge-scope.md) decides which. A table of every conceivable edge
+[`_shared/edge-scope.md`](../_shared/edge-scope.md) decides which. An edge row that is common, high
+risk and made the same way every time by the repository's own means is marked for the P5 live lane
+in its `where` cell, as [`_shared/edge-scope.md`](../_shared/edge-scope.md) «Live lane» says. A table of every conceivable edge
 is not thoroughness: it buries the few rows that matter.
 
 ## 3. Lane

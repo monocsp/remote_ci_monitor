@@ -14,6 +14,7 @@ import io
 import os
 import tarfile
 import threading
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -95,12 +96,17 @@ def wrap_finish(srv, hook) -> None:
     srv.store.finish = finish  # type: ignore[method-assign]
 
 
-def test_b6_a_remote_keep_job_is_shelved_like_a_local_one(srv, tmp_path):
+def test_b6_a_remote_keep_job_is_shelved_like_a_local_one(srv, tmp_path, monkeypatch):
     seen: dict[int, Any] = {}
+    received: list[datetime] = []
 
     def snap(job_id: int) -> None:
+        received.append(datetime.now(UTC))
         seen[job_id] = (srv.store.shelf_item(job_id), srv.store.get_job(job_id).state)
 
+    # 워커는 벽시계를 쓴다. 서버 시계가 과거에 멈춰 있으면 워커의 끝난 시각이 수신 시각보다
+    # 미래라 서버가 그 끝으로 자른다(M5t-b 결정 277) — 이 시험의 서버도 벽시계를 따른다
+    monkeypatch.setattr(srv.app, "now_fn", lambda: datetime.now(UTC))
     wrap_finish(srv, snap)
     jid = run_remote(srv, tmp_path)
     item, state = seen[jid]
@@ -112,9 +118,8 @@ def test_b6_a_remote_keep_job_is_shelved_like_a_local_one(srv, tmp_path):
     job = srv.store.get_job(jid)
     assert final.job_state == SUCCEEDED
     assert final.job_finished_at == job.finished_at.timestamp()
-    assert (
-        final.job_finished_at != srv.clock.now.timestamp()
-    )  # 워커가 보낸 시각이지 받은 시각이 아니다
+    # 워커가 보낸 시각이지 받은 시각이 아니다 — 수집 · 업로드 뒤에 받았다
+    assert job.finished_at < received[-1]
 
 
 def test_b8_a_fetch_then_ack_waits_for_the_shelf(srv, tmp_path):
@@ -200,6 +205,7 @@ def test_e53_a_malicious_outer_bundle_cannot_plant_links_or_escape(srv, tmp_path
     path = tmp_path / "evil.tar"
     path.write_bytes(buf.getvalue())
     wc = WorkerClient(f"http://127.0.0.1:{srv.port}", srv.tokens["lin-01"])
+    wc.session_id = srv.session("lin-01")  # M5t-b: 그 잡을 claim 한 세션으로 보고한다
     receipt = wc.upload_bundle(jid, path)
     assert receipt["bundle_sha256"] == hashlib.sha256(buf.getvalue()).hexdigest()
     wc.finish(
@@ -321,7 +327,7 @@ def die_at(srv, tmp_path: Path, monkeypatch, method: str, preset: str = "linkeep
     t.start()
     t.join(timeout=60)
     wait_until(lambda: not t.is_alive() or w.stopping.is_set(), what="worker died")
-    srv.clock.advance(300)
+    srv.clock.advance(601)  # M5t-b: 잡은 timeout 이 아니라 끊김 유예(기본 600) 뒤에 닫힌다
     srv.app.mark_lost_workers(srv.clock.now)
     wait_until(lambda: srv.store.get_job(jid).state == "lost", what="job lost")
     return jid

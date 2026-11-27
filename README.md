@@ -50,7 +50,7 @@ or just slow, is the machine on fire, did it pass? rcm answers that in one scree
 Build machines run macOS (Apple Silicon or Intel) and Linux. Windows is out of scope; sessions on
 Windows submit through WSL ([Windows (WSL)](docs/usage.md#windows-wsl)).
 
-Status: **v0.11.1, M5t-a released; M5t-b and M5t-c next**. There is no GitHub backend and none is planned. `PLAN.md`
+Status: **v0.12.0, M5t-b released; M5t-c next**. There is no GitHub backend and none is planned. `PLAN.md`
 (Korean) is the plan of record; `CHANGELOG.md` is what changed.
 
 ## Install
@@ -222,6 +222,7 @@ itself ([keeping clients on the server's version](docs/operating.md#keeping-clie
 | `rcm cancel N` · `rcm pause` · `rcm resume` | cancel (joiners only leave the join list) · pause/resume the queue (admin) |
 | `rcm reload [--dry-run]` | re-read the config file and its `include` files — presets and repos only, no restart (admin); `--dry-run` names what would change and applies nothing |
 | `rcm bump N [--priority high]` | change a waiting job's priority (admin) |
+| `rcm release-hold N [--reason TEXT] [--json]` | after you checked the machine, release the hold an `irreversible` job left on its concurrency group (admin). `--reason` goes into the audit trail; exit 1 when the job has no open hold ([when a group is held](docs/operating.md#when-a-group-is-held-rcm-release-hold)) |
 | `rcm release new [--repo R] [--ios X] [--android Y] [--yes]` · `list` · `delete N` · `open N` | store version drafts (admin). With no version arguments `new` asks only for the names, offering the server's hints: enter takes the hint, `-` skips that store, `--yes` takes both. `open` prints the address of the version page |
 | `rcm release status [REPO] [--build-name X]` | both stores' review state: runs the repository's `status` role, waits, and prints each store's version, build, state and the store's own word (any client token) |
 | `rcm release golive [REPO] --build-name X --platform ios\|android\|both --plan` · `… --confirm-build-number N [--at TIME \| --in DURATION]` | going live with an approved build ([going live](docs/configuration.md#going-live-golive)). `--plan` reads approval and the approved build and waits; without it you ask for the release now or at a time, with the approved build number you typed (admin). Nothing goes live on approval by itself |

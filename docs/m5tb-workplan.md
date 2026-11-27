@@ -1791,21 +1791,21 @@ PR 하나에 브랜치 하나, 워크트리 하나다. 같은 물결의 PR 은 �
 | 2 | 결정 페이지: 위임 질문(메인 세션 + Codex, 오너 위임) | — | 1 | [ ] |
 | 3 | PR0 머지(PLAN.md 열 자리 반영 포함) | PR0 | 1 · 2 | [ ] |
 | 4 | M5t-a PR1~PR7 전부 dev 머지 확인(v0.11.0 에 들 내용) | — | — | [ ] |
-| 5 | PR1 세션 · 펜싱 · 유예 · 감시 스레드 · 닫힌 잡 통보 · 세션 폴더 · 고아 · 프로토콜 · DB v26 · Popen 직전 확인 · 감독자 · 그룹 홀드(서버 쪽) · `rcm release-hold` · 4판: heartbeat 순번 · `claims_settled` · T5 홀드 · 세션별 잠금 · 감독자 (1)~(4) · 홀드 알림 · 홀드의 상태/헬스 키 · 대기 사유 | PR1 | 3 · 4 | [ ] |
-| 6 | PR2 로그 쓰기 절차 · 잡마다 보내는 스레드 · 죽은 세션 큐(300초 상한) · finish 상한 · 늦은 결과 · 산출물 · 끝난 잡 짧은 파일 점검 · 4판: 로그 읽는 쪽 상한 | PR2 | 5 | [ ] |
-| 7 | PR3 화면 사유 · 사람용 줄 · 잠근 시험 목록 · 홀드의 사람용 화면(웹 · `rcm check` · `rcm doctor` · `rcm wait`) | PR3 | 5 | [ ] |
-| 8 | PR2 머지 → PR3 dev 합쳐 RL28 · RL29 · RL45 다시 돌린 뒤 머지 | PR2 · PR3 | 6 · 7 | [ ] |
-| 9 | 새 변이 68개(§7.4)가 `scripts/mutcheck.py` 에 들어갔는지 | PR1 · PR2 · PR3 | 5 · 6 · 7 | [ ] |
-| 10 | PR4 실기 수용과 보고서(감독자 값 재측정 포함) | PR4 | 8 | [ ] |
+| 5 | PR1 세션 · 펜싱 · 유예 · 감시 스레드 · 닫힌 잡 통보 · 세션 폴더 · 고아 · 프로토콜 · DB v26 · Popen 직전 확인 · 감독자 · 그룹 홀드(서버 쪽) · `rcm release-hold` · 4판: heartbeat 순번 · `claims_settled` · T5 홀드 · 세션별 잠금 · 감독자 (1)~(4) · 홀드 알림 · 홀드의 상태/헬스 키 · 대기 사유 | PR1 | 3 · 4 | [x] #284 |
+| 6 | PR2 로그 쓰기 절차 · 잡마다 보내는 스레드 · 죽은 세션 큐(300초 상한) · finish 상한 · 늦은 결과 · 산출물 · 끝난 잡 짧은 파일 점검 · 4판: 로그 읽는 쪽 상한 | PR2 | 5 | [x] #286 |
+| 7 | PR3 화면 사유 · 사람용 줄 · 잠근 시험 목록 · 홀드의 사람용 화면(웹 · `rcm check` · `rcm doctor` · `rcm wait`) | PR3 | 5 | [x] #285 |
+| 8 | PR2 머지 → PR3 dev 합쳐 RL28 · RL29 · RL45 다시 돌린 뒤 머지 | PR2 · PR3 | 6 · 7 | [x] #286 · #285 |
+| 9 | 새 변이 68개(§7.4)가 `scripts/mutcheck.py` 에 들어갔는지 | PR1 · PR2 · PR3 | 5 · 6 · 7 | [x] #284 · #286 · #285 |
+| 10 | PR4 실기 수용과 보고서(감독자 값 재측정 포함) | PR4 | 8 | [x] #289 |
 | 11 | M5t-c 명세의 DB v27 이 v26 위인지 확인 | — | 5 | [ ] |
 | 12 | 결정 번호: M5t-b 256~279 · 320~339 · 350~359, M5t-c 280~319 · 340~349 — M5t-c 결정 317 · 343 은 `docs/m5tc-workplan.md` 의 317 행 · 343 행(PR #269)으로 가리킴(§1.2) | — | 0 | [ ] |
-| 13 | 릴리스 묶음: PR1 · PR2 · PR3 이 **모두** dev 에 머지되기 전에는 릴리스(버전 올림 · main PR)를 만들지 않는다 — 홀드(PR1)와 그 사람용 화면(PR3), 로그 라우트 경계(PR1 · PR2). CHANGELOG `[Unreleased]` 정리 | PR4 | 10 | [ ] |
-| 14 | main 릴리스 · 버전업(메인 세션, 오너가 목표에 넣어 승인 2026-11-26) | — | 13 | [ ] |
+| 13 | 릴리스 묶음: PR1 · PR2 · PR3 이 **모두** dev 에 머지되기 전에는 릴리스(버전 올림 · main PR)를 만들지 않는다 — 홀드(PR1)와 그 사람용 화면(PR3), 로그 라우트 경계(PR1 · PR2). CHANGELOG `[Unreleased]` 정리 | PR4 | 10 | [x] #289 · 정리는 이 PR(release/v0.12.0) |
+| 14 | main 릴리스 · 버전업(메인 세션, 오너가 목표에 넣어 승인 2026-11-26) | — | 13 | [ ] 이 PR(release/v0.12.0) — 버전 0.12.0, main 은 dev→main PR 뒤 |
 | 15 | 운영 반영(큐가 빌 때, 메인 세션) | — | 14 | [ ] |
 | 16 | 앱 프로젝트에 `irreversible` 달기 — 그 프리셋을 읽는 서버가 모두 이 기능 버전 이상인지 확인한 뒤(F23). 그룹이 없으면 합성 그룹이 생김을 그쪽에 알림(결정 330) | — | 15 | [ ] |
 | 17 | 운영 서버의 남은 원격 잡 수(끝난 잡 짧은 파일 점검 비용, F79) — 메인 세션이 운영 읽기 경로로 잰다 | — | 6 | [ ] |
-| 18 | 문서: `docs/configuration.md` 의 `irreversible` 절에 「`irreversible` 프리셋에는 세션을 빠져나가는 명령(`setsid` · 이중 fork 데몬)을 쓰지 않는다 — rcm 은 그 프로세스를 볼 수 없어 이 경우는 fail-open 이다」를 적고 `tests/test_docs_m5tb.py` 가 잠근다(5차 위임 결정 (e), §9, RL49) | PR1 | 3 · 4 | [ ] |
-| 19 | (새) 감독자 4판 값 재측정 — `-I` 파일 경로 기동 · `ps` 쓸기 비용(F83 · F84)을 실기 하네스로 한 번 더, Linux 머신이 있으면 `ps -A -o pid= -o pgid=` 꼴 확인 | PR4 | 10 | [ ] |
+| 18 | 문서: `docs/configuration.md` 의 `irreversible` 절에 「`irreversible` 프리셋에는 세션을 빠져나가는 명령(`setsid` · 이중 fork 데몬)을 쓰지 않는다 — rcm 은 그 프로세스를 볼 수 없어 이 경우는 fail-open 이다」를 적고 `tests/test_docs_m5tb.py` 가 잠근다(5차 위임 결정 (e), §9, RL49) | PR1 | 3 · 4 | [x] #284 |
+| 19 | (새) 감독자 4판 값 재측정 — `-I` 파일 경로 기동 · `ps` 쓸기 비용(F83 · F84)을 실기 하네스로 한 번 더, Linux 머신이 있으면 `ps -A -o pid= -o pgid=` 꼴 확인 | PR4 | 10 | [x] #289 |
 | 20 | (새) M5t-c 343 맞물림: M5t-b PR1 머지 뒤 M5t-c PR1 이 `session_fenced` · `protocol_required` 를 MAC 다는 거절 목록에 더했는지, 짝지은 워커의 W5 가 검증 때만 종료 0 이고 W6 이 검증 때만 종료 3(검증 안 되면 M5t-c J13)인지(M5t-c 쪽 시험) — 메인 세션 확인 | — | 5 | [ ] |
 
 ## 7. 시험 계획
@@ -2478,3 +2478,114 @@ V1 은 반박자 1, V2 는 반박자 2 다. 「3판」 열의 줄은 WP3 이다.
 | 4R-10 | LOW | 버려진 늦은 heartbeat 응답에만 실린 취소의 행방이 없음 | 다음 응답에 다시 온다(목록은 잡 상태로 만든다, 한 주기 늦음) | 고침 |
 
 ## 13. 구현하며 바뀐 것 (Changed while implementing)
+
+### PR1 세션 · 펜싱 · 유예 · 감독자 · 그룹 홀드 (#284)
+
+PR #284 본문의 「Differs from the spec」 과 같은 목록이다. 항목은 구현 라운드(P2-1~P2-11, P6-1~P6-2)에서 적은 그대로 옮겼다.
+
+| # | 명세와 다름 / 명세에 없음 |
+|---|---|
+| 1 | App mono_fn default — not in spec: an App given a test now_fn and no mono_fn takes its monotonic clock from now_fn().timestamp(); production keeps time.monotonic. |
+| 2 | WorkerClient without explicit claim_seq / seq — not in spec: it makes its own session id and counts claim_seq · seq itself; RemoteWorker always passes its own. |
+| 3 | T5 close transaction — differs: one store.finish transaction per job (each with its hold row), all inside the session lock, instead of all jobs in one transaction (§4.2). |
+| 4 | Hold scope match in claim SQL — differs: broader than the busy-job rule (either side global, host match or unknown, equal pools) — fail-closed (§4.12). |
+| 5 | Late finish with group_gone on a terminal job — differs: PR1 already releases the open hold on the same session's group_gone: true finish (409 job_closed + hold_released); late_result still PR2 (RL1 · RL2 need it). |
+| 6 | e2e server disconnect_grace_seconds = 90 — follows §7.5; the killed-worker test waits G (@slow). |
+| 7 | Session folder job dir is deleted once the finish is reported (PR1 has no disk queue; §4.4 step 10 leaves it to the 7-day sweep). |
+| 8 | Irreversible claim without a frozen G: watchdog and recheck use the smallest valid G (L + 35). |
+| 9 | A heartbeat cut at its 15 s deadline counts as a connection failure (also feeds the M5n rediscovery counter). |
+| 10 | The start scan reads only folders named as a 32-hex session id. |
+| 11 | A release-hold reason empty after cleaning is stored as NULL. |
+| 12 | Supervisor test hooks are keyword arguments of job_supervisor.main, unreachable from the command line (§7.5 asked for hook injection). |
+| 13 | A held waiting job is needs_action ahead of paused, placement and worker_down too (spec: before blocked_by_group, §4.8). |
+| 14 | deliver_hold sends nothing for a hold already released. |
+| 15 | RCM_SUMMARY of a local-lane hold names 「the server's local lane」 / 「check the server」. |
+| 16 | /api/health irreversible_holds is null when the read fails (never []); /api/status reads holds inside the queue section. |
+| 17 | RL6 / RL10 / RL50 e2e scope narrowed at P2-3 (sha256 is PR2; exact orderings in unit / HTTP tests) — RL6 (a) wait JSON keys, RL10 fake supervisor and RL50 relay e2e were later filled by P2-5/P2-6 (items 20, 24 and test_rl10_a_fake_supervisor_does_not_bring_back_a_fenced_process). |
+| 18 | Extra mutants beyond §7.4 (closed-jobs-ignored and the seven m5tb-* P2-2 cases). |
+| 19 | Docs outside owns: README / README.ko.md did not list rcm release-hold yet — README row added at P2-4 (item 20); the CHANGELOG lines, first written without a PR link (number unknown), now carry the #284 link. |
+| 20 | README release-hold row written `rcm release-hold N [--reason TEXT] [--json]` (N like every other row) instead of `<job>`. |
+| 21 | RL50 e2e: the relay holds the idle heartbeat and refuses later ones; red under t5-ignores-claims-settled; hb-stale-seq-judged cannot be made red by a real worker (R20) and stays killed by tests/test_hb_order_m5tb.py. |
+| 22 | RL14 (b): the kill -9 test runs a new preset longl (sleep 400) instead of slowl (sleep 30), which ended before G. |
+| 23 | T4 / RL8 (a) irreversible: quiet time is not counted — for a cancel requested before a quiet session is heard again, the unconfirmed deadline is resumed + (kill_at - requested_at), then + 2H; a server restart counts as quiet (main session's answer in P2-6-in). |
+| 24 | RL51 (a) marker file not asserted (a TERM in the popen window comes before the command can install a handler); replacement evidence above. Accepted by the main session (P2-7-in). |
+| 25 | RL24 old worker retry spacing / exit 2 not tested (base-version behaviour, no base worker in the tree); replacement evidence above. Accepted by the main session (P2-7-in). |
+| 26 | RL6 (a) base key list written as a literal from the terminal job document minus hold, justified by the diff touching it only through App._with_hold. |
+| 27 | RL41 (c) e2e partition is partial: the relay trickles the snapshot and refuses every other connection (a full pause would trip the 60 s download timeout before the 55 s self-stop). |
+| 28 | RL41 (c) e2e checks marker file and preflight line; supervisor pid 0 stays in the unit row. |
+| 29 | RL41 (c) cancel half runs with the test server's grace_seconds 20. |
+| 30 | popen-check-only-with-requires is not applicable to (c); other mutants show the red. (The RL41 (c) item of P2-6's workplan_diff «not done this round» is closed by this round.) |
+| 31 | register answer key `fenced_sessions` (not in §4.2's key list): P6 GAP8 added it as an int; P6-2 #2 makes it `null` when a server restarted less than worker_timeout_seconds ago has not yet heard a fenced session; the worker logs one 'cannot tell' line on null and nothing when the key is absent |
+| 32 | the narrow confirm (lost + worker_replaced) that a fenced session sends for a finish of any outcome omits `group_gone` when the worker does not know whether the group is gone (it carries `group_gone` only when known); the server then holds an irreversible job's group (`group_not_gone`) instead of rejecting the confirm |
+| 33 | Job.retries_on is false for a job claimed as irreversible (P6-2 #1): a job submitted with [retry] before the mark closes `failed` on its retry exit code, no next attempt, on both lanes |
+
+### PR2 로그 오프셋 · 잡별 디스크 큐 · 늦은 결과 (#286)
+
+PR #286 본문의 「Differs from the spec」 과 같은 목록이다. 항목은 구현 라운드(batch-1~8, P6-1)에서 적은 것을 옮겼다.
+
+| # | 명세와 다름 / 명세에 없음 |
+|---|---|
+| 1 | 로그 조각 경계를 넘는 표식: 서버가 커밋된 파일의 열린 마지막 줄(4 KiB 이하)을 읽어 새 조각과 함께 표식을 풉니다. 메모리 조각 없이 기존 표식 이어 붙이기 시험 둘을 지키려는 선택입니다. |
+| 2 | 오프셋 없이 부르는 `WorkerClient.log`: 세션이 있는 클라이언트는 그 잡에서 마지막으로 돌려받은 오프셋을 보냅니다. `RemoteWorker` 는 늘 자기 오프셋을 넘깁니다(§13 PR1 2번과 같은 선례). |
+| 3 | `late_result_recorded` 는 lost 잡만이 아니라 모든 `409 job_closed` finish 응답에 붙습니다(lost 가 아니면 false). 워커가 받는 응답 꼴을 하나로 둡니다. |
+| 4 | 서버 재시작으로 lost 가 된 로컬 레인 잡의 `log_complete` 는 NULL 입니다. 죽은 서버가 로컬 로그 꼬리도 잃었을 수 있기 때문입니다. 명세는 로컬 잡을 늘 true 로 적었습니다. |
+| 5 | `snapshot_unreachable` 는 `SnapshotUnreachable(MaterializeError)` 하위 클래스로 냅니다. tests/test_worker.py 가 모든 `MaterializeError` 발생 자리에 PREFLIGHT 코드를 요구합니다. |
+| 6 | 끝나지 않은 죽은 세션 잡의 큐는 남은 로그만 보내고 멈춥니다. 등록이 그 잡을 restarted-without-job 으로 닫습니다. |
+| 7 | `_closed_answer` 는 finish 본문을 요청 스레드별 저장소에서 읽습니다. PR1 변이 둘의 앵커를 지키려는 것입니다. |
+| 8 | RL5 · RL8 의 PR2 몫(late_result)은 서버 쪽 단위 시험만 있습니다. e2e 는 유예 만료(90초)와 늦은 finish 가 필요해서 이번에는 넣지 않았습니다. |
+| 9 | RL18 e2e 는 서버 log.txt(가린 출력과 바이트 단위로 같음), `rcm logs`, 잡 문서를 봅니다. SSE 와 웹 로그는 같은 log.txt 를 내므로 따로 보지 않았습니다. |
+| 10 | RL18 e2e 는 진짜 `rcm worker` 를 작은 감싸개로 띄워 조각 크기를 200바이트로 줄입니다(시험 전용). |
+| 11 | 명세 §7.3 이 적지 않은 tests/test_worker_m5q_drain.py 의 시험 이름과 계약을 바꿨습니다(위 「범위 정정」). |
+| 12 | PR1 변이 `narrow-confirm-without-keep` 를 지웠습니다. 가리키던 `report()` 가 사라졌고, 같은 규칙은 `unsent-finish-folder-dropped` 가 잡습니다. |
+| 13 | 24시간 버림은 죽은 세션 큐에도 같게 적용됩니다. 같은 보내기 고리를 쓰기 때문입니다. |
+| 14 | 줄 가운데서 끝난 조각의 가리기: 서버가 커밋된 열린 마지막 줄(4 KiB 이하, 파일에서 읽음)을 보고, 두 조각에 걸친 값의 새 조각 쪽을 `****` 로 가립니다. 이미 커밋된 앞부분은 그대로 둡니다. 커밋한 바이트는 바뀌지 않는다는 규칙(결정 339-f) 때문입니다. 명세는 조각이 늘 줄바꿈에서 끝난다고 보았지만, kill -9 뒤 죽은 세션의 꼬리나 옛 워커에서는 그렇지 않습니다. |
+| 15 | 256 KiB 보다 긴 줄은 4 MiB(서버 본문 한도)까지 한 조각으로 보냅니다. 줄바꿈 없는 꼬리는 스트림이 더 자랄 수 없을 때(finish 기록 뒤, 죽은 세션)만 보냅니다. |
+| 16 | 스풀을 못 읽으면 물러서며 `#N report: cannot read the spooled log — retrying` 을 한 번 남기고, 그 시간은 죽은 세션의 300초에 셉니다. 명세에는 쓰기 실패만 정의돼 있습니다. 끝난 잡이면 300초 뒤 finish 를 먼저 보내고 `#N report: spooled log still unreadable 300s after the job ended — sending the finish first, the log stays incomplete` 를 남깁니다. 쓴 길이보다 짧은 스풀도 못 읽음으로 다룹니다. |
+| 17 | 서버의 열린 줄 창은 4 KiB 와 그 프리셋의 가장 긴 릴리스 값 가운데 큰 쪽입니다. 창 안에 줄 끝이 없으면 창 전체를 가리기의 머리로 씁니다. 표식은 머리가 온전한 줄일 때만 풉니다. |
+| 18 | 살아 있는 워커에서 보내는 스레드가 `done` 없이 끝나면 그 잡을 heartbeat 와 레인에 남기고 `#N report: <Error> — keeping the report on disk for the next worker process` 를 남깁니다. 서버는 워커가 다시 시작할 때까지 잡을 running 으로 둡니다. |
+| 19 | 드레인 한도(60초)가 지난 잡: 레인은 비우지만 보내는 스레드는 exec 까지 계속 보내고, 잡은 그 스레드가 끝날 때 heartbeat 목록에서 빠집니다. 명세 §4.5(F10)와 맞춘 결함 고침입니다. |
+| 20 | 죽은 세션의 300초는 큐마다 `answered` 표식 하나로 셉니다. 워커 전체 표식은 큐 사이에서 낡았습니다. |
+| 21 | 기존 시험 둘의 이름을 바꿨습니다: `test_job_log_memory_is_dropped_when_the_job_is_closed_as_lost`, `test_registering_again_waits_for_a_registration_already_running`. 같은 세션 재등록은 멱등이라(결정 260) 옛 계약이 사라졌고, 남은 규칙을 봅니다. |
+| 22 | 못 읽는 `outbox.json`: `dead session <id> job #N: outbox unreadable (<why>) — …` 한 줄, 스풀은 `<data_dir>/worker-sessions/unreadable-<D>-<id>/` 로 옮겨 7일 뒤 지웁니다. 명세에는 이 갈래가 없습니다. |
+| 23 | 워커의 JSON 파일(outbox · claim · proc · owner · ok_at)은 임시 파일 fsync → rename → 폴더 fsync 로 씁니다. 명세는 outbox 의 fsync 를 말하지 않았습니다. |
+| 24 | `outbox.json` 저장 실패: 실패 구간마다 `#N report: cannot save outbox.json (<error>) — the report is only in memory; …` 한 줄. |
+| 25 | 번들을 못 읽으면 `upload_failed`, 2xx 의 JSON 아닌 본문은 `ClientError` 502(register 는 종료 2, claim · heartbeat 는 다시 시도), 그 밖의 예외는 물러서며 다시 시도합니다. 명세의 응답 표는 HTTP 답과 연결 실패만 다룹니다. |
+| 26 | 409 의 `late_result_recorded` · `hold_released` 를 워커가 줄로 남깁니다. 명세는 워커 쪽 쓰임을 정하지 않았습니다. |
+| 27 | 4 MiB 넘는 한 줄의 가리기 한계를 문서에 적었습니다(§13 용). |
+| 28 | 끝난 잡이 phase 에만 막히면 로그 · 번들과 같은 규칙을 씁니다. 5xx 나 예상 못 한 예외가 300초 이어지면 finish 를 먼저 보내고 phase 를 버리며(`#N report: phase still not delivered 300s after the job ended — …`), 연결 실패면 24시간 뒤 phase 없이 보냅니다. 명세의 finish 상한(결정 324)과 재전송 창(결정 264)은 phase 를 말하지 않았습니다. |
+| 29 | 죽은 세션 큐의 등록 대기: 로컬 오류(못 읽는 스풀, 예상 못 한 예외)도 서버 오류처럼 300초에 셉니다. 결정 337 은 서버 응답 시간만 말했고, 연결 실패 시간은 지금도 세지 않습니다. 로컬 오류가 섞였으면 `dead session <id> queue not delivered after 300s of server errors or local errors — …` 줄을 씁니다. |
+| 30 | 300초 상한에 닿아도, 한 번도 보내 보지 않은 끝난 잡의 finish 가 서버나 로컬 오류로 막혀 있으면 등록이 상한 뒤 60초까지 그 finish 를 기다립니다. 그동안 큐가 비어 있으면 finish 를 보내 보지만, 큐가 로그 요청(최대 60초)이나 묶음 올리기(최대 300초)에 묶여 있으면 보내 보지 못하고 잡은 restarted-without-job 으로 닫힙니다. 끝난 시각이 벽시계보다 앞이면(시계가 뒤로 감) 빚진 finish 로 보지 않습니다. 결정 337 은 상한에서 등록하고 나머지는 디스크에 둔다고만 했습니다. |
+| 32a | 죽은 세션 큐의 등록 대기 300초와 그 뒤 60초는 워커의 단조 시계(`mono_fn`)로 셉니다. §4.1.3 타이머 표의 「D 큐 등록 대기 · 단조」와 같고, batch-9 전에는 벽시계로 셌습니다. finish 상한 300초와 재전송 창 24시간은 표대로 디스크의 `ended_at` 벽시계입니다. |
+| 31 | 다시 시작한 큐의 오프셋 질의를 막힌 로그 단계로 셉니다(결정 324 는 로그 · 산출물만 말했습니다). |
+| 32 | finish 가 먼저 가면서 남기는 것(phase, 로그 꼬리, 묶음)이 있으면 큐마다 한 번 `#N report: the finish goes first 300s after the job ended; not sent: …` 를 남깁니다. |
+
+### PR3 끊긴 워커와 그룹 홀드의 사람용 화면 (#285)
+
+PR #285 본문의 「Differs from the spec」 과 같은 목록이다. 항목은 구현 라운드(batch-1~8, P6-1~P6-2)에서 적은 것을 옮겼다.
+
+| # | 명세와 다름 / 명세에 없음 |
+|---|---|
+| 1 | `late_result` 사람용 줄은 `rcm wait` 한 줄만 냅니다(`#N late result: succeeded (exit 0) — not counted as this job's result`). 명세가 말한 `rcm status <job>` 명령은 없습니다. |
+| 2 | 명세에 없던 `rcm wait` 의 「돌아옴」 줄 `#N worker W is back — the job goes on` 을 더했습니다. 「연락이 끊김」 줄이 마지막 말로 남으면 잡이 아직 끊긴 것으로 읽히기 때문입니다. |
+| 3 | lost 잡의 원인 한 줄을 `rcm wait` 끝에 냅니다(RL29). |
+| 4 | 홀드에 막힌 대기 행의 이유 줄은 `needs action · group G is held by #N — rcm release-hold N after checking the machine` 입니다(웹은 #N 링크). |
+| 5 | `irreversible_holds: null` 은 웹에서 `unknown — group holds unavailable`, `rcm check` 에서 warn 한 줄로 보입니다. 키가 없는 옛 서버에서는 아무것도 보이지 않습니다. |
+| 6 | `rcm doctor --json` 의 `irreversible_holds` 는 worker 역할이면 이 토큰의 홀드, coordinator-worker 면 로컬 레인 홀드, 그 밖에는 null 입니다. 종료 코드에 들지 않습니다. |
+| 7 | 한국어 웹 문구는 「잡혀 있음」 대신 「막혀 있음」, 칩은 「그룹 막힘」입니다(한국어 화면에 「잡」을 남기지 않는 시험 C-39). |
+| 8 | 끊김 · 돌아옴 · 홀드 줄은 기다리는 동안 찍는 줄이라 `rcm wait` 과 `rcm run` 이 같이 찍습니다. 잡이 끝난 뒤의 줄(lost 원인, 늦은 결과, 불완전한 로그)은 `rcm wait` 에만 나오고, `rcm run` 의 끝 출력은 골든 시험이 잠근 그대로입니다. |
+| 9 | 끊긴 잡 뒤에서 같은 동시성 그룹으로 기다리는 잡도 `wait_seconds` · `finish_at` · `blocked_by.remaining_seconds` 가 null 이고, ETA 계산에서 레인을 차지하지 않습니다. 명세(§4.8, 결정 276)는 끊긴 잡 자신의 끝 시각만 적었습니다. 모르는 끝에서 나온 숫자는 fail-open 이라 넓혔습니다(P3 1라운드 MED). 골든 픽스처가 이 규칙으로 23개 행이 더 바뀌었습니다(13행은 null, 10행은 레인이 비어 같거나 이르게 끝남). |
+| 10 | 홀드 목록에 읽을 수 없는 항목이 하나라도 있으면 세 화면 모두 목록 전체를 「모름」으로 보입니다(`rcm check` 의 `could not read every group hold the server sent — unknown`, 웹 `unknown — group holds unavailable`, doctor `--json` null). 짧아진 목록이 완전한 목록으로 읽히지 않게 하려는 것입니다. |
+| 11 | `rcm doctor` 텍스트는 worker · coordinator-worker 역할에서 홀드를 모르면 `warn  group holds: unknown — …` 한 줄을 냅니다. 종료 코드는 그대로입니다. |
+| 12 | 한국어 홀드 문장은 그룹 이름 바로 뒤에 조사를 붙이지 않습니다(`그룹 irreversible:ship — #812가 막고 있음`). 그룹 이름의 읽는 법을 모르기 때문입니다. |
+| 13 | §7.4 밖의 변이 넷(hold-wait-line-raw-code, hold-check-row-missing, doctor-holds-not-this-machine, log-incomplete-line-dropped)을 더했습니다. |
+| 14 | 웹 띠에서 「되돌릴 수 없는 프리셋은 그룹이 홀드된다」 꼬리를 뺐습니다. 넣으면 390px 에서 띠가 94~95px 로 80px 잠금을 넘습니다. 홀드는 「확인이 필요한 작업」이 따로 말합니다. |
+| 15 | 조사 규칙에 「모음 + r」 예외 하나를 더했습니다. 「와(과)」 병기형은 괄호 조사 금지 시험(C-38)이 막아 쓰지 않았습니다. |
+| 16 | `rcm eta <프리셋>` 의 가상 잡이 열린 홀드를 보고 프리셋의 그룹 범위를 싣습니다(`Server.eta` 인자 하나, `eta_for_new`). 명세 §5 는 PR3 이 server.py 를 건드리지 않는다고 했습니다. host · global 범위 그룹 프리셋의 ETA 가 실제 제출과 같아집니다. |
+| 17 | 홀드가 열렸는데 기본 큐가 비면 `rcm top` 은 `queue — empty · a held group does not start until it is released` 와 홀드마다 한 줄을, 웹은 `Queue is empty — a held group does not start until it is released.` 를 보입니다. 홀드를 모르면 `… group holds unknown` 입니다. |
+| 18 | 끊긴 워커의 취소 중인 잡: `lost contact with W — the job is cancelled when the worker is back, or ends as lost after the grace period`, 돌아옴 줄은 `… is back — the job is being cancelled`. 끊긴 동안 취소가 오면 `#N cancel requested — …` 한 줄을 더합니다. 명세 §4.8 의 한 문장과 다르고, 결정 322 를 따릅니다. |
+| 19 | 끊김 유예 중인 잡의 추정치는 `finish_at` 말고도 overdue · stuck · `stuck_code` · quiet 를 내지 않고, 웹 행은 시간을 세지 않으며 진행 막대에 시간 눈금이 없습니다(명세는 결정 276 의 `finish_at` null 만 적었습니다). |
+| 20 | `worker` 키가 없는 홀드 항목은 읽을 수 없는 항목으로 봅니다(목록 전체를 모름). |
+| 21 | 목록 밖 잡의 웹 로그 서랍은 `/jobs/N` 을 한 번 읽어 `log_complete` 를 봅니다. |
+| 22 | 홀드를 만든 잡의 `rcm wait` 은 lost 줄 뒤에 `#N group G is held — check the machine for a leftover process, then ask an admin to run rcm release-hold N` 를 냅니다(종료 3 그대로). |
+| 23 | 「확인이 필요한 작업」 띠는 세 줄 + `and N more` 이고, `nothing else needs a look` 은 다 그렸고 모르는 것이 없을 때만입니다. |
+| 24 | 한국어 홀드 항목의 명령에는 조사를 붙이지 않습니다(`… 푸는 명령: rcm release-hold 812`). |

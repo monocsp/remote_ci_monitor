@@ -1222,9 +1222,11 @@ Git mirrors are never pruned.
   cancel). The worker registers, claims one queued job per lane, downloads the snapshot, streams
   the raw log (the server parses step markers) and reports the outcome; a heartbeat every
   `worker_heartbeat_seconds` (5) keeps it alive. If the server hears nothing for
-  `worker_timeout_seconds` (60) the worker shows `down`, its running jobs become `lost`
-  (`worker build-02 unreachable for 61s`) and are not resumed — resubmit. A worker that restarts
-  re-registers and its old jobs are closed as lost too. `rcm top` and the web header show each
+  `worker_timeout_seconds` (60) the worker shows `down`; its running jobs keep running and become
+  `lost` (`worker build-02 unreachable for 601s`) only after the
+  [disconnect grace](#a-lost-connection-disconnect_grace_seconds) (600 s by default). A worker that
+  comes back inside the grace goes on reporting, and the job ends with its real result. `rcm top`
+  and the web header show each
   remote lane as `build-02/1 busy #511`; `pools[].lanes` counts only live workers. The worker
   process itself (`rcm worker`) ships in the next release step (M5b-3).
 - **Notifications** — `[[notify]]` rules run a command (`argv`, no shell) or POST JSON to a `url`
@@ -1244,12 +1246,20 @@ Git mirrors are never pruned.
   [action](#when-a-person-has-to-act), empty without one),
   `RCM_MACHINE` (where the job ran: the remote worker's name as it claimed the job, or this
   server's current host name for a local lane; empty for a job that never started or for a local
-  lane when this server does not know its own name — the job's `ran_on`);
+  lane when this server does not know its own name — the job's `ran_on`),
+  `RCM_EVENT` (`job_finished`), and `RCM_HOLD`, `RCM_HOLD_GROUP` and `RCM_HOLD_NOTE` (`1`, the
+  group and `group held — run rcm release-hold <job>` when the job's close
+  [held its group](#jobs-that-must-not-run-twice-irreversible); `0` and empty otherwise);
   the hook also inherits `PATH`, `HOME` and `LANG`;
   user strings are sanitised and capped at 4 KB (`RCM_FAILURES` drops whole lines to fit). A `url`
-  rule POSTs `{"notify": <rule>, "job": <the finished job>, "failures": [...], "failure_count": N,
+  rule POSTs `{"notify": <rule>, "event": "job_finished", "job": <the finished job>, "hold":
+  {"held": false, "group": "", "note": ""}, "failures": [...], "failure_count": N,
   "failures_truncated": false}` with the same 20-name cap, plus `"shelf_url"` for a kept job. Each (job, rule) fires exactly once,
-  including jobs that finished while the server was down. Failures are logged and counted
+  including jobs that finished while the server was down. `on` also takes `irreversible_hold`,
+  which is never part of the default: such a rule is called once for each new group hold, with
+  `RCM_EVENT=irreversible_hold`, `RCM_HOLD_CAUSE`, `RCM_HOLD_WORKER` (empty for a local lane), a
+  one-line `RCM_SUMMARY` and, for a `url`, `"hold"` with `scope`, `cause`, `worker`, `since` and
+  `release_command` added. A hold released before the call is not announced. Failures are logged and counted
   (`server.notify_failures`) but never retried, and never mark the queue unhealthy. `rcm check`
   shows a `warn  notify` row with the count while it is above 0, and the web header a
   `notify failures N` badge (hidden at 0). The count lives in the server's
@@ -1433,11 +1443,12 @@ downloads the snapshot (or fetches the `git_ref` from its own `[[repos]]` — ke
 `worker.toml` and pass `--config`), streams the raw log to the server, which parses the step
 markers, and reports the outcome. `rcm top` and the web header show it as `build-02/1 busy #511`;
 its host sample appears under that pool. If the server hears no heartbeat for
-`worker_timeout_seconds` (60) the worker shows `down`, its running jobs become `lost`
-(`worker build-02 unreachable for 61s`) and are not resumed — resubmit. Each heartbeat lists
+`worker_timeout_seconds` (60) the worker shows `down`. Its running jobs keep running for the
+[disconnect grace](#a-lost-connection-disconnect_grace_seconds) and only then become `lost`
+(`worker build-02 unreachable for 601s`) — resubmit then. Each heartbeat lists
 the jobs the worker is running; a job the server handed it that is missing becomes `lost`
-(`worker build-02 restarted without the job`), except a job handed out since the worker's
-previous heartbeat, which gets one more heartbeat to show up. Stopping the worker
+(`worker build-02 restarted without the job`), but only once the heartbeat says the worker has
+seen that job's claim answer. Stopping the worker
 reports its running jobs as `lost` (`worker stopped`). `worker.toml` keys: `server` (a URL, or
 `"auto"`), `server_name`, `token` (or the env var), `pool`, `lanes`, `name`, `accept_any`,
 `data_dir`, `grace_seconds`, `keep_workspace_on_failure`, `[host]` (sampler) and `[[repos]]`. See
@@ -1452,6 +1463,177 @@ heartbeat finishes its jobs and restarts the same way, without losing one. `RCM_
 `rcm worker --no-follow` pin the version or turn this off, and an editable install does not follow.
 `rcm worker --check` never follows. Details, including what a service manager sees, are in
 [remote workers](operating.md#remote-workers).
+
+**One process per worker token.** Each `rcm worker` process opens its own session when it
+registers. When a second process starts with the same token, it becomes the worker: the first
+one's next request is refused, it stops its running jobs, reports them `lost`
+(`worker build-02 was replaced by a newer process`) and exits 0, so a service manager does not
+start it again. If the first process cannot be reached when it is replaced (a network split), its
+jobs keep their lane and group until the [disconnect grace](#a-lost-connection-disconnect_grace_seconds)
+runs out, and the queue still shows them `running`: the worker name has a live session, so its
+lanes are not `down`. An older worker is refused on its version first and follows the server or stops
+with exit 2. A new worker that meets a server of its own version without worker protocol 2 stops
+before it registers with
+`the server speaks worker protocol 1 — upgrade rcm on the server (this worker needs protocol 2)`
+and exit 3 ([remote workers](operating.md#remote-workers)).
+
+### A lost connection: `disconnect_grace_seconds`
+
+A remote job is not closed when its worker goes quiet. The server waits
+`[server] disconnect_grace_seconds` after the last time it heard that worker process; only then
+does the job become `lost` (`worker_unreachable`, exit 3 from `rcm wait`). A plain job keeps
+running on the worker the whole time: if the connection comes back after the job was closed, the
+worker finishes it and the server does not change the result. A worker that is restarted on the
+same machine and data folder checks the jobs its last process left: a job whose process group is
+gone is closed at once, and an `irreversible` job whose process it cannot verify is closed as
+`orphan_unverified` (`the same work may still be running`) — check that machine.
+
+| key | default | range |
+|---|---|---|
+| `disconnect_grace_seconds` | `max(600, L + 35)` | `L + 35` to `86400` |
+
+`L` is `max(worker_timeout_seconds, 2 × worker_heartbeat_seconds + 50)`, so the floor is 95 with
+the default 60 and 5. The value is written on the job when a worker claims it; a later edit or
+`rcm reload` does not change jobs that already run. Time the server was stopped does not count:
+after a restart the grace starts again from the moment the server came up, so a restart never
+closes every remote job at once. A server with `lanes = 0` uses the same key.
+
+### The worker's log and its report queue
+
+A remote worker writes each job's output to disk before it sends it: the bytes go to
+`<data_dir>/worker-sessions/<session>/jobs/<id>/stream.log`, and `outbox.json` next to it keeps
+the last phase, the byte offset the server has confirmed, the artifact bundle and the finish. One
+sender per job sends them in order: the phase, then the log in pieces of at most 256 KiB that end
+at a line break (`X-RCM-Log-Offset` names the first byte; a longer line goes whole in one piece of
+up to 4 MiB), then the bundle, then the finish. Jobs
+do not wait for each other. A lane takes its next job only when its job's queue is done, and the
+heartbeat keeps listing the job until then. A draining worker (one that follows the server to a new
+version) waits at most 60 s for a job's queue, then restarts anyway; the sender keeps sending
+until the restart and the new process sends the rest before it registers. If the drain is
+cancelled first, the lane still waits for that queue before it claims again. If a sender stops
+without delivering everything while the worker keeps running (the server asks for a newer worker
+protocol, or an error outside a report step), the job stays listed and its lane takes no job until
+the worker restarts; the next process sends the queue from disk. The worker syncs `outbox.json`
+to disk, the file and its folder, every time it saves it, so an OS crash does not leave it empty.
+`ok_at.json`, the time the worker sent the last request the server answered, is replaced the
+same way but not synced, so a slow disk never delays a heartbeat. If a folder cannot be synced,
+the worker logs it once per process
+(`session folder: cannot sync a folder to disk (<error>) — an OS crash may lose the last saved report`).
+
+The server writes each piece at the length it has committed and answers with the new offset. A
+piece it already has is ignored, a piece ahead of it gets `409 log_gap` and the worker resends
+from `expected_offset`, so a dropped answer or a retry never doubles or skips a byte. Readers
+(`rcm logs`, the web log view, the status and job tails) see only committed bytes. The server
+masks the preset's release secrets in every piece, also a value split across two pieces when a
+piece ends in the middle of a line: the part already committed stays as it was and the rest
+becomes `****`, so the whole value never reaches `log.txt`. The worker cuts a line only when it is
+longer than 4 MiB; a job's own output never gets there, because the runner breaks output without
+a line end every 64 KiB. If a secret straddles such a cut, its first part stays in `log.txt`.
+
+| when | what the worker does |
+|---|---|
+| the job is still running | retries every failure with backoff (1 s doubling to 30 s), with no limit |
+| the job ended and the log or bundle got HTTP 5xx for 300 s | sends the finish first; the bundle becomes `failed` (`upload_failed`) and the job's `log_complete` is `false`. Whenever the finish goes first 300 s after the job ended while log bytes or the bundle are still waiting, the worker names what it does not send (`#N report: the finish goes first 300s after the job ended; not sent: <what is left>`) |
+| the job ended and the server cannot be reached | keeps the order and resends from the confirmed offset when the server is back |
+| the job ended and its phase fails with HTTP 5xx or an unexpected error for 300 s | sends the finish first and drops the phase. When only the phase is left, the line is `#N report: phase still not delivered 300s after the job ended — sending the finish first, the phase is dropped`; when log bytes or the bundle wait behind the phase, they are not sent either, and the `not sent` line above names them and the phase. A phase that cannot reach the server holds the finish until 24 hours after the job ended (`#N report: phase not delivered in 24h — sending the finish without it`) |
+| `stream.log` cannot be read, or is shorter than what was written | retries with backoff and logs `#N report: cannot read the spooled log — retrying` once; 300 s after the job ended it sends the finish first and the job's `log_complete` is `false` (`#N report: spooled log still unreadable 300s after the job ended — sending the finish first, the log stays incomplete`) |
+| 24 hours after the job ended | sends the finish without the rest of the log; a finish that still cannot go is dropped with a log line (`#N report: finish not delivered in 24h — dropping the report`) |
+| the bundle file in the queue is gone or cannot be read | logs `#N artifacts: cannot read the bundle (<error>) — the finish reports upload_failed` and sends the finish; the bundle is `failed` (`upload_failed`) |
+| a report step fails with an unexpected error (a bug, a local fault) | retries with backoff and logs `#N <step>: unexpected <Error> — retrying` once; 300 s after the job ended it sends the finish first (`#N report: still failing with an unexpected error 300s after the job ended — sending the finish first`) |
+| `outbox.json` cannot be saved (a full disk) | keeps the report in memory and keeps sending; logs `#N report: cannot save outbox.json (<error>) — the report is only in memory; a restart before it is sent loses it` once; for a queue a stopped process left, the line starts with `dead session <id>` |
+
+An answer with a 2xx status whose body is not JSON counts as a server error (HTTP 502). The
+report queue, claim and heartbeat try again; register stops the worker with exit 2, and the
+service manager starts it again.
+
+A worker restarted on the same data folder with the same token and server sends what its last
+process left, with that process's session, before it registers; a server that keeps answering
+with errors for 300 s makes it register anyway
+(`dead session <id> queue not delivered after 300s of server errors — registering; job #N will close as restarted-without-job`).
+Time without a connection does not count toward the 300 s. A local error (the spooled log
+cannot be read, an unexpected error) counts like a server error, because it may pass on the next
+try; when one was among the 300 s, the line says so
+(`dead session <id> queue not delivered after 300s of server errors or local errors — registering; job #N will close as restarted-without-job`).
+When a server error or a local error holds the queue of a job that ended, its finish goes
+first 300 s after the job ended, and registration waits for that finish no more than 60 s past
+its 300 s (one 30 s backoff and two 15 s requests); after that it registers with the line above.
+The worker tries the finish in that time when the queue is free; when the queue is held by a log
+request (up to 60 s) or a bundle upload (up to 300 s), the finish is not tried and the job closes
+as restarted-without-job. Registration counts both waits on the monotonic clock, so setting the
+wall clock forward or back does not shorten or stall them; the 300 s after the job ended is the
+wall clock against the end time on disk. A job whose end time is ahead of the clock (the clock
+went back) is not waited for.
+A job folder whose `outbox.json` is missing,
+empty or not JSON while its `stream.log` is there cannot be sent: the worker logs
+`dead session <id> job #N: outbox unreadable (<why>) — the job will close as restarted-without-job; spool kept in <folder>`
+and moves the spool to `<data_dir>/worker-sessions/unreadable-<session>-<id>/`, which the
+start-up clean-up removes after 7 days. A finish that arrives after the server
+already closed the job as `lost` does not change the job: the job document and `rcm wait --json`
+show it as `late_result` (`outcome`, `exit_code`, `finished_at`, `received_at`, `log_complete`).
+A resent copy of the finish that closed the job is not a late result: a worker that reported the
+job `lost` itself (`worker_self_stopped`, `snapshot_unreachable`) and missed the answer gets
+`409 job_closed` with nothing recorded. The worker logs what the server answered:
+`#N late result recorded`, `#N late result not recorded — the server keeps the result it already has`,
+and `#N hold released` when the group hold of an `irreversible` job was released.
+`log_complete` on a job is `true` when the server received every byte the job produced, `false`
+when bytes are missing, and `null` when it does not know (an older worker, or a job closed by the
+grace). A progress line that never ends (`\r` without a newline) reaches the live tail in 64 KiB
+pieces, so it shows up late.
+
+### Jobs that must not run twice: `irreversible`
+
+`irreversible = true` on a preset marks work that must not run twice at once, such as a store
+upload or a deploy. rcm then does three things for its jobs.
+
+- **The worker stops the job itself** when it cannot reach the server for most of the grace
+  (`G − m`, where `m` is 15 s plus the preset's `grace_seconds` plus 10 s). The job ends `lost`
+  (`worker_self_stopped`), before the server would close it. A plain preset is never stopped this
+  way.
+- **A supervisor runs the command.** The worker, or a local lane, starts the command under a small
+  supervisor process. If the worker is killed (`kill -9`), the supervisor ends the command's
+  process group within about a quarter of a second. Do not start rcm's supervisor yourself inside
+  an irreversible preset: the job already runs under one.
+- **An unconfirmed close holds the group.** When such a job closes without a confirmation that
+  its processes are gone (the grace ran out, a cancel never reached the worker, the server was
+  killed while a local job ran), the server holds the job's `concurrency_group`. No job of that
+  group starts until the worker confirms or an admin runs `rcm release-hold N` after checking the
+  machine ([releasing a hold](operating.md#when-a-group-is-held-rcm-release-hold)). The hold
+  does not expire.
+
+A preset with `irreversible = true` and no `concurrency_group` gets the group
+`irreversible:<preset name>` with `concurrency_scope = "global"`; the server logs
+`preset X: irreversible without concurrency_group — using group irreversible:X (global)` when it
+starts, and `rcm presets` shows that group.
+
+An irreversible preset cannot have [`[presets.retry]`](#trying-again-later-presetsretry): a retry
+runs the command again, so the server refuses to load such a preset (`irreversible presets cannot
+have [retry]`). A job submitted with a retry before you marked its preset keeps that retry, but once
+it is claimed as irreversible it is never retried: its retry exit code ends it `failed`, with no
+next attempt, and its job document shows `max_attempts: null`. A cancel that has not stopped the
+command yet does not change that: when the command exits on its own with the retry exit code, the
+job ends `failed`, as any job that does not retry does.
+
+This key is not the release checks' irreversible mode (an input value such as `mode = upload` that
+a [release profile](#release-profile) never makes the default). `irreversible = true` marks the
+whole preset, so its job stops itself on a lost connection even when its input is a rehearsal.
+
+**Keep the worker's clock from jumping.** The worker counts the time since the server last
+answered on the wall clock too, so the time a sleeping machine spends asleep counts. A step
+correction (NTP stepping the clock, or the date set by hand) that moves the clock forward by
+`G − m` or more makes the worker stop an irreversible job early: the job ends `lost`
+(`worker_self_stopped`, exit 3 from `rcm wait`). On a worker that runs irreversible presets, let
+NTP slew the clock instead of stepping it.
+
+The command must not leave daemons or other processes outside its session behind (`setsid`, a
+double-fork daemon): rcm cannot see them, so for those processes this protection is fail-open.
+They keep running after the job ends, and a later job of the same group can start beside them.
+
+A held job's waiting neighbours show reason `needs_action` with `action.code =
+"irreversible_hold"` in `/api/status`, whose top-level `irreversible_holds` lists every open hold
+(`/api/health` carries the same list, for information only; both say `null` when the server could
+not read them, never an empty list). `GET /jobs/N` shows the job's `hold`
+and its history. A `[[notify]]` rule can ask for one call per new hold with
+`on = ["irreversible_hold"]` ([notifications](#priority-snapshot-cache-and-notifications)).
 
 ### A server that only hands out jobs: `lanes = 0`
 

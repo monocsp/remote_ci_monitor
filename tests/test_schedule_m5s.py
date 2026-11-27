@@ -189,7 +189,7 @@ def make(
 
 
 def test_db_is_v25_with_the_milestone_columns(store):
-    assert DB_VERSION == 25
+    assert DB_VERSION == 26  # v26(M5t-b)의 열 일곱 개가 그 뒤 맨 끝이다
     cols = [r[1] for r in store._conn().execute("PRAGMA table_info(jobs)")]
     want = [
         "not_before",
@@ -203,7 +203,17 @@ def test_db_is_v25_with_the_milestone_columns(store):
         "retry_max_attempts",
         "retry_disabled",
     ]
-    assert cols[-len(want) :] == want
+    v26 = [
+        "worker_session_id",
+        "irreversible",
+        "disconnect_grace_seconds",
+        "claim_seq",
+        "log_offset",
+        "log_file_bytes",
+        "log_complete",
+    ]
+    assert cols[-len(want) - len(v26) : -len(v26)] == want
+    assert cols[-len(v26) :] == v26
 
 
 def test_a_v24_database_gains_the_columns_after_a_backup(tmp_path):
@@ -233,7 +243,7 @@ def test_a_v24_database_gains_the_columns_after_a_backup(tmp_path):
     c.close()
     s = Store(path)
     try:
-        assert s.user_version() == 25
+        assert s.user_version() == 26  # v24 → v25 → v26(M5t-b)
         j = s.get_job(old.id)
         assert j.not_before is None and j.start_deadline is None and j.no_supersede is False
     finally:

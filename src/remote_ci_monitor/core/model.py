@@ -120,6 +120,9 @@ REASON_CANCELLING = "cancelling"
 REASON_PAUSED = "paused"
 REASON_NOT_SCHEDULED = "not_scheduled"
 REASON_WORKER_DOWN = "worker_down"
+#: 도는 원격 잡의 워커와 연락이 끊겼다 — 레인은 `down` 이지만 잡은 끊김 유예(G) 동안 `running`
+#: 으로 남는다(M5t-b §4.8 · 결정 276). 행동 가능하고 `worker_down` 바로 뒤다. 끝날 시각은 모른다.
+REASON_WORKER_UNREACHABLE_GRACE = "worker_unreachable_grace"
 #: 집었을 레인이 호스트 부하로 보류 중이다(M5f). **`ACTIONABLE_REASONS` 에는 안 올린다** —
 #: 의도된·자가 치유되는 상태라 `paused` 와 같은 종류다(오너 결정 45). 오래 닫혀 있으면
 #: `rcm check` 가 경고한다.
@@ -140,6 +143,9 @@ REASON_CHECK_PENDING = "check_pending"
 #: 도는 잡이 「사람이 할 일」 표식(`::rcm::action::`)을 찍었다(M5s 결정 213). 행동 가능 — 잡이
 #: 직접 무엇을 해 달라고 말했다. 사람을 기다리는 잡은 대개 조용해서 `stuck` 보다 앞에 둔다.
 REASON_NEEDS_ACTION = "needs_action"
+#: 열린 그룹 홀드에 막힌 대기 잡의 `action.code`(M5t-b §4.8 · 결정 330). 사유는 새 값이 아니라
+#: `needs_action` 이다 — 홀드는 사람(admin)이 그 머신을 보고 `rcm release-hold` 로만 풀린다.
+ACTION_IRREVERSIBLE_HOLD = "irreversible_hold"
 
 #: M5n 배치 · 그룹 범위 (DB 에 그대로 들어가는 값)
 PLACEMENT_POOL = "pool"
@@ -165,6 +171,7 @@ STUCK_NO_OUTPUT = "no_output"  # 단계 이야기를 안 하는 잡이 `no_outpu
 ACTIONABLE_REASONS = (
     REASON_NEEDS_ACTION,
     REASON_WORKER_DOWN,
+    REASON_WORKER_UNREACHABLE_GRACE,
     REASON_NO_CAPABLE_MACHINE,
     REASON_CHECK_FAILED,
     REASON_STUCK,
@@ -236,6 +243,11 @@ class Preset:
     #: 원격 금지(M5t-a 결정 254). 참이면 이 프리셋에게 서버의 머신 목록은 `@local` 하나뿐이다 —
     #: 원격 워커는 집지도, 후보로 보이지도 않는다. 비밀을 쓰는 release · deploy 프리셋에 단다
     local_only: bool = False
+    #: 되돌릴 수 없음(M5t-b 결정 257). 참이면 claim 때 잡에 얼리고, 감독자 아래에서 돌고(331),
+    #: 프로세스 죽음 확인 없이 닫히면 그룹을 홀드한다(330). 그룹이 없으면 합성 그룹을 쓴다
+    irreversible: bool = False
+    #: `concurrency_group` 을 설정이 아니라 rcm 이 채웠다(`irreversible:<이름>`, 결정 330)
+    group_synthetic: bool = False
 
     def input_spec(self, name: str) -> InputSpec | None:
         for spec in self.inputs:
@@ -388,6 +400,14 @@ class Job:
     retry_interval_seconds: int | None = None
     retry_max_attempts: int | None = None
     retry_disabled: bool = False
+    #: M5t-b(v26) — claim 한 워커 세션(결정 265). 로컬 잡과 v26 이전 레거시 잡은 None
+    worker_session_id: str | None = None
+    #: claim 때 얼린 「되돌릴 수 없음」(결정 257). None 은 claim 전 · 레거시다
+    irreversible: bool | None = None
+    #: claim 때 얼린 끊김 유예(초). 원격 잡에만 있다 — 로컬 잡은 None
+    disconnect_grace_seconds: int | None = None
+    #: 그 잡을 돌려준 claim 요청의 워커 순번(결정 339-a). 로컬 · 레거시는 None
+    claim_seq: int | None = None
 
     @property
     def chain_root(self) -> int:
@@ -395,9 +415,14 @@ class Job:
         return self.chain_id if self.chain_id is not None else self.id
 
     def retries_on(self, rc: int | None) -> bool:
-        """이 종료코드가 얼린 반복 정책에 걸리나. 선언이 없거나 제출이 껐으면 언제나 False."""
+        """이 종료코드가 얼린 반복 정책에 걸리나. 선언이 없거나 제출이 껐으면 언제나 False.
+
+        claim 때 「되돌릴 수 없음」을 얼린 잡도 언제나 False 다(P6-2 #1). 반복 정책은 제출 때
+        얼므로 표식 전에 `[retry]` 로 제출된 잡이 표식 뒤에 claim 되면 둘 다 갖는다 — 반복하면
+        같은 명령이 두 번 돈다. 로컬 레인과 원격 finish 가 모두 이 함수로 정한다."""
         return (
             rc is not None
+            and self.irreversible is not True  # mutcheck: irreversible-job-retried
             and self.retry_on_exit is not None
             and not self.retry_disabled
             and rc == self.retry_on_exit
@@ -748,6 +773,22 @@ class LocalMachine:
 
 
 @dataclass(frozen=True)
+class OpenHold:
+    """열린 그룹 홀드 하나(`irreversible_holds` 행, M5t-b §4.12). 그룹 · 범위 · 풀 · 호스트는 닫는
+    트랜잭션이 잡 행에서 복사한 것이다 — 지금 설정을 읽지 않는다(결정 339-d)."""
+
+    job_id: int
+    group: str
+    scope: str
+    pool: str
+    host_key: str | None = None
+    since: datetime | None = None
+    preset: str | None = None
+    worker: str | None = None
+    cause: str = ""
+
+
+@dataclass(frozen=True)
 class StatusModel:
     generated_at: datetime
     display_timezone: str | None
@@ -757,3 +798,6 @@ class StatusModel:
     base_url: str | None = None
     #: 이 서버 머신(M5t-a). 없으면 로컬 레인 잡의 `ran_on` 은 null 이다
     local_machine: LocalMachine | None = None
+    #: 열린 그룹 홀드(M5t-b §4.8) — `/api/status` 의 `irreversible_holds`. 없으면 빈 튜플,
+    #: 못 읽었으면 None(모름)
+    irreversible_holds: tuple[OpenHold, ...] | None = ()

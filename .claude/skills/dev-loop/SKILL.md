@@ -21,7 +21,7 @@ and P6 itself; why is in [`_shared/stage-lead.md`](../_shared/stage-lead.md).
 | P2 build | [`build-pr`](../build-pr/SKILL.md) (implement) | lead's out.json `complete`, plan↔test check SOUND, `rcm/ci` green on the head |
 | P3 review | this file, «P3 review» | a round that closes the stage (HIGH 0 and unknown 0, canon «Rounds» 1) on the head |
 | P4 live | [`live-verify`](../live-verify/SKILL.md) | only when required; a round that closes the stage (HIGH 0 and unknown 0, canon «Rounds» 1) and the report committed |
-| P5 edges | [`edge-audit`](../edge-audit/SKILL.md) | a round with unknown 0 whose confirmed GAPs are handed to P6 (canon «Rounds» 6: a HIGH GAP is closed by the P6 re-check, not by HIGH 0 here) |
+| P5 edges | [`edge-audit`](../edge-audit/SKILL.md) | a round with unknown 0 whose confirmed GAPs are handed to P6 (canon «Rounds» 6: a HIGH GAP is closed by the P6 re-check, not by HIGH 0 here), its live lane run or written `none` (`edge-audit` «Live lane») |
 | P6 gap fix | [`build-pr`](../build-pr/SKILL.md) (gap-fix) | every confirmed GAP closed (HANDLED by the P6 re-check + a test that locks the path) |
 | triage | [`isolated-verifier`](../../agents/isolated-verifier.md) «Triage» | the canon's scoring done, `triage:` posted, a moved head looked at as «Rounds» 7 says |
 | P7 merge | [`pr`](../pr/SKILL.md) | `verified: <head sha>` posted, `tools/merge_pr.py` merged, worktree removed |

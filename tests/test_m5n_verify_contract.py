@@ -138,7 +138,7 @@ class SlowSpecClient:
         self.registers += 1
         return {"heartbeat_seconds": 5, "name": "mbp", "generation": self.generation}
 
-    def heartbeat(self, jobs, host_sample=None) -> dict[str, Any]:
+    def heartbeat(self, jobs, host_sample=None, **_kw) -> dict[str, Any]:  # M5t-b: seq
         return {"generation": self.generation}
 
     def spec(self) -> dict[str, Any]:

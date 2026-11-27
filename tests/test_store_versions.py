@@ -83,7 +83,7 @@ def add_version(
 def test_this_build_is_database_version_24():
     # v22: 잡 링크 두 열(tests/test_job_link.py) · v23: M5n(tests/test_store_m5n.py) ·
     # v24: M5p 보관함(tests/test_store_m5p.py) — versions 표는 v21 그대로다
-    assert DB_VERSION == 25  # v25 는 M5s(tests/test_schedule_m5s.py)
+    assert DB_VERSION == 26  # v25 는 M5s(tests/test_schedule_m5s.py) · v26 은 M5t-b
 
 
 def test_a_fresh_database_has_the_versions_table_and_index(tmp_path):

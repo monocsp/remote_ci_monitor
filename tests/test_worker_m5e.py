@@ -38,7 +38,7 @@ from remote_ci_monitor.remote_worker import RemoteWorker
 from remote_ci_monitor.store import Store
 from test_server import TAR, make_tar, sh
 from test_worker import enqueue, run_one
-from test_worker_api import TIMEOUT, WORKER_PRESETS, WorkerServer
+from test_worker_api import WORKER_PRESETS, WorkerServer
 
 WORKER = "build-02"
 
@@ -260,7 +260,7 @@ class FakeWorkerClient:
         self.calls.append(f"phase:{phase}")
         return {}
 
-    def log(self, job_id: int, data: bytes) -> dict[str, Any]:
+    def log(self, job_id: int, data: bytes, offset: int | None = None) -> dict[str, Any]:
         self.calls.append("log")
         self.logged.append(bytes(data))
         return {}
@@ -454,7 +454,7 @@ def test_a_finish_that_says_empty_reads_back_as_empty(srv):
 def test_a_late_upload_for_a_lost_job_is_refused_and_does_not_revive_it(srv):
     """§5: `lost` 잡의 늦은 업로드는 **409**. 죽은 잡을 산출물로 되살리지 않는다."""
     jid = running_gold(srv)
-    srv.clock.advance(TIMEOUT + 1)
+    srv.clock.advance(601)  # M5t-b: 잡은 timeout 이 아니라 끊김 유예(기본 600) 뒤에 닫힌다
     srv.app.mark_lost_workers(srv.clock.now)
     assert srv.store.get_job(jid).state == LOST
     status, body = srv.req(

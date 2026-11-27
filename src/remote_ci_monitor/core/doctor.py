@@ -504,6 +504,28 @@ def _preset_state(p: Mapping[str, Any]) -> str:
     return STATE_TEXT.get(p["state"], "—") if p["state"] is not None else "—"
 
 
+#: 이 머신에서 돈 잡의 그룹 홀드를 가질 수 있는 역할(M5t-b §4.8)
+HOLD_ROLES = (ROLE_WORKER, ROLE_COORDINATOR_WORKER)
+
+#: 그 역할에서 홀드를 모를 때(`irreversible_holds` null)의 한 줄
+HOLDS_UNKNOWN_LINE = (
+    "group holds: unknown — rcm could not learn this machine's group holds from the server"
+)
+
+
+def hold_line(hold: Mapping[str, Any]) -> str:
+    """이 머신에서 돈 잡의 그룹 홀드 한 줄(M5t-b §4.8). 원인 코드는 드러내지 않는다 — 사람이
+    할 일은 원인과 무관하게 같다. 푸는 일은 admin 의 몫이다."""
+    job_id = hold.get("job_id")
+    preset = clean_text(hold.get("preset")) or "—"
+    group = clean_text(hold.get("group")) or "—"
+    return (
+        f"job #{job_id} ({preset}) · group {group}: a job that ran here was closed without a "
+        "stop confirmation — check for a leftover process, then ask an admin to run "
+        f"rcm release-hold {job_id}"
+    )
+
+
 def _shown(value: Any) -> str:
     """사람용 칸 — 모름(None)은 `—` 이다."""
     return "—" if value is None else str(value)
@@ -596,6 +618,13 @@ def render(doc: Mapping[str, Any]) -> list[str]:
             f"{s['missing']} missing · {s['unknown']} unknown"
             + (f" · {maybe} may come (unknown)" if maybe else "")
         )
+    holds = doc.get("irreversible_holds")
+    for h in holds or []:
+        lines.append(f"needs action  {hold_line(h)}")
+    # 홀드를 가질 수 있는 역할인데 모르면(null) 한 줄 — 아무것도 안 찍으면 「없음」과 같아 보인다.
+    # client · coordinator 의 null 은 「이 머신과 무관」이라 조용하다
+    if holds is None and doc.get("role") in HOLD_ROLES:  # mutcheck: doctor-holds-unknown-silent
+        lines.append(f"warn  {HOLDS_UNKNOWN_LINE}")
     for w in doc.get("warnings") or []:
         lines.append(f"warn  {w}")
     for p in doc.get("problems") or []:

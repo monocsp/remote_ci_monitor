@@ -17,7 +17,18 @@ by discovery (M5n).
 | binary | the worktree's `./.venv/bin/rcm` (and `./.venv/bin/python`) by absolute path | the `rcm` on `PATH` may be the service's |
 
 **Never `~` in a test config:** every `rcm` command runs with `HOME=$D/home` (below), so `~` would be
-`$D/home/…`. `data_dir` is absolute. For a home of `/home/example`, a complete `<data_dir>/server.toml`:
+`$D/home/…`. `data_dir` is absolute. First make the folders, in one Bash call:
+
+```sh
+D=$HOME/.local/share/rcm-devtest-<topic>
+mkdir -p "$(dirname "$D")" && mkdir "$D" && mkdir "$D/home" || exit 1   # exists: pick a new name
+```
+
+Then write the two files with the **Write tool**, at their absolute paths, not with a shell heredoc:
+`tools/guard_production.py` refuses a heredoc that holds `$D` words and an `rcm` word, and the Write
+tool expands nothing, so what you write is what the server reads. For a home of `/home/example`,
+port 8790 and the topic `example`, the complete `<data_dir>/server.toml`; change only the home, the
+port, the folder name and the presets:
 
 ```toml
 [server]
@@ -25,20 +36,6 @@ bind = "127.0.0.1"
 port = 8790
 data_dir = "/home/example/.local/share/rcm-devtest-example"
 advertise = false   # otherwise discovery mixes this server up with production
-```
-
-Write it, and the worker's, with the shell, so `$D` and `$P` are expanded before the file exists
-(an unquoted `EOF`); change only the port, the folder name and the presets:
-
-```sh
-D=$HOME/.local/share/rcm-devtest-<topic>; P=<port>
-mkdir -p "$(dirname "$D")" && mkdir "$D" && mkdir "$D/home" || exit 1   # exists: pick a new name
-cat > "$D/server.toml" <<EOF
-[server]
-bind = "127.0.0.1"
-port = $P
-data_dir = "$D"
-advertise = false
 
 [[presets]]
 name = "ok"
@@ -47,16 +44,27 @@ argv = ["sh", "-c", "echo ::rcm::step::hello; echo ok"]
 timeout_seconds = 60
 
 [[presets]]
+name = "slow"   # a client waiting on it is still waiting when its signal lands («Signals»)
+description = "Fake preset: prints one step marker, sleeps 30 seconds and exits 0"
+argv = ["sh", "-c", "echo ::rcm::step::hello; sleep 30; echo ok"]
+timeout_seconds = 60
+
+[[presets]]
 name = "ok-remote"   # its pool is served only by the test worker
 argv = ["sh", "-c", "echo ::rcm::step::hello; echo ok"]
 pool = "devtest-remote"
 timeout_seconds = 60
-EOF
-printf 'server = "http://127.0.0.1:%s"\npool = "devtest-remote"\ndata_dir = "%s/worker"\n' "$P" "$D" \
-  > "$D/worker.toml"
 ```
 
-`ok` runs on the server's own local lane (`"worker": null` in the job's JSON): a server ↔ worker
+and `<data_dir>/worker.toml`, with the same port and folder:
+
+```toml
+server = "http://127.0.0.1:8790"
+pool = "devtest-remote"
+data_dir = "/home/example/.local/share/rcm-devtest-example/worker"
+```
+
+`ok` and `slow` run on the server's own local lane (`"worker": null` in the job's JSON): a server ↔ worker
 scenario on it passes with no worker at all. A worker scenario submits `ok-remote`, and its PASS needs
 the job's `worker` (`GET /jobs/<N>`) to name the test worker; `null` is UNKNOWN, whatever the exit code.
 
@@ -111,8 +119,96 @@ gets `--by acceptance` so the requester names no person or host.
 ## Parallel servers and cleanup
 
 At most two servers at once (the build machine also runs `rcm-ci`), each with its own port and
-`data_dir`. Record each server's pid and stop that pid when done. Leave `data_dir` until the report has
-its evidence, then remove it by its exact path, never with a glob.
+`data_dir`. Leave `data_dir` until the report has its evidence, then remove it by its exact path,
+never with a glob.
+
+## Signals
+
+**Signals go only to a pid you recorded, never by name.** Each test `rcm serve` and `rcm worker`,
+and any client you will signal (an `rcm run` for a ctrl-C), starts through `tools/live_proc.py
+start`. It runs the command as given, with no shell, and right after the start writes its pid and
+then its start time into `data_dir`: `<name>.pid` and `<name>.start`, with the names `server`,
+`worker` and `client`; the output goes to `<name>.log`. The pid and that start time together are
+the process's identity. The start time is what `LC_ALL=C TZ=UTC ps -p <pid> -o lstart=` prints,
+as the worker's own reader does (`ps_start` in `src/remote_ci_monitor/remote_worker.py`), so the
+start time written and the one read back are the same text. Before it starts anything, the tool
+refuses (exit 4, `REFUSED` and the reason) a `data_dir` under `~/.local/share/rcm`, `~/.config/rcm`
+or `/tmp`, a `--config` that is production's, names port 8787 or opens production's `data_dir`, an
+`rcm serve`, `rcm worker` or `rcm token` without `--config`, a client without `RCM_SERVER`, and
+whatever `tools/guard_production.py` would refuse as a Bash call. The port and the server
+address are judged by the value that wins in rcm's own order: for `rcm serve`, `--port`, then
+`RCM_SERVER_PORT`, then the config's `port`, then the default 8787 (so a config with no `[server]`
+table or no `port` is 8787 unless `--port` or `RCM_SERVER_PORT` names another); for `rcm worker`,
+`--server`, then the config's `server`; for a client, `--server`, then `RCM_SERVER`. Only the rcm
+command that reads an override gets it: a wrapper (any command that is not `rcm` itself, such as
+`python wrap.py --config x --port 8791`) and `rcm token` are judged by the config as written, since
+a wrapper may not pass `--port` or `--server` on to the rcm it starts. A quoted port
+(`port = "8787"`) is read as rcm reads it, and a port or an override rcm cannot read (`--port abc`,
+an empty `RCM_SERVER_PORT`) is refused. An 8787 you wrote
+on the command or in the environment (`--port`, `--bind`, `--server`, `RCM_SERVER_PORT`,
+`RCM_SERVER_BIND`, `RCM_SERVER`) is refused even where it does not win. A worker or client whose
+winning address is empty or `auto` is refused: it would discover a server on the network, maybe
+production's. An abbreviated option (`--por`, `--conf`, `--data-d`) is read as the option rcm's
+argparse takes it for. A name whose earlier record cannot be confirmed gone (`ps` fails, the
+record cannot be read) is refused rather than written over. A child that ends within a second
+of its start is exit 1, with the end of its log printed; one whose pid or start time could not be
+written is stopped and is exit 1 too. The server and the worker:
+
+```sh
+D=$HOME/.local/share/rcm-devtest-<topic>
+cd <abs worktree> && HOME=$D/home ./.venv/bin/python tools/live_proc.py start --dir $D --name server -- ./.venv/bin/rcm serve --config $D/server.toml
+cd <abs worktree> && HOME=$D/home RCM_WORKER_TOKEN=$(cat $D/worker.token) ./.venv/bin/python tools/live_proc.py start --dir $D --name worker -- ./.venv/bin/rcm worker --config $D/worker.toml
+```
+
+A client that will get SIGINT starts with `--interactive-sigint` and submits the `slow` preset
+without `--no-wait`, so it is still waiting when the signal lands (`ok` ends before it). A
+process started in the background without job control begins with SIGINT ignored, Python then
+sets no ctrl-C handler, and the signal does nothing (`signal.getsignal(SIGINT)` is `SIG_IGN`
+there); `--interactive-sigint` gives the child SIGINT's default disposition back before it runs:
+
+```sh
+D=$HOME/.local/share/rcm-devtest-<topic>
+cd <abs worktree> && HOME=$D/home RCM_SERVER=http://127.0.0.1:<port> RCM_TOKEN=$(cat $D/client.token) ./.venv/bin/python tools/live_proc.py start --dir $D --name client --interactive-sigint -- ./.venv/bin/rcm run slow --by acceptance
+```
+
+Every stop, SIGTERM, `kill -9` or SIGINT, the live lane's included, goes through `tools/live_proc.py
+signal`, with `--name` set to `server`, `worker` or `client` and `--sig` to `TERM`, `KILL` or `INT`.
+It reads both files again and signals only when the pid is above 1 and `ps` still prints the
+recorded start time and, for `rcm serve` and `rcm worker`, the command line still holds this
+`data_dir`'s config, given as `--expect-config $D/server.toml` or `$D/worker.toml`;
+a client has no `--config` (its `data_dir` reaches it through `HOME` and `RCM_SERVER`), so for a
+client the start time alone decides. Otherwise it sends nothing, prints both start times and the
+command line, one per line, and ends with `BLOCKED` (exit 3): the process you started is gone, the
+pid is no longer yours, and the row is BLOCKED with those lines as its reason. A `ps` that cannot
+run (missing, past its time limit, an odd exit) and a record that cannot be read (a directory, no
+permission, not UTF-8) are BLOCKED the same way: not knowing is not «gone». There is no lookup
+by name.
+
+```sh
+D=$HOME/.local/share/rcm-devtest-<topic>
+cd <abs worktree> && ./.venv/bin/python tools/live_proc.py signal --dir $D --name worker --sig TERM --expect-config $D/worker.toml
+cd <abs worktree> && ./.venv/bin/python tools/live_proc.py signal --dir $D --name client --sig INT
+```
+
+At the end, `stop-all` stops what this `data_dir` recorded and nothing else: the same check, then
+SIGTERM, up to ten seconds of waiting, and SIGKILL to what still has the recorded start time. A
+recorded process that is already gone is reported, not signalled. A name it cannot confirm, before
+SIGTERM or while waiting after it, is BLOCKED and gets no SIGKILL; the others are still stopped,
+and the exit is 3.
+
+```sh
+D=$HOME/.local/share/rcm-devtest-<topic>
+cd <abs worktree> && ./.venv/bin/python tools/live_proc.py stop-all --dir $D
+```
+
+Never by name: `pkill rcm`, `killall` or a `pgrep` pattern also hit the production launchd server
+and worker on this build machine.
+
+The tests of `tools/live_proc.py` make their folders under the account's real home, as
+`~/.local/share/rcm-devtest-livep-<random>` (`outside_tmp` in `tests/conftest.py`), because CI's
+temporary folder is under `/tmp`; a test whose folder cannot be removed fails. A folder left by a
+killed run is not removed by the next run, since one of that name may be another run's: look at
+it and remove it by hand.
 
 ## Production is read-only, only with the owner's OK, and only by the main session
 

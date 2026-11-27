@@ -82,6 +82,11 @@ PLAUSIBLE: dict[str, dict[str, Any]] = {
     "worker_restarted_without_job": {"name": "build-02"},
     "worker_unreachable": {"name": "build-02", "seconds": 61},
     "cancel_unconfirmed": {},
+    # M5t-b(결정 278 · 327)
+    "worker_self_stopped": {"seconds": 566},
+    "worker_replaced": {"name": "build-02"},
+    "snapshot_unreachable": {},
+    "orphan_unverified": {"name": "build-02", "seconds": 610},
 }
 
 #: 지금 서버가 만드는 문장 전수. **여기를 고치려면 사용자에게 보이는 글자가 바뀐다는 뜻이다.**
@@ -211,6 +216,20 @@ PINNED: list[tuple[str, dict[str, Any], str]] = [
         "worker build-02 unreachable for 61s",
     ),
     ("cancel_unconfirmed", {}, "worker did not confirm the cancel"),
+    # M5t-b(결정 278 · 327) — RL29 의 다섯 끝
+    (
+        "worker_self_stopped",
+        {"seconds": 566},
+        "worker stopped the job itself after 566s without the server",
+    ),
+    ("worker_replaced", {"name": "build-02"}, "worker build-02 was replaced by a new process"),
+    ("snapshot_unreachable", {}, "the worker could not reach the server for the snapshot"),
+    (
+        "orphan_unverified",
+        {"name": "build-02", "seconds": 610},
+        "worker build-02 unreachable for 610s; the job may still be running on that machine, "
+        "check it",
+    ),
 ]
 
 

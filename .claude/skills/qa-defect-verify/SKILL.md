@@ -85,6 +85,10 @@ Counting (the `core` line and `UNKNOWN` rows included), the carried MED/LOW, the
   in a new lead round; new head, `rcm/ci`, then the next round (for a triage fix, the canon's one-verifier
   look at its diff, «Rounds» 7).
 - Passed and triaged: `gh pr comment <N> --body "verified: <40-char head>"`.
+- A finding about code is closed only by a commit that changes code or tests, never by a
+  documents-only commit: rewording the report or a scenario row does not remove a defect. A finding
+  about a document itself (a wrong path in the report, a row that misquotes the source) is closed by
+  that document's commit, and the round record says which kind it was.
 
 Keep every verifier's full answer as `verify-r<N>-<id>.md` in the round folder; the report quotes the counts
 and the core lines from them.

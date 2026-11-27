@@ -326,7 +326,7 @@ def test_check_prints_a_table_and_exits_0_with_a_worker_token(home, srv, token, 
     assert re.search(r"\blinux\b", row_line(out, "pool")), out
     assert re.search(r"\b(n/a|none)\b", row_line(out, "repos")), out
     assert str(data_dir) in row_line(out, "data dir"), out
-    assert srv.store.list_workers() == []  # --check 는 register 를 부르지 않는다
+    assert srv.store.list_workers() == []  # RL12 (c): --check 는 register 를 부르지 않는다
     assert all(ln.startswith(("ok ", "FAIL")) for ln in out.splitlines() if ln.strip()), out
 
 

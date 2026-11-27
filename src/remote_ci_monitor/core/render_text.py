@@ -14,6 +14,7 @@ from zoneinfo import ZoneInfo
 
 from remote_ci_monitor.core import artifacts as _art
 from remote_ci_monitor.core.model import (
+    ACTION_IRREVERSIBLE_HOLD,
     CANCELLED,
     CANCELLING,
     EXHAUSTED,
@@ -30,6 +31,7 @@ from remote_ci_monitor.core.model import (
     UPLOADING,
 )
 from remote_ci_monitor.core.outcome import label_text
+from remote_ci_monitor.core.outcome import render as outcome_text
 from remote_ci_monitor.core.progress import clean_line
 from remote_ci_monitor.core.queue import confidence
 from remote_ci_monitor.core.status import parse_iso
@@ -688,10 +690,23 @@ def _plain_reason_text(row: dict[str, Any], workers: list[dict[str, Any]] | None
         return (
             f"over by {fmt_duration(over)} · expected {fmt_duration(est.get('expected_seconds'))}"
         )
+    if reason == "worker_unreachable_grace":
+        # 끊김 유예(M5t-b §4.8) — 원문 코드는 드러내지 않는다. 취소 중이면 「돌아오면 취소된다」
+        # (결정 322) — `rcm top` 과 `rcm eta --job` 이 이 문장을 쓴다
+        cancelling = row.get("state") == CANCELLING  # mutcheck: row-grace-cancel-ignores-state
+        return unreachable_text(row.get("ran_on"), cancelling=cancelling)
     if reason == "needs_action":
         # 잡이 찍은 「사람이 할 일」(M5s). note 는 서버가 제어문자를 지운 한 줄이지만 옛 서버나
         # 가짜 서버의 문서일 수 있어 `rcm wait` 의 `action_line` 처럼 한 번 더 씻는다
         act = row.get("action") if isinstance(row.get("action"), dict) else {}
+        held = held_group(act, row.get("blocked_by"))
+        if held is not None:
+            # 그룹 홀드(M5t-b §4.8) — 서버가 정한 코드라 사람 말로 바꿔 그린다
+            group, holder = held
+            return (
+                f"needs action · group {group} is held by #{holder} — rcm release-hold {holder} "
+                "after checking the machine"
+            )
         code = act.get("code")
         note = clean_line(act["note"]) if isinstance(act.get("note"), str) else None
         head = f"needs action · {code}" if code else "needs action"
@@ -722,6 +737,186 @@ def _plain_reason_text(row: dict[str, Any], workers: list[dict[str, Any]] | None
         lane = row.get("lane")
         return f"running · lane {lane}" if lane else "running"
     return reason or "unknown"
+
+
+def unreachable_text(machine: Any, *, cancelling: bool = False) -> str:
+    """끊김 유예 중인 잡의 한 줄(M5t-b §4.8 · 결정 276).
+
+    머신 이름(`ran_on`)을 모르면 「the worker」다. 취소 중인 잡은 이어지지 않는다 — 다시 붙은
+    워커는 취소 요청이 있는 잡을 멈춘다(결정 322, P6-1 G5)."""
+    name = clean_line(machine) if isinstance(machine, str) else ""
+    who = name or "the worker"
+    tail = _GRACE_CANCEL_TAIL if cancelling else _GRACE_TAIL  # mutcheck: grace-cancel-says-goes-on
+    return f"lost contact with {who} — {tail}"
+
+
+#: 끊김 유예의 뒤 절 — `rcm top` 의 이유 줄과 `rcm wait` 의 줄이 같은 말을 쓴다
+_GRACE_TAIL = "the job goes on if the worker is back within the grace period"
+#: 취소 중인 잡의 뒤 절(결정 322) — 웹의 `reason.unreachable_cancelling` 과 같은 뜻
+_GRACE_CANCEL_TAIL = (
+    "the job is cancelled when the worker is back, or ends as lost after the grace period"
+)
+
+
+def unreachable_cancel_text() -> str:
+    """끊긴 동안 취소가 요청됐을 때의 한 줄(P6-2) — 앞서 「이어진다」고 말한 것을 바로잡는다."""
+    return f"cancel requested — {_GRACE_CANCEL_TAIL}"
+
+
+def unknown_eta_reason(row: Mapping[str, Any]) -> str | None:
+    """ETA 가 「—」인 까닭 가운데 M5t-b 가 더한 셋의 사람 문장(`rcm eta`, P6-1 G2 · G4).
+
+    끊김 유예 중인 잡, 그 잡 뒤에서 그룹을 기다리는 잡(쥔 잡의 끝을 모른다), 홀드에 막힌 잡이다.
+    `rcm top` 의 이유 줄과 같은 말이다. 다른 사유는 None — 부르는 쪽이 오늘의 꼬리를 쓴다."""
+    reason = row.get("reason")
+    blocked = row.get("blocked_by")
+    if reason == "worker_unreachable_grace":
+        return _plain_reason_text(dict(row))
+    if reason == "needs_action" and held_group(row.get("action"), blocked) is not None:
+        return _plain_reason_text(dict(row))
+    if (
+        reason == "blocked_by_group"
+        and isinstance(blocked, dict)
+        and blocked.get("remaining_seconds") is None
+    ):
+        return _plain_reason_text(dict(row))
+    return None
+
+
+def hold_top_lines(holds: Any) -> list[str] | None:
+    """`rcm top` 의 열린 홀드 줄(P6-1 G3) — 홀드마다 한 줄. 하나라도 못 읽으면 None(모름)."""
+    if not isinstance(holds, list):
+        return None
+    out = []
+    for h in holds:
+        f = hold_fields(h)
+        if f is None:
+            return None
+        job_id, group, _preset, _worker = f
+        out.append(
+            f"  group {group} is held by #{job_id} — rcm release-hold {job_id} after checking "
+            "the machine"
+        )
+    return out
+
+
+def held_group(action: Any, blocked_by: Any) -> tuple[str, int] | None:
+    """홀드에 막힌 대기 잡이면 (그룹, 홀드 잡 번호). 아니면 None(M5t-b §4.8).
+
+    `action.code` 가 `irreversible_hold` 이고 `blocked_by` 에 정수 잡 번호와 그룹이 있을 때만이다.
+    옛 서버나 가짜 서버의 문서라 그룹을 모르면 지어내지 않는다 — 부르는 쪽이 오늘의 줄로 물러선다.
+    """
+    if not isinstance(action, dict) or action.get("code") != ACTION_IRREVERSIBLE_HOLD:
+        return None
+    if not isinstance(blocked_by, dict):
+        return None
+    holder = blocked_by.get("job_id")
+    group = blocked_by.get("group")
+    if not isinstance(holder, int) or isinstance(holder, bool) or not isinstance(group, str):
+        return None
+    group = clean_line(group)
+    return (group, holder) if group else None
+
+
+def hold_fields(hold: Any) -> tuple[int, str, str, str | None] | None:
+    """`irreversible_holds` 항목 하나 → (잡 번호, 그룹, 프리셋, 워커). 읽을 수 없으면 None.
+
+    서버 문서는 우리가 만든 게 아니다 — 터미널로 흐르는 글자는 씻는다. 워커가 null 이면 로컬
+    레인 잡이다(M5t-b §4.8)."""
+    if not isinstance(hold, dict):
+        return None
+    job_id = hold.get("job_id")
+    if not isinstance(job_id, int) or isinstance(job_id, bool):
+        return None
+    group = clean_line(hold["group"]) if isinstance(hold.get("group"), str) else ""
+    if not group:
+        return None
+    # `worker: null` 은 로컬 레인이다 — 키가 없거나 다른 꼴이면 로컬과 구별할 수 없어 읽지 못한
+    # 항목이다(P6-1 G7, doctor `parse_holds` · 웹 `holdsOf` 와 같은 규칙)
+    if "worker" not in hold or not (  # mutcheck: check-hold-missing-worker-read-as-local
+        hold["worker"] is None or isinstance(hold["worker"], str)
+    ):
+        return None
+    preset = clean_line(hold["preset"]) if isinstance(hold.get("preset"), str) else ""
+    worker = clean_line(hold["worker"]) if isinstance(hold.get("worker"), str) else ""
+    return job_id, group, preset or DASH, worker or None
+
+
+def hold_check_text(hold: Any) -> str | None:
+    """`rcm check` 의 홀드 경고 줄 하나(M5t-b §4.8). 원문 코드(원인)는 드러내지 않는다."""
+    f = hold_fields(hold)
+    if f is None:
+        return None
+    job_id, group, preset, worker = f
+    where = worker or "the server's local lane"
+    look = worker or "the server"
+    return (
+        f"group {group} · job #{job_id} ({preset}) on {where} closed without a stop "
+        f"confirmation — check {look}, then rcm release-hold {job_id}"
+    )
+
+
+def hold_owner_line(job: Mapping[str, Any], *, job_id: int) -> str | None:
+    """이 잡이 만든 그룹 홀드가 아직 열려 있으면 `rcm wait` 끝의 한 줄(M5t-b §4.8, P6-1 G9).
+
+    잡 문서의 `hold` 는 PR1 의 것이다 — 풀렸거나(`released_at`) 없거나 읽을 수 없으면 말하지
+    않는다. 그룹 이름은 잡 문서의 `concurrency_group` 이고, 모르면 지어내지 않는다."""
+    hold = job.get("hold")
+    if not isinstance(hold, dict) or hold.get("released_at") is not None:
+        return None
+    group = (
+        clean_line(job["concurrency_group"])
+        if isinstance(job.get("concurrency_group"), str)
+        else ""
+    )
+    what = f"group {group} is held" if group else "its group is held"
+    return (
+        f"#{job_id} {what} — check the machine for a leftover process, then ask an admin to run "
+        f"rcm release-hold {job_id}"
+    )
+
+
+def log_incomplete_line(job: Mapping[str, Any], *, job_id: int) -> str | None:
+    """`log_complete` 가 **거짓**일 때만 한 줄(M5t-b §4.6 · RL20).
+
+    참 · null · 키 없음(옛 서버 · PR2 전)은 말하지 않는다."""
+    if job.get("log_complete") is not False:
+        return None
+    return (
+        f"#{job_id} log incomplete — the worker could not keep all of it; rcm logs {job_id} "
+        "shows what arrived"
+    )
+
+
+#: 늦은 결과의 `outcome` 으로 받는 값 — 어휘 밖이면 줄을 내지 않는다(터미널에 흐르는 문자열이다)
+_LATE_OUTCOMES = frozenset(("succeeded", "failed", "timed_out", "cancelled", "lost"))
+
+
+def late_result_line(job: Mapping[str, Any], *, job_id: int) -> str | None:
+    """`late_result` 한 줄(M5t-b §4.6 · 결정 256 · 274). 잡의 결과로 세지 않는다고 말한다."""
+    late = job.get("late_result")
+    if not isinstance(late, dict):
+        return None
+    outcome = late.get("outcome")
+    if outcome not in _LATE_OUTCOMES:
+        return None
+    code = late.get("exit_code")
+    tail = f" (exit {code})" if isinstance(code, int) and not isinstance(code, bool) else ""
+    return f"#{job_id} late result: {outcome}{tail} — not counted as this job's result"
+
+
+def lost_line(job: Mapping[str, Any], *, job_id: int) -> str | None:
+    """`lost` 로 끝난 잡의 원인 문장 한 줄(M5t-b RL29). 코드를 영어 문장으로 그리고, 모르는 코드면
+    서버가 저장한 `summary` 로 물러선다. 둘 다 없으면 말하지 않는다."""
+    if job.get("state") != LOST:
+        return None
+    code = job.get("summary_code")
+    args = job.get("summary_args") if isinstance(job.get("summary_args"), dict) else None
+    text = outcome_text(code, args) if isinstance(code, str) else None
+    if text is None and isinstance(job.get("summary"), str):
+        text = job["summary"]
+    text = clean_line(text) if text else ""
+    return f"#{job_id} lost: {text}" if text else None
 
 
 def _mb(b: int | None) -> str:
@@ -1143,8 +1338,9 @@ def render(
         out.append(f"  notify failures {server['notify_failures']} · see the server log")
     if server.get("last_error"):
         out.append(f"  error · {str(server['last_error'])[:60]}")
+    holds = status["irreversible_holds"] if "irreversible_holds" in status else ...
     for pl in pools or [{}]:  # pools 가 비면 조회 실패 모양(오늘과 같다)
-        out.extend(render_pool(pl, tz=tz, now=now, server=server, workers=workers))
+        out.extend(render_pool(pl, tz=tz, now=now, server=server, workers=workers, holds=holds))
     return "\n".join(out) + "\n"
 
 
@@ -1201,11 +1397,16 @@ def render_pool(
     now: datetime | None = None,
     server: dict[str, Any] | None = None,
     workers: list[dict[str, Any]] | None = None,
+    holds: Any = ...,
 ) -> list[str]:
-    """풀 하나(큐 · recent · medians · host)를 줄 목록으로. 기본 풀은 M1 모양 그대로."""
+    """풀 하나(큐 · recent · medians · host)를 줄 목록으로. 기본 풀은 M1 모양 그대로.
+
+    `holds` 는 상태 문서의 `irreversible_holds` 다(`...` 이면 키가 없는 옛 서버). 빈 기본 풀이
+    「바로 시작한다」고 말할지 정한다(P6-1 G3)."""
     server = server or {}
     workers = workers if workers is not None else (server.get("workers") or [])
     out: list[str] = []
+    held = [] if holds is ... else hold_top_lines(holds)
     hosts = pool.get("hosts")
     remote = pool.get("name") not in (None, "default")
     lanes = pool.get("lanes")
@@ -1221,6 +1422,14 @@ def render_pool(
             out.append(f"queue — empty{label}{' · paused' if server.get('paused') else ''}")
         elif server.get("paused") or (workers and all(w.get("state") == "down" for w in workers)):
             out.append("queue — empty but paused/no worker — nothing will start")
+        elif held != []:  # mutcheck: top-held-empty-promises-start
+            # 열린 그룹 홀드가 있으면(P6-1 G3) 그 그룹의 프리셋은 바로 시작하지 않는다 — 그 약속을
+            # 하지 않고 홀드마다 한 줄. 못 읽었으면 모른다고 말한다
+            if held is None:
+                out.append("queue — empty · group holds unknown")
+            else:
+                out.append("queue — empty · a held group does not start until it is released")
+                out.extend(held)
         else:
             out.append("queue — empty (rcm run <preset> starts immediately)")
     else:

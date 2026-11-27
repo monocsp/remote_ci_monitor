@@ -87,15 +87,20 @@ def format_limit(seconds: int | None) -> str:
     return f"limit {seconds}s"
 
 
-def tail_lines(path: Path, n: int = 5, max_bytes: int = 8192) -> list[str] | None:
-    """로그 파일의 마지막 n 줄(최대 max_bytes). 파일이 없으면 None."""
+def tail_lines(
+    path: Path, n: int = 5, max_bytes: int = 8192, *, end: int | None = None
+) -> list[str] | None:
+    """로그 파일의 마지막 n 줄(최대 max_bytes). 파일이 없으면 None. `end` 를 주면 그 길이에서 끝난
+    것으로 읽는다 — 원격 잡은 커밋된 길이(`log_file_bytes`)까지만 보인다(M5t-b 결정 339-f)."""
     if n <= 0:
         return []
     try:
         size = path.stat().st_size
+        if end is not None:
+            size = min(size, max(0, end))
         with path.open("rb") as fh:
             fh.seek(max(0, size - max_bytes))
-            data = fh.read()
+            data = fh.read(size - max(0, size - max_bytes))
     except OSError:
         return None
     text = data.decode("utf-8", errors="replace")
@@ -256,6 +261,7 @@ class Worker(threading.Thread):
         environ: dict[str, str] | None = None,
         admit: Callable[[int, datetime, Callable[[], Job | None]], Any] | None = None,
         claimant: Callable[[datetime], Any] | None = None,
+        on_hold: Callable[[int], None] | None = None,
     ):
         super().__init__(name=f"rcm-worker-{lane}", daemon=True)
         self.lane = lane
@@ -265,6 +271,8 @@ class Worker(threading.Thread):
         self.stop_event = stop or threading.Event()
         self.on_change = on_change
         self.on_marker = on_marker
+        # 홀드를 만든 닫힘 뒤 · 커밋 밖에서 부른다 — 서버의 `_hold_created`(로그 · 버스 사건, §4.12)
+        self.on_hold = on_hold
         self.now_fn = now_fn
         # 부하 게이트(M5f). None 이면 게이트 없이 오늘처럼 집는다(테스트·단독 사용).
         self.admit = admit
@@ -278,6 +286,11 @@ class Worker(threading.Thread):
         self._since: datetime = now_fn()
         self._hold: Any = None
         self._shutting_down = False
+        # 지금 잡의 러너가 Popen 직전(`spawning`)까지 갔다. 그 전에 끝난 잡은 띄운 적이 없으니
+        # 그룹이 없다는 것이 확인된 것이다(§4.12 확인 표 1행의 「띄우지 않음」)
+        self._launched = False
+        # 지금 잡의 러너가 낸 결과. 그 뒤에 레인이 터지면 바깥 처리기가 이것으로 닫는다
+        self._result: Any = None
 
     def shutdown(self) -> None:
         """서버 종료. 도는 잡은 실행기가 `should_stop` 을 보고 프로세스 그룹에 SIGTERM 을 보내
@@ -338,6 +351,26 @@ class Worker(threading.Thread):
             except Exception:  # noqa: BLE001 — 콜백 오류가 워커를 죽이면 안 된다
                 pass
 
+    @staticmethod
+    def _hold_cause(job: Job | None, gone: bool | None) -> str | None:
+        """로컬 레인의 확인(§4.12 확인 표 4행): 러너가 돌아온 뒤 그룹이 사라졌음을 서버가 직접 본다.
+        표식 잡인데 `group_gone` 이 참이 아니면 확인 없는 닫힘이다 — 같은 트랜잭션에서 홀드한다.
+        `_reap_group` 이 SIGKILL 2초 뒤에도 그룹을 봤거나(거짓) `_abandon` 이 못 끝냈거나
+        모를 때다. 잡을 읽지 못했으면(None) 표식 잡으로 본다 — 닫힌 쪽이다."""
+        irreversible = job is None or job.irreversible is True
+        if irreversible and gone is not True:  # mutcheck: local-lane-group-unchecked
+            return "group_not_gone"
+        return None
+
+    def _hold_created(self, job_id: int) -> None:
+        """홀드를 만든 닫힘의 커밋 뒤 — 서버에 알린다(로그 한 줄 · `irreversible_hold` 사건)."""
+        if self.on_hold is None or not self.store.has_open_hold(job_id):
+            return
+        try:
+            self.on_hold(job_id)
+        except Exception:  # noqa: BLE001 — 알림 오류가 레인을 죽이면 안 된다
+            pass
+
     # ── 루프 ────────────────────────────────────────────────────────────────
 
     def run(self) -> None:
@@ -359,6 +392,8 @@ class Worker(threading.Thread):
                     self.wake.clear()
                     continue
                 self._set(WORKER_BUSY, current.id)
+                self._launched = False
+                self._result = None
                 self._changed(current.id)
                 self.execute(current)  # 예외는 바깥 except 가 잡고 current 를 닫는다
                 self._changed(current.id)
@@ -368,19 +403,96 @@ class Worker(threading.Thread):
             err = _safe_error(e)
             if current is not None:
                 try:
-                    text, code, args = outcome.summary("worker_error", detail=str(err))
-                    self.store.finish(
+                    result = self._result
+                    exit_code: int | None = None
+                    if result is not None:  # mutcheck: local-safety-net-drops-the-result
+                        # 러너는 이미 결과를 냈다 — 그 결과와 그 `group_gone` 으로 닫는다(P3
+                        # 3라운드 LOW). 버리면 끝난 잡이 실패로 남고 확인된 그룹도 홀드된다.
+                        # 원격 워커의 바깥 안전망과 같다
+                        state, text, code, args = self._result_close(current, result)
+                        exit_code, gone = result.rc, result.group_gone
+                    else:
+                        state = FAILED
+                        text, code, args = outcome.summary("worker_error", detail=str(err))
+                        # 러너가 띄운 뒤의 예외면 러너가 그룹을 끝내고 확인한 값(`_abandon`)이
+                        # 실린다. 띄우기 전이면 그룹은 없다
+                        gone = getattr(e, "group_gone", None) if self._launched else True
+                    cause = self._hold_cause(current, gone)
+                    if self.store.finish(
                         current.id,
-                        FAILED,
+                        state,
                         now=self.now_fn(),
+                        exit_code=exit_code,
                         summary=text,
                         summary_code=code,
                         summary_args=args,
-                    )
+                        hold_cause=cause,  # mutcheck: local-safety-net-hold-dropped
+                    ):
+                        if cause is not None:
+                            self._hold_created(current.id)
                     self._changed(current.id)
                 except Exception:  # noqa: BLE001
                     pass
+            else:
+                claimed = getattr(e, "claimed_job_id", None)
+                if claimed is not None:  # mutcheck: unread-claim-left-running
+                    self._close_unread_claim(int(claimed), str(err))
             self._set(WORKER_DOWN, None, err)
+
+    def _close_unread_claim(self, job_id: int, err: str) -> None:
+        """claim 은 커밋됐는데 잡을 읽지 못했다(`Store.claim` 이 예외에 id 를 싣는다, P3 3라운드
+        LOW). 그대로 두면 잡이 `running` 으로 남고 재시작이 표식 잡의 그룹을 거짓으로 홀드한다.
+        명령은 돈 적이 없으니 그룹이 없다는 것이 확인된 닫힘이다. 그사이 들어온 취소는 이긴다
+        (`_fail_before_start`). 다시 읽어도 못 읽으면 `running` · `cancelling` 에서 실패로
+        닫는다."""
+        gone = True  # 띄운 적 없다
+        try:
+            try:
+                job = self.store.get_job(job_id)
+            except Exception:  # noqa: BLE001 — 다시 못 읽으면 id 로만 닫는다
+                job = None
+            if job is not None:
+                self._fail_before_start(
+                    job, "worker_error", hold_cause=self._hold_cause(job, gone), detail=err
+                )
+            else:
+                text, code, args = outcome.summary("worker_error", detail=err)
+                self.store.finish(
+                    job_id,
+                    FAILED,
+                    now=self.now_fn(),
+                    exit_code=None,
+                    summary=text,
+                    summary_code=code,
+                    summary_args=args,
+                    only_from=(RUNNING, CANCELLING),
+                    hold_cause=self._hold_cause(None, gone),
+                )
+            self._changed(job_id)
+        except Exception:  # noqa: BLE001 — 닫지 못하면 재시작의 `recover_on_start` 가 맡는다
+            pass
+
+    def _result_close(
+        self, job: Job, result: Any
+    ) -> tuple[str, str | None, str | None, dict[str, Any]]:
+        """바깥 처리기가 러너의 결과로 닫을 때의 (상태, 요약, 코드, 인자). 원격 워커의
+        `_result_outcome` 과 같은 규칙이다 — 마커를 읽지 않고(그 읽기가 터졌을 수 있다) 반복도
+        만들지 않는다. 그사이 수용된 취소는 이긴다(본 경로의 `outcome_for` 와 같다)."""
+        try:
+            job = self.store.get_job(job.id) or job
+        except Exception:  # noqa: BLE001 — 저장소가 터졌으면 claim 때 본 잡으로 닫는다
+            pass
+        if result.lost:
+            return LOST, *outcome.summary("server_stopped_while_running")
+        if result.cancelled or job.state == CANCELLING:
+            return CANCELLED, *cancel_outcome(job)
+        if result.timed_out:
+            return TIMED_OUT, *outcome.summary("timed_out", seconds=job.timeout_seconds)
+        if result.rc == 0:
+            return SUCCEEDED, None, None, {}
+        if result.rc is None:
+            return FAILED, *outcome.summary("worker_error", detail="no exit code")
+        return FAILED, *outcome.exit_summary(result.rc, None, (), ())
 
     # ── 실행 ────────────────────────────────────────────────────────────────
 
@@ -450,25 +562,34 @@ class Worker(threading.Thread):
         out.bundle_path.replace(dest / "bundle.tar")
         return replace(out, bundle_path=dest / "bundle.tar")
 
-    def _close_cancelled_before_start(self, job: Job) -> None:
+    def _close_cancelled_before_start(self, job: Job, *, hold_cause: str | None) -> None:
         """`cancelling` 인 잡을 프로세스 없이 `cancelled` 로 — preflight 가 취소를 덮지 않게
-        (M5l S4). 그새 다른 종료 상태가 됐다면 아무것도 하지 않는다(`finish` 가 거절한다)."""
+        (M5l S4). 그새 다른 종료 상태가 됐다면 아무것도 하지 않는다(`finish` 가 거절한다).
+        `hold_cause` 는 부르는 쪽이 러너의 `group_gone` 으로 정했다(`_hold_cause`). 기본값이 없다 —
+        판단을 건너뛴 호출이 보이도록(P3 3라운드 LOW)."""
         current = self.store.get_job(job.id) or job
         if current.state != CANCELLING:
             return
         text, code, args = cancel_outcome(current)
-        self.store.finish(
-            job.id,
-            CANCELLED,
-            now=self.now_fn(),
-            exit_code=None,
-            summary=text,
-            summary_code=code,
-            summary_args=args,
-            only_from=(CANCELLING,),
-        )
+        if (
+            self.store.finish(
+                job.id,
+                CANCELLED,
+                now=self.now_fn(),
+                exit_code=None,
+                summary=text,
+                summary_code=code,
+                summary_args=args,
+                only_from=(CANCELLING,),
+                hold_cause=hold_cause,
+            )
+            and hold_cause is not None
+        ):
+            self._hold_created(job.id)
 
-    def _fail_before_start(self, job: Job, code: str, /, **args: Any) -> None:
+    def _fail_before_start(
+        self, job: Job, code: str, /, *, hold_cause: str | None, **args: Any
+    ) -> None:
         """프로세스가 뜨기 전에 끝난 잡을 닫는다 — **코드와 함께**, 그리고 취소에 진다.
 
         코드 없이 닫으면 「테스트가 깨졌다」와 「스냅샷을 못 펼쳤다」가 화면에서 같은 모양이 되어
@@ -482,6 +603,10 @@ class Worker(threading.Thread):
 
         서버가 만든 코드이므로 라벨(`failed_step`·`last_step`)도 대장 행도 남기지 않는다
         (M5h 불변식) — 스크립트가 선언한 실패가 아니다.
+
+        `hold_cause` 는 러너가 띄운 뒤 시작하지 못한 표식 잡(감독자 실패 · 관찰자 실패)의 홀드다
+        (`_hold_cause`). 띄우기 전의 실패는 `_hold_cause(job, True)`(None)다. 기본값이 없다 —
+        판단을 건너뛴 호출이 보이도록(P3 3라운드 LOW).
         """
         text, summary_code, clean = outcome.summary(code, **args)
         closed = self.store.finish(
@@ -493,12 +618,16 @@ class Worker(threading.Thread):
             summary_code=summary_code,
             summary_args=clean,
             only_from=(RUNNING,),
+            hold_cause=hold_cause,
         )
+        if closed and hold_cause is not None:
+            self._hold_created(job.id)
         if not closed:
             # 검사와 finish 사이에 `cancelling` 이 됐다 — 취소가 이긴다. 프로세스는 없었으니
             # 여느 취소처럼 요청자 이름으로 닫는다. 이 대체 경로가 없으면 잡은 종료 상태에 못 가고
             # `running` 으로 영영 남는다.
-            self._close_cancelled_before_start(job)
+            # mutcheck: local-fail-race-hold-dropped
+            self._close_cancelled_before_start(job, hold_cause=hold_cause)
 
     @staticmethod
     def _append_log(log_path: Path, line: str) -> None:
@@ -536,6 +665,8 @@ class Worker(threading.Thread):
         )
 
     def execute(self, job: Job) -> None:
+        self._launched = False
+        self._result = None
         job_dir, workspace, log_path = self._paths(job)
         job_dir.mkdir(parents=True, exist_ok=True)
         preset = self.config.preset(job.preset)
@@ -543,7 +674,11 @@ class Worker(threading.Thread):
             # 잡이 큐에 있는 사이 설정에서 프리셋이 사라졌다 — 프리셋 하나를 지우고 재기동하면 그
             # 프리셋의 대기 잡이 한꺼번에 이렇게 죽는다. 코드가 있어야 「게이트가 깨진 게 아니라
             # 방금 한 편집 때문」임을 세어서 말할 수 있다. 문장은 예전과 글자까지 같다.
-            self._fail_before_start(job, "preset_missing", preset=job.preset)
+            # 띄운 적 없다 — 그룹이 없다는 것이 확인됐다(§4.12 확인 표 1행)
+            gone = True
+            self._fail_before_start(
+                job, "preset_missing", hold_cause=self._hold_cause(job, gone), preset=job.preset
+            )
             return
         # 릴리스 프로파일이 있는 저장소의 프리셋: 비밀 폴더를 `<secrets_dir_env>` 로 넘기고(폴더가
         # 있을 때만) value 비밀은 stdout 에서 지운다(계약 §4 「Job stdout is masked」).
@@ -563,6 +698,9 @@ class Worker(threading.Thread):
             workspace=workspace,
             log_path=log_path,
             grace_seconds=self.config.server.grace_seconds,
+            # claim 이 얼린 표식(M5t-b 결정 257 · F76). 감독자 아래에서 돌고 서버가 죽으면
+            # 감독자가 그룹을 끊는다(결정 331). 재기동 홀드는 `recover_on_start` 가 건다
+            irreversible=job.irreversible is True,
         )
         observer = _LocalObserver(self, job)
         try:
@@ -577,7 +715,11 @@ class Worker(threading.Thread):
             # 최종 환경에 도구가 없다 — 프로세스는 뜨지 않았다(M5j G4 · 결정 85). 서버가 만든
             # 코드라 라벨(`failed_step`·`last_step`)도 대장 행도 없다(M5h 불변식). 인자는 이름
             # 하나뿐이다 — PATH 와 경로는 상태에 싣지 않는다(PLAN 「보안」).
-            self._fail_before_start(job, "tool_missing", tool=e.public_name)
+            # 띄운 적 없다 — 그룹이 없다는 것이 확인됐다
+            gone = True
+            self._fail_before_start(
+                job, "tool_missing", hold_cause=self._hold_cause(job, gone), tool=e.public_name
+            )
             if not self.config.server.keep_workspace_on_failure:
                 shutil.rmtree(workspace, ignore_errors=True)
             return
@@ -597,8 +739,14 @@ class Worker(threading.Thread):
             # 로그를 못 연 경우(`log_unavailable`)는 여기서도 못 쓴다(같은 파일이다).
             if e.log:
                 self._append_log(log_path, f"[rcm] {e.log}")
-            self._fail_before_start(job, e.code, **e.args_public)
+            # 띄운 뒤의 `RunnerError`(감독자가 시작하지 못함)는 러너가 정한 `group_gone` 을 싣는다.
+            # 띄우기 전이면(자재화 · 로그 · `spawning` 전) 그룹은 없다
+            gone = getattr(e, "group_gone", None) if self._launched else True
+            self._fail_before_start(
+                job, e.code, hold_cause=self._hold_cause(job, gone), **e.args_public
+            )
             return
+        self._result = result
         # 워크스페이스를 지우기 **전에**, 그리고 종료를 커밋하기 **전에** 모은다(명세 §5).
         # 다음 시도가 있을 시도(M5s)는 모으지 않는다 — 보관과 묶음은 사슬의 마지막 시도에서만
         # 만든다(결정 228). 12번 반복이 묶음 12개가 되지 않게
@@ -621,6 +769,7 @@ class Worker(threading.Thread):
             timed_out=result.timed_out,
             lost=result.lost,
         )
+        hold_cause = self._hold_cause(job, result.group_gone)
         closed = self.store.finish(
             job.id,
             oc.state,
@@ -635,11 +784,16 @@ class Worker(threading.Thread):
             fail_truncated=oc.fail_truncated,
             bundle=bundle,
             ttl_hours=self.config.server.artifact_retention_hours,
+            hold_cause=hold_cause,
         )
+        if closed and hold_cause is not None:
+            self._hold_created(job.id)
         if not closed and oc.state == RETRIED:
             # `retried` 는 `running` 에서만 간다(M5s 결정 225) — 그 사이 취소가 들어왔다. 취소가
             # 이기고 다음 시도는 없다. 프로세스는 이미 끝났으니 여느 취소처럼 요청자 이름으로 닫는다
-            self._close_cancelled_before_start(job)
+            # 표식 잡은 반복하지 않으므로(`Job.retries_on`, P6-2 #1) 여기의 hold_cause 는 늘
+            # None 이다 — 그래도 러너가 정한 값을 그대로 넘긴다
+            self._close_cancelled_before_start(job, hold_cause=hold_cause)
         # ── 정리 ──
         # 반복할 시도의 워크스페이스는 남기지 않는다(M5s §4.2) — 실패가 아니고, 12번이면 12개다
         keep = oc.state not in (SUCCEEDED, RETRIED) and self.config.server.keep_workspace_on_failure
@@ -702,6 +856,10 @@ class _LocalObserver:
     def should_stop(self) -> bool:
         return self.worker._shutting_down
 
+    def spawning(self) -> None:
+        """러너가 Popen 직전 확인을 지났다 — 여기부터는 그룹이 있을 수 있다(§4.12)."""
+        self.worker._launched = True  # mutcheck: local-launch-not-marked
+
 
 def start_workers(
     store: Store,
@@ -714,6 +872,7 @@ def start_workers(
     now_fn: Callable[[], datetime] = _utcnow,
     admit: Callable[[int, datetime, Callable[[], Job | None]], Any] | None = None,
     claimant: Callable[[datetime], Any] | None = None,
+    on_hold: Callable[[int], None] | None = None,
 ) -> list[Worker]:
     workers = [
         Worker(
@@ -727,6 +886,7 @@ def start_workers(
             now_fn=now_fn,
             admit=admit,
             claimant=claimant,
+            on_hold=on_hold,
         )
         for lane in range(1, config.server.lanes + 1)
     ]

@@ -268,7 +268,7 @@ class Flaky:
         self._maybe_fail()
         return {"heartbeat_seconds": 5, "name": "mbp"}
 
-    def heartbeat(self, jobs, host_sample=None) -> dict[str, Any]:
+    def heartbeat(self, jobs, host_sample=None, **_kw) -> dict[str, Any]:  # M5t-b: seq
         self._maybe_fail()
         return {}
 

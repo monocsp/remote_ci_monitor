@@ -183,6 +183,7 @@ NEW_RECENT = frozenset(
         "retried_as",
         "max_attempts",
         "ran_on",  # M5t-a 결정 248 f — 잡이 돈 머신(계산 값, 시작 전이면 null)
+        "log_complete",  # M5t-b §4.6 — 로그를 빠짐없이 받았나(참 · 거짓 · 모름)
     }
 )
 NEW_ROW = frozenset(
@@ -355,7 +356,8 @@ def test_schema_version_is_still_one_and_the_document_still_serializes():
 
 def test_no_key_that_exists_today_disappears():
     doc = full_doc()
-    assert set(doc) == set(BASE_TOP)  # 최상위는 늘지도 줄지도 않는다
+    # 최상위는 줄지 않고 정해진 것만 는다 — M5t-b §4.8 의 `irreversible_holds`(키 추가만)
+    assert set(doc) == set(BASE_TOP) | {"irreversible_holds"}
     server = doc["server"]
     assert BASE_SERVER <= set(server)
     assert set(server) - BASE_SERVER <= NEW_SERVER

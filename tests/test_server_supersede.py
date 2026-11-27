@@ -252,9 +252,25 @@ def test_a4_remote_worker_gets_the_cancel_through_heartbeat(srv):
 
 
 def test_a26_unconfirmed_cancel_keeps_the_superseded_summary(srv):
+    """들리는 워커가 supersede 의 취소를 확인하지 않아 서버가 닫아도 「superseded by #N」 은 남는다.
+
+    M5t-b T4: 창은 워커가 취소를 들을 수 있었던 때부터 잰다 — 요청 뒤 한 번 들린 다음, 그 뒤의
+    창(`kill_at + 2 × heartbeat`)이 지나야 닫힌다."""
     o = running_remote(srv)
     n = queued_tree(srv)
-    srv.clock.advance(GRACE + 2 * HEARTBEAT + 1)
+    assert state(srv, o) == CANCELLING
+    srv.clock.advance(1)
+    status, hb = srv.heartbeat("build-02", jobs=[o])
+    assert status == 200 and hb["cancel"] == [o]  # 워커가 취소를 들었다
+    assert state(srv, o) == CANCELLING
+    cancel = srv.store.get_job(o).cancel
+    assert (cancel.kill_at - cancel.requested_at).total_seconds() == GRACE
+    kill_at = cancel.kill_at
+    srv.clock.advance((kill_at - srv.clock()).total_seconds() + 2 * HEARTBEAT - 1)
+    status, _hb = srv.heartbeat("build-02", jobs=[o])
+    assert status == 200
+    assert state(srv, o) == CANCELLING  # 창이 아직 안 지났다
+    srv.clock.advance(2)
     status, _hb = srv.heartbeat("build-02", jobs=[o])
     assert status == 200
     assert_superseded(srv, o, n)

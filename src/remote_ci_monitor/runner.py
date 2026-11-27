@@ -126,6 +126,10 @@ class RunSpec:
     #: stdout 을 로그 파일과 관찰자에게 주기 **전에** 거치는 마스킹(릴리스 비밀 → `****`).
     #: None 이면 그대로. 줄 단위 배치에 적용되므로 한 값이 줄을 넘지 않는 한 조각이 안 남는다.
     mask: Callable[[bytes], bytes] | None = None
+    #: claim 이 얼린 표식(M5t-b 결정 257 · 331). 참이면 감독자 아래에서 돌고 끝에 그룹을 거둔다
+    irreversible: bool = False
+    #: claim 이 얼린 끊김 유예 G_J(원격 잡만). 로컬 잡은 None
+    disconnect_grace_seconds: int | None = None
 
 
 # ── macOS Command Line Tools shim (M5t-a 결정 246) ─────────────────────────────
@@ -278,7 +282,10 @@ def _preflight_lines(requires: tuple[str, ...], missing: list[str]) -> list[str]
 
 
 class RunObserver(Protocol):
-    """관찰자 — 로컬은 DB 에 직접, 원격은 HTTP 로 서버에."""
+    """관찰자 — 로컬은 DB 에 직접, 원격은 HTTP 로 서버에.
+
+    M5t-b(결정 333): `spawning()` 은 Popen 직전 확인을 지난 뒤 · Popen 바로 앞, `spawned(pid)` 는
+    Popen 직후에 부른다(원격 워커가 `proc.json` 을 두 번 쓴다). 없는 관찰자는 건너뛴다."""
 
     def phase(self, phase: str) -> None: ...
     def output(self, data: bytes) -> None: ...
@@ -296,6 +303,9 @@ class RunResult:
     lost: bool = False  # should_stop 으로 끊었다
     term_sent_at: datetime | None = field(default=None, repr=False)
     kill_sent: bool = field(default=False, repr=False)
+    #: 표식 잡의 프로세스 그룹이 사라졌다는 확인(S7 의 ESRCH, M5t-b 결정 330). 프로세스를 띄우지
+    #: 않았으면 참, 일반 잡은 None(모름 — 볼 필요가 없다)
+    group_gone: bool | None = None
 
 
 def build_env(spec: RunSpec, environ: Mapping[str, str]) -> dict[str, str]:
@@ -335,6 +345,52 @@ def signal_group(proc: subprocess.Popen, sig: int) -> None:
             pass
 
 
+#: 감독자 파일(M5t-b §4.13). `-m` 이 아니라 파일 경로로 띄운다 — `-I` 가 `PYTHONPATH` 를 버리기 때문
+SUPERVISOR_PATH = Path(__file__).resolve().with_name("job_supervisor.py")
+#: 감독자가 명령을 띄우지 못했을 때의 종료와 표지(감독자 파일의 같은 이름과 같다 — 시험이 잠근다)
+SUPERVISOR_NOT_STARTED_EXIT = 125
+SUPERVISOR_MARKER = b"[rcm] supervisor: not started: "
+#: S7 — 리더가 끝난 뒤 그룹 소멸(ESRCH)을 확인하는 창
+GROUP_GONE_WAIT_SECONDS = 2.0
+
+
+def supervised_argv(spec: RunSpec) -> list[str]:
+    """표식 잡의 argv — 감독자로 감싼다(결정 331 · 339-c (4)). 파일이 없으면 깨진 설치다."""
+    if not SUPERVISOR_PATH.is_file():
+        raise RunnerError(
+            "launch_failed", error="SupervisorMissing", log=f"missing {SUPERVISOR_PATH.name}"
+        )
+    return [
+        sys.executable,
+        "-I",  # mutcheck: supervisor-not-isolated
+        str(SUPERVISOR_PATH),
+        "--parent",
+        str(os.getpid()),
+        "--grace",
+        str(spec.grace_seconds),
+        "--",
+        *spec.argv,
+    ]
+
+
+def _not_started(result: RunResult, head: bytes) -> RunnerError | None:
+    """리더가 125 로 끝났고 **파이프 첫 바이트부터** 표지가 나왔을 때만 감독자의 미시작으로 읽는다.
+    러너 플래그가 있으면 그 결과(None), `launch_*` 면 그 코드, 아니면 `SupervisorNotStarted`."""
+    if result.rc != SUPERVISOR_NOT_STARTED_EXIT or not head.startswith(SUPERVISOR_MARKER):
+        return None
+    reason = head[len(SUPERVISOR_MARKER) :].split(b"\n", 1)[0].decode("ascii", "replace")
+    log = "the supervisor could not start the command"
+    if reason == "launch_executable_missing":
+        return RunnerError("launch_executable_missing", log=log)
+    if reason == "launch_permission_denied":
+        return RunnerError("launch_permission_denied", log=log)
+    if reason == "launch_failed":
+        return RunnerError("launch_failed", error="SupervisorLaunch", log=reason)
+    if result.lost or result.cancelled or result.timed_out:
+        return None
+    return RunnerError("launch_failed", error="SupervisorNotStarted", log=reason)
+
+
 def run_job(
     spec: RunSpec,
     observer: RunObserver,
@@ -342,6 +398,7 @@ def run_job(
     now_fn: Callable[[], datetime] = _utcnow,
     environ: Mapping[str, str] | None = None,
     materialize: Callable[[RunSpec], None] | None = None,
+    mono_fn: Callable[[], float] = time.monotonic,
 ) -> RunResult:
     """자재화(있으면) → `requires` 검사 → `phase executing` → Popen → 펌프 → 결과. 종료 규칙은
     호출자가 `worker.outcome_for` 로 정한다. `MaterializeError` 는 그대로 올린다(호출자가 failed
@@ -360,13 +417,17 @@ def run_job(
         if spec.requires:
             # 자재화가 길었다면 그사이 취소·종료 요청이 와 있을 수 있다 — 그게 이긴다. 프로세스도
             # 판정 줄도 없이 돌려주고, 호출자가 여느 취소·유실처럼 닫는다(M5l S4 · 리뷰 B P2).
-            # 없는 도구가 사용자의 취소를 `tool_missing` 으로 덮어서는 안 된다.
+            # 없는 도구가 사용자의 취소를 `tool_missing` 으로 덮어서는 안 된다. 프로세스를 띄우지
+            # 않았으니 그룹은 없다(`group_gone` 참) — 아래 Popen 직전 확인과 같다. 빠지면 표식 잡의
+            # finish 가 `group_gone` 없이 가서 서버가 그룹을 홀드한다(RL41 (c))
             if observer.should_stop():
                 at = now_fn()
-                return RunResult(rc=None, started=at, finished=at, lost=True)
+                # mutcheck: requires-early-stop-group-unknown
+                return RunResult(rc=None, started=at, finished=at, lost=True, group_gone=True)
             if observer.should_cancel():
                 at = now_fn()
-                return RunResult(rc=None, started=at, finished=at, cancelled=True)
+                # mutcheck: requires-early-cancel-group-unknown
+                return RunResult(rc=None, started=at, finished=at, cancelled=True, group_gone=True)
             # Popen 직전, **최종 환경**에서 — 프로세스가 볼 PATH 그대로, 상대 항목은 워크스페이스
             # 기준. 같은 줄을 관찰자에게도 주어 원격 워커의 서버 로그에도 남는다(마커는 아니다).
             missing = missing_tools(spec.requires, env, spec.workspace)
@@ -379,9 +440,31 @@ def run_job(
                 raise RequiredToolMissing(missing[0])
         started = now_fn()
         observer.phase(PHASE_EXECUTING)
+        # Popen 직전 확인 — requires 와 상관없이(M5t-b 결정 333). 준비가 길었다면 그사이 자기 멈춤
+        # · 취소가 왔을 수 있다. 확인과 Popen 사이에는 네트워크가 없다
+        if observer.should_stop():  # mutcheck: popen-check-only-with-requires
+            return RunResult(rc=None, started=started, finished=started, lost=True, group_gone=True)
+        if observer.should_cancel():
+            return RunResult(
+                rc=None, started=started, finished=started, cancelled=True, group_gone=True
+            )
+        argv = supervised_argv(spec) if spec.irreversible else list(spec.argv)
+        spawning = getattr(observer, "spawning", None)
+        if callable(spawning):
+            try:
+                spawning()
+            except RunnerError as e:
+                e.group_gone = True  # type: ignore[attr-defined]  # 띄우기 전이다
+                raise
+            except Exception as e:  # noqa: BLE001 — 관찰자의 어떤 예외든 「띄우지 못함」이다
+                failure = RunnerError(
+                    "launch_failed", error=type(e).__name__, log=f"observer: {safe_error(e)}"
+                )
+                failure.group_gone = True  # type: ignore[attr-defined]
+                raise failure from e
         try:
             proc = subprocess.Popen(
-                list(spec.argv),
+                argv,
                 cwd=str(spec.workspace),
                 env=env,
                 stdin=subprocess.DEVNULL,
@@ -390,9 +473,51 @@ def run_job(
                 start_new_session=True,
             )
         except OSError as e:
-            raise _launch_error(e, spec.argv[0]) from e
-        result = _pump(spec, proc, log, observer, started, now_fn)
+            failure = _launch_error(e, spec.argv[0])
+            failure.group_gone = True  # type: ignore[attr-defined]  # 띄우지 못했다
+            raise failure from e
+        except Exception as e:  # noqa: BLE001  # mutcheck: popen-error-not-launch-failed
+            # OSError 가 아닌 Popen 실패 — argv 의 NUL 은 ValueError 다. 프로세스는 뜨지 않았다.
+            # 그대로 새면 호출자는 그룹을 모른다(표식 잡이면 홀드) — 띄우지 못함으로 닫는다
+            failure = RunnerError(
+                "launch_failed",
+                error=type(e).__name__,
+                log=f"cannot start {spec.argv[0]!r}: {safe_error(e)}",
+            )
+            failure.group_gone = True  # type: ignore[attr-defined]
+            raise failure from e
+        # 여기서부터 프로세스가 돈다 — 관찰자의 어떤 예외도 그 프로세스를 감시 없이 남기면 안 된다
+        # (P3 1라운드 HIGH). 기록 실패는 잡을 멈추지 않는다: `spawning` 의 「띄우는 중」 기록이
+        # 남아 있어 다음 프로세스는 그 그룹을 모름(UNKNOWN)으로 읽는다
+        spawned = getattr(observer, "spawned", None)
+        if callable(spawned):
+            try:
+                spawned(proc.pid)
+            except Exception as e:  # noqa: BLE001  # mutcheck: runner-spawned-error-escapes
+                # 잡은 멈추지 않는다. 다만 삼킨 예외가 보이게 잡 로그에 한 줄(OSError 가 아닌 것도)
+                _note(log, f"[rcm] observer: spawned: {type(e).__name__}")
+        try:
+            result, head = _pump(spec, proc, log, observer, started, now_fn, mono_fn)
+        except Exception as e:
+            # 펌프 안의 관찰자 호출이 터졌다 — 그룹을 끝내고 거둔 뒤 올린다. 호출자가 finish 를
+            # 보낸다. 그룹이 사라졌는지는 여기서 확인한 대로다
+            e.group_gone = _abandon(proc, spec)  # type: ignore[attr-defined]
+            raise
+    if spec.irreversible:
+        failure = _not_started(result, head)
+        if failure is not None:
+            failure.group_gone = result.group_gone  # type: ignore[attr-defined]
+            raise failure
     return result
+
+
+def _note(log: Any, line: str) -> None:
+    """러너가 잡 로그에 남기는 한 줄. 쓰지 못해도 잡을 막지 않는다."""
+    try:
+        log.write(line.encode("utf-8", errors="replace") + b"\n")
+        log.flush()
+    except (OSError, ValueError):
+        pass
 
 
 def _pump(
@@ -402,8 +527,14 @@ def _pump(
     observer: RunObserver,
     started: datetime,
     now_fn: Callable[[], datetime],
-) -> RunResult:
-    """stdout 을 파일과 관찰자로 흘리며 취소·타임아웃·정지를 본다. 프로세스가 끝날 때까지."""
+    mono_fn: Callable[[], float] = time.monotonic,
+) -> tuple[RunResult, bytes]:
+    """stdout 을 파일과 관찰자로 흘리며 취소·타임아웃·정지를 본다. 프로세스가 끝날 때까지.
+
+    점검 박자와 SIGTERM→SIGKILL 은 단조 시계로, `started` · `finished` · 잡 시한은 벽시계로 잰다
+    (결정 333 — 잡 시한까지 단조로 바꾸면 macOS 잠자기가 시한에서 빠진다). 첫 점검은 Popen 직후
+    곧바로 한다. 표식 잡은 리더가 끝나면 남은 그룹을 거두고(S7) `group_gone` 을 정한다. 두 번째
+    값은 파이프의 첫 바이트들이다(감독자 표지를 읽는다)."""
     assert proc.stdout is not None
     fd = proc.stdout.fileno()
     chunks: queue.Queue[bytes | None] = queue.Queue()
@@ -423,10 +554,37 @@ def _pump(
     threading.Thread(target=reader, name=f"rcm-reader-{spec.job_id}", daemon=True).start()
     result = RunResult(rc=None, started=started, finished=started)
     buf = b""
+    head = b""
     eof = False
-    last_check = started
-    grace = timedelta(seconds=spec.grace_seconds)
+    grace = float(spec.grace_seconds)
     timeout = timedelta(seconds=spec.timeout_seconds) if spec.timeout_seconds else None
+    term_mono: list[float] = []  # 러너가 보낸 첫 SIGTERM 의 단조 시각
+
+    def term(now: datetime) -> None:
+        signal_group(proc, signal.SIGTERM)
+        result.term_sent_at = now
+        term_mono.append(mono_fn())  # mutcheck: runner-grace-wall-clock
+
+    def check(now: datetime) -> None:
+        forced = result.cancelled or result.timed_out or result.lost
+        if not forced and observer.should_stop():
+            result.lost = True
+            term(now)
+        elif not forced and observer.should_cancel():
+            result.cancelled = True
+            term(now)
+        elif not forced and timeout is not None and now - started > timeout:
+            result.timed_out = True
+            term(now)
+        if spec.irreversible and not term_mono and proc.poll() is not None:
+            # S7: 리더(감독자)가 끝났는데 파이프를 쥔 멤버가 남았다 — 지금 SIGTERM
+            term(now)
+        if term_mono and not result.kill_sent and mono_fn() - term_mono[0] >= grace:
+            signal_group(proc, signal.SIGKILL)
+            result.kill_sent = True
+
+    check(now_fn())  # 첫 점검은 곧바로(결정 333 — 1초 기다리지 않는다)
+    last_check = mono_fn()
     while not eof:
         try:
             data = chunks.get(timeout=POLL_SECONDS)
@@ -436,6 +594,8 @@ def _pump(
         if data is None:
             eof = True
         elif data:
+            if len(head) < len(SUPERVISOR_MARKER) + 64:
+                head += data[: len(SUPERVISOR_MARKER) + 64 - len(head)]
             buf += data
             *lines, buf = buf.split(b"\n")
             if len(buf) > MAX_LINE_BYTES:  # 개행 없는 긴 출력은 잘라서 흘린다
@@ -448,26 +608,10 @@ def _pump(
                 log.write(batch)
                 log.flush()
                 observer.output(batch)
-        # ── 취소 · 타임아웃 · 정지 (1초마다) ──
-        if (now - last_check).total_seconds() >= POLL_SECONDS or eof:
-            last_check = now
-            forced = result.cancelled or result.timed_out or result.lost
-            if not forced and observer.should_stop():
-                result.lost = True
-                signal_group(proc, signal.SIGTERM)
-                result.term_sent_at = now
-            elif not forced and observer.should_cancel():
-                result.cancelled = True
-                signal_group(proc, signal.SIGTERM)
-                result.term_sent_at = now
-            elif not forced and timeout is not None and now - started > timeout:
-                result.timed_out = True
-                signal_group(proc, signal.SIGTERM)
-                result.term_sent_at = now
-            if result.term_sent_at is not None and not result.kill_sent:
-                if now - result.term_sent_at >= grace:
-                    signal_group(proc, signal.SIGKILL)
-                    result.kill_sent = True
+        # ── 취소 · 타임아웃 · 정지 (1초마다, 단조) ──
+        if mono_fn() - last_check >= POLL_SECONDS or eof:
+            last_check = mono_fn()
+            check(now)
         if not eof and result.kill_sent and proc.poll() is not None:
             break  # 손자가 파이프를 잡고 있어도 더 기다리지 않는다
     if buf:
@@ -487,8 +631,75 @@ def _pump(
     except OSError:
         pass
     result.rc = proc.returncode
+    if spec.irreversible:
+        result.group_gone = _reap_group(proc, result, term_mono, grace, mono_fn)
     result.finished = now_fn()
-    return result
+    return result, head
+
+
+def _abandon(proc: subprocess.Popen, spec: RunSpec) -> bool:
+    """감시를 이어 갈 수 없는 그룹을 끝낸다: SIGTERM, `grace_seconds` 뒤 SIGKILL, 그 뒤
+    `GROUP_GONE_WAIT_SECONDS` 안에 그룹이 사라졌으면 참. 리더는 거둔다(좀비 리더는 그룹에
+    남는다)."""
+    # mutcheck: runner-abandon-leaves-group
+    signal_group(proc, signal.SIGTERM)
+    kill_at = time.monotonic() + float(spec.grace_seconds)  # 주입 시계가 멈춰 있어도 끝난다
+    while proc.poll() is None and time.monotonic() < kill_at:
+        time.sleep(0.05)
+    signal_group(proc, signal.SIGKILL)
+    try:
+        proc.wait(timeout=GROUP_GONE_WAIT_SECONDS)
+    except subprocess.TimeoutExpired:
+        pass
+    try:
+        if proc.stdout is not None:
+            proc.stdout.close()
+    except OSError:
+        pass
+    gone_by = time.monotonic() + GROUP_GONE_WAIT_SECONDS
+    while _group_alive(proc.pid) and time.monotonic() < gone_by:
+        time.sleep(0.05)
+    return proc.poll() is not None and not _group_alive(proc.pid)
+
+
+def _group_alive(pgid: int) -> bool:
+    try:
+        os.killpg(pgid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+def _reap_group(
+    proc: subprocess.Popen,
+    result: RunResult,
+    term_mono: list[float],
+    grace: float,
+    mono_fn: Callable[[], float],
+) -> bool:
+    """S7(결정 339-c (2)): 리더가 끝난 뒤 남은 그룹 멤버를 거둔다. 러너가 이미 SIGTERM 을 보냈으면
+    다시 보내지 않고 **그 첫 SIGTERM** + grace 에 SIGKILL, 안 보냈으면 지금 SIGTERM. 그 뒤 2초 안에
+    ESRCH 면 그룹이 사라졌다(참). 리더는 이미 거뒀다 — 좀비 리더는 그룹에 남기 때문이다."""
+    pgid = proc.pid
+    leader_end = mono_fn()
+    if not _group_alive(pgid):
+        return True
+    if not term_mono:
+        signal_group(proc, signal.SIGTERM)
+        term_mono.append(mono_fn())
+    # 시한은 첫 SIGTERM 부터다. 리더 끝부터 재면 2·grace 가 나온다(3판 꼴, RL51)
+    kill_at = term_mono[0] + grace  # mutcheck: reap-grace-from-leader-end
+    del leader_end  # 위 변이가 쓰는 이름 — 시한의 기준이 아니다
+    while _group_alive(pgid):
+        if not result.kill_sent and mono_fn() >= kill_at:
+            signal_group(proc, signal.SIGKILL)
+            result.kill_sent = True
+        if result.kill_sent and mono_fn() >= kill_at + GROUP_GONE_WAIT_SECONDS:
+            return False
+        time.sleep(0.05)
+    return True
 
 
 __all__ = [

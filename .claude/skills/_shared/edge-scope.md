@@ -60,6 +60,56 @@ and returns any match to the author as a row to write.
 | P5 edge audit (`isolated-verifier`) | a rare, reversible edge is `RARE`, not `GAP`, with its condition; `RARE` has no severity, is not counted, and is not fixed by P6 or triage; how votes on it merge is the canon's «Quorum» |
 | scenario author (`scenario-author`) | filters before a row goes in; "do not pick only what will pass" still holds: the filter is reach, not outcome |
 | QA fix (`qa-defect-fix`) | the same filter for the scenario rows of a defect |
+| live lane (P1 mark, P5 `edge-audit`) | a rare edge is never picked, and the "cannot be undone" list above is the risk test; «Live lane» below |
+
+## Live lane
+
+Reading the code covers many edges and runs none. The live lane runs a few edges for real in P5, on a
+test server built from the PR's head, by `live-verifier`s. Each run costs a server, a worker and
+minutes, so only an edge that is both reachable and costly when unhandled earns one; running an edge
+nobody reaches proves nothing a reader needs. This section is the canon for which edges go in; [`edge-audit`](../edge-audit/SKILL.md) «Live lane»
+is the procedure.
+
+An edge goes in only when all three hold:
+
+1. **Not rare.** None of ①②③ above applies. An edge reported before (the history search) is
+   common, so it qualifies.
+2. **High risk.** Left unhandled, its result is on the "cannot be undone" list above, or is HIGH 1 or
+   2 of [`isolated-verifier`](../../agents/isolated-verifier.md) «Severity» (a traceback, a dead
+   server or worker, a job silently lost or left in the wrong state, a wrong exit code). No other
+   test of risk.
+3. **Made the same way every time with the repository's own means** — the table below. An edge that
+   needs a moment no command sets (a claim landing between two heartbeats, a cancel in the middle of
+   a retry) stays with the code reading and with unit tests that drive an injected clock. A condition
+   a command holds in place (the server stopped while a worker runs) is not timing, and qualifies.
+
+The live lane takes at most five rows per PR, rows the P5 round adds included. Past five, keep the
+riskiest and cut the rest; the cut rows stay with the code reading and the tests. The lane runs only
+on test servers: a step that could only run against production is not a lane row.
+
+| condition | means | described in |
+|---|---|---|
+| the server restarts while a job runs, waits or uploads | SIGTERM to the test server's recorded pid, then start it again | `_shared/test-server.md` «Signals» |
+| a worker is killed, stopped or restarted | `kill -9` or SIGTERM to the test worker's recorded pid, then start it again | `_shared/test-server.md` «Signals»; `tests/test_e2e_worker.py` (`WorkerProc`, `Stack`) |
+| a worker or a client loses the server | stop the test server (SIGTERM to its recorded pid) while the worker runs or while `rcm wait --job <N> --timeout <seconds>` waits; start it again | `_shared/test-server.md` «Signals» |
+| ctrl-C during `rcm run` | SIGINT to the client's recorded pid | `_shared/test-server.md` «Signals» |
+| `--no-wait`, then `rcm wait` later | the two commands one after the other | — |
+| two sessions submit the same tree | two `rcm run … --no-wait` one after the other | — |
+| a job's exit code, marker or very long output | a fake preset: `sh -c` printing a marker and an exit code | `live-verify` §1 |
+| what a notify hook receives | a fake hook that writes its environment to a file | `live-verify` §1 |
+| the web page at phone width, both languages | the CDP helper of `tests/test_web_browser.py`, 390 px measured inside the page | `live-verify` §2 |
+
+An edge that needs a means not in this table fails condition 3. The lane does not build a tool for it.
+
+Where it is written:
+
+- **P1** ([`workplan`](../workplan/SKILL.md)). An edge row that meets all three gets, in its `where`
+  cell, `live lane · <means> (live)` — for example `live lane · kill -9 the worker (live)`. P4 does
+  not run such a row; P5's lane does, on the same head. Rows cut by the limit are one line under the
+  table: `Live lane cut (limit): <ID> · <why it is less risky than the rows kept>`.
+- **P5** ([`edge-audit`](../edge-audit/SKILL.md) «Live lane»). It starts from the P1 rows and may add
+  an edge the round found or left `NEEDS_RUN` that meets all three, within the same limit. A
+  workplan without marks gets its rows picked by P5 by the same rule.
 
 ## What does not change
 

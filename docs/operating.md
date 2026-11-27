@@ -497,6 +497,7 @@ ones you do not know.
 | `remote_machines` | coordinator roles: rows of `name` `pool` `alive` `eligible` `presets`, each `null` when the server does not say; else `null` |
 | `summary` | counts of `ready` `needs_check` `missing` `unknown` among presets that come to this machine, and `applies_unknown`: presets the server does not say whether they come here |
 | `problems` · `undecided` · `warnings` | the lines behind exit 1, exit 3 and the warnings; every `unknown` preset that might come, `unknown` probe and `unknown` row of rcm's own needs has its line in `undecided` |
+| `irreversible_holds` | roles `worker` and `coordinator-worker`: the open [group holds](#when-a-group-is-held-rcm-release-hold) of jobs that ran on this machine, rows of `job_id` `preset` `group` `scope` `worker` `cause` `since` (`[]` when there is none); `null` when rcm does not know (the server is unreachable, does not send them, or sent one it cannot read) and for the other roles. Not part of the exit code |
 
 macOS Command Line Tools shims: `/usr/bin/git`, `make`, `xcrun` and the other tools that only
 forward to the Command Line Tools open an install dialog when the tools are not installed. rcm
@@ -667,6 +668,16 @@ shows both versions. From 0.8.0 sessions and remote workers follow the new serve
 the next command fetches the server's client, and a running worker finishes its jobs and starts
 again on the new version. `RCM_CLIENT_VERSION`, `~/.config/rcm/client-version` or `--no-follow`
 keeps one where it is ([keeping clients on the server's version](#keeping-clients-on-the-servers-version)).
+
+Upgrading to worker protocol 2 (database v26): a worker of protocol 1 that already claimed a job
+before the upgrade can still finish it. Its finish carries no `group_gone`, the confirmation that
+the job's processes are gone, so a job of an
+[`irreversible`](configuration.md#jobs-that-must-not-run-twice-irreversible) preset closed that
+way holds its concurrency group until you check the machine and run
+[`rcm release-hold`](#when-a-group-is-held-rcm-release-hold). Upgrade the workers right after
+the server. A job claimed before the upgrade whose preset is no longer in the configuration
+counts as `irreversible`, because the server cannot tell: closed that way it holds its
+`concurrency_group`, or `irreversible:<preset name>` when it had none.
 
 A copy you make yourself, with the server running, must use SQLite's own backup — `cp` misses
 the write-ahead log:
@@ -959,10 +970,24 @@ rcm: following server v0.8.1 (installed v0.8.0) — fetched 707.7 KB
 If the server goes back to the worker's own version before the jobs finish, the drain is cancelled
 (`server runs v0.8.0 again — drain cancelled`) and the lanes take jobs again; if it moves to a
 third version, the worker restarts for that one. A job that finishes while the server is away
-(for example during the few seconds it is being replaced) is not given up: the worker keeps it in
-its heartbeats and reports it again after the next answered heartbeat, before it registers again,
-and at the end of a drain, for up to a minute, so the new registration does not close that job as
-lost. After that minute it logs `job #<id> still not reported` and gives the report up. The restart leaves `RCM_WORKER_RESTARTED_AT` in its environment: within 5 minutes of
+(for example during the few seconds it is being replaced) is not given up: the worker keeps the
+job's log, its artifacts and its result in a queue on disk and sends them in order once the server
+answers again. A lane takes no new job until the queue of its last job is sent. At the end of a
+drain the worker waits up to a minute for that queue; then it logs
+`job #<id> still not reported — restarting anyway`, leaves the queue on disk, and the restarted
+worker sends it before it registers again, so the new registration does not close that job as
+lost. The restarted worker waits for that queue for at most 300 seconds of server error answers
+(connection failures do not count, because the server is not answering then). After that it logs
+`dead session <session> queue not delivered after 300s of server errors — registering; job #<id>
+will close as restarted-without-job` (`<session>` is the first 8 characters of the old worker
+session's id), registers and takes jobs again, and that job ends `lost`
+(`worker_restarted_without_job`). The log and the artifacts are sent again for up to 24 hours
+after the job ends. When that window has passed, the worker gives them up and sends the finish
+alone, with the size of the log it had (`log_bytes`), logging
+`#<id> report: log and artifacts not delivered in 24h — sending the finish without them`; the
+server then marks the job's log incomplete. When the finish itself cannot be delivered within those
+24 hours, the worker drops the job's queue and logs
+`#<id> report: finish not delivered in 24h — dropping the report`. The restart leaves `RCM_WORKER_RESTARTED_AT` in its environment: within 5 minutes of
 it, a server version change seen in a heartbeat does not drain again
 (`server runs v0.8.1 — not draining: restarted 60s ago`), and jobs go on being served. A refused
 registration drains at any time, because that lane cannot take jobs. While the server does not
@@ -1006,6 +1031,47 @@ not follow stops with exit 2, so the service manager starts it again. Before, it
 exit 0 and stayed down. A worker that follows a much older server reads its `worker.toml` with that
 version's code, so a key that version does not know (for example `server_name` on a server before
 0.5.0) stops it with exit 2.
+
+Worker protocol 2 adds two exits a service manager sees. The server checks a worker's version
+before its protocol, so an older worker meets the version refusal above: it follows the server's
+version, or it stops with exit 2. An older worker that reports the same version string (a source
+checkout) is refused with `worker protocol 2 required: upgrade rcm on this worker` and also stops
+with exit 2. A new worker that finds a server of its own version that does not speak protocol 2
+stops before it registers with
+`the server speaks worker protocol 1 — upgrade rcm on the server (this worker needs protocol 2)`
+and exit 3, so the service manager starts it again until the server is upgraded. A worker
+replaced by a second process with the same token stops its jobs, reports them `lost` and exits 0,
+so it is not started again and the two processes do not take turns. Restarting a worker no longer closes its running jobs
+at once: the server waits the [disconnect grace](configuration.md#a-lost-connection-disconnect_grace_seconds),
+and the new process checks what its last process left behind.
+
+That exit 0 also means a service worker stays down when you start a second `rcm worker` with its
+token by hand. The second process says so when it registers:
+
+```
+[rcm worker] replaced 1 other process of worker build-02 — a service worker with this token has stopped and will not start again by itself
+```
+
+The server keeps the time it last heard each process in memory only. For `worker_timeout_seconds`
+after the server restarts it cannot tell whether a process it has not heard from yet was still
+running, so the register answer carries `fenced_sessions: null` and the second process says
+`the server restarted recently and cannot tell whether this replaced another process of worker
+build-02` instead. Check the service yourself in that case.
+
+When you are done with the second process, start the service again:
+`launchctl kickstart -k gui/<uid>/<label>` (launchd) or `systemctl --user restart <unit>`
+(systemd).
+
+A worker that stops before it could tell the server how a job ended (the server was unreachable,
+or the process was replaced) leaves that job's folder in its `data_dir`. The next worker process
+started there finds the folder, checks that the job's processes are gone and tells the server, so
+the job closes without holding its group.
+
+Change a worker's `server` or `server_name` only while it runs no job: stop the worker and wait for
+its jobs to end first. The worker keeps a session folder per process under its `data_dir`, owned
+by the server it was set up for. After the change it takes its old folders for another worker's,
+so it does not stop what an old job left running and does not tell the server; those jobs close
+as `lost` only when the disconnect grace runs out.
 
 ### The cache
 
@@ -1122,6 +1188,118 @@ rcm version
 Point `RCM_VENV` at the virtual environment that holds `rcm` when it is not the one on `PATH`,
 and set `RCM_TOKEN` on a server with `read_auth = "basic"`. `pipx` users run
 `pipx install --force "$tmp"/*.whl` in place of the `pip install` line.
+
+## When a worker cannot be reached
+
+A remote job keeps running while the server waits the
+[disconnect grace](configuration.md#a-lost-connection-disconnect_grace_seconds) for its worker.
+The worker shows `down`, and the job is still `running`, with reason `worker_unreachable_grace`
+in `/api/status`. Its finish time is unknown, so its ETA is `—`. A job waiting in the same
+concurrency group behind it has no ETA either (`—`), and it takes no lane in the estimate: it
+cannot start before the group is free. So the ETAs of later jobs on that lane assume that waiting
+job does not use the lane, and they may come later than shown once the worker is back. People
+see it in words, never the code:
+
+| where | what it says |
+|---|---|
+| web queue and «Needs a look» | `lost contact with build-02 — the job goes on if the worker is back within the grace period`, listed right after `worker down` |
+| `rcm top` | the same sentence on the job's reason line, `eta —` |
+| `rcm wait` and `rcm run`, while they wait (stderr) | `#812 lost contact with worker build-02 — the job goes on if the worker is back within the grace period` once, and `#812 worker build-02 is back — the job goes on` if it returns |
+| `rcm eta --job 812` | `#812 · running · elapsed …`, `eta —` and the same sentence; a job waiting in its group behind it gets `⛓ blocked by #812 · <group> · frees in —` |
+
+A job that was being cancelled does not go on: the worker stops it when it is back. For such a
+job the sentence is `lost contact with build-02 — the job is cancelled when the worker is back, or
+ends as lost after the grace period`, and the line when the worker returns is
+`#812 worker build-02 is back — the job is being cancelled`. When the cancel is asked for after
+`rcm wait` already said the job goes on, it prints one more line, `#812 cancel requested — the job
+is cancelled when the worker is back, or ends as lost after the grace period`. While rcm cannot
+reach the worker it knows only what it heard last: the job is never `overdue` or `stuck` in that
+time, nor `quiet`, and the web row stops counting its step and elapsed time, shows a grey lane instead
+of the running one, and its progress bar has no time scale (`progress —`), only the steps it
+heard were done.
+
+One case has no lost-contact line. When a worker process is replaced by a newer one with the same
+token while the first one cannot be reached (a network split), its jobs show `running`, with an
+ETA and no lost-contact line, until the grace runs out and closes them: the worker name has a live
+session, so its lanes are not `down` (see
+[disconnect grace](configuration.md#a-lost-connection-disconnect_grace_seconds)).
+
+Neither `rcm wait` nor `rcm run` ends during the grace: each ends with the job's own result when
+the worker comes back, or with exit 3 when the grace runs out, or at its own `--timeout` with
+exit 3. A job that
+ends without its worker is `lost` (exit 3, no step) and its `summary_code` says why. `rcm wait`
+prints that reason as one line, for example `#812 lost: worker build-02 unreachable for 660s`,
+and the web shows the same sentence in both languages:
+
+| `summary_code` | what happened |
+|---|---|
+| `worker_unreachable` | the grace ran out before the worker came back |
+| `worker_self_stopped` | an `irreversible` job: the worker stopped it itself before the grace ran out |
+| `worker_replaced` | a second worker process with the same token replaced this one |
+| `worker_restarted_without_job` | the worker restarted and did not have the job |
+| `orphan_unverified` | an `irreversible` job whose process rcm could not confirm gone: the job may still be running on that machine, check it |
+
+A worker that comes back after its job was closed still reports how the job ended. `rcm wait`
+shows that report as one line, `#812 late result: succeeded (exit 0) — not counted as this job's
+result`; the job stays `lost` and the exit code stays 3. When the worker could not keep all of a
+job's log, `rcm wait` and the end of `rcm logs N` (on stderr) say
+`#812 log incomplete — the worker could not keep all of it; rcm logs 812 shows what arrived`, and
+the web log view adds `log incomplete` to its header line. Neither line appears for a server that
+does not send `late_result` or `log_complete`. The lines printed after the job ends (the `lost`
+reason, the late result, the incomplete log) are `rcm wait`'s; `rcm run` ends as it did before.
+
+## When a group is held: `rcm release-hold`
+
+A job of an [`irreversible`](configuration.md#jobs-that-must-not-run-twice-irreversible) preset
+that closed without a confirmation that its processes are gone holds its concurrency group.
+Nothing of that group starts until the hold is released, and the hold does not expire: rcm does
+not know whether the command is still running on that machine. You see it as reason
+`needs_action` (`irreversible_hold`) on the waiting jobs and in `irreversible_holds` of
+`/api/status` and `/api/health`; the job's page (`GET /jobs/N`) has its `hold`.
+
+People see a hold in words, without the code:
+
+| where | what it shows |
+|---|---|
+| web «Needs a look» | one entry per hold, even when no job waits on that group: `Group irreversible:ship is held: job #812 (ship) on build-02 closed without a stop confirmation. Check build-02 for a leftover process, then run rcm release-hold 812.` The held job's row in Recent carries a `group held` chip. With no job in the queue, the queue box does not promise an immediate start either: `Queue is empty — a held group does not start until it is released.` |
+| `rcm wait` and `rcm run`, while they wait (stderr) | `#821 needs action · group irreversible:ship is held by job #812 — check that machine for a leftover process, then ask an admin to run rcm release-hold 812`; `rcm wait --return-on-action` ends there with exit 4 |
+| `rcm top` | the waiting job's reason line: `needs action · group irreversible:ship is held by #812 — rcm release-hold 812 after checking the machine`. With no job in the queue it does not promise an immediate start: `queue — empty · a held group does not start until it is released`, then one line per hold, `group irreversible:ship is held by #812 — rcm release-hold 812 after checking the machine` |
+| `rcm eta` | a preset of a held group, or a job waiting on one, gets `wait —` and `eta —` with the same reason sentence as `rcm top`, and no `N ahead`: the job does not move until the hold is released |
+| `rcm wait` on the held job itself | after its `lost` line, `#812 group irreversible:ship is held — check the machine for a leftover process, then ask an admin to run rcm release-hold 812`; the exit code stays 3 |
+| `rcm check` | one `warn  irreversible hold` row per hold; a hold is a warning, never a FAIL, so the exit code does not change |
+| `rcm doctor` (roles `worker` and `coordinator-worker`) | a `needs action` line for each hold of a job that ran on this machine: `a job that ran here was closed without a stop confirmation — check for a leftover process, then ask an admin to run rcm release-hold N`; `--json` lists them in `irreversible_holds` (`null` when unknown). When rcm does not know them, the text output says so in one line, `group holds: unknown — rcm could not learn this machine's group holds from the server`, rather than nothing. The exit code rules do not change |
+
+A job of the server's own local lane has no worker: the web and `rcm check` say «the server's
+local lane» and «check the server». When the server could not read its holds
+(`irreversible_holds: null`), the web says `unknown — group holds unavailable` instead of «nothing
+to look at» (an empty queue says `Queue is empty — group holds unknown.`), and `rcm check` prints
+one warning row saying so. An entry rcm cannot read (no job
+number, no group, or no `worker` key: `worker: null` means the local lane, so a missing one cannot
+be read as local) makes the whole list unknown in all three places, rather than a shorter list
+that looks complete: the web says the same `unknown — group holds unavailable`, `rcm check` prints
+`could not read every group hold the server sent — unknown`, and `rcm doctor --json` has
+`irreversible_holds: null`.
+
+Look at the machine first. On the worker named in the hold, `ps -g <pgid>` lists what is left of
+the job's process group (the job's last log line and `rcm logs N` tell you how far it got). When
+nothing is left and the work did not finish twice, release the hold with an admin token:
+
+```sh
+rcm release-hold 812 --reason "checked build-02: no process left"
+# released the hold on group irreversible:ship (job #812) — queued jobs in that group can start
+```
+
+| exit | meaning |
+|---|---|
+| `0` | released |
+| `1` | the job has no open hold |
+| `2` | usage, or the server refused: not an admin token (403), no such job (404), no token (401) |
+| `3` | the server could not be reached, or answered with a server error (5xx): try again |
+
+`--json` prints the server's answer. The release is kept as an event on the job, with your token
+name and the reason (control characters removed, up to 200 characters). A worker that comes back
+and confirms the job's process group is gone releases the hold by itself; an admin release is for
+the worker that never comes back.
 
 ## Security notes
 
@@ -1251,7 +1429,10 @@ bundles rather than evicting bundles somebody is still waiting for; the affected
 - Medians are recomputed when a job finishes, not on every request. A status document served
   seconds after a job ends already includes it; nothing else moves a 45-day median.
 - A worker the server has not heard from in a week is forgotten, and its lanes stop appearing as
-  `down`. A worker with a job still running is never forgotten, however long it has been silent.
+  `down`. A worker with a job still running is never forgotten, however long it has been silent,
+  and neither is a worker whose job holds a group
+  ([`rcm release-hold`](#when-a-group-is-held-rcm-release-hold)): when it comes back it can still
+  confirm the job's processes are gone and release the hold.
 - When the queue is paused or every worker lane is down, ETAs are `null` on purpose.
 - Host samples are polled (default every 5 s). `stale` means the last sample is older than 3 intervals; `hosts_error` means the sampler itself failed. Memory "used" on macOS is `active + wired + compressed` (what Activity Monitor calls Memory Used), which is smaller than `top`'s PhysMem used. Memory is shown in GiB under the `GB` label, like Activity Monitor and `free -h`, so a 24 GB machine reads `24.0 GB`. GPU numbers come from `ioreg` (Apple Silicon) or `nvidia-smi`; on other machines the GPU shows `unavailable` with the reason. Disk is the filesystem holding the **data directory** — where snapshots, mirrors and workspaces land — not the root partition, and a remote worker reports its own. It is counted in decimal GB, like Finder. The card warns at 85% used **or** under 10 GiB free, whichever comes first: a large disk at 90% still has room, a small one at 80% cannot unpack a snapshot.
 
@@ -1280,6 +1461,6 @@ The loopback e2e test proves the flow on one machine. Checking the M1 goal ("ano
     `rcm worker --server http://<build-machine>:8787 --pool mac2 --lanes 1` with a worker token,
     give a preset `pool = "mac2"`, and `rcm run` it — the job must run there, its steps and host
     card must show under **pool mac2** in `rcm top` and the web page, and `rcm logs` must return
-    the whole log. `kill -9` the worker while a job runs: within `worker_timeout_seconds` the job
-    must be `lost` with `worker … unreachable`, the header must show `<token name>/1 down`, and a
-    restarted worker must pick up the next job.
+    the whole log. `kill -9` the worker while a job runs: within `worker_timeout_seconds` the
+    header must show `<token name>/1 down`, after `disconnect_grace_seconds` the job must be
+    `lost` with `worker … unreachable`, and a restarted worker must pick up the next job.

@@ -36,7 +36,8 @@ def presets(marks: Path) -> list[dict[str, Any]]:
         sh("qa", MARK, concurrency_group="devices", env=env),
         sh("solo", MARK, env=env),
         sh("orphan", 'sleep 300 & echo $! > "$RCM_MARK_DIR/pid"; wait', env=env),
-        sh("stubborn", "trap '' TERM; sleep 300", env=env),
+        # trap 을 건 뒤에 armed 를 찍는다 — 시험은 그것을 보고 취소한다(아래)
+        sh("stubborn", "trap '' TERM; : > \"$RCM_MARK_DIR/$RCM_JOB_ID.armed\"; sleep 300", env=env),
         sh("stubborn-timeout", "trap '' TERM; sleep 300", timeout_seconds=1, env=env),
     ]
 
@@ -129,10 +130,15 @@ def test_cancel_kills_the_grandchildren_of_the_job_process(tmp_path):
 
 
 def test_term_ignoring_script_is_killed_after_grace(tmp_path):
-    s, _ = start_server(tmp_path, workers=True)  # grace_seconds = 1 (test_server.Server 기본)
+    s, marks = start_server(tmp_path, workers=True)  # grace_seconds = 1 (test_server.Server 기본)
     try:
         jid = submit_tree(s, "stubborn", 1)
         s.wait_state(jid, "running")
+        # 스크립트가 trap 을 건 뒤에 취소한다. 러너의 첫 점검은 Popen 직후 곧바로라
+        # (M5t-b 결정 333) trap 전에 닿은 SIGTERM 은 셸을 신호로 끝낸다(-15). 이 시험이
+        # 보려는 「무시된 TERM 뒤의 KILL」이 아니다
+        armed = marks / f"{jid}.armed"
+        wait_until(armed.exists, 15.0, f"job {jid} to arm its TERM trap")
         t0 = time.monotonic()
         status, body = s.req("POST", f"/jobs/{jid}/cancel", token="alice", json_body={})
         assert status == 200 and body["state"] == "cancelling"

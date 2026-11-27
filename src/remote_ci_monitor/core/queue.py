@@ -20,6 +20,7 @@ from statistics import median
 from typing import Any
 
 from remote_ci_monitor.core.model import (
+    ACTION_IRREVERSIBLE_HOLD,
     ACTIVE_STATES,
     CANCELLING,
     DEFAULT_POOL,
@@ -43,6 +44,7 @@ from remote_ci_monitor.core.model import (
     REASON_UPLOADING,
     REASON_WAITING_FOR_LANE,
     REASON_WORKER_DOWN,
+    REASON_WORKER_UNREACHABLE_GRACE,
     SCOPE_GLOBAL,
     SCOPE_HOST,
     SOURCE_MEASURED_OTHER,
@@ -55,10 +57,12 @@ from remote_ci_monitor.core.model import (
     WORKER_DOWN,
     WORKER_HELD,
     WORKER_IDLE,
+    Action,
     BlockedBy,
     Estimate,
     Job,
     Median,
+    OpenHold,
     Placement,
     PlacementNote,  # noqa: F401 — 다시 내보낸다(`queue.PlacementNote`, §11.4)
     Preset,
@@ -333,15 +337,24 @@ def _busy_estimate(
     )
 
 
-def _busy_reason(job: Job, est: Estimate, progress: Progress | None = None) -> str:
+def _busy_reason(
+    job: Job, est: Estimate, progress: Progress | None = None, *, unreachable: bool = False
+) -> str:
     """표시 사유 하나.
-    `cancelling → materializing → needs_action → stuck → overdue → quiet → running`.
+    `worker_unreachable_grace → cancelling → materializing → needs_action → stuck → overdue →
+    quiet → running`.
+
+    `unreachable` 은 그 잡을 집은 원격 워커가 `down` 이라는 뜻이다 — 잡은 끊김 유예 동안
+    `running` 으로 남는다(M5t-b §4.8). 이것이 맨 앞이다: 취소 중이어도 그 취소가 워커에 닿지
+    못한다는 사실이 더 행동에 쓸모 있다.
 
     초과 실행이면서 조용한 잡은 `overdue` 로 낸다 — 더 행동 가능한 사실이 이긴다. 뒤집으면
     초과 실행이 회색 「조용함」 뒤에 숨는다. 같은 까닭으로 「사람이 할 일」 표식(M5s)이 멈춤보다
     앞이다 — 사람을 기다리는 잡은 조용하고, 그 침묵의 이유를 잡이 직접 말했다. 취소 중인 잡은
     표식이 있어도 `cancelling` 이다(이제 할 일이 없다).
     """
+    if unreachable:  # mutcheck: unreachable-reason-dropped
+        return REASON_WORKER_UNREACHABLE_GRACE
     if job.state == CANCELLING:
         return REASON_CANCELLING
     if job.phase == PHASE_MATERIALIZING:
@@ -404,7 +417,8 @@ class _GroupHold:
     group: str
     pool: str
     host: str | None
-    free_at: datetime
+    #: 그룹이 풀리는 시각. None 이면 모른다 — 끊김 유예 중인 잡(M5t-b §4.8)은 언제 끝날지 모른다
+    free_at: datetime | None
     job: Job | None = None  # 도는 잡이면 그 잡(blocked_by 의 근거). 예측 배정이면 None
     est: Estimate | None = None
 
@@ -418,6 +432,32 @@ def _scope_matches(scope: str, hold: _GroupHold, pool: str, host: str | None) ->
     if scope == SCOPE_HOST:
         return host is None or hold.host is None or hold.host == host
     return hold.pool == pool
+
+
+def hold_note(job_id: int) -> str:
+    """홀드에 막힌 대기 잡의 `action.note` — 알림의 `RCM_HOLD_NOTE` 와 같은 한 줄(§4.12)."""
+    return f"group held — run rcm release-hold {int(job_id)}"
+
+
+def _hold_blocks(
+    hold: OpenHold, group: str, scope: str, lanes: Sequence[tuple[str, str | None]]
+) -> bool:
+    """열린 홀드가 이 대기 잡을 막나 — `store._open_hold_sql` 과 같은 넓은 범위 규칙(fail-closed).
+
+    어느 한쪽이 `global` 이면 막고, 어느 한쪽이 `host` 면 호스트가 같거나 모를 때 막고, 풀이 같으면
+    막는다. `lanes` 는 그 잡이 들어갈 수 있는 (풀, 호스트)들이고 하나라도 맞으면 막힌다."""
+    if hold.group != group:
+        return False
+    if hold.scope == SCOPE_GLOBAL or scope == SCOPE_GLOBAL:
+        return True
+    for pool, host in lanes:
+        if (hold.scope == SCOPE_HOST or scope == SCOPE_HOST) and (
+            host is None or hold.host_key is None or hold.host_key == host
+        ):
+            return True
+        if hold.pool == pool:
+            return True
+    return False
 
 
 def compute_queue(
@@ -435,6 +475,7 @@ def compute_queue(
     host_medians: Mapping[str, Mapping[str, Median]] | None = None,
     host_step_medians: Mapping[tuple[str, str], Mapping[str, StepMedian]] | None = None,
     worker_hosts: Mapping[str | None, str] | None = None,
+    open_holds: Sequence[OpenHold] = (),
 ) -> list[QueueRow]:
     """활성 잡 → 큐 행. 출력 순서는 running → cancelling → 대기(claim 순서).
 
@@ -448,6 +489,9 @@ def compute_queue(
     - 그룹 배제는 **대기 잡의 범위**로(`pool` · `host` · `global`).
     - `host_medians` 가 있으면 기대 시간은 그 호스트에서(`expected_on`), `host_step_medians` 가
       있으면 멈춤 판정은 그 호스트의 단계 표로만 — 다른 호스트로 물러나지 않는다.
+    - `open_holds`(M5t-b §4.8 · 결정 330): 열린 그룹 홀드에 막힌 대기 잡은 `needs_action` +
+      `action.code = irreversible_hold` + `blocked_by` 가 그 홀드 잡이다. 언제 풀릴지 모르므로
+      레인을 차지하지 않고(`_GroupHold` 모의에 넣지 않는다) `wait_seconds` · `finish_at` 은 null.
     """
     progress = progress or {}
     step_medians = step_medians or {}
@@ -462,6 +506,9 @@ def compute_queue(
 
     lane_info: dict[_LaneKey, WorkerInfo] = {(w.worker, w.lane): w for w in workers}
     live = [w for w in workers if w.state != WORKER_DOWN]
+    # 연락이 끊긴 원격 워커(M5t-b §4.8) — 그 워커가 집은 잡은 유예 동안 돌지만 끝날 시각을 모른다.
+    # 로컬 레인(`worker` 없음)은 원격 워커의 끊김과 무관하다
+    down_workers = {w.worker for w in workers if w.state == WORKER_DOWN and w.worker}
     # 레인은 **번호가 아니라 (워커, 번호)** 로 센다. 기본 풀에는 로컬 레인 1..N 과 원격 워커의
     # 레인 1..M 이 함께 들어오므로, 번호로 키를 잡으면 로컬 레인 2 와 `build-02/2` 가 뭉개진다.
     live_lanes: list[_LaneKey] = [(w.worker, w.lane) for w in live]
@@ -506,8 +553,15 @@ def compute_queue(
         )
         if busy_per_pool.get(job.pool, 0) > 1:
             est = replace(est, shared=True)
-        free_at = now + timedelta(seconds=est.remaining_seconds or 0)
-        if holder_lane is not None and holder_lane in lane_free:
+        unreachable = job.worker_name is not None and job.worker_name in down_workers
+        if unreachable:
+            # 워커가 돌아올지 모른다 — 시각을 지어내지 않는다. 경과 · 출력 시각은 마지막으로
+            # 들은 값이라 그것으로 초과 · 멈춤 · 조용함을 판정하지 않는다(P6-1 G6 · P6-2)
+            est = replace(est, finish_at=None, overdue=False, stuck=False, stuck_code=None)
+            est = replace(est, quiet=False)  # mutcheck: unreachable-quiet-kept
+        # 끊긴 잡의 끝은 모른다 — 그 그룹 뒤의 대기 잡도 그 끝에서 숫자를 지어내지 않는다
+        free_at = None if unreachable else now + timedelta(seconds=est.remaining_seconds or 0)
+        if free_at is not None and holder_lane is not None and holder_lane in lane_free:
             lane_free[holder_lane] = max(lane_free[holder_lane], free_at)
             lane_last_job[holder_lane] = job.id
             idle_since.pop(holder_lane, None)
@@ -520,7 +574,7 @@ def compute_queue(
             QueueRow(
                 job=job,
                 position=None,
-                reason=_busy_reason(job, est, prog),
+                reason=_busy_reason(job, est, prog, unreachable=unreachable),
                 lane=job.lane,
                 ahead_job_id=None,
                 blocked_by=None,
@@ -548,17 +602,32 @@ def compute_queue(
         open_cands = [k for k in live_cands if lane_info[k].state != WORKER_HELD]
         group = job.concurrency_group
         scope = job.concurrency_scope
+        preset = presets.get(job.preset)
+        if group is None and preset is not None and preset.irreversible:
+            # 표식을 달기 전에 제출된 잡 — claim 은 프리셋의 지금 그룹(합성 포함)으로 본다(RL48)
+            group, scope = preset.concurrency_group, preset.concurrency_scope
+        held_by: OpenHold | None = None
+        if group:
+            hold_lanes = [(lane_pool(k), lane_host(k)) for k in candidates] or [(job.pool, None)]
+            held_by = next(
+                (h for h in open_holds if _hold_blocks(h, group, scope, hold_lanes)), None
+            )
 
         def group_free_at(key: _LaneKey, group: str | None = group, scope: str = scope):
+            """이 레인에서 그룹이 풀리는 시각 — (아는가, 시각). 쥔 잡 하나라도 끝을 모르면
+            (끊김 유예, M5t-b §4.8) 모른다: 그 레인에는 배정하지 않는다."""
             if not group:
-                return None
+                return True, None
             pool, host = lane_pool(key), lane_host(key)
             times = [
                 h.free_at
                 for h in holds
                 if h.group == group and _scope_matches(scope, h, pool, host)
             ]
-            return max(times) if times else None
+            if any(t is None for t in times):  # mutcheck: group-hold-unknown-end-counted
+                return False, None
+            known = [t for t in times if t is not None]
+            return True, (max(known) if known else None)
 
         def busy_holder(keys: Sequence[_LaneKey], group: str | None = group, scope: str = scope):
             """대기 잡을 막고 있는 **도는** 잡(가장 큰 id). 레인 후보 중 하나라도 맞으면."""
@@ -581,12 +650,13 @@ def compute_queue(
         expected: float | None = None
         source = SOURCE_DEFAULT
         n = 0
-        preset = presets.get(job.preset)
-        if not paused and open_cands:
-            best: tuple[Any, ...] | None = None
+        best: tuple[Any, ...] | None = None
+        if not paused and open_cands and held_by is None:
             for key in open_cands:
                 start = lane_free[key]
-                gf = group_free_at(key)
+                knows, gf = group_free_at(key)
+                if not knows:
+                    continue  # mutcheck: group-waiter-takes-a-lane
                 if gf is not None:
                     start = max(start, gf)
                 e, src, cnt = expected_on(
@@ -596,7 +666,9 @@ def compute_queue(
                 rank = (end, lane_free[key], key[0] or "", key[1])
                 if best is None or rank < best[0]:
                     best = (rank, key, start, end, e, src, cnt)
-            assert best is not None
+        if best is not None:
+            # 모든 레인에서 그룹의 끝을 모르면 배정하지 않는다 — 그 그룹이 풀리기 전에는 claim 되지
+            # 않으므로 레인을 차지하지도 않고, `wait` · `finish` 는 null 이다(M5t-b §4.8)
             _rank, chosen, start, finish, expected, source, n = best
             wait = _seconds(now, start)
             ahead = lane_last_job[chosen]
@@ -617,16 +689,31 @@ def compute_queue(
             BlockedBy(
                 job_id=holder.job.id,  # type: ignore[union-attr]
                 group=group or "",
-                remaining_seconds=holder.est.remaining_seconds,  # type: ignore[union-attr]
+                # 쥔 잡의 끝을 모르면(끊김 유예) 「언제 풀리나」도 모른다 — 지어내지 않는다
+                remaining_seconds=(
+                    holder.est.remaining_seconds  # type: ignore[union-attr]
+                    if holder.free_at is not None  # mutcheck: blocked-by-unknown-end-counted
+                    else None
+                ),
             )
             if holder is not None
             else None
         )
+        action: Action | None = None
+        if held_by is not None:
+            # 홀드가 도는 잡의 그룹 점유보다 먼저 온다 — 남은 시간이 무한한 점유다(§4.8)
+            blocked = BlockedBy(job_id=held_by.job_id, group=held_by.group, remaining_seconds=None)
+            action = Action(
+                code=ACTION_IRREVERSIBLE_HOLD, note=hold_note(held_by.job_id), at=held_by.since
+            )
         # reason
         if job.state == UPLOADING:
             last = job.source.last_received_at or job.created_at
             stalled = _seconds(last, now) > cfg.upload_stall_seconds
             reason = REASON_UPLOAD_STALLED if stalled else REASON_UPLOADING
+        elif held_by is not None:  # mutcheck: hold-reason-not-needs-action
+            # 「어디서나 needs_action」(결정 330) — 정지 · 워커 down 보다 먼저: 사람만 푼다
+            reason = REASON_NEEDS_ACTION
         elif paused:
             reason = REASON_PAUSED
         elif place is not None and not place.workers and place.reason:
@@ -676,6 +763,7 @@ def compute_queue(
                 estimate=est,
                 progress=None,
                 placement_detail=tuple(place.notes[:PLACEMENT_DETAIL_MAX]) if place else (),
+                action=action,
             )
         )
     return rows
@@ -695,11 +783,16 @@ def eta_for_new(
     now: datetime,
     priority: int = PRIORITY_NORMAL,
     pool: str = DEFAULT_POOL,
-) -> tuple[QueueRow, int]:
+    open_holds: Sequence[OpenHold] = (),
+) -> tuple[QueueRow, int | None]:
     """지금 이 키의 잡을 넣으면 어떻게 되나 — 가상 잡을 붙여 계산한다(`rcm eta`).
 
     가상 잡은 같은 우선순위의 맨 뒤에 선다(더 낮은 우선순위보다는 앞). 다른 풀의 잡은 세지 않는다.
     반환: (가상 잡의 큐 행, 실제로 앞선 활성 잡 수 — 실행 중 + 우선순위가 같거나 높은 대기 잡).
+
+    `open_holds` 는 `compute_queue` 와 같다(M5t-b §4.8) — 홀드된 그룹의 가상 잡은 실제 잡처럼
+    `needs_action` 이고 wait · finish 가 null 이다. 그때 앞선 잡 수는 None 이다: 사람이 풀기 전에는
+    오지 않을 순번이다(P6-1 G2).
     """
     jobs = [j for j in jobs if j.pool == pool]
     next_id = max((j.id for j in jobs), default=0) + 1
@@ -709,6 +802,8 @@ def eta_for_new(
         inputs=dict(inputs or {}),
         key=key,
         concurrency_group=preset.concurrency_group,
+        # 제출된 잡처럼 프리셋의 범위를 단다 — 홀드가 막는지는 범위로 정해진다(`_hold_blocks`)
+        concurrency_scope=preset.concurrency_scope,  # mutcheck: eta-ghost-scope-dropped
         source=Source(mode="tree"),
         requester=Requester(name="", label=""),
         state=QUEUED,
@@ -725,8 +820,11 @@ def eta_for_new(
         presets=presets,
         cfg=cfg,
         now=now,
+        open_holds=open_holds,
     )
     row = next(r for r in rows if r.job.id == next_id)
+    if row.action is not None and row.action.code == ACTION_IRREVERSIBLE_HOLD:
+        return row, None  # mutcheck: eta-held-ahead-counted
     ahead = sum(
         1 for j in jobs if j.state in ACTIVE_STATES and (j.is_busy or j.priority >= priority)
     )

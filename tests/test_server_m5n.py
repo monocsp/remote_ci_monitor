@@ -301,7 +301,15 @@ def test_worker_spec_is_the_probes_and_the_preset_requirements(srv):
     status, spec = srv.spec()
     assert status == 200, spec
     # M5t-a TD15 이 `tools` 를 더했다(docs/m5t-workplan.md §4.5 「대상 프리셋」)
-    assert set(spec) == {"generation", "probe_interval_seconds", "probes", "presets", "tools"}
+    # M5t-b 결정 270 이 `worker_protocol` 을 더했다(등록 전 확인, docs/m5tb-workplan.md §4.10)
+    assert set(spec) == {
+        "generation",
+        "probe_interval_seconds",
+        "probes",
+        "presets",
+        "tools",
+        "worker_protocol",
+    }
     assert spec["generation"] == gen
     assert spec["probe_interval_seconds"] == 600
     assert spec["probes"] == [

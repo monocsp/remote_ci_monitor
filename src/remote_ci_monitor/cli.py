@@ -90,7 +90,9 @@ from remote_ci_monitor.core.model import (
     EXIT_CODE_BY_STATE,
     EXIT_UNKNOWN,
     PLACEMENT_CAPABLE,
+    REASON_WORKER_UNREACHABLE_GRACE,
     RETRIED,
+    RUNNING,
     TERMINAL_STATES,
     Preset,
 )
@@ -107,6 +109,12 @@ from remote_ci_monitor.core.render_text import (
     fingerprint_summary,
     fmt_clock,
     fmt_duration,
+    held_group,
+    hold_check_text,
+    hold_owner_line,
+    late_result_line,
+    log_incomplete_line,
+    lost_line,
     placement_reason_text,
     placement_suffix,
     presets_summary,
@@ -118,6 +126,9 @@ from remote_ci_monitor.core.render_text import (
     shelf_row,
     source_ident,
     storage_row,
+    unknown_eta_reason,
+    unreachable_cancel_text,
+    unreachable_text,
     verdict_text,
     wait_end_line,
 )
@@ -237,7 +248,8 @@ def describe(job: dict[str, Any], *, head: str | None = None) -> str:
         parts.append(f"elapsed {fmt_duration(est['elapsed_seconds'])}")
     if est.get("finish_at"):
         parts.append(f"eta {fmt_clock(est['finish_at'], datetime.now().astimezone().tzinfo)}")
-    elif est.get("overdue"):
+    elif est.get("overdue") and job.get("reason") != REASON_WORKER_UNREACHABLE_GRACE:
+        # 끊긴 동안의 경과는 마지막으로 들은 값이다 — 「lost contact」 옆에 초과를 말하지 않는다(G6)
         parts.append("overdue")
     if job.get("summary") and state in TERMINAL_STATES:
         parts.append(str(job["summary"]))
@@ -697,6 +709,29 @@ def _supersede_row(h: dict[str, Any]) -> tuple[str, bool | None, str] | None:
         f"skipped for {shown} — cancel_requires_submission_token is on "
         '(set supersede = "off" or turn the token rule off)',
     )
+
+
+#: `rcm check` 의 그룹 홀드 행 이름(M5t-b §4.8)
+HOLD_ROW = "irreversible hold"
+
+
+def _hold_rows(h: dict[str, Any]) -> list[tuple[str, bool | None, str]]:
+    """`rcm check` 의 그룹 홀드 경고 줄 — 홀드마다 하나(M5t-b §4.8 · 결정 330).
+
+    경고(ok = None)이지 FAIL 이 아니다. `rcm check` 는 이 머신의 환경 검사이고, 홀드와 무관한
+    프리셋의 연결 점검을 막으면 안 된다. 키가 없으면 옛 서버라 행이 없고, null 이면 서버가 홀드를
+    못 읽었다 — 「없음」이라 하지 않고 모른다고 말한다."""
+    if "irreversible_holds" not in h:
+        return []
+    holds = h.get("irreversible_holds")
+    if not isinstance(holds, list):
+        return [(HOLD_ROW, None, "the server could not read its group holds — unknown")]
+    texts = [hold_check_text(x) for x in holds]
+    # 읽을 수 없는 항목을 빼고 나머지만 보이면 짧은 목록이 「그게 전부」로 읽힌다. `rcm doctor` 의
+    # `parse_holds` · 웹의 `holdsOf` 와 같은 규칙: 하나라도 못 읽으면 목록 전체가 모름이다
+    if any(t is None for t in texts):  # mutcheck: hold-check-unreadable-dropped
+        return [(HOLD_ROW, None, "could not read every group hold the server sent — unknown")]
+    return [(HOLD_ROW, None, t) for t in texts if t]
 
 
 def _warn_if_client_too_old(client: Client, h: dict[str, Any] | None = None) -> None:
@@ -1247,17 +1282,27 @@ class _FetchSpec:
     dry_run: bool = False
 
 
-def action_line(job_id: Any, action: Any) -> str | None:
+def action_line(job_id: Any, action: Any, blocked_by: Any = None) -> str | None:
     """`#N needs action · <code> · <note>` — 「사람이 할 일」 표식 한 줄(M5s). 표식이 없으면 None.
 
     code 는 서버가 어휘로 거른 값이지만 여기서도 어휘 밖이면 말하지 않는다 — 터미널에 그대로
     흐르는 문자열이다. note 는 서버가 이미 지웠지만(`progress.parse_action_value`) 옛 서버나 가짜
-    서버의 문서일 수 있어 같은 `clean_line` 을 한 번 더 지난다."""
+    서버의 문서일 수 있어 같은 `clean_line` 을 한 번 더 지난다.
+
+    그룹 홀드(M5t-b §4.8)는 서버가 정한 코드다 — `blocked_by` 로 그룹과 홀드 잡을 알면 원문 코드
+    대신 사람 말로 쓴다. 모르면(옛 · 가짜 서버) 오늘의 줄 그대로다."""
     if not isinstance(action, dict):
         return None
     code = action.get("code")
     if not isinstance(code, str) or not ACTION_CODE_RE.fullmatch(code):
         return None
+    held = held_group(action, blocked_by)
+    if held is not None:
+        group, holder = held
+        return (
+            f"#{job_id} needs action · group {group} is held by job #{holder} — check that "
+            f"machine for a leftover process, then ask an admin to run rcm release-hold {holder}"
+        )
     note = clean_line(action.get("note")) if isinstance(action.get("note"), str) else ""
     tail = f" · {note}" if note else ""
     return f"#{job_id} needs action · {code}{tail}"
@@ -1301,7 +1346,7 @@ class _ActionWatch:
         if ident is None or ident == self.printed:
             return None
         self.printed = ident
-        return action_line(job.get("id", self.job_id), job.get("action"))
+        return action_line(job.get("id", self.job_id), job.get("action"), job.get("blocked_by"))
 
     def stop_when(self, job: dict[str, Any]) -> int | None:
         if not self.return_on_action or self._stopped(job):
@@ -1309,6 +1354,50 @@ class _ActionWatch:
         if action_line(self.job_id, job.get("action")) is None:
             return None
         return EXIT_ACTION
+
+
+class _GraceWatch:
+    """기다리는 잡의 원격 워커와 연락이 끊겼다가 돌아오는 것(M5t-b §4.8 · RL28).
+
+    사유가 `worker_unreachable_grace` 가 되는 순간 stderr 한 줄, 다시 도는 사유로 돌아오면 한 줄.
+    잡은 유예 동안 `running` 이고 `rcm wait` 은 끝내지 않는다 — 결과가 오면 그 결과, 유예가 끝나면
+    서버가 `lost`(3)로 닫는다. 원문 코드는 드러내지 않는다. 취소 중(`cancelling`)인 잡은 「이어
+    간다」가 아니라 「돌아오면 취소된다」고 말한다 — 다시 붙은 워커는 취소 요청이 있는 잡을 멈춘다
+    (명세 결정 322, P6-1 G5). 「이어진다」를 찍은 뒤 끊긴 동안 취소가 요청되면 그 말을 바로잡는
+    줄을 한 번 더 찍는다(P6-2)."""
+
+    def __init__(self, job_id: int) -> None:
+        self.job_id = job_id
+        self.away = False
+        #: 끊김 줄(또는 바로잡는 줄)이 이미 「돌아오면 취소된다」고 말했나
+        self.said_cancel = False
+
+    def observe(self, job: dict[str, Any]) -> str | None:
+        if job.get("state") not in (RUNNING, CANCELLING):
+            return None
+        machine = job.get("ran_on")
+        name = clean_line(machine) if isinstance(machine, str) else ""
+        jid = job.get("id", self.job_id)
+        # 취소 중인 잡은 워커가 돌아와도 이어지지 않는다 — 다시 붙은 워커가 멈춘다(결정 322)
+        cancelling = job.get("state") == CANCELLING
+        if job.get("reason") == REASON_WORKER_UNREACHABLE_GRACE:
+            if self.away:
+                # 끊긴 동안 state 가 cancelling 이 됐다 — 「이어진다」는 이제 틀린 말이다
+                if cancelling and not self.said_cancel:  # mutcheck: grace-late-cancel-silent
+                    self.said_cancel = True
+                    return f"#{jid} " + unreachable_cancel_text()
+                return None
+            self.away = True
+            self.said_cancel = cancelling
+            who = f"worker {name}" if name else None
+            return f"#{jid} " + unreachable_text(who, cancelling=cancelling)
+        if not self.away:
+            return None
+        self.away = False
+        self.said_cancel = False
+        who = f"worker {name}" if name else "the worker"
+        then = "the job is being cancelled" if cancelling else "the job goes on"
+        return f"#{jid} {who} is back — {then}"
 
 
 def _wait(
@@ -1342,15 +1431,16 @@ def _wait(
     line = _StatusLine()
     last: dict[str, Any] | None = None
     watch = _ActionWatch(job_id, return_on_action=return_on_action)
+    grace = _GraceWatch(job_id)
 
     def on_update(job: dict[str, Any]) -> None:
         nonlocal last
         last = job
-        said = watch.observe(job)
-        if said:
-            line.done()  # 진행 줄을 덮어쓰지 않게 — 표식은 남아야 하는 줄이다
-            _info(said)
-            line.last = ""
+        for said in (watch.observe(job), grace.observe(job)):
+            if said:
+                line.done()  # 진행 줄을 덮어쓰지 않게 — 표식은 남아야 하는 줄이다
+                _info(said)
+                line.last = ""
         line.update(describe(job))
 
     def on_retry(job: dict[str, Any]) -> None:
@@ -1406,6 +1496,18 @@ def _wait(
     end = wait_end_line(job, job_id=job_id) if end_summary and isinstance(job, dict) else None
     if end:
         _info(end)
+    if end_summary and isinstance(job, dict):
+        # M5t-b: 유실의 원인 문장(RL29), 늦게 온 결과(세지 않는다, §4.6), 불완전한 로그(RL20).
+        # 키가 없는 문서(옛 서버 · PR2 전)에는 아무 줄도 없다
+        for said in (
+            lost_line(job, job_id=job_id),
+            # 이 잡이 그룹을 막았으면 그 사실과 푸는 명령(P6-1 G9)
+            hold_owner_line(job, job_id=job_id),  # mutcheck: hold-owner-line-dropped
+            late_result_line(job, job_id=job_id),
+            log_incomplete_line(job, job_id=job_id),
+        ):
+            if said:
+                _info(said)
     # 0 이 아닌 끝에는 로그로 가는 길과 이름별 최근 이력을 붙인다(M5h §2.5). 3(모른다)에도
     # 붙인다 — 모를수록 로그가 필요하다.
     # 확정 404 만 로그 줄을 뺀다 — 없는 잡의 로그 길은 아무것도 안 가리킨다(M5i I3).
@@ -1488,7 +1590,7 @@ def _notify_text(job: Any, job_id: int, code: int, end: str | None) -> str:
     if end:
         return end
     if code == EXIT_ACTION and isinstance(job, dict):
-        said = action_line(job_id, job.get("action"))
+        said = action_line(job_id, job.get("action"), job.get("blocked_by"))
         if said:
             return said
     return f"#{job_id} wait ended · exit {code}"
@@ -1691,6 +1793,28 @@ def cmd_cancel(args: argparse.Namespace) -> int:
         _info(f"left the join list of job #{args.job} (job keeps running)")
     else:
         _info(f"job #{args.job} is now {resp.get('state')}")
+    return 0
+
+
+def cmd_release_hold(args: argparse.Namespace) -> int:
+    """`rcm release-hold N [--reason TEXT] [--json]`(M5t-b §4.12 · 결정 330). 종료 0 풀었다 · 1 열린
+    홀드 없음(409 `no_hold`) · 2 사용법 · 서버의 거절(4xx) · 3 서버에 못 닿음 · 5xx(풀렸는지
+    모름)."""
+    client = _client(args)
+    try:
+        resp = client.release_hold(args.job, reason=args.reason)
+    except ClientError as e:
+        if e.status == 409 and e.body.get("code") == "no_hold":
+            _err(f"release-hold: {e.message}")
+            return 1
+        _err(f"release-hold failed: {e.message}")
+        return USAGE_EXIT if 0 < e.status < 500 else EXIT_UNKNOWN  # mutcheck: release-hold-5xx
+    if args.json:
+        _print_json(resp)
+    _info(
+        f"released the hold on group {resp.get('group')} (job #{args.job})"
+        " — queued jobs in that group can start"
+    )
     return 0
 
 
@@ -2574,6 +2698,10 @@ def _fmt_eta_row(row: dict[str, Any], ahead: int | None) -> str:
             "check_pending",
         ):
             parts.append(reason.replace("_", " "))
+        # 끊김 유예 · 끊긴 잡 뒤의 그룹 대기 · 그룹 홀드(M5t-b) — `rcm top` 과 같은 사람 문장(P6-1)
+        said = unknown_eta_reason(row)
+        if said:  # mutcheck: eta-unknown-reason-dropped
+            parts.append(said)
     conf = est.get("confidence")
     source = est.get("source")
     n = est.get("sample_count")
@@ -2617,6 +2745,9 @@ def cmd_eta(args: argparse.Namespace) -> int:
                 # 갈 레인이 없는 잡 — 앞선 잡을 세면 없는 순서를 지어낸다. `/api/eta` 의 `ahead`
                 # null 과 같다(M5t-a 위임 결정 7)
                 ahead = None
+            if held_group(row.get("action"), row.get("blocked_by")) is not None:
+                # 홀드에 막힌 잡(M5t-b §4.8)도 같다 — 사람이 풀기 전에는 오지 않을 순번이다(P6-1 G4)
+                ahead = None  # mutcheck: eta-job-held-ahead-counted
             if args.json:
                 _print_json(row)
             else:
@@ -3147,6 +3278,15 @@ def cmd_logs(args: argparse.Namespace) -> int:
         return _client_fail(client, "logs failed", e)
     except KeyboardInterrupt:
         return 130
+    # 로그가 불완전하면 끝에 한 줄(M5t-b §4.6 · RL20). 잡 문서를 못 읽으면 말하지 않는다 — 로그는
+    # 이미 나갔고 종료 코드는 로그를 받은 것에 대한 것이다
+    try:
+        doc = client.job(args.job)
+    except ClientError:
+        doc = None
+    said = log_incomplete_line(doc, job_id=args.job) if isinstance(doc, dict) else None
+    if said:
+        _info(said)
     return 0
 
 
@@ -4494,6 +4634,7 @@ def cmd_check(args: argparse.Namespace) -> int:
             supersede_row = _supersede_row(h)
             if supersede_row is not None:
                 rows.append(supersede_row)
+            rows.extend(_hold_rows(health_body))
             adv = h.get("advertise") or {}
             if adv.get("error"):
                 # 광고가 켜져 있는데 실제로는 못 나간다 — 발견은 부가 기능이라 FAIL 은 아니다
@@ -5683,6 +5824,16 @@ def build_parser() -> argparse.ArgumentParser:
     client_opts(gc)
     gc.set_defaults(func=cmd_gc)
 
+    hold_help = (
+        "release an irreversible job's group hold after you checked the machine "
+        "(admin token; not a store release)"
+    )
+    hold = sub.add_parser("release-hold", help=hold_help, description=hold_help)
+    hold.add_argument("job", type=int)
+    hold.add_argument("--reason", help="why it is safe (kept in the audit trail, 200 chars)")
+    hold.add_argument("--json", action="store_true", help="print the answer as JSON")
+    client_opts(hold)
+    hold.set_defaults(func=cmd_release_hold)
     cancel = sub.add_parser("cancel", help="cancel a job (joiners only leave the join list)")
     cancel.add_argument("job", type=int)
     cancel.add_argument(

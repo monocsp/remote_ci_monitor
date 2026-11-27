@@ -22,6 +22,7 @@ from remote_ci_monitor.core.model import (
     HostSample,
     Job,
     LocalMachine,
+    OpenHold,
     Pool,
     Preset,
     Progress,
@@ -190,6 +191,41 @@ def action_json(a: Action | None) -> dict[str, Any] | None:
     return {"code": a.code, "note": a.note, "at": iso(a.at)}
 
 
+def hold_item_json(h: OpenHold) -> dict[str, Any]:
+    """`/api/status` · `/api/health` 의 `irreversible_holds` 항목 하나(M5t-b §4.8). 키만 더했다 —
+    `schema_version` 은 그대로다. `worker` 는 로컬 레인 잡이면 null 이다."""
+    return {
+        "job_id": h.job_id,
+        "preset": h.preset,
+        "group": h.group,
+        "scope": h.scope,
+        "worker": h.worker,
+        "cause": h.cause,
+        "since": iso(h.since),
+    }
+
+
+def hold_doc_json(row: dict[str, Any] | None) -> dict[str, Any] | None:
+    """잡 문서(`GET /jobs/{id}`)의 `hold` — `store.hold_of` 의 행. 홀드가 없던 잡은 null(§4.8)."""
+    if row is None:
+        return None
+    history = []
+    for e in row.get("history") or []:
+        item = dict(e)
+        at = item.get("at")
+        item["at"] = iso(at) if isinstance(at, datetime) else at
+        history.append(item)
+    return {
+        "cause": row.get("cause"),
+        "created_at": iso(row.get("created_at")),
+        "released_at": iso(row.get("released_at")),
+        "release_kind": row.get("release_kind"),
+        "released_by": row.get("released_by"),
+        "release_reason": row.get("release_reason"),
+        "history": history,
+    }
+
+
 def _requester(job: Job) -> dict[str, str]:
     return {"name": job.requester.name, "label": job.requester.label}
 
@@ -221,7 +257,8 @@ def chain_json(job: Job) -> dict[str, Any]:
     null 이다.
 
     `retried_as` 는 `retried` 로 끝난 시도의 다음 시도다 — `rcm wait` 가 이 키를 따라간다.
-    `max_attempts` 는 제출 때 얼린 상한이다(반복을 안 켠 잡은 null)."""
+    `max_attempts` 는 제출 때 얼린 상한이다(반복을 안 켠 잡은 null). claim 때 「되돌릴 수
+    없음」을 얼린 잡도 null 이다 — 그 잡은 반복하지 않는다(`Job.retries_on`, P6-2 #1 · P6-3 #2)."""
     return {
         "chain_id": job.chain_id,
         "attempt": job.attempt,
@@ -229,7 +266,9 @@ def chain_json(job: Job) -> dict[str, Any]:
         "retried_as": job.retried_as,
         "max_attempts": (
             job.retry_max_attempts
-            if job.retry_on_exit is not None and not job.retry_disabled
+            if job.retry_on_exit is not None
+            and not job.retry_disabled
+            and job.irreversible is not True  # mutcheck: irreversible-retry-limit-shown
             else None
         ),
     }
@@ -351,8 +390,10 @@ def recent_json(
     base_url: str | None = None,
     action: Action | None = None,
     local: LocalMachine | None = None,
+    log_complete: bool | None = None,
 ) -> dict[str, Any]:
-    """끝난 잡 한 행. `action` 은 순수 층이 모른다 — 마커를 읽은 호출자(서버 · 알림)가 넘긴다."""
+    """끝난 잡 한 행. `action` 은 순수 층이 모른다 — 마커를 읽은 호출자(서버 · 알림)가 넘긴다.
+    `log_complete` 도 그렇다(M5t-b §4.6 — 참 · 거짓 · 모름 null, DB 를 읽은 서버가 넘긴다)."""
     started = job.started_at
     finished = job.finished_at
     job_seconds = (finished - started).total_seconds() if started and finished else None
@@ -404,6 +445,8 @@ def recent_json(
         "start_deadline": iso(job.start_deadline),
         # M5s — 반복 사슬(결정 211). 사슬은 마지막 시도 한 행으로 보이고 `attempt` 가 시도 수다
         **chain_json(job),
+        # M5t-b — 서버가 그 잡의 로그를 빠짐없이 받았나(참 · 거짓 · 모름). 키 추가만
+        "log_complete": log_complete,
     }
 
 
@@ -730,4 +773,11 @@ def status_json(
             )
             for p in model.pools
         ],
+        # M5t-b §4.8 — 열린 그룹 홀드(만든 순서). 없으면 [], 못 읽었으면 null · 키 추가만
+        # (schema_version 그대로)
+        "irreversible_holds": (
+            None  # mutcheck: status-holds-unknown-as-empty
+            if model.irreversible_holds is None
+            else [hold_item_json(h) for h in model.irreversible_holds]
+        ),
     }

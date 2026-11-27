@@ -159,6 +159,7 @@ def test_a_remote_claimant_without_a_report_keeps_its_remembered_host(tmp_path):
     srv = M5nServer(tmp_path)
     try:
         srv.reported("mbp", pool="mbp", host_key=HOST_B)
+        srv.new_process("mbp")  # M5t-b: 새 프로세스 = 새 세션
         srv.registered("mbp", pool="mbp")  # 새 프로세스 — 보고가 지워진다
         assert srv.app.report_of("mbp") is None
         c = srv.app.claimant_for("mbp", "mbp", srv.clock())
@@ -242,7 +243,7 @@ def test_a_slow_measurement_does_not_hold_the_heartbeat(monkeypatch):
         server = "http://10.0.0.2:8787"
         token = "t"
 
-        def heartbeat(self, jobs, host_sample=None):
+        def heartbeat(self, jobs, host_sample=None, **_kw):  # M5t-b: seq · claims_settled
             return {"generation": "1:1"}
 
         def spec(self):
