@@ -1504,11 +1504,16 @@ def test_pr4_report_evidence_hashes_are_sha256_of_relative_names() -> None:
     assert any(n.startswith("web/") and n.endswith(".png") for n in names)
 
 
-def test_pr4_changelog_unreleased_names_the_live_harness() -> None:
+def _changelog_m5tb() -> str:
+    """릴리스 뒤에는 M5t-b 항목이 `[Unreleased]` 가 아니라 그 버전의 절(0.12.0)에 있다 —
+    `[Unreleased]` 부터 M5t-b 앞의 마지막 판 `[0.11.1]` 절 앞까지를 본다."""
     text = (ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
     start = text.index("## [Unreleased]")
-    end = text.index("\n## [", start + 1)
-    assert "scripts/acceptance/m5tb_live.sh" in text[start:end]
+    return text[start : text.index("\n## [0.11.1]", start + 1)]
+
+
+def test_pr4_changelog_unreleased_names_the_live_harness() -> None:
+    assert "scripts/acceptance/m5tb_live.sh" in _changelog_m5tb()
 
 
 # ── batch-5: 판정이 「못 읽은 것」을 「없음」으로 읽지 않는다(PLAN.md 「fail-open 금지」) ─────────
@@ -1880,11 +1885,7 @@ def test_rl51_a_is_a_skip_line_that_names_its_unit_test() -> None:
 
 def test_pr4_changelog_claims_only_guards_the_harness_runs() -> None:
     # CHANGELOG 은 「launchd 라벨을 거절한다」고 했지만 is_prod_label 은 정의만 있고 불리지 않는다
-    text = (ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
-    start = text.index("## [Unreleased]")
-    bullet = next(
-        b for b in text[start : text.index("\n## [", start + 1)].split("\n- ") if "m5tb_live" in b
-    )
+    bullet = next(b for b in _changelog_m5tb().split("\n- ") if "m5tb_live" in b)
     calls = [x for x in script_text().splitlines() if "is_prod_label " in x and "() {" not in x]
     if not calls:
         assert "launchd label" not in bullet, bullet

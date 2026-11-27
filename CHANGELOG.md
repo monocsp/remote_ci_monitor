@@ -7,6 +7,8 @@ of a key bumps that number and is listed here.
 
 ## [Unreleased]
 
+## [0.12.0] - 2026-11-27
+
 ### Breaking changes
 - **Worker protocol 2: upgrade the server and every `rcm worker` together.** Each worker process
   now opens a session when it registers, numbers its claims and heartbeats, and the server checks
@@ -2625,7 +2627,8 @@ Python 3.11+ standard library only — zero runtime dependencies. API schema: `s
 - No partial-upload resume: an interrupted snapshot upload ends as `cancelled`; run `rcm run` again.
 - Basic auth is clear text — use it only behind TLS (Tailscale HTTPS or a reverse proxy).
 
-[Unreleased]: https://github.com/monocsp/remote_ci_monitor/compare/v0.11.1...HEAD
+[Unreleased]: https://github.com/monocsp/remote_ci_monitor/compare/v0.12.0...HEAD
+[0.12.0]: https://github.com/monocsp/remote_ci_monitor/compare/v0.11.1...v0.12.0
 [0.11.1]: https://github.com/monocsp/remote_ci_monitor/compare/v0.11.0...v0.11.1
 [0.11.0]: https://github.com/monocsp/remote_ci_monitor/compare/v0.10.0...v0.11.0
 [0.10.0]: https://github.com/monocsp/remote_ci_monitor/compare/v0.9.0...v0.10.0
