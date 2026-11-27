@@ -135,7 +135,12 @@ start time written and the one read back are the same text. Before it starts any
 refuses (exit 4, `REFUSED` and the reason) a `data_dir` under `~/.local/share/rcm`, `~/.config/rcm`
 or `/tmp`, a `--config` that is production's, names port 8787 or opens production's `data_dir`, an
 `rcm serve`, `rcm worker` or `rcm token` without `--config`, a client without `RCM_SERVER`, and
-whatever `tools/guard_production.py` would refuse as a Bash call. The server and the worker:
+whatever `tools/guard_production.py` would refuse as a Bash call. Port 8787 also counts when the
+config has no `[server]` table or no `port` (8787 is the default), and when `--port`, `--bind` or
+`--server` names it (they override the config). An abbreviated option (`--por`, `--conf`,
+`--data-d`) is read as the option rcm's argparse takes it for. A child that ends within a second
+of its start is exit 1, with the end of its log printed; one whose pid or start time could not be
+written is stopped and is exit 1 too. The server and the worker:
 
 ```sh
 D=$HOME/.local/share/rcm-devtest-<topic>
@@ -162,7 +167,9 @@ recorded start time and, for `rcm serve` and `rcm worker`, the command line stil
 a client has no `--config` (its `data_dir` reaches it through `HOME` and `RCM_SERVER`), so for a
 client the start time alone decides. Otherwise it sends nothing, prints both start times and the
 command line, one per line, and ends with `BLOCKED` (exit 3): the process you started is gone, the
-pid is no longer yours, and the row is BLOCKED with those lines as its reason. There is no lookup
+pid is no longer yours, and the row is BLOCKED with those lines as its reason. A `ps` that cannot
+run (missing, past its time limit, an odd exit) and a record that cannot be read (a directory, no
+permission, not UTF-8) are BLOCKED the same way: not knowing is not «gone». There is no lookup
 by name.
 
 ```sh
@@ -173,7 +180,9 @@ cd <abs worktree> && ./.venv/bin/python tools/live_proc.py signal --dir $D --nam
 
 At the end, `stop-all` stops what this `data_dir` recorded and nothing else: the same check, then
 SIGTERM, up to ten seconds of waiting, and SIGKILL to what still has the recorded start time. A
-recorded process that is already gone is reported, not signalled.
+recorded process that is already gone is reported, not signalled. A name it cannot confirm, before
+SIGTERM or while waiting after it, is BLOCKED and gets no SIGKILL; the others are still stopped,
+and the exit is 3.
 
 ```sh
 D=$HOME/.local/share/rcm-devtest-<topic>
