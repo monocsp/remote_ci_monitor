@@ -1085,3 +1085,106 @@ def test_b7_6_the_test_folder_passes_the_tools_own_tmp_rule(d: Path) -> None:
     # 도구의 기본 /tmp 규칙(`Places.tmp_roots` 기본값)을 통과해야 한다.
     places = lp.Places(home=d.parents[2], prod=gp.Production())
     assert lp.refusal(d, SLEEPER, places, cwd=d, environ={}) is None, d
+
+
+# --- batch-8: 덮어쓰기 완화는 그 값을 읽는 rcm 명령에만 ---------------------------------
+# 사례마다 `# B8-<n>` 은 batch-8 in 파일의 항목 번호다.
+
+
+@pytest.mark.parametrize(
+    ("argv", "body", "environ"),
+    [
+        ([sys.executable, "{d}/wrap.py", "--config", "{c}", "--port", "8791"], "port-less", {}),
+        ([sys.executable, "{d}/wrap.py", "--config", "{c}"], "port-less",
+         {"RCM_SERVER_PORT": "8791"}),
+        (["{d}/wrap.sh", "--config={c}", "--port=8791"], "port-8787", {}),
+        (["{d}/wrap.sh", "--config", "{c}"], "table-less", {"RCM_SERVER_PORT": "8791"}),
+        (["{d}/wrap.sh", "--config", "{c}", "--server", "http://127.0.0.1:8791"], "url-8787", {}),
+        (["{d}/wrap.sh", "--config", "{c}", "--server", "http://127.0.0.1:8791"], "url-auto", {}),
+        (["./.venv/bin/rcm", "token", "--config", "{c}"], "port-less",
+         {"RCM_SERVER_PORT": "8791"}),
+        (["./.venv/bin/rcm", "serve", "--config", "{c}", "--server", "http://127.0.0.1:8791"],
+         "url-8787", {}),
+    ],
+)  # fmt: skip
+def test_b8_1_an_override_counts_only_for_the_rcm_command_that_reads_it(
+    tmp_path: Path, d: Path, argv: list[str], body: str, environ: dict[str, str]
+) -> None:
+    # B8-1 — 명령줄 · 환경이 설정의 포트 · 서버를 이긴다고 보는 것은 안쪽 명령이 그 값을 실제로
+    # 읽을 때뿐이다: `--port` · `RCM_SERVER_PORT` 는 `rcm serve`, `--server` 는 `rcm worker` 와
+    # 클라이언트. 감싼 스크립트(`python wrap.py`)는 그 플래그를 안쪽 rcm 에 넘긴다는 보장이 없고,
+    # 넘기지 않으면 rcm 이 설정대로 8787 로 뜬다. 그래서 설정을 적힌 그대로(batch-6 의 엄격한
+    # 읽기) 본다. `rcm token` 은 포트를 쓰지 않고, `rcm serve` 는 `--server` 를 받지 않는다.
+    bodies = {
+        "port-less": f'[server]\ndata_dir = "{d}"\n',
+        "port-8787": f'[server]\nport = 8787\ndata_dir = "{d}"\n',
+        "table-less": 'title = "no server table"\n',
+        "url-8787": f'server = "http://127.0.0.1:8787"\ndata_dir = "{d}/worker"\n',
+        "url-auto": f'server = "auto"\ndata_dir = "{d}/worker"\n',
+    }
+    config = d / "b8.toml"
+    config.write_text(bodies[body], encoding="utf-8")
+    words = [word.format(d=d, c=config) for word in argv]
+    reason = _refusal(tmp_path / "home", d, words, environ=environ)
+    assert reason and ("8787" in reason or "discover" in reason), reason
+
+
+@pytest.mark.parametrize(
+    ("argv", "environ"),
+    [
+        (["./.venv/bin/rcm", "serve", "--config", "{c}", "--port", "8791"], {}),
+        (["./.venv/bin/rcm", "serve", "--config", "{c}"], {"RCM_SERVER_PORT": "8791"}),
+        ([sys.executable, "{d}/wrap.py", "--config", "{d}/server.toml", "--port", "8791"], {}),
+    ],
+)  # fmt: skip
+def test_b8_1_the_rcm_server_still_takes_its_own_override(
+    tmp_path: Path, d: Path, argv: list[str], environ: dict[str, str]
+) -> None:
+    # B8-1 — 대조: `rcm serve` 는 여전히 port 없는 설정 위의 `--port 8791` 을 받는다. 감싼 명령도
+    # 설정 자체가 시험 포트면 받는다.
+    config = d / "b8.toml"
+    config.write_text(f'[server]\ndata_dir = "{d}"\n', encoding="utf-8")
+    words = [word.format(d=d, c=config) for word in argv]
+    assert _refusal(tmp_path / "home", d, words, environ=environ) is None
+
+
+@pytest.mark.parametrize("port", ["true", "false", "8790.0", "[8790]", "{ value = 8790 }"])
+def test_b8_2_a_port_of_the_wrong_type_is_refused_even_when_it_is_not_8787(
+    tmp_path: Path, d: Path, port: str
+) -> None:
+    # B8-2 — `_port_value` 의 타입 검사는 rcm 이 설정 오류로 거부하는 꼴을 막는다. 8787 이 아닌
+    # 값이라 뒤의 `== 8787` 이 대신 막아 주지 않는다. 이 검사만 잡는 사례다.
+    config = _server_toml(d, "typed.toml", f"port = {port}\n")
+    reason = _refusal(tmp_path / "home", d, ["./.venv/bin/rcm", "serve", "--config", config])
+    assert reason and "cannot read the port" in reason, reason
+
+
+@pytest.mark.parametrize("server", ["8790", "true", "8790.0", "[8790]"])
+def test_b8_2_a_server_key_that_is_neither_table_nor_url_is_refused(
+    tmp_path: Path, d: Path, server: str
+) -> None:
+    # B8-2 — 맨 위의 `server` 가 표도 주소도 아니면(`server = 8790`) rcm 이 설정 오류로 거부한다.
+    # 무엇으로 뜰지 모르니 띄우지 않는다. 값이 8787 이 아니어서 포트 검사가 가려 주지 않는다.
+    (d / "odd.toml").write_text(f'server = {server}\ndata_dir = "{d}"\n', encoding="utf-8")
+    argv = ["./.venv/bin/rcm", "serve", "--config", f"{d}/odd.toml"]
+    reason = _refusal(tmp_path / "home", d, argv)
+    assert reason and "neither a table nor a URL" in reason, reason
+
+
+@pytest.mark.parametrize(
+    ("extra", "environ"),
+    [
+        (["--port", "abc"], {}),
+        (["--port="], {}),
+        ([], {"RCM_SERVER_PORT": ""}),
+        ([], {"RCM_SERVER_PORT": "eighty"}),
+    ],
+)
+def test_b8_3_an_override_rcm_cannot_read_is_refused(
+    tmp_path: Path, d: Path, extra: list[str], environ: dict[str, str]
+) -> None:
+    # B8-3 — rcm 은 `--port abc` 를 argparse 에서, `RCM_SERVER_PORT=""` 를 설정 읽기
+    # (`_coerce_scalar`)에서 거부한다. 무엇으로 뜰지 모르는 값은 설정이 시험 포트여도 받지 않는다.
+    argv = [*_good_server(d), *extra]
+    reason = _refusal(tmp_path / "home", d, argv, environ=environ)
+    assert reason and "cannot read the port" in reason, reason
