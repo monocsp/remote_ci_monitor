@@ -136,12 +136,20 @@ documents that stay in the repository are written in 평어체.
 
    `main` only takes a PR from `dev` (`gh pr create --base main --head dev`), and the `Releasing`
    section of `CONTRIBUTING.md` says when.
-4. Clean up — the branch is done (`--delete-branch` deleted it on GitHub), the worktree is done:
+4. Clean up — the branch is done (`--delete-branch` deleted it on GitHub), the worktree is done. Run it
+   in the main session's `dev` worktree (`remote_ci_monitor-dev`), never inside the one being removed:
    ```sh
+   git fetch --prune
+   git pull --ff-only
    git worktree remove ../remote_ci_monitor-<what-it-does>
    git branch -d <type>/<what-it-does>
-   git fetch --prune
    ```
+   Fetch first: once the remote branch is pruned, `-d` compares with this worktree's `dev`, so a `dev`
+   that has not pulled the merge commit refuses a merged branch. If `-d` still refuses, do not reach
+   for `-D`: `git branch -r --contains <type>/<what-it-does>` lists `origin/dev` when the merge commit
+   (`tools/merge_pr.py` merges with one) holds the branch. Then the fault is this worktree, not the
+   branch: `git status` must show `dev` checked out and level with `origin/dev`; fix that and `-d`
+   again. No `origin/dev` there means not merged, so stop and look.
    `git branch -d`, never `-D`: it refuses a branch whose commits are not merged. No `--force` on the
    removal and no `rm -rf`: a refusal means something is still in that worktree, so look at it first.
    Remove only the worktree this session made; one that holds QA evidence waits for B6
