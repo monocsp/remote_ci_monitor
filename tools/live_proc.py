@@ -25,8 +25,11 @@
 설정 위에 얹히는 `--port` · `--bind` · `--server` 의 8787 도, 그리고 rcm 의 argparse 가 받는
 줄임말(`--por` · `--conf` · `--data-d`)도 그 옵션으로 읽는다. 설정의 포트는 rcm 처럼 읽고
 (`port = "8787"` 도 8787), 판정은 rcm 의 덮어쓰기 순서에서 이긴 값으로 한다(`--port 8791` 이면
-port 없는 설정도 받는다). 다만 사람이 적은 8787(`--port` · `RCM_SERVER_PORT` · `--server` ·
-`RCM_SERVER`)은 이기지 않아도 거부한다. `rcm serve|worker|token` 은 `--config` 를 꼭 받고,
+port 없는 설정도 받는다). 그 덮어쓰기는 값을 읽는 rcm 명령에만 센다 — 포트는 `rcm serve`,
+주소는 `rcm worker` 와 클라이언트. 감싼 명령 · `rcm token` 의 설정은 적힌 그대로 본다(감싼
+스크립트가 `--port` 를 안쪽 rcm 에 넘긴다는 보장이 없다). 다만 사람이 적은
+8787(`--port` · `RCM_SERVER_PORT` · `--server` · `RCM_SERVER`)은 이기지 않아도 거부한다.
+`rcm serve|worker|token` 은 `--config` 를 꼭 받고,
 클라이언트 명령은 서버 주소(`RCM_SERVER` · `--server`)를 꼭 받는다. 워커 · 클라이언트의 이긴
 주소가 없거나 `auto` 면 거부한다 — 발견으로 운영 서버를 찾을 수 있다. 그리고 운영 가드 훅의
 판정(`guard_production.decide`)을 안쪽 명령에 그대로 묻는다 — 이 도구가 훅을 돌아가는 길이
@@ -328,13 +331,19 @@ def refusal(
         chosen = (flag_servers[-1] if flag_servers else "") or environ.get("RCM_SERVER") or None
     else:  # `rcm worker` 는 `--server ""` 도 얹는다. `RCM_SERVER` 는 읽지 않는다
         chosen = flag_servers[-1] if flag_servers else None
+    # 덮어쓰기는 그 값을 실제로 읽는 rcm 명령에만 센다(2026-11-27 batch-8): 포트는 `rcm serve`,
+    # 서버 주소는 `rcm worker` 와 클라이언트. 감싼 명령(`python wrap.py --port 8791`)은 그 플래그를
+    # 안쪽 rcm 에 넘긴다는 보장이 없고, `rcm token` 은 포트를, `rcm serve` 는 `--server` 를 읽지
+    # 않는다 — 그런 명령의 설정은 적힌 그대로 본다.
+    takes_port = subcommand == "serve"  # mutcheck: live-proc-wrapper-port-credited
+    takes_server = subcommand == "worker" or client  # mutcheck: live-proc-wrapper-server-credited
     for config in configs:
         reason = _config_refusal(
             _abs(config, cwd),
             places,
             subcommand=subcommand,
-            port_override=port_override,
-            server_override=chosen,
+            port_override=port_override if takes_port else None,
+            server_override=chosen if takes_server else None,
         )
         if reason is not None:
             return reason
