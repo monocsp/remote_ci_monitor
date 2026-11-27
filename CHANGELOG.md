@@ -131,6 +131,7 @@ of a key bumps that number and is listed here.
   It exits 1 on a `FAIL`, 2 when it refuses to start, 3 on an `UNKNOWN`, and 0 only when every
   check passed or was skipped on purpose. The 2026-11-27 run and its numbers are in
   [the acceptance report](docs/acceptance/reports/2026-11-27-m5tb-acceptance.md).
+  ([#289](https://github.com/monocsp/remote_ci_monitor/pull/289))
 
 ### Fixed
 - **`/api/status` no longer answers 500 when its queue section fails.** That section is `null`

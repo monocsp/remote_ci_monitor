@@ -5,7 +5,9 @@
   이 커밋의 `src/` 와 `web/` 는 `dev` 의 `37e7b98c22dfa0ebad73b4ef6c04181c0a374aa8` 과 같다. M5t-b 의
   PR1(#284), PR2(#286), PR3(#285)이 모두 머지된 판이다. 하네스는 시험 폴더에 도우미
   `bin/m5tb_helper.py` 를 써서 부르는데, 세 번째 실기의 시험 폴더에 남은 도우미는 이 커밋의 하네스가
-  쓰는 것과 바이트 단위로 같았다. 두 번째 실기는 판정을 고치기 전의 `02b6bc3` 에서 돌았다.
+  쓰는 것과 바이트 단위로 같았다. 두 번째 실기는 판정을 고치기 전의 `02b6bc3` 에서 돌았다. 그 뒤
+  pipefail 줄 다섯 곳만 고친 `6bf4fffd480afa01527b7376bde9bb278874bc8e` 에서는 부분 실기를 한 번
+  돌렸다(아래 「마지막 head 의 부분 실기」).
 - 명세: `docs/m5tb-workplan.md` 의 §5 PR4 행, §6 의 10 · 13 · 19, §7.1 의 실기 대상 행, 측정값 F78 ·
   F83 · F84. M5t-b 는 원격 잡의 결과가 연락이 끊겨도 한 번만, 맞게 돌아오게 하는 작업이다.
 - 다시 돌리는 법: 워크트리에서 `M5TB_PORT=8797 bash scripts/acceptance/m5tb_live.sh` 를 돌린다. G 만료를
@@ -15,12 +17,13 @@
   판정 줄 없이 끝난 단계도 끝에 `UNKNOWN … no verdict` 줄을 받으므로 3 이 된다. 모두 PASS 나 SKIP
   이어야 0 이다.
 
-이번 실기는 세 번 돌렸다. 첫 실기는 하네스 결함 둘 때문에 뒤쪽 단계가 돌지 못했다. 하네스를 고친 뒤
+전체 실기는 세 번 돌렸다. 첫 실기는 하네스 결함 둘 때문에 뒤쪽 단계가 돌지 못했다. 하네스를 고친 뒤
 돌린 두 번째 실기는 FAIL 과 UNKNOWN 이 없었지만, 그 뒤 판정 함수에서 fail-open 을 찾아 판정을 고쳤다.
 고친 판정으로 돌린 세 번째 실기에서도 FAIL 과 UNKNOWN 이 없었고 종료 코드는 0 이었다. 실기 판정
 22개가 PASS 였고, 하네스가 일부러 돌리지 않는 몫 8개는 SKIP 이며 SKIP 마다 그 경우를 덮는 시험을
-적었다. 아래 표와 증거는 모두 세 번째 실기의 것이다. 남은 것은 Linux 머신에서의 `/proc` 신원 확인과
-그 머신의 `ps` 꼴 확인이다. 이 머신에는 Linux 가 없다.
+적었다. 아래 표와 증거는 따로 적지 않으면 세 번째 실기의 것이다. 그 뒤 마지막 head 가 바꾼 줄을
+지나는 단계만 `--only` 로 다시 돌렸고 그 단계들은 PASS 였다. 남은 것은 Linux 머신에서의 `/proc`
+신원 확인과 그 머신의 `ps` 꼴 확인이다. 이 머신에는 Linux 가 없다.
 
 ## 판정을 고친 뒤 다시 돌린 실기
 
@@ -58,6 +61,31 @@
 이 실기는 다른 프로젝트의 게이트 잡과 겹쳐 이 Mac 의 부하가 약 7 이었다. 두 번째 실기(옛 판정,
 10:43 시작, 18분 47초, PASS 22 · SKIP 7, 종료 0)는 이력으로 아래 실기 표에만 남긴다.
 
+## 마지막 head 의 부분 실기
+
+세 번째 실기는 `341c5d3` 에서 돌았다. 그 뒤 마지막 head `6bf4fff` 는 하네스의 pipefail 줄 다섯 곳을
+고쳤다. `| head -1` 을 `sed -n 1p` 와 `find … -print -quit` 로 바꾼 것이고 판정 함수와 도우미는 그대로다.
+시험 폴더에 남은 도우미는 세 번째 실기의 것과 바이트 단위로 같았다. 그 줄을 지나는 단계를 보려고
+2026-11-27 12:24(KST)에 `--only RL34,RL40,RL5,RL29` 로 부분 실기를 돌렸고 7분 22초 걸렸다. 다른
+프로젝트의 게이트 잡 둘과 겹쳐 이 Mac 의 부하가 약 50 이었다.
+
+- 바뀐 줄을 지난 단계는 모두 PASS 였다. RL34(`run_self_stop_timing`)는 고친 두 줄로 워커 로그에서
+  문턱과 줄인 grace 를 읽었다. 사실 파일에 문턱 62 · 52 와 grace 를 줄였다는 표시가 있고, 명령은 기본
+  grace 에서 62.081초, 큰 grace 에서 52.002초에 사라졌다. RL40(`run_finish_offline`)은 고친 `find` 로
+  워커 로컬 로그를 찾아 서버 `log.txt` 와 sha256 을 견줬다(「same log」). RL5(`run_partition_past_g`)는
+  고친 `find` 로 닫힌 뒤에도 워커 로컬 로그가 늘어나는 것을 봤다. 같은 단계의 RL1(62.832초)과 RL42 도
+  PASS 다.
+- 다섯째 줄인 RL45-web 의 「and N more」 수 읽기는 `run_kill_worker` 안에 있어 이 부분 실기에서 돌지
+  않았다. 이 줄은 레포 잠금 `test_no_early_exit_consumer_under_pipefail` 이 꼴을 보고, RL45-web 판정은
+  세 번째 실기에서 옛 꼴의 줄로 PASS 였다.
+- RL29 와 RL29-web 은 UNKNOWN 이고 종료 코드는 3 이다. 다섯 `lost` 끝 가운데 `worker_replaced` 는
+  RL10(`run_fence`), `orphan_unverified` 는 RL15(`run_orphan`)가 만드는데, `--only` 에서는 이 두 단계가
+  돌지 않아 그렇게 끝난 잡이 없었다. 판정은 찾을 잡이 없다는 것을 PASS 로 넘기지 않고
+  「no job ended so in this run」으로 UNKNOWN 을 냈다. 다섯 끝은 세 번째 실기에서 모두 PASS 였다.
+
+결과는 PASS 5 · SKIP 3(RL34-bf · RL40-5xx · RL42-gc) · FAIL 0 · UNKNOWN 2, 종료 3 이다. 증거는 아래
+「증거 파일」의 둘째 목록에 있다.
+
 ## 무엇을 어디서 어떻게 돌렸나
 
 시험은 모두 Apple Silicon Mac 한 대(macOS 27.2)에서 했다. 이 Mac 에서는 운영 rcm 이 서비스로 돌며 포트
@@ -83,8 +111,11 @@
 | 첫째 | 2026-11-27 09:57 | 10분 8초 | 다른 프로젝트의 게이트 잡(이 Mac 의 부하 12~19) | PASS 9 · SKIP 2 · UNKNOWN 6 · FAIL 1, 뒤쪽 단계가 돌지 못함 |
 | 둘째 | 2026-11-27 10:43 | 18분 47초 | 없음(부하 약 3) | 옛 판정. PASS 22 · SKIP 7 · FAIL 0 · UNKNOWN 0, 종료 0 |
 | 셋째 | 2026-11-27 11:51 | 18분 46초 | 다른 프로젝트의 게이트 잡(부하 약 7) | PASS 22 · SKIP 8 · FAIL 0 · UNKNOWN 0, 종료 0 |
+| 넷째(부분) | 2026-11-27 12:24 | 7분 22초 | 다른 프로젝트의 게이트 잡 둘(부하 약 50) | `--only RL34,RL40,RL5,RL29`, 마지막 head `6bf4fff`. 바뀐 줄을 지난 단계 PASS, RL29 · RL29-web 은 RL10 · RL15 가 돌지 않아 찾을 잡이 없어 UNKNOWN. PASS 5 · SKIP 3 · FAIL 0 · UNKNOWN 2, 종료 3 |
 
 하네스 출력의 시각은 UTC 다(셋째 실기 `02:51:33` 이 KST 11:51:33).
+SKIP 수는 단계가 `verdict <ID> SKIP` 으로 낸 줄을 센 것이고, `main` 이 `summary.txt` 끝에 덧붙이는 `row, not live` 줄은 세지 않는다.
+그 40줄은 아래 「단계별 판정」 표 밑에 적은 단위 시험 · pytest e2e 몫이고, `verdict` 를 거치지 않아 콘솔 출력에도 나오지 않는다.
 
 ## 단계별 판정 (셋째 실기)
 
@@ -95,7 +126,7 @@
 | ID | 판정 | 잰 값과 판정 근거 |
 |---|---|---|
 | RL50 | PASS | 중계가 claim 응답 전의 heartbeat 를 붙잡았다 늦게 놓았다. 표식 잡은 `running` 이고 프로세스가 살아 있으며 홀드 0, 같은 그룹 둘째 잡은 `queued` |
-| RL10 | PASS | 같은 토큰으로 둘째 프로세스를 띄우자 첫 프로세스가 0.986초 뒤 종료 0 으로 끝났다. 잡 프로세스가 사라졌고 `lost`(`worker_replaced`), `rcm wait` 종료 3, 홀드 0, 그 이름의 세션 2 |
+| RL10 | PASS | 같은 토큰으로 둘째 프로세스를 띄우자 첫 프로세스가 종료 0 으로 끝났다. 끝난 시간은 판정이 보지 않고 사실 파일(`facts/RL10.txt`)에도 없다. 하네스가 `timeline.txt` 에 적은 줄은 `RL10 first process gone after 0.986 s` 였다. 잡 프로세스가 사라졌고 `lost`(`worker_replaced`), `rcm wait` 종료 3, 홀드 0, 그 이름의 세션 2 |
 | RL51 | PASS | SIGTERM 을 무시하는 자식이 사라진 시간: 워커가 산 채 취소 3.751초, 워커 `kill -9` 3.234초, 명령이 grace 를 거의 다 쓰고 끝남 3.804초. 명세는 (b)(c) 모두 「첫 SIGTERM + grace_J + 0.5초」다. 워커 `kill -9` 는 그 SIGTERM 이 감독자가 부모의 죽음을 알아챈 뒤라 감지 상한(0.25 + 0.06 = 0.31초, F78)과 측정 0.04초를 더해 grace_J + 0.85 = 3.85초가 상한이다. 워커가 산 경우는 하네스가 첫 SIGTERM 을 볼 수 없어 `rcm cancel` 이 돌아온 때부터 잰다. 그래서 취소를 워커에 싣는 다음 heartbeat(HB 1초)와 그 왕복 0.5초를 더해 grace_J + 1 + 0.5 + 0.5 = 5초가 상한이고 (c) 도 같다. (c) 의 옛 상한 grace_J + 4 + 1 = 8초는 다른 몫(「셋 다 플래그 → 그룹 소멸 ≤ grace_J + 4초」)이었다. 이 실기 값은 세 상한 안이다 |
 | RL51-a | SKIP | (a) 감독자가 시작 확인을 지난 뒤 명령 Popen 전에 SIGTERM 을 받는 창은 주입 훅이 있어야 한다. `test_rl51_a_sigterm_in_the_popen_window_reaches_the_command`(`tests/test_job_supervisor_m5tb.py`). 이 SKIP 줄은 격리 확인 1라운드 뒤 하네스에 더했고 셋째 실기의 요약에 처음 나왔다 |
 | RL18 | PASS | 릴리스 비밀 원문이 서버 `log.txt`, `rcm logs`, SSE(984바이트 받음), 웹 로그 라우트, 잡 문서 어디에도 0번. 서버 `log.txt` 는 가린 출력과 바이트 단위로 같음, 중계를 끊은 뒤 워커가 조각을 다시 보냄, `log_complete` true. 판정은 다섯 곳마다 읽었다는 증거를 요구하고 이 실기에서 모두 있었다. 가린 값이 서버 `log.txt` · `rcm logs`(종료 0) · 웹 로그(HTTP 200)에 각 200번, 잡 문서(HTTP 200)에 프리셋 이름 2번, SSE 에 그 잡의 사건 6번이다. 두 번째 실기의 옛 판정은 SSE 바이트 수만 보았다 |
@@ -339,6 +370,33 @@ a1cbba3896c4507bdaec659f912dc2e836943090373c8bae9c57e98d101bc87e  rl18-sse.bin
 0105e1c714a9cdc7dca0a6f7d34cb28ee96ac1f8d36ca8ea0d6ea7ffe95fa960  m5tb-live-20261127-1151.txt
 4945b9916b48b46f78c7ed2f3002cde5f0872370b2dd9bd6d552dd36a2828ffb  m5tb-live-20261127-1043.txt
 b27be5cb0d5855de8575eca9d88174e42c67ffd9b9bed1858faf7aa2e0595522  m5tb-live-20261127-0957.txt
+```
+
+마지막 head 의 부분 실기의 증거 폴더는 `<HOME>/.local/share/rcm-devtest-m5tb/live-0af0381a/out` 이고
+이름은 그 폴더 기준이다. 맨 아래 줄은 그 실기의 콘솔 출력이고 위 목록의 콘솔 출력 셋과 같은 폴더에
+있다. `judge.err` 는 비어 있다. `facts/RL5.txt` 와 `facts/RL42.txt` 는 잰 시간이 없는 사실만 담아 세
+번째 실기의 것과 sha256 이 같다.
+
+```text
+d4ad313eab8032010dde1dfa545ab6f5bfd1a419d1985fe7a5504b4d73ac2e6a  summary.txt
+1a34c852243f2e85569dc304075ce630503902fc18f3c0799be4ddcb58b3564e  timeline.txt
+6d372f412c2c4fe59d21d1da0e080215d922e86eb81d30f3f6c5d6cc46a81c38  jobs.json
+c1a2c4828307fcfbfa07436b90dceffaca8999b03aaf1156cd99959faadae2a1  lost.tsv
+8ad343819d69ae74f2bfc2b145ad33a1ba7f23e5f8178314aa840f7223bc4ae1  relay.log
+050ce4ec3f4ceddd00ca917945ecff3cc31c984b5052a3ad4f457ddf14b4c376  env.txt
+e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  judge.err
+9e3441bee5376385dd08927d306bc57bfe38c459b48dd8a44cf6e0fca96c124a  facts/RL1.txt
+98080311d835f7ad314ffad96bdf7b3b92597e1143b34626dc592d7951ed3a36  facts/RL29-web.txt
+5006a050c3b38b675ccd795364b2b345773efaeb92693be69bc8d797a4091285  facts/RL29.txt
+2a7b2771a3568eff7caac38781cf167b4238918cdf5e0014f7e3c24d7c1463f8  facts/RL34.txt
+45c8d01ad6af80d7386907b4133f69a9908e2105b31d2e4f716997966681d145  facts/RL40.txt
+3aa681b9d58f1c67c55c71a7b766a0a1af69198d921ddf5c3cfcedeafa82e6c9  facts/RL42.txt
+7b0552671c9dc38d4b355b11ffcc948b66992253b0f3a01144a527cd23192649  facts/RL5.txt
+a03963ce71c0ac9bd0f4973011705f242bdaa6c5611a149c4111e449c250cf01  web/rl29-en.png
+5192f7b3b0d6bd9ba8438f65c41d3071ec85943d831814da3a5705979392f011  web/rl29-ko.png
+1b33f3e91aa216ba52c00399c694811d57a1a7c0369c54f58bdb92ba2d5660e9  web/rl29-en.txt
+d0dd045072d8689a63d5fbc41f1b7424aa446b2bb67717fe8cd1bd5afaeffd76  web/rl29-ko.txt
+532aa2faf34d9d345e479d3a6bd35be277a7612d8a28f125606d508177dade20  m5tb-live-20261127-1224.txt
 ```
 
 폴더에는 이 밖에 단계별 `rcm wait` 출력(`rl*-wait*.json`, `.err`), 워커 로그(`worker-<이름>-<n>.log`),
