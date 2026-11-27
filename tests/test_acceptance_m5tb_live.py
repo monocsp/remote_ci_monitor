@@ -1325,3 +1325,17 @@ def test_rl15_runners_report_unstarted_jobs_through_not_started() -> None:
     for step, workers in (("RL15", "rl15"), ("RL1", "rl1a,rl1b"), ("RL8", "rl8a,rl8b"),
                           ("RL2", "rl2a,rl2b"), ("RL43", "rl43a,rl43b,rl43e")):  # fmt: skip
         assert re.search(rf"not_started {step} {workers} ", text), step
+
+
+def test_rl29_every_runner_can_be_rerun_with_only() -> None:
+    # RL29 — claim-lost(worker_restarted_without_job 을 만드는 단계)는 어느 행에도 없어서
+    # `--only` 로 실패한 단계만 다시 돌리면 RL29 가 그 끝을 볼 수 없었다
+    reachable: set[str] = set()
+    for _id, kind, runners, _what in steps():
+        if kind == "live":
+            reachable |= set(runners.split("+"))
+    every = var("ALL_RUNNERS").split()
+    assert set(every) <= reachable, sorted(set(every) - reachable)
+    r = sh("runners_for", "RL29")
+    assert r.returncode == 0, r.stderr
+    assert r.stdout.split() == ["run_claim_lost", "run_lost_ends"], r.stdout
