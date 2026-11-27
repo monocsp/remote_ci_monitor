@@ -1389,3 +1389,104 @@ def test_f78_local_measurements_run_when_only_picks_rl43() -> None:
     text = script_text()
     main = text[text.index("main() {") :]
     assert re.search(r'has_runner "\$runners" run_kill_worker && run_f78_local', main), main[:200]
+
+
+# ── 보고서 docs/acceptance/reports/2026-11-27-m5tb-acceptance.md (§5 PR4 행 · §6 의 10 · 19) ──
+REPORT = ROOT / "docs" / "acceptance" / "reports" / "2026-11-27-m5tb-acceptance.md"
+VERDICTS = ("PASS", "FAIL", "UNKNOWN", "SKIP")
+
+
+def report_text() -> str:
+    assert REPORT.is_file(), f"{REPORT.relative_to(ROOT)} is missing"
+    return REPORT.read_text(encoding="utf-8")
+
+
+def report_rows() -> dict[str, list[str]]:
+    """보고서 표에서 첫 칸이 판정 ID 인 행 → 나머지 칸(ID 는 백틱 없이 쓴다)."""
+    rows: dict[str, list[str]] = {}
+    for line in report_text().splitlines():
+        m = re.match(r"^\| ((?:RL\d+|F78)(?:-[a-z0-9]+)?) \| (.*) \|$", line)
+        if m:
+            rows.setdefault(m.group(1), []).append(m.group(2))
+    return rows
+
+
+def skip_ids() -> set[str]:
+    """실기 단계가 SKIP 으로 내는 판정 ID — 하네스의 `verdict <ID> SKIP` 줄."""
+    return set(re.findall(r"verdict (\S+) SKIP ", script_text()))
+
+
+def test_pr4_report_gives_every_verdict_the_harness_prints_a_row(tmp_path: Path) -> None:
+    # 판정 ID 는 하네스(판정 표 JUDGES · SKIP 줄 · 단계 표의 live 행)에서 읽는다
+    # — 손으로 베끼지 않는다
+    mod = helper(tmp_path)
+    want = set(mod.JUDGES) | skip_ids() | {s[0] for s in steps() if s[1] == "live"}
+    rows = report_rows()
+    missing = sorted(want - set(rows))
+    assert missing == [], f"the report has no row for {missing}"
+    no_verdict = sorted(
+        i for i in want if not any(re.search(rf"\b{v}\b", c) for c in rows[i] for v in VERDICTS)
+    )
+    assert no_verdict == [], f"rows without a verdict word: {no_verdict}"
+
+
+def test_pr4_report_skip_rows_name_tests_that_exist() -> None:
+    rows = report_rows()
+    for sid in sorted(skip_ids()):
+        cells = " ".join(rows.get(sid, []))
+        assert "SKIP" in cells, (sid, cells)
+        assert re.search(r"test_\w+", cells), f"{sid}: the SKIP row names no covering test"
+    defs: set[str] = set()
+    for p in (ROOT / "tests").glob("test_*.py"):
+        defs |= set(re.findall(r"^def (test_\w+)", p.read_text(encoding="utf-8"), re.M))
+    unknown = []
+    for m in re.finditer(r"(test_[A-Za-z0-9_]+)(\.py|\*)?", report_text()):
+        name, tail = m.group(1), m.group(2)
+        if tail == ".py":
+            ok = (ROOT / "tests" / f"{name}.py").is_file()
+        elif tail == "*":
+            ok = any(d.startswith(name) for d in defs)
+        else:
+            ok = name in defs
+        if not ok:
+            unknown.append(m.group(0))
+    assert unknown == [], f"the report names tests that do not exist: {sorted(set(unknown))}"
+
+
+def test_pr4_report_has_no_personal_paths_or_private_addresses() -> None:
+    text = report_text()
+    assert "<HOME>" in text
+    bad: list[str] = []
+    for pat in (
+        r"/Users/",
+        r"/home/[a-z]",
+        r"~/",
+        r"[\w.+-]+@[\w-]+\.[\w.]+",
+        r"\b10\.\d+\.\d+\.\d+\b",
+        r"\b192\.168\.\d+\.\d+\b",
+        r"\b172\.(?:1[6-9]|2\d|3[01])\.\d+\.\d+\b",
+        r"\b100\.(?:6[4-9]|[7-9]\d|1[01]\d|12[0-7])\.\d+\.\d+\b",
+        r"\b[\w-]+\.local\b",
+    ):
+        bad += [m.group(0) for m in re.finditer(pat, text)]
+    assert bad == [], bad
+
+
+def test_pr4_report_evidence_hashes_are_sha256_of_relative_names() -> None:
+    lines = re.findall(r"^([0-9a-f]{64})  (\S+)$", report_text(), re.M)
+    assert len(lines) >= 20, "the report lists fewer than 20 evidence files with their sha256"
+    for _, name in lines:
+        assert not name.startswith(("/", "~", "<")), name
+    names = {n for _, n in lines}
+    # 판정을 낸 요약 · 시간표 · 잡 목록과 사실 파일 · 화면은 모두 있어야 한다
+    for need in ("summary.txt", "timeline.txt", "jobs.json", "lost.tsv"):
+        assert need in names, need
+    assert any(n.startswith("facts/") for n in names)
+    assert any(n.startswith("web/") and n.endswith(".png") for n in names)
+
+
+def test_pr4_changelog_unreleased_names_the_live_harness() -> None:
+    text = (ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
+    start = text.index("## [Unreleased]")
+    end = text.index("\n## [", start + 1)
+    assert "scripts/acceptance/m5tb_live.sh" in text[start:end]
