@@ -135,10 +135,18 @@ start time written and the one read back are the same text. Before it starts any
 refuses (exit 4, `REFUSED` and the reason) a `data_dir` under `~/.local/share/rcm`, `~/.config/rcm`
 or `/tmp`, a `--config` that is production's, names port 8787 or opens production's `data_dir`, an
 `rcm serve`, `rcm worker` or `rcm token` without `--config`, a client without `RCM_SERVER`, and
-whatever `tools/guard_production.py` would refuse as a Bash call. Port 8787 also counts when the
-config has no `[server]` table or no `port` (8787 is the default), and when `--port`, `--bind` or
-`--server` names it (they override the config). An abbreviated option (`--por`, `--conf`,
-`--data-d`) is read as the option rcm's argparse takes it for. A child that ends within a second
+whatever `tools/guard_production.py` would refuse as a Bash call. The port and the server
+address are judged by the value that wins in rcm's own order: for `rcm serve`, `--port`, then
+`RCM_SERVER_PORT`, then the config's `port`, then the default 8787 (so a config with no `[server]`
+table or no `port` is 8787 unless `--port` or `RCM_SERVER_PORT` names another); for `rcm worker`,
+`--server`, then the config's `server`; for a client, `--server`, then `RCM_SERVER`. A quoted port
+(`port = "8787"`) is read as rcm reads it, and a port rcm cannot read is refused. An 8787 you wrote
+on the command or in the environment (`--port`, `--bind`, `--server`, `RCM_SERVER_PORT`,
+`RCM_SERVER_BIND`, `RCM_SERVER`) is refused even where it does not win. A worker or client whose
+winning address is empty or `auto` is refused: it would discover a server on the network, maybe
+production's. An abbreviated option (`--por`, `--conf`, `--data-d`) is read as the option rcm's
+argparse takes it for. A name whose earlier record cannot be confirmed gone (`ps` fails, the
+record cannot be read) is refused rather than written over. A child that ends within a second
 of its start is exit 1, with the end of its log printed; one whose pid or start time could not be
 written is stopped and is exit 1 too. The server and the worker:
 
