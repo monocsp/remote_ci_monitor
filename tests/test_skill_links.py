@@ -29,7 +29,11 @@
 from __future__ import annotations
 
 import importlib.util
+import os
 import re
+import shutil
+import signal
+import subprocess
 import sys
 from pathlib import Path
 
@@ -83,8 +87,12 @@ DEFINES_RE = re.compile(
 #: 정의를 다시 적는 줄 — 심각도 낱말과 정본의 기준 낱말 둘 이상이 한 줄에.
 CRITERIA = ("fail-open", "traceback", "secret", "auth", "corrupt", "migrat", "mutcheck")
 #: `pkill` · `killall` · `pgrep` — 이름으로 죽이지 않는 규칙(「띄울 때 적은 pid 에만」)도 정본
-#: 한 곳에만 둔다.
-TEST_SERVER_WORDS = ("8790", "8899", "rcm-devtest", "pkill", "killall", "pgrep")
+#: 한 곳에만 둔다. `lstart` · `.start` — 신원(pid 와 시작 시각)을 읽고 적는 줄도 정본 밖에서
+#: 다시 쓰지 않는다. 다시 쓴 사본은 재확인 비교나 `LC_ALL=C TZ=UTC` 를 빠뜨린 채 남는다.
+TEST_SERVER_WORDS = (
+    *("8790", "8899", "rcm-devtest"),
+    *("pkill", "killall", "pgrep", "lstart", ".start"),
+)
 TOML_BLOCK_RE = re.compile(r"^```toml\n(.*?)^```", re.S | re.M)
 #: 워크트리 `.venv` 가 아닌 명령 꼴. 허용: `./.venv/bin/python tools/…` ·
 #: `./.venv/bin/python scripts/mutcheck.py` · `./.venv/bin/ruff`.
@@ -325,9 +333,25 @@ ADOPTED = (
     # 가리킨다. 신원은 pid 와 띄운 직후 적은 시작 시각이다 — 명령줄 대조만으로는 `--config` 가
     # 없는 클라이언트(`HOME` · `RCM_SERVER` 로 data_dir 을 받는다)가 영원히 통과하지 못했다.
     ("skills/_shared/test-server.md", "## Signals"),
-    ("skills/_shared/test-server.md", "-o lstart= > $D/worker.start"),
+    # 바늘은 신원을 적는 줄과 다시 읽어 견주는 줄 그 자체다. `ps` 는 레포의 읽기 코드
+    # (`remote_worker.ps_start`)처럼 `LC_ALL=C TZ=UTC` 로 — 적을 때와 읽을 때 같은 글이 나온다.
+    *(
+        (
+            "skills/_shared/test-server.md",
+            f"LC_ALL=C TZ=UTC ps -p $(cat $D/{n}.pid) -o lstart= > $D/{n}.start",
+        )
+        for n in ("server", "worker", "client")
+    ),
+    (
+        "skills/_shared/test-server.md",
+        '[ "$(LC_ALL=C TZ=UTC ps -p $P -o lstart=)" = "$(cat $D/$N.start)" ]',
+    ),
+    # 서버 · 워커의 명령줄 조건은 산문이 아니라 블록의 비교다. 거부하면 이유를 찍는다.
+    ("skills/_shared/test-server.md", "CMD=$(LC_ALL=C TZ=UTC ps -p $P -o command=)"),
+    ("skills/_shared/test-server.md", '*"--config $D/"*) MINE=yes'),
+    ("skills/_shared/test-server.md", 'echo "command: $CMD"; echo BLOCKED'),
     ("skills/_shared/test-server.md", "a client has no `--config`"),
-    ("skills/_shared/test-server.md", "send nothing and the row is BLOCKED"),
+    ("skills/_shared/test-server.md", "sends nothing, prints both start times"),
     # 셸이 작업 제어 없이 뒤로 보낸 작업은 SIGINT 를 무시한 채 시작한다(파이썬은 그때 ctrl-C
     # 처리기를 달지 않는다). 그래서 SIGINT 를 받을 클라이언트는 `set -m` 아래에서 띄운다.
     ("skills/_shared/test-server.md", "sh -c 'set -m;"),
@@ -369,6 +393,10 @@ RETIRED = (
     # 옛 신원 확인 — 명령줄만 보면 클라이언트는 이 data_dir 의 설정을 보일 수 없다.
     ("skills/_shared/test-server.md", "still shows this `data_dir`'s config"),
     ("skills/edge-audit/SKILL.md", "«Parallel servers and cleanup»"),
+    # 명령줄 조건을 산문으로만 적던 문장 — 이제 블록의 `case` 가 견준다.
+    ("skills/_shared/test-server.md", "must also show this `data_dir`'s config"),
+    # 두 시각을 이유로 적으라고만 하고 찍는 줄이 없던 문장.
+    ("skills/_shared/test-server.md", "with the\ntwo start times as its reason"),
 )
 
 
@@ -386,27 +414,139 @@ def test_the_edge_scope_page_gives_the_reason_not_a_quote() -> None:
     assert "2026-11-26" not in text and "The owner of the project these skills" not in text
 
 
-#: 실기 레인에서 프로세스에 신호를 보내는 수단 — 이 낱말이 든 행 · 항목은 pid 규칙 절을 가리킨다.
-SIGNAL_RE = re.compile(r"SIGTERM|SIGINT|kill -9|stop the test server")
+#: 프로세스에 신호를 보내는 말 — 낱말이 바뀌어도 걸리게 넓게 잡는다.
+SIGNAL_RE = re.compile(r"\bSIG[A-Z]{2,}|\bsignal|\bkill|ctrl-C|\binterrupt|\bterminat", re.I)
+#: 실기 레인 표에서는 서버 · 워커를 멈추거나 다시 띄우는 말도 신호를 보내는 말이다.
+STOP_RE = re.compile(r"\bstop|\brestart", re.I)
+LIVE_LANE_HEAD = "| condition | means | described in |"
+
+
+def _live_lane_rows(text: str) -> list[str]:
+    lines = text.splitlines()
+    start = lines.index(LIVE_LANE_HEAD) + 2  # 머리줄과 구분줄 다음
+    rows = []
+    for line in lines[start:]:
+        if not line.startswith("|"):
+            break
+        rows.append(line)
+    return rows
 
 
 def test_every_signal_row_of_the_live_lane_points_at_the_pid_rule() -> None:
-    # 표의 네 행(서버 재시작 · 워커 죽이기 · 서버를 잃기 · ctrl-C)이 모두 적은 pid 와 «Signals» 를
-    # 말한다. 행 수도 잠근다 — 신호 낱말을 지우면 행이 골라지지 않아 초록이 된다.
+    # 행 목록이나 행 수가 아니라 표의 모든 행을 본다. 신호 · 멈춤 · 재시작을 말하거나 «Signals»
+    # 를 가리키는 행은 적은 pid 와 «Signals» 를 둘 다 말한다. 행이 늘어도, 신호 낱말을 다른 말로
+    # 바꿔도(SIGINT → interrupt) 그 행은 골라진다.
     text = (SKILLS / "_shared" / "edge-scope.md").read_text(encoding="utf-8")
-    rows = [line for line in text.splitlines() if line.startswith("| ") and SIGNAL_RE.search(line)]
-    assert len(rows) == 4, rows
-    for row in rows:
+    rows = _live_lane_rows(text)
+    assert rows, f"edge-scope.md has no {LIVE_LANE_HEAD!r} table"
+    picked = [r for r in rows if "«Signals»" in r or SIGNAL_RE.search(r) or STOP_RE.search(r)]
+    assert picked, rows
+    for row in picked:
         assert "recorded pid" in row and "test-server.md` «Signals»" in row, row
 
 
 def test_live_verify_points_its_signals_at_the_pid_rule() -> None:
-    # live-verify 의 「필요한 때」 목록과 §2 의 워커 항목 — 신호를 말하는 항목마다 «Signals» 링크.
+    # live-verify 본문(머리말 뒤)에서 신호를 말하는 항목마다 «Signals» 링크.
     text = (SKILLS / "live-verify" / "SKILL.md").read_text(encoding="utf-8")
-    items = [p for p in _paragraphs(text) if SIGNAL_RE.search(p)]
-    assert len(items) >= 2, items
+    body = text.split("\n---\n", 1)[1]
+    items = [p for p in _paragraphs(body) if SIGNAL_RE.search(p)]
+    assert items, "live-verify names no signal"
     for item in items:
         assert "test-server.md) «Signals»" in item, item
+
+
+def _sh_blocks(text: str) -> list[str]:
+    return re.findall(r"^```sh\n(.*?)^```", text, re.S | re.M)
+
+
+def test_the_ctrl_c_client_waits_on_a_slow_preset(tmp_path: Path) -> None:
+    # ctrl-C 행을 따라 하려면 신호가 닿을 때 클라이언트가 아직 기다리고 있어야 한다. `ok` 는
+    # 곧바로 끝나 SIGINT 가 빈 pid 에 간다. 그래서 클라이언트는 느린 가짜 프리셋으로 기다린다.
+    text = TEST_SERVER_CANON.read_text(encoding="utf-8")
+    heredoc = re.search(r'^cat > "\$D/server\.toml" <<EOF\n(.*?)^EOF$', text, re.S | re.M)
+    assert heredoc, "test-server.md has no server.toml heredoc"
+    data_dir = tmp_path / "rcm-devtest-t"
+    config = tmp_path / "server.toml"
+    config.write_text(
+        heredoc.group(1).replace("$P", "8790").replace("$D", str(data_dir)), encoding="utf-8"
+    )
+    presets = {p.name: p for p in load_server_config(config, environ={}).presets}
+    client = re.search(r"sh -c 'set -m;[^']*?rcm run (\S+) --by acceptance([^']*)'", text)
+    assert client, "test-server.md has no set -m client block"
+    assert "--no-wait" not in client.group(2), client.group(0)
+    preset = presets.get(client.group(1))
+    assert preset, f"the client runs {client.group(1)!r}, not a preset of the heredoc"
+    sleep = re.search(r"\bsleep (\d+)", " ".join(preset.argv))
+    assert sleep and int(sleep.group(1)) >= 10, preset.argv
+    assert preset.timeout_seconds > int(sleep.group(1)), preset
+
+
+def _ps(pid: int, field: str) -> str:
+    env = dict(os.environ, LC_ALL="C", TZ="UTC")
+    out = subprocess.run(
+        ["ps", "-p", str(pid), "-o", f"{field}="], env=env, capture_output=True, text=True
+    )
+    return out.stdout
+
+
+@pytest.mark.parametrize("shell", ["sh", "zsh"])
+@pytest.mark.parametrize(
+    ("name", "config", "start", "signalled"),
+    [
+        ("worker", "{d}/worker.toml", "recorded", True),
+        ("server", "{d}/server.toml", "recorded", True),
+        ("client", None, "recorded", True),
+        # 시작 시각이 다르다 — 그 pid 는 이제 남의 것이다.
+        ("worker", "{d}/worker.toml", "Thu Jan  1 00:00:00 1970", False),
+        ("client", None, "Thu Jan  1 00:00:00 1970", False),
+        # 시작 시각은 같아도 명령줄에 이 data_dir 의 설정이 없다(운영 워커일 수 있다).
+        ("worker", "/elsewhere/worker.toml", "recorded", False),
+        ("server", None, "recorded", False),
+        # 적은 시작 시각 파일이 비었다.
+        ("worker", "{d}/worker.toml", "", False),
+    ],
+)
+def test_the_signal_check_block_signals_only_its_own_process(
+    tmp_path: Path, shell: str, name: str, config: str | None, start: str, signalled: bool
+) -> None:
+    # «Signals» 의 재확인 블록을 문서에서 꺼내 그대로 돌린다. 그 비교 줄을 지우면 남의 pid 에
+    # 신호가 가서 빨강이다.
+    if shutil.which(shell) is None:
+        pytest.skip(f"no {shell}")
+    text = TEST_SERVER_CANON.read_text(encoding="utf-8")
+    blocks = [b for b in _sh_blocks(text) if "kill -$SIG" in b]
+    assert len(blocks) == 1, blocks
+    block = re.sub(r"\bN=\w+", f"N={name}", blocks[0].replace("<topic>", "t"))
+    block = re.sub(r"\bSIG=\w+", "SIG=TERM", block)
+    d = tmp_path / ".local" / "share" / "rcm-devtest-t"
+    d.mkdir(parents=True)
+    argv = [sys.executable, "-c", "import time; time.sleep(30)"]
+    if config:
+        argv += ["--config", config.format(d=d)]
+    proc = subprocess.Popen(argv)
+    try:
+        (d / f"{name}.pid").write_text(f"{proc.pid}\n", encoding="utf-8")
+        recorded = _ps(proc.pid, "lstart") if start == "recorded" else (start and start + "\n")
+        (d / f"{name}.start").write_text(recorded, encoding="utf-8")
+        env = {"PATH": os.environ["PATH"], "HOME": str(tmp_path)}
+        out = subprocess.run(
+            [shell, "-c", block], env=env, capture_output=True, text=True, timeout=10
+        )
+        if signalled:
+            assert proc.wait(timeout=5) == -signal.SIGTERM, out
+            assert "BLOCKED" not in out.stdout, out
+        else:
+            assert proc.poll() is None, out
+            lines = out.stdout.splitlines()
+            assert lines and lines[-1] == "BLOCKED", out
+            # 거부한 이유: 적은 시각 · 지금 시각 · 명령줄을 한 줄씩.
+            assert any(line.startswith("recorded start:") for line in lines), out
+            assert any(line.startswith("current start:") for line in lines), out
+            assert any(line.startswith("command:") and "time.sleep" in line for line in lines), out
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+            proc.wait(timeout=5)
 
 
 def test_the_pr_cleanup_prunes_before_it_deletes_the_branch() -> None:
