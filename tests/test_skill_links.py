@@ -274,3 +274,122 @@ def test_the_title_scan_reads_each_form(text: str, refused: bool) -> None:
     guard = _load_guard_naming()
     found = _title_examples(text, guard.TYPES)
     assert any(guard.check_subject(t) for _, _, t in found) is refused, found
+
+
+# --- 2026-11-27 다른 프로젝트의 개발 · QA 스킬 새 판을 들인 규칙 ---------------------------------
+#
+# 들인 규칙은 정본 한 곳에 두고 나머지는 가리킨다(dev-loop 의 「Canon」 원칙). 아래 셋을 잠근다.
+# 1) 들인 규칙이 정본 파일에 실제로 있고, 그 규칙을 쓰는 자리가 정본을 가리킨다.
+# 2) 셈이 든 규칙(계획-시험 대조를 사람에게 올리는 때, 실기 레인의 상한)은 정본 밖에서 다시 적지
+#    않는다. 2026-11-25 이식 때 「UNSOUND 세 번이면 사람에게」가 네 파일에 따로 적혔다 — 하나를
+#    고치면 셋이 옛 규칙으로 남는다.
+# 3) 스캐너가 `tests/` 경로와 맨 `python -m pytest` 도 본다.
+
+#: (파일, 그 파일에 있어야 하는 글) — 규칙의 정본과 그 정본을 가리키는 자리.
+ADOPTED = (
+    # 다시 받는 계획-시험 대조: 앞 검토를 주고, 바뀌지 않은 행은 이월하고,
+    # 새 약점은 반례가 있어야 받는다.
+    ("skills/_shared/scenario-trace.md", "## Re-reviews"),
+    ("skills/_shared/scenario-trace.md", "counterexample"),
+    ("skills/_shared/scenario-trace.md", "carried r<N-1>"),
+    ("skills/_shared/scenario-trace.md", "## Ambiguous"),
+    # 사람이 읽는 글에서는 SOUND · COVERED 대신 커버리지 말로 쓴다.
+    ("skills/_shared/scenario-trace.md", "## Words for people"),
+    ("skills/_shared/scenario-trace.md", "커버리지 미충족"),
+    ("skills/_shared/decision-page.md", "scenario-trace.md) «Words for people»"),
+    # 한 행에는 관측할 결과 하나, 시간 · 나타남 행은 두 경계를 다 적는다.
+    ("skills/_shared/scenario-trace.md", "one observable result"),
+    # 사람에게 올리는 때의 정본은 isolated-verifier «Rounds» 6 이다.
+    ("agents/isolated-verifier.md", "«not closed» twice"),
+    ("skills/build-pr/SKILL.md", "«Rounds» 6"),
+    ("skills/qa-defect-fix/SKILL.md", "«Rounds» 6"),
+    # P5 실기 레인: 고르는 기준은 edge-scope, 절차는 edge-audit.
+    ("skills/_shared/edge-scope.md", "## Live lane"),
+    ("skills/edge-audit/SKILL.md", "## Live lane"),
+    ("skills/edge-audit/SKILL.md", "edge-scope.md) «Live lane»"),
+    ("skills/workplan/SKILL.md", "edge-scope.md) «Live lane»"),
+    ("agents/isolated-verifier.md", "P5 live lane"),
+    # 압축 뒤에는 돌리던 스킬과 그 단계 절을 다시 연다.
+    ("skills/_shared/stage-lead.md", "reopen"),
+    ("skills/dev-batch/SKILL.md", "«When a lead stops or is needed again»"),
+    # 이번 세션에서 부딪친 것: 하네스만 바꾼 PR · 머지 뒤 dev · 시계 주입 · 변이 앵커.
+    ("skills/pr/SKILL.md", "tests/test_skill_links.py"),
+    ("skills/pr/SKILL.md", "`rcm/ci` on the merge commit"),
+    ("skills/pr/SKILL.md", "git branch -d"),
+    ("agents/build-lead.md", "injected clock"),
+    ("agents/build-lead.md", "pattern not found"),
+    # QA: 코드 지적은 문서만 바꾼 커밋으로 닫지 않는다 · 그림 이름의 배율 접미사.
+    ("skills/qa-defect-verify/SKILL.md", "documents-only commit"),
+    ("skills/qa-defect-report/SKILL.md", "@2x"),
+)
+
+
+@pytest.mark.parametrize(("rel", "needle"), ADOPTED)
+def test_each_adopted_rule_sits_where_it_belongs(rel: str, needle: str) -> None:
+    text = (CLAUDE / rel).read_text(encoding="utf-8")
+    assert needle in text, f".claude/{rel} lacks {needle!r}"
+
+
+#: 셈이 든 규칙 — (정본, 이름, 규칙을 적는 문단의 꼴). 문단 = 빈 줄로 나뉜 덩어리.
+COUNTED_RULES = (
+    (
+        AGENTS / "isolated-verifier.md",
+        "plan-to-test escalation",
+        re.compile(r"(?=.*\bUNSOUND\b)(?=.*\b(twice|three|third|five|fifth|in a row)\b)", re.S),
+    ),
+    (
+        SKILLS / "_shared" / "edge-scope.md",
+        "live lane cap",
+        re.compile(r"(?=.*\blive lane\b)(?=.*\b(five|5)\b)", re.S | re.I),
+    ),
+)
+
+
+def _paragraphs(text: str) -> list[str]:
+    return [p for p in re.split(r"\n\s*\n", text) if p.strip()]
+
+
+@pytest.mark.parametrize(
+    ("canon", "name", "pattern"), COUNTED_RULES, ids=[n for _, n, _ in COUNTED_RULES]
+)
+def test_counted_rules_are_written_only_in_their_canon(
+    canon: Path, name: str, pattern: re.Pattern[str]
+) -> None:
+    paragraphs = _paragraphs(canon.read_text(encoding="utf-8"))
+    assert any(pattern.match(p) for p in paragraphs), f"{_rel(canon)} no longer states the {name}"
+    elsewhere = {
+        _rel(p): [
+            q.strip()[:80] for q in _paragraphs(p.read_text(encoding="utf-8")) if pattern.match(q)
+        ]
+        for p in _docs()
+        if p != canon
+    }
+    restated = {k: v for k, v in elsewhere.items() if v}
+    assert not restated, f"the {name} is restated outside {_rel(canon)}: {restated}"
+
+
+@pytest.mark.parametrize(
+    ("text", "found"),
+    [
+        ("run `tests/test_nope.py` first", ["tests/test_nope.py"]),
+        ("the CDP helper in `tests/test_web_browser.py`", ["tests/test_web_browser.py"]),
+        ("`node --test tests/web/queue_card.test.js`", ["tests/web/queue_card.test.js"]),
+        ("`tests/test_docs_m5*.py`", []),  # 글롭은 파일 이름이 아니다
+        ("`scripts/acceptance/<topic>_live.sh`", []),  # 자리표시
+    ],
+)
+def test_the_path_scan_reads_each_form(text: str, found: list[str]) -> None:
+    assert TOOL_RE.findall(text) == found
+
+
+@pytest.mark.parametrize(
+    ("text", "bare"),
+    [
+        ("python3 -m pytest tests/test_x.py -q", True),
+        ("then `python -m pytest`", True),
+        ("./.venv/bin/python -m pytest tests/test_x.py -q", False),
+        ("pytest covers those", False),  # 낱말일 뿐 명령이 아니다
+    ],
+)
+def test_the_command_scan_reads_each_form(text: str, bare: bool) -> None:
+    assert any(p.search(text) for p in BARE_COMMANDS.values()) is bare
