@@ -1570,6 +1570,105 @@ def test_pi27_other_token_paths_keep_their_shape(ps):
     assert ps.req("POST", "/resume", token="admin")[0] == 200
 
 
+def sse_first_frame(srv, token: str | None = None, headers: dict | None = None):
+    """`GET /events` 의 상태와 첫 프레임(200 이면 빈 줄까지, 아니면 본문) — 그다음 끊는다."""
+    conn = http.client.HTTPConnection("127.0.0.1", srv.port, timeout=15)
+    hdrs = dict(headers or {})
+    if token is not None:
+        hdrs["Authorization"] = f"Bearer {srv.tokens.get(token, token)}"
+    conn.request("GET", "/events", headers=hdrs)
+    resp = conn.getresponse()
+    if resp.status != 200:
+        payload = resp.read()
+        conn.close()
+        return resp.status, payload
+    frame = b""
+    while not frame.endswith(b"\n\n"):
+        line = resp.fp.readline()
+        if not line:
+            break
+        frame += line
+    conn.close()
+    return 200, frame
+
+
+def test_pi27_g6_events_shelf_and_driver_tokens_keep_their_shape(tmp_path, monkeypatch):
+    """G6: `TokenInfo` 를 만드는 `_token_info` 를 모든 토큰 읽기가 함께 쓰게 된 뒤에도 SSE
+    `/events`, 보관함, 릴리스 드라이버 토큰 발급 · 폐기의 상태 코드와 키가 그대로다. 읽기 인증이
+    켜진(`basic`) 서버라 토큰 검사가 실제로 돈다. 짝지은 토큰(worker · client)도 같은 길을 간다."""
+    from remote_ci_monitor.release_driver import KIND_START, DriverRunner, token_name
+
+    s = PairServer(tmp_path, read_auth="basic")
+    try:
+        s.tokens["gone"] = s.store.add_token("gone-client", now=T0, kind="client")
+        s.store.revoke_token("gone-client", T0)
+        s.tokens["paired-w"] = s.paired_by_exchange("worker", "build-01")["token"]
+        s.tokens["paired-c"] = s.paired_by_exchange("client", "laptop-1")["token"]
+        basic = base64.b64encode(f"alice-laptop:{s.tokens['alice']}".encode()).decode()
+
+        # SSE /events
+        unauth = b'{"error": "read access requires a token on this server"}'
+        for who in (None, "no-such-token", "gone"):
+            assert sse_first_frame(s, who) == (401, unauth), who
+        for who in ("alice", "admin", "build-02", "paired-w", "paired-c"):
+            status, frame = sse_first_frame(s, who)
+            assert status == 200 and frame.startswith(b"event: hello\nid: 0\ndata: "), who
+            hello = json.loads(frame.split(b"data: ", 1)[1])
+            assert set(hello) == {"last_id", "generated_at", "server"}, who
+        assert sse_first_frame(s, headers={"Authorization": f"Basic {basic}"})[0] == 200
+
+        # 보관함 — 읽기 목록과 admin 삭제
+        for who in (None, "no-such-token", "gone"):
+            assert s.req("GET", "/api/shelf", token=who)[0] == 401, who
+        for who in ("alice", "admin", "build-02", "paired-w", "paired-c"):
+            status, body = s.req("GET", "/api/shelf", token=who)
+            assert status == 200 and set(body) == {"items", "storage", "display_timezone"}, who
+        worker_refused = "worker tokens cannot use the client API"
+        for who, want in (
+            (None, (401, "read access requires a token on this server")),
+            ("alice", (403, "admin token required")),
+            ("paired-c", (403, "admin token required")),
+            ("build-02", (403, worker_refused)),
+            ("paired-w", (403, worker_refused)),
+            ("admin", (404, "not on the shelf")),
+        ):
+            status, body = s.req("DELETE", "/shelf/1", token=who)
+            assert (status, body["error"]) == want, who
+
+        # 릴리스 드라이버의 내부 토큰 — 띄우는 동안 client 토큰, 못 띄우면 곧바로 폐기
+        seen: dict = {}
+        real_add = s.store.add_token
+
+        def add_and_use(name, **kw):
+            secret = real_add(name, **kw)
+            seen["secret"] = secret
+            seen["while"] = s.req("GET", "/api/whoami", token=secret)
+            return secret
+
+        monkeypatch.setattr(s.store, "add_token", add_and_use)
+        runner = DriverRunner(s.store, now_fn=s.clock, log=lambda line: None)
+        with pytest.raises(OSError):
+            runner.spawn(
+                data_dir=s.cfg.data_dir,
+                repo="app",
+                driver=tmp_path / "gone" / "driver.sh",
+                checkout=tmp_path / "gone",
+                build_name="1.0.1",
+                kind=KIND_START,
+                started_by="macmini-admin",
+                env={},
+                server_url="http://127.0.0.1:1",
+            )
+        name = token_name("app", 1)
+        assert seen["while"] == (200, {"name": name, "admin": False, "kind": "client"})
+        assert s.req("GET", "/api/whoami", token=seen["secret"])[0] == 401
+        row = {t.name: t for t in s.store.list_tokens()}[name]
+        assert (row.kind, row.admin, row.revoked_at) == ("client", False, s.clock())
+        assert (row.pool, row.pair_id, row.paired_host, row.paired_addr) == (None,) * 4
+    finally:
+        s.close()
+
+
 # ── PI46 거절 MAC ───────────────────────────────────────────────────────────
 
 

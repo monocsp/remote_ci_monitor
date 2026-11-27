@@ -9372,6 +9372,18 @@ MUTANTS = (
             "test_pi35_f_g5_rcm_serve_on_a_full_disk_exits_2_and_leaves_no_key",
         ),
     ),
+    Mutant(
+        # 모든 토큰 읽기가 함께 쓰는 _token_info 가 kind 를 버림 — worker 토큰이 client 로 보여
+        # 보관함 삭제 같은 길의 거절 문장 · 판단이 바뀐다(P6 G6 · PI27)
+        name="pair-token-info-kind-dropped",
+        path="src/remote_ci_monitor/store.py",
+        old='            kind=row["kind"] or TOKEN_CLIENT,\n',
+        new="            kind=TOKEN_CLIENT,\n",
+        tests=(
+            "tests/test_pairing_server.py::"
+            "test_pi27_g6_events_shelf_and_driver_tokens_keep_their_shape",
+        ),
+    ),
 )
 
 
