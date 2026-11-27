@@ -47,6 +47,12 @@ argv = ["sh", "-c", "echo ::rcm::step::hello; echo ok"]
 timeout_seconds = 60
 
 [[presets]]
+name = "slow"   # a client waiting on it is still waiting when its signal lands («Signals»)
+description = "Fake preset: prints one step marker, sleeps 30 seconds and exits 0"
+argv = ["sh", "-c", "echo ::rcm::step::hello; sleep 30; echo ok"]
+timeout_seconds = 60
+
+[[presets]]
 name = "ok-remote"   # its pool is served only by the test worker
 argv = ["sh", "-c", "echo ::rcm::step::hello; echo ok"]
 pool = "devtest-remote"
@@ -56,7 +62,7 @@ printf 'server = "http://127.0.0.1:%s"\npool = "devtest-remote"\ndata_dir = "%s/
   > "$D/worker.toml"
 ```
 
-`ok` runs on the server's own local lane (`"worker": null` in the job's JSON): a server ↔ worker
+`ok` and `slow` run on the server's own local lane (`"worker": null` in the job's JSON): a server ↔ worker
 scenario on it passes with no worker at all. A worker scenario submits `ok-remote`, and its PASS needs
 the job's `worker` (`GET /jobs/<N>`) to name the test worker; `null` is UNKNOWN, whatever the exit code.
 
@@ -120,36 +126,47 @@ never with a glob.
 and any client you will signal (an `rcm run` for a ctrl-C), in the background, and in the same call
 write its pid and then its start time into `data_dir`: `<name>.pid` and `<name>.start`, with the
 names `server`, `worker` and `client`. The pid and that start time together are the process's
-identity. The worker (the server the same way):
+identity. Every `ps` here runs under `LC_ALL=C TZ=UTC`, as the worker's own reader does
+(`ps_start` in `src/remote_ci_monitor/remote_worker.py`), so the start time written and the one read
+back are the same text. The server and the worker:
 
 ```sh
 D=$HOME/.local/share/rcm-devtest-<topic>
-cd <abs worktree> && { HOME=$D/home RCM_WORKER_TOKEN=$(cat $D/worker.token) ./.venv/bin/rcm worker --config $D/worker.toml > $D/worker.log 2>&1 & echo $! > $D/worker.pid; } && ps -p $(cat $D/worker.pid) -o lstart= > $D/worker.start
+cd <abs worktree> && { HOME=$D/home ./.venv/bin/rcm serve --config $D/server.toml > $D/server.log 2>&1 & echo $! > $D/server.pid; } && LC_ALL=C TZ=UTC ps -p $(cat $D/server.pid) -o lstart= > $D/server.start
+cd <abs worktree> && { HOME=$D/home RCM_WORKER_TOKEN=$(cat $D/worker.token) ./.venv/bin/rcm worker --config $D/worker.toml > $D/worker.log 2>&1 & echo $! > $D/worker.pid; } && LC_ALL=C TZ=UTC ps -p $(cat $D/worker.pid) -o lstart= > $D/worker.start
 ```
 
-A client that will get SIGINT starts under `sh -c 'set -m; …'`, without `--no-wait` so the signal
-lands while it waits. A background job of a shell without job control starts with SIGINT ignored,
-Python then sets no ctrl-C handler, and the signal does nothing (`signal.getsignal(SIGINT)` is
-`SIG_IGN` there); `set -m` turns job control on. zsh refuses `set -m` outside a terminal, so it is `sh`:
+A client that will get SIGINT starts under `sh -c 'set -m; …'` and submits the `slow` preset without
+`--no-wait`, so it is still waiting when the signal lands (`ok` ends before it). A background job of
+a shell without job control starts with SIGINT ignored, Python then sets no ctrl-C handler, and the
+signal does nothing (`signal.getsignal(SIGINT)` is `SIG_IGN` there); `set -m` turns job control on.
+zsh refuses `set -m` outside a terminal, so it is `sh`:
 
 ```sh
 D=$HOME/.local/share/rcm-devtest-<topic>
-cd <abs worktree> && D=$D sh -c 'set -m; HOME=$D/home RCM_SERVER=http://127.0.0.1:<port> RCM_TOKEN=$(cat $D/client.token) ./.venv/bin/rcm run ok --by acceptance > $D/client.log 2>&1 & echo $! > $D/client.pid' && ps -p $(cat $D/client.pid) -o lstart= > $D/client.start
+cd <abs worktree> && D=$D sh -c 'set -m; HOME=$D/home RCM_SERVER=http://127.0.0.1:<port> RCM_TOKEN=$(cat $D/client.token) ./.venv/bin/rcm run slow --by acceptance > $D/client.log 2>&1 & echo $! > $D/client.pid' && LC_ALL=C TZ=UTC ps -p $(cat $D/client.pid) -o lstart= > $D/client.start
 ```
 
-Every stop, SIGTERM, `kill -9` or SIGINT, the live lane's included, reads both files again and
-signals only when `ps -p <pid> -o lstart=` still prints the recorded start time:
+Every stop, SIGTERM, `kill -9` or SIGINT, the live lane's included, goes through this block, with
+`N` set to `server`, `worker` or `client` and `SIG` to `TERM`, `KILL` or `INT`. It reads both files
+again and signals only when `ps` still prints the recorded start time and, for `rcm serve` and
+`rcm worker`, the command line still holds this `data_dir`'s `--config $D/…`;
+a client has no `--config` (its `data_dir` reaches it through `HOME` and `RCM_SERVER`), so for a
+client the start time alone decides. Otherwise it sends nothing, prints both start times and the
+command line, one per line, and ends with `BLOCKED`: the process you started is gone, the pid is
+no longer yours, and the row is BLOCKED with those lines as its reason.
 
 ```sh
-D=$HOME/.local/share/rcm-devtest-<topic>; N=worker; P=$(cat $D/$N.pid)
-[ -s $D/$N.start ] && [ "$(ps -p $P -o lstart=)" = "$(cat $D/$N.start)" ] && kill -TERM $P
+D=$HOME/.local/share/rcm-devtest-<topic>; N=worker; SIG=TERM; P=$(cat $D/$N.pid)
+CMD=$(LC_ALL=C TZ=UTC ps -p $P -o command=)
+MINE=no; [ $N = client ] && MINE=yes; printf '%s\n' "$CMD" | grep -qF -- "--config $D/" && MINE=yes
+if [ -s $D/$N.start ] && [ "$(LC_ALL=C TZ=UTC ps -p $P -o lstart=)" = "$(cat $D/$N.start)" ] && [ $MINE = yes ]; then
+  kill -$SIG $P
+else
+  echo "recorded start: $(cat $D/$N.start)"; echo "current start: $(LC_ALL=C TZ=UTC ps -p $P -o lstart=)"
+  echo "command: $CMD"; echo BLOCKED
+fi
 ```
-
-For `rcm serve` and `rcm worker`, `ps -p <pid> -o command=` must also show this `data_dir`'s config
-(their `--config $D/…`); a client has no `--config` (its `data_dir` reaches it through `HOME` and
-`RCM_SERVER`), so for a client the start time alone decides. If either check differs, the process
-you started is gone and the pid is no longer yours: send nothing and the row is BLOCKED, with the
-two start times as its reason.
 
 Never by name: `pkill rcm`, `killall` or a `pgrep` pattern also hit the production launchd server
 and worker on this build machine.
