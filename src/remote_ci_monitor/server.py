@@ -188,6 +188,7 @@ from remote_ci_monitor.janitor import Janitor, reconcile_shelf_on_start
 from remote_ci_monitor.materialize import blob_path, stale_blob_keys
 from remote_ci_monitor.mdns import Responder
 from remote_ci_monitor.notify import Notifier
+from remote_ci_monitor.pairing import load_or_create_pair_key
 from remote_ci_monitor.release_driver import (
     KIND_CONFIRM,
     KIND_RETRY,
@@ -556,10 +557,14 @@ class App(RemoteWorkersMixin, CapabilitiesMixin, ShelfAppMixin):
         version: str = __version__,
         debug: bool = False,
         mono_fn: Callable[[], float] | None = None,
+        pair_key: bytes | None = None,
     ):
         self.config = config
         self.store = store
         self.now_fn = now_fn
+        # 서버 신원 키(M5t-c §4.2). `serve()` 는 기동 때 읽어 넘긴다. 직접 만든 App(시험)은 처음
+        # 쓸 때 `data_dir` 에서 읽거나 만든다(`PairingMixin.pair_key`)
+        self._pair_key = pair_key
         # 단조 시계(M5t-b 결정 266) — 끊김 유예는 벽시계가 아니라 이것으로 잰다. 바닥은 기동 시각.
         # 주입 시계만 받은 곳(시험)에서는 그 시계를 따른다 — 시간을 미는 시험이 유예도 민다
         if mono_fn is None:
@@ -6733,6 +6738,14 @@ def serve(config: ServerConfig, *, debug: bool = False) -> int:
     except BaseException:
         httpd.server_close()
         raise
+    try:
+        # 서버 신원 키(M5t-c §4.2) — 없고 살아 있는 짝 토큰이 있으면 여기서 기동을 거절한다
+        # (`PairKeyError` 는 `StoreError` 라 `cannot start server: …` 종료 2 가 된다, F23)
+        pair_key = load_or_create_pair_key(data_dir, store)
+    except BaseException:
+        httpd.server_close()
+        store.close()
+        raise
     # 두 줄은 **DB 가 열린 뒤에** 찍는다 — 못 열면 거절이 `rcm:` 한 줄이어야 하기
     # 때문이다(2026-09-10 사고 · tests/test_cli_serve_refusal.py). 잰 값은 각 구간의
     # 실제 소요라, 어느 쪽이 느렸는지는 그대로 남는다.
@@ -6741,7 +6754,7 @@ def serve(config: ServerConfig, *, debug: bool = False) -> int:
     progress.step("port", f"http://{bound_host}:{bound_port}", seconds=bound_at - began)
     progress.step("database", f"schema v{DB_VERSION}", seconds=opened_at - bound_at)
     try:
-        app = App(config, store, debug=debug)
+        app = App(config, store, debug=debug, pair_key=pair_key)
         httpd.attach(app)
     except BaseException:
         httpd.server_close()

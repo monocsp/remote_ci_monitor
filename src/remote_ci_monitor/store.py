@@ -85,7 +85,7 @@ from remote_ci_monitor.core.supersede import SUPERSEDED, branch_of, repo_of, sup
 #: (M5j G4 · `tool_missing`). 취소·유실처럼 스크립트에 대해 아무 말도 못 한 잡이다.
 WINDOW_EXCLUDED_CODES: tuple[str, ...] = ("tool_missing",)
 
-DB_VERSION = 26
+DB_VERSION = 27
 #: 제출 capability 의 역할(M5j G5 · 결정 87). 요청자는 잡을 취소하고, 합류자는 자기 참여만 뺀다.
 ROLE_CANCEL_JOB = "cancel_job"
 ROLE_LEAVE_SUBMISSION = "leave_submission"
@@ -336,8 +336,13 @@ CREATE TABLE IF NOT EXISTS tokens (
   admin INTEGER NOT NULL DEFAULT 0,
   created_at REAL NOT NULL,
   revoked_at REAL,
-  kind TEXT NOT NULL DEFAULT 'client'
+  kind TEXT NOT NULL DEFAULT 'client',
+  pool TEXT,
+  pair_id TEXT,
+  paired_host TEXT,
+  paired_addr TEXT
 );
+CREATE UNIQUE INDEX IF NOT EXISTS tokens_pair_id ON tokens(pair_id);
 CREATE TABLE IF NOT EXISTS server_state (
   key TEXT PRIMARY KEY,
   value TEXT NOT NULL
@@ -734,6 +739,16 @@ _MIGRATIONS: dict[int, tuple[str, ...]] = {
         _IRREVERSIBLE_HOLDS_SQL,
         _IRREVERSIBLE_HOLDS_INDEX_SQL,
     ),
+    # v26 → v27(M5t-c · docs/m5tc-workplan.md §4.5 · 결정 293): 짝짓기 토큰의 칸 넷 — 묶인 풀,
+    # 서버 신원의 `pair_id`(K 를 파생하는 이름, 비밀이 아니다), 붙은 머신의 정리한 이름과 주소.
+    # 옛 행은 전부 NULL = 사람이 옮긴 토큰이다. `pair_id` 는 고유 색인(NULL 은 여럿 허용).
+    27: (
+        "ALTER TABLE tokens ADD COLUMN pool TEXT",
+        "ALTER TABLE tokens ADD COLUMN pair_id TEXT",
+        "ALTER TABLE tokens ADD COLUMN paired_host TEXT",
+        "ALTER TABLE tokens ADD COLUMN paired_addr TEXT",
+        "CREATE UNIQUE INDEX IF NOT EXISTS tokens_pair_id ON tokens(pair_id)",
+    ),
 }
 
 
@@ -961,6 +976,12 @@ class SessionFenced(StoreError):
     판정을 믿을 수 없다 — 그 사이 같은 이름의 새 프로세스가 등록했을 수 있다."""
 
 
+#: 토큰 행을 `TokenInfo` 로 읽는 열(v27 의 넷 포함 — 등록 검사 · spec 거르기 · 증명 검사가 본다)
+_TOKEN_COLS = (
+    "name, sha256, admin, created_at, revoked_at, kind, pool, pair_id, paired_host, paired_addr"
+)
+
+
 @dataclass(frozen=True)
 class TokenInfo:
     name: str
@@ -968,6 +989,15 @@ class TokenInfo:
     created_at: datetime
     revoked_at: datetime | None = None
     kind: str = TOKEN_CLIENT  # client | admin | worker — `admin` 불리언과 항상 일치(M5b-2)
+    # M5t-c(v27 · §4.5 「TokenInfo · verify_token」): 짝짓기로 받은 토큰만 값이 있다
+    pool: str | None = None  # 묶인 풀(짝지은 worker 토큰만)
+    pair_id: str | None = None  # 서버 신원 K 를 파생하는 이름 — 비밀이 아니다
+    paired_host: str | None = None  # 붙은 머신의 정리한 host_name(원문이 아니다)
+    paired_addr: str | None = None  # 교환 요청의 접속 주소
+
+
+class TokenNameTaken(StoreError):
+    """그 이름의 토큰 행이 이미 있다(폐기된 행 포함 — 이름은 행이 점유한다, F1)."""
 
 
 @dataclass(frozen=True)
@@ -4334,37 +4364,109 @@ class Store:
             raise StoreError(f"token '{name}' already exists") from e
         return secret
 
+    @staticmethod
+    def _token_info(row: sqlite3.Row) -> TokenInfo:
+        return TokenInfo(
+            name=row["name"],
+            admin=bool(row["admin"]),
+            created_at=_dt(row["created_at"]),
+            revoked_at=_dt(row["revoked_at"]),
+            kind=row["kind"] or TOKEN_CLIENT,
+            pool=row["pool"],
+            pair_id=row["pair_id"],
+            paired_host=row["paired_host"],
+            paired_addr=row["paired_addr"],
+        )
+
     def verify_token(self, secret: str | None) -> TokenInfo | None:
         """제시된 토큰이 유효(폐기되지 않음)하면 TokenInfo. 비교는 compare_digest."""
         if not secret:
             return None
         digest = hash_token(secret)
-        for row in self._conn().execute(
-            "SELECT name, sha256, admin, created_at, kind FROM tokens WHERE revoked_at IS NULL"
-        ):
+        sql = f"SELECT {_TOKEN_COLS} FROM tokens WHERE revoked_at IS NULL"
+        for row in self._conn().execute(sql):
             if hmac.compare_digest(row["sha256"], digest):
-                return TokenInfo(
-                    name=row["name"],
-                    admin=bool(row["admin"]),
-                    created_at=_dt(row["created_at"]),
-                    kind=row["kind"] or TOKEN_CLIENT,
-                )
+                return self._token_info(row)
         return None
 
     def list_tokens(self) -> list[TokenInfo]:
-        return [
-            TokenInfo(
-                name=r["name"],
-                admin=bool(r["admin"]),
-                created_at=_dt(r["created_at"]),
-                revoked_at=_dt(r["revoked_at"]),
-                kind=r["kind"] or TOKEN_CLIENT,
+        sql = f"SELECT {_TOKEN_COLS} FROM tokens ORDER BY created_at, name"
+        return [self._token_info(r) for r in self._conn().execute(sql)]
+
+    def token_row(self, name: str) -> TokenInfo | None:
+        """그 이름의 행(폐기된 행 포함). 이름은 폐기된 뒤에도 행이 점유한다(F1)."""
+        sql = f"SELECT {_TOKEN_COLS} FROM tokens WHERE name=?"
+        row = self._conn().execute(sql, (name,)).fetchone()
+        return None if row is None else self._token_info(row)
+
+    def token_pair_id(self, secret: str | None) -> str | None:
+        """그 토큰 행의 `pair_id` — **폐기된 행도** 찾는다(M5t-c F65 · 결정 340). 거절 MAC 의 K 를
+        파생할 때만 쓴다. 인증은 언제나 `verify_token` 이다. `--replace` 로 sha256 이 바뀐 옛 토큰은
+        행이 없으므로 None(「모르는 토큰 행」)."""
+        if not secret:
+            return None
+        digest = hash_token(secret)
+        found: str | None = None
+        sql = "SELECT sha256, pair_id FROM tokens WHERE pair_id IS NOT NULL"
+        for row in self._conn().execute(sql):
+            if hmac.compare_digest(row["sha256"], digest):
+                found = row["pair_id"]
+        return found
+
+    def active_paired_tokens(self) -> int:
+        """폐기되지 않은 짝지은 토큰의 수 — `pair.key` 가 없을 때 기동을 막는 근거(결정 306)."""
+        row = (
+            self._conn()
+            .execute("SELECT COUNT(*) FROM tokens WHERE pair_id IS NOT NULL AND revoked_at IS NULL")
+            .fetchone()
+        )
+        return int(row[0])
+
+    def add_paired_token(
+        self,
+        name: str,
+        *,
+        kind: str,
+        pool: str | None,
+        pair_id: str,
+        paired_host: str | None,
+        paired_addr: str | None,
+        now: datetime,
+        replace: bool = False,
+    ) -> str:
+        """짝짓기 교환이 발급하는 토큰(M5t-c §4.4). 비밀은 **한 번만** 돌려주고 DB 에는 sha256 만.
+
+        `replace` 면 같은 이름 · 같은 kind 의 행을 **한 UPDATE 문장**으로 바꾼다(결정 293) — 새
+        sha256 · `pair_id` · `pool` · `paired_*` · `created_at`, `revoked_at = NULL`. 옛 토큰은 그
+        순간부터 401 이고 두 토큰이 함께 유효하거나 함께 무효인 순간이 없다. 행이 없거나 kind 가
+        다르면 `StoreError`. `replace` 가 아니면 새 행이고, 이름이 이미 있으면(폐기 포함)
+        `TokenNameTaken`."""
+        if kind not in TOKEN_KINDS:
+            raise ValueError(f"unknown token kind {kind!r}")
+        secret = secrets.token_urlsafe(32)
+        digest = hash_token(secret)
+        conn = self._conn()
+        if replace:
+            cur = conn.execute(
+                "UPDATE tokens SET sha256=?, pair_id=?, pool=?, paired_host=?, paired_addr=?, "
+                "created_at=?, revoked_at=NULL WHERE name=? AND kind=?",
+                (digest, pair_id, pool, paired_host, paired_addr, _ts(now), name, kind),
+            )  # mutcheck: pair-replace-two-statements
+            if cur.rowcount != 1:
+                raise StoreError(f"no {kind} token named '{name}' to replace")
+            return secret
+        admin = 1 if kind == TOKEN_ADMIN else 0
+        try:
+            conn.execute(
+                "INSERT INTO tokens (name, sha256, admin, created_at, kind, pool, pair_id, "
+                "paired_host, paired_addr) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (name, digest, admin, _ts(now), kind, pool, pair_id, paired_host, paired_addr),
             )
-            for r in self._conn().execute(
-                "SELECT name, admin, created_at, revoked_at, kind FROM tokens "
-                "ORDER BY created_at, name"
-            )
-        ]
+        except sqlite3.IntegrityError as e:
+            if self.token_row(name) is not None:
+                raise TokenNameTaken(f"token '{name}' already exists") from e
+            raise StoreError(f"cannot store token '{name}': {e}") from e
+        return secret
 
     def revoke_token(self, name: str, now: datetime) -> bool:
         cur = self._conn().execute(
@@ -5625,4 +5727,4 @@ class Store:
         return out
 
 
-__all__ = ["Store", "StoreError", "TokenInfo", "hash_token", "DB_VERSION"]
+__all__ = ["Store", "StoreError", "TokenInfo", "TokenNameTaken", "hash_token", "DB_VERSION"]
