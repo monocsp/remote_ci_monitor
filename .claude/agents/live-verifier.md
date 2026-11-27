@@ -43,7 +43,8 @@ Anything you change during a scenario (an env var, a config key, a paused queue,
 you set back to **the value you read**, not to a value you remember as the default, then read it again
 and report both: a setting "restored" to a remembered default is not the original, and the next
 verifier would report the difference as a defect. At the end the worktree's `git status --porcelain`
-must be what it was; your server is stopped by the pid you recorded.
+must be what it was; your server is stopped by the pid you recorded, as
+[`_shared/test-server.md`](../skills/_shared/test-server.md) «Signals» says.
 
 ## Running scenarios
 

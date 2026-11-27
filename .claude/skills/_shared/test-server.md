@@ -114,20 +114,45 @@ At most two servers at once (the build machine also runs `rcm-ci`), each with it
 `data_dir`. Leave `data_dir` until the report has its evidence, then remove it by its exact path,
 never with a glob.
 
+## Signals
+
 **Signals go only to a pid you recorded, never by name.** Start each test `rcm serve` and `rcm worker`,
-and any client you will signal (an `rcm run` for a ctrl-C), in the background and write its pid into
-`data_dir` at once, in the same call (the worker below; the others the same way, `server.pid`,
-`client.pid`):
+and any client you will signal (an `rcm run` for a ctrl-C), in the background, and in the same call
+write its pid and then its start time into `data_dir`: `<name>.pid` and `<name>.start`, with the
+names `server`, `worker` and `client`. The pid and that start time together are the process's
+identity. The worker (the server the same way):
 
 ```sh
 D=$HOME/.local/share/rcm-devtest-<topic>
-cd <abs worktree> && { HOME=$D/home RCM_WORKER_TOKEN=$(cat $D/worker.token) ./.venv/bin/rcm worker --config $D/worker.toml > $D/worker.log 2>&1 & echo $! > $D/worker.pid; }
+cd <abs worktree> && { HOME=$D/home RCM_WORKER_TOKEN=$(cat $D/worker.token) ./.venv/bin/rcm worker --config $D/worker.toml > $D/worker.log 2>&1 & echo $! > $D/worker.pid; } && ps -p $(cat $D/worker.pid) -o lstart= > $D/worker.start
 ```
 
-Every stop, SIGTERM, `kill -9` or SIGINT, the live lane's included, goes to `$(cat $D/<name>.pid)`
-after `ps -p <pid> -o command=` still shows this `data_dir`'s config; anything else there means your
-process is gone and the pid is not yours to signal. Never by name: `pkill rcm`, `killall` or a
-`pgrep` pattern also hit the production launchd server and worker on this build machine.
+A client that will get SIGINT starts under `sh -c 'set -m; …'`, without `--no-wait` so the signal
+lands while it waits. A background job of a shell without job control starts with SIGINT ignored,
+Python then sets no ctrl-C handler, and the signal does nothing (`signal.getsignal(SIGINT)` is
+`SIG_IGN` there); `set -m` turns job control on. zsh refuses `set -m` outside a terminal, so it is `sh`:
+
+```sh
+D=$HOME/.local/share/rcm-devtest-<topic>
+cd <abs worktree> && D=$D sh -c 'set -m; HOME=$D/home RCM_SERVER=http://127.0.0.1:<port> RCM_TOKEN=$(cat $D/client.token) ./.venv/bin/rcm run ok --by acceptance > $D/client.log 2>&1 & echo $! > $D/client.pid' && ps -p $(cat $D/client.pid) -o lstart= > $D/client.start
+```
+
+Every stop, SIGTERM, `kill -9` or SIGINT, the live lane's included, reads both files again and
+signals only when `ps -p <pid> -o lstart=` still prints the recorded start time:
+
+```sh
+D=$HOME/.local/share/rcm-devtest-<topic>; N=worker; P=$(cat $D/$N.pid)
+[ -s $D/$N.start ] && [ "$(ps -p $P -o lstart=)" = "$(cat $D/$N.start)" ] && kill -TERM $P
+```
+
+For `rcm serve` and `rcm worker`, `ps -p <pid> -o command=` must also show this `data_dir`'s config
+(their `--config $D/…`); a client has no `--config` (its `data_dir` reaches it through `HOME` and
+`RCM_SERVER`), so for a client the start time alone decides. If either check differs, the process
+you started is gone and the pid is no longer yours: send nothing and the row is BLOCKED, with the
+two start times as its reason.
+
+Never by name: `pkill rcm`, `killall` or a `pgrep` pattern also hit the production launchd server
+and worker on this build machine.
 
 ## Production is read-only, only with the owner's OK, and only by the main session
 

@@ -89,10 +89,10 @@ on test servers: a step that could only run against production is not a lane row
 
 | condition | means | described in |
 |---|---|---|
-| the server restarts while a job runs, waits or uploads | SIGTERM to the test server's recorded pid, then start it again | `_shared/test-server.md` «Parallel servers and cleanup» |
-| a worker is killed, stopped or restarted | `kill -9` or SIGTERM to the test worker's recorded pid, then start it again | `_shared/test-server.md` «Parallel servers and cleanup»; `tests/test_e2e_worker.py` (`WorkerProc`, `Stack`) |
-| a worker or a client loses the server | stop the test server while the worker runs or while `rcm wait --job <N> --timeout <seconds>` waits; start it again | `_shared/test-server.md` |
-| ctrl-C during `rcm run` | SIGINT to the client's recorded pid | `_shared/test-server.md` «Parallel servers and cleanup» |
+| the server restarts while a job runs, waits or uploads | SIGTERM to the test server's recorded pid, then start it again | `_shared/test-server.md` «Signals» |
+| a worker is killed, stopped or restarted | `kill -9` or SIGTERM to the test worker's recorded pid, then start it again | `_shared/test-server.md` «Signals»; `tests/test_e2e_worker.py` (`WorkerProc`, `Stack`) |
+| a worker or a client loses the server | stop the test server (SIGTERM to its recorded pid) while the worker runs or while `rcm wait --job <N> --timeout <seconds>` waits; start it again | `_shared/test-server.md` «Signals» |
+| ctrl-C during `rcm run` | SIGINT to the client's recorded pid | `_shared/test-server.md` «Signals» |
 | `--no-wait`, then `rcm wait` later | the two commands one after the other | — |
 | two sessions submit the same tree | two `rcm run … --no-wait` one after the other | — |
 | a job's exit code, marker or very long output | a fake preset: `sh -c` printing a marker and an exit code | `live-verify` §1 |
