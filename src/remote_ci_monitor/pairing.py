@@ -494,6 +494,10 @@ class PairingMixin:
                 code="pair_unsupported",
             )
         urls = self._pair_urls(port)
+        # 코드 키(scrypt)는 잠금 **밖에서** 만든다 — 그 사이 교환 · 취소 · 목록이 기다리지 않게.
+        # 이미 열린 창(409)과 이름은 아래 잠금 안에서 본다. 버려지는 코드는 아무 데도 남지 않는다
+        code = new_code()
+        code_key = cp.pair_code_key(code)
         windows = self._pair_windows
         with windows.lock:
             now = self.now_fn()
@@ -523,14 +527,13 @@ class PairingMixin:
                         code="name_taken",
                         name=name,
                     )
-            code = new_code()
             win = PairWindow(
                 id=secrets.token_hex(8),
                 kind=kind,
                 pool=pool,
                 name=name,
                 replace=replace,
-                code_key=cp.pair_code_key(code),
+                code_key=code_key,
                 opened_by=opened_by,
                 opened_at=now,
                 expires_at=now + timedelta(minutes=ttl),

@@ -661,6 +661,26 @@ def test_pi47_a_the_201_has_exactly_the_spec_keys_and_the_code_only_there(ps):
     assert doc["code"].replace("-", "").encode() not in listed
 
 
+def test_pi47_d_the_code_key_is_made_outside_the_window_lock(ps, monkeypatch):
+    """P3 r1: 창 열기의 scrypt 는 창 잠금 밖에서 돈다 — 그동안 교환 · 취소 · 목록이 기다리지
+    않는다. 이미 열린 창의 409 는 잠금 안에서 그대로 본다."""
+    real = cp.pair_code_key
+    held: list[bool] = []
+
+    def spy(code: str) -> bytes:
+        held.append(ps.app._pair_windows.lock.locked())
+        return real(code)
+
+    monkeypatch.setattr(pairing_mod.cp, "pair_code_key", spy)
+    doc = ps.opened("worker")
+    status, body = ps.open("worker")
+    assert (status, body["code"]) == (409, "pair_window_open")
+    assert held == [False, False]
+    monkeypatch.undo()
+    body = ps.exchange_body(doc["code"], "worker", "build-51")  # 만든 코드 키가 창에 들어갔다
+    assert ps.exchange(body)[0] == 200
+
+
 def test_pi47_admin_routes_need_an_admin_token(ps):
     for method, path in (("POST", "/pair"), ("GET", "/pair"), ("POST", "/pair/cancel")):
         assert ps.req(method, path, json_body={"kind": "worker"})[0] == 401
