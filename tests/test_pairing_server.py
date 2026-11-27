@@ -1816,6 +1816,36 @@ def test_pi46_e_register_rejects_get_a_mac_only_for_the_listed_codes(ps):
     assert "pair_reject_mac" not in doc
 
 
+def test_pi46_k_g4_a_reject_mac_that_cannot_be_computed_is_logged_by_exception_name(
+    ps, monkeypatch
+):
+    """G4: 거절 MAC 계산이 예외(DB busy 등)로 실패하면 거절은 MAC 없이 그대로 나가고, 서버
+    로그에 예외 이름만 실은 한 줄이 남는다 — 토큰 · nonce · 예외 문장(값이 섞일 수 있다)은
+    싣지 않는다."""
+    out = ps.paired_by_exchange("worker", "build-01")
+    token = out["token"]
+    nonce = secrets.token_hex(32)
+
+    def busy(**kw):
+        raise sqlite3.OperationalError(f"database is locked ({token})")
+
+    monkeypatch.setattr(ps.app, "pair_reject_mac_for", busy)
+    ps.logs.clear()
+    doc = sent_error(
+        ps,
+        ApiError(401, "a valid worker token is required"),
+        method="POST",
+        path="/worker/heartbeat",
+        token=token,
+        nonce=nonce,
+        body=b"{}",
+    )
+    assert doc == {"error": "a valid worker token is required"}
+    assert ps.logs == ["pair: no pair_reject_mac on a 401 answer (OperationalError)"]
+    for value in (token, nonce, "database is locked"):
+        assert value not in "\n".join(ps.logs)
+
+
 # ── 등록 증명 검사(check_register_proof — PR2 가 부른다) ───────────────────
 
 

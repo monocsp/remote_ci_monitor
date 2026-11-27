@@ -9344,6 +9344,20 @@ MUTANTS = (
             "test_pi8_d_g3_cancel_and_exchange_are_serialised_by_one_lock",
         ),
     ),
+    Mutant(
+        # 거절 MAC 계산이 실패해도 로그가 없음 — MAC 만 조용히 빠져 아무도 이유를 모른다(P6 G4)
+        name="reject-mac-failure-not-logged",
+        path="src/remote_ci_monitor/server.py",
+        old=(
+            '            self.app.log(f"pair: no pair_reject_mac on a {e.status} answer'
+            ' ({name})")\n'
+        ),
+        new="            pass\n",
+        tests=(
+            "tests/test_pairing_server.py::"
+            "test_pi46_k_g4_a_reject_mac_that_cannot_be_computed_is_logged_by_exception_name",
+        ),
+    ),
 )
 
 

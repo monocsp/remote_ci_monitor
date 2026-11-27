@@ -5857,7 +5857,10 @@ class Handler(ShelfHandlerMixin, BaseHTTPRequestHandler):
                 authorization=headers.get("Authorization"),
                 body_hash=self.body.sha256,
             )
-        except Exception:  # noqa: BLE001 — MAC 을 못 달아도 거절은 거절이다(키 없음 = 종료 아님)
+        except Exception as exc:  # noqa: BLE001 — MAC 을 못 달아도 거절은 거절이다(키 없음 = 종료 아님)
+            # 왜 빠졌는지는 남긴다(G4). 예외 이름만 — 문장에는 토큰 · 경로 · DB 값이 섞일 수 있다
+            name = type(exc).__name__
+            self.app.log(f"pair: no pair_reject_mac on a {e.status} answer ({name})")
             return None
 
     # ── 요청 처리 ───────────────────────────────────────────────────────────
