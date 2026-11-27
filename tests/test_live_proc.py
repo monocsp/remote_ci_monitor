@@ -50,6 +50,9 @@ gp = _load("guard_production")
 lp = _load("live_proc")
 
 SLEEPER = [sys.executable, "-c", "import time; time.sleep(30)"]
+#: 준비를 알리고 자는 파이썬 — 신호 처분을 다 정한 뒤 「ready」를 찍는다. 시험은 그 줄을 보고
+#: 신호를 보낸다(파이썬이 처리기를 달기 전에 닿는 경주를 없앤다).
+READY = "print('ready', flush=True); time.sleep(30)"
 OLD_START = "Thu Jan  1 00:00:00 1970\n"
 
 
@@ -67,9 +70,20 @@ def _places(home: Path, *, tmp_roots: tuple[Path, ...] = ()) -> object:
 
 @pytest.fixture
 def d(tmp_path: Path) -> Path:
+    # 시험 서버 폴더: 도구는 안쪽 명령의 `--config` 를 읽어 보므로 그 파일들을 둔다.
     path = tmp_path / "home" / ".local" / "share" / "rcm-devtest-t"
     path.mkdir(parents=True)
+    _test_configs(path)
     return path
+
+
+def _test_configs(folder: Path) -> None:
+    folder.mkdir(parents=True, exist_ok=True)
+    server = f'[server]\nport = 8790\ndata_dir = "{folder}"\nadvertise = false\n'
+    worker = f'server = "http://127.0.0.1:8790"\ndata_dir = "{folder}/worker"\n'
+    for name, text in (("server.toml", server), ("worker.toml", worker)):
+        (folder / name).write_text(text, encoding="utf-8")
+    (folder / "worker.toml.bak").write_text(worker, encoding="utf-8")
 
 
 @pytest.fixture
@@ -88,6 +102,16 @@ def _start(d: Path, name: str, argv: list[str], procs: list, **kw) -> subprocess
     assert isinstance(proc, subprocess.Popen), out.getvalue()
     procs.append(proc)
     return proc
+
+
+def _wait_ready(d: Path, name: str) -> None:
+    log = d / f"{name}.log"
+    deadline = time.monotonic() + 10
+    while time.monotonic() < deadline:
+        if "ready" in log.read_text(encoding="utf-8"):
+            return
+        time.sleep(0.05)
+    raise AssertionError(f"{name} never printed ready: {log.read_text(encoding='utf-8')!r}")
 
 
 def _rc(proc: subprocess.Popen, timeout: float) -> int | None:
@@ -166,12 +190,14 @@ def test_a_missing_empty_or_low_pid_is_refused(
 ) -> None:
     proc = _start(d, "worker", [*SLEEPER, "--config", f"{d}/worker.toml"], procs)
     sent: list[tuple[int, int]] = []
-    monkeypatch.setattr(lp.os, "kill", lambda pid, sig: sent.append((pid, sig)))
     if content is None:
         (d / "worker.pid").unlink()
     else:
         (d / "worker.pid").write_text(content, encoding="utf-8")
-    code, lines = _send(d, "worker", "TERM", expect_config=f"{d}/worker.toml")
+    # pid 0 은 자기 프로세스 그룹이다 — 잘못 보내면 pytest 가 죽으니 kill 을 가로챈다.
+    with monkeypatch.context() as m:
+        m.setattr(lp.os, "kill", lambda pid, sig: sent.append((pid, sig)))
+        code, lines = _send(d, "worker", "TERM", expect_config=f"{d}/worker.toml")
     _assert_blocked(code, lines)
     assert sent == [], "kill was called"
     assert proc.poll() is None
@@ -185,9 +211,13 @@ def test_an_empty_start_file_is_refused(d: Path, procs: list) -> None:
     assert _rc(proc, 0.5) is None
 
 
-@pytest.mark.parametrize("config", [["--config", "/elsewhere/worker.toml"], []])
-def test_expect_config_must_be_on_the_command_line(d: Path, procs: list, config: list) -> None:
+@pytest.mark.parametrize("elsewhere", [True, False])
+def test_expect_config_must_be_on_the_command_line(
+    tmp_path: Path, d: Path, procs: list, elsewhere: bool
+) -> None:
     # 시작 시각은 맞아도 명령줄에 이 data_dir 의 설정이 없다(운영 워커일 수 있다).
+    _test_configs(tmp_path / "elsewhere")
+    config = ["--config", f"{tmp_path}/elsewhere/worker.toml"] if elsewhere else []
     proc = _start(d, "worker", [*SLEEPER, *config], procs)
     code, lines = _send(d, "worker", "TERM", expect_config=f"{d}/worker.toml")
     _assert_blocked(code, lines)
@@ -216,9 +246,11 @@ def _start_ignoring_sigint(d: Path, procs: list, **kw) -> subprocess.Popen:
     # 작업 제어 없는 셸이 뒤로 보낸 것과 같은 조건: 띄우는 쪽이 SIGINT 를 무시하고 있다.
     old = signal.signal(signal.SIGINT, signal.SIG_IGN)
     try:
-        return _start(d, "client", SLEEPER, procs, **kw)
+        proc = _start(d, "client", [sys.executable, "-c", f"import time; {READY}"], procs, **kw)
     finally:
         signal.signal(signal.SIGINT, old)
+    _wait_ready(d, "client")
+    return proc
 
 
 def test_interactive_sigint_lets_python_end_on_ctrl_c(d: Path, procs: list) -> None:
@@ -231,7 +263,6 @@ def test_interactive_sigint_lets_python_end_on_ctrl_c(d: Path, procs: list) -> N
 def test_without_interactive_sigint_the_ignored_sigint_stays_ignored(d: Path, procs: list) -> None:
     # 대조: 플래그가 없으면 물려받은 SIG_IGN 그대로라 SIGINT 가 닿아도 끝나지 않는다.
     proc = _start_ignoring_sigint(d, procs)
-    time.sleep(0.3)  # 파이썬이 처리기를 정할 틈
     code, lines = _send(d, "client", "INT")
     assert code == 0, lines
     assert _rc(proc, 0.5) is None
@@ -243,13 +274,13 @@ def test_without_interactive_sigint_the_ignored_sigint_stays_ignored(d: Path, pr
 def test_stop_all_reaps_only_what_this_folder_recorded(d: Path, procs: list) -> None:
     server = _start(d, "server", [*SLEEPER, "--config", f"{d}/server.toml"], procs)
     # SIGTERM 을 무시하는 워커 — 기다린 뒤 SIGKILL 로 거둔다.
-    stubborn = "import signal, time; signal.signal(signal.SIGTERM, signal.SIG_IGN); time.sleep(30)"
+    stubborn = f"import signal, time; signal.signal(signal.SIGTERM, signal.SIG_IGN); {READY}"
     worker = _start(d, "worker", [sys.executable, "-c", stubborn], procs)
+    _wait_ready(d, "worker")
     other = subprocess.Popen(SLEEPER)  # 적히지 않은 프로세스
     procs.append(other)
     reused = _start(d, "client", SLEEPER, procs)
     (d / "client.start").write_text(OLD_START, encoding="utf-8")  # 시작 시각이 다르다
-    time.sleep(0.3)
     out = io.StringIO()
     code = lp.stop_all(d, grace=1.0, out=out)
     lines = out.getvalue().splitlines()
