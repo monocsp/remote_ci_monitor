@@ -1188,3 +1188,31 @@ def test_b8_3_an_override_rcm_cannot_read_is_refused(
     argv = [*_good_server(d), *extra]
     reason = _refusal(tmp_path / "home", d, argv, environ=environ)
     assert reason and "cannot read the port" in reason, reason
+
+
+def test_b8_4_a_test_folder_that_cannot_be_removed_fails_the_test() -> None:
+    # B8-4 — `outside_tmp` 는 진짜 홈에 폴더를 만든다. 못 지우면 조용히 남기지 않고 시험이
+    # 실패한다(`ignore_errors` 없음). 그 픽스처는 `tests/conftest.py` 한 곳에만 있다 — 두 시험
+    # 파일이 복사본을 따로 들고 있으면 한쪽만 고쳐진다.
+    import conftest
+
+    for module in ("test_live_proc.py", "test_skill_links.py"):
+        text = (ROOT / "tests" / module).read_text(encoding="utf-8")
+        assert "def outside_tmp(" not in text, f"tests/{module} keeps its own outside_tmp"
+    make = getattr(conftest, "outside_tmp_folder", None)
+    assert make is not None, "tests/conftest.py has no shared outside_tmp_folder"
+    if os.geteuid() == 0:  # pragma: no cover — root 는 읽기 전용 폴더도 지운다
+        pytest.skip("root removes a read-only folder")
+    made: list[Path] = []
+    try:
+        with pytest.raises(OSError), make() as folder:
+            made.append(folder)
+            locked = folder / "locked"
+            locked.mkdir()
+            (locked / "file").write_text("x", encoding="utf-8")
+            locked.chmod(0o500)
+    finally:
+        for folder in made:  # 이 시험이 만든 폴더만 치운다
+            (folder / "locked").chmod(0o700)
+            shutil.rmtree(folder)
+    assert made and not made[0].exists()
