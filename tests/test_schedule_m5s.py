@@ -189,7 +189,7 @@ def make(
 
 
 def test_db_is_v25_with_the_milestone_columns(store):
-    assert DB_VERSION == 26  # v26(M5t-b)의 열 일곱 개가 그 뒤 맨 끝이다
+    assert DB_VERSION == 27  # v26(M5t-b)의 열 일곱 개가 그 뒤 맨 끝이다 · v27 은 tokens 에만
     cols = [r[1] for r in store._conn().execute("PRAGMA table_info(jobs)")]
     want = [
         "not_before",
@@ -243,7 +243,7 @@ def test_a_v24_database_gains_the_columns_after_a_backup(tmp_path):
     c.close()
     s = Store(path)
     try:
-        assert s.user_version() == 26  # v24 → v25 → v26(M5t-b)
+        assert s.user_version() == 27  # v24 → v25 → v26(M5t-b) → v27(M5t-c)
         j = s.get_job(old.id)
         assert j.not_before is None and j.start_deadline is None and j.no_supersede is False
     finally:

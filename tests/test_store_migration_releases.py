@@ -76,7 +76,8 @@ def test_a_fresh_database_is_version_18_with_the_releases_table():
     # v24: M5p 보관함 — `jobs.keep` 과 `shelf_items` (tests/test_store_m5p.py)
     # v25: M5s 예약 · 반복 열 (tests/test_schedule_m5s.py)
     # v26: M5t-b 워커 세션 · 그룹 홀드 (tests/test_irreversible_hold_m5tb.py)
-    assert DB_VERSION == 26
+    # v27: M5t-c 짝짓기 — tokens 의 네 열 (tests/test_pairing_server.py)
+    assert DB_VERSION == 27
 
 
 def test_a_fresh_database_has_the_releases_table_and_index(tmp_path):

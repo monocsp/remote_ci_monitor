@@ -141,8 +141,8 @@ def test_rl24_a_v25_database_migrates_to_v26_and_keeps_every_job(tmp_path):
     c.close()
     s = Store(path)
     try:
-        assert DB_VERSION == 26
-        assert s.user_version() == 26
+        assert DB_VERSION == 27  # v27(M5t-c)은 tokens 에만 열을 더한다
+        assert s.user_version() == 27  # v25 → v26 → v27
         after = {
             r["id"]: (r["state"], r["summary"], r["worker_name"])
             for r in s._conn().execute("SELECT * FROM jobs")

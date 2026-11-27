@@ -1647,3 +1647,22 @@ M5t-b 명세와 맞출 문장도 하나 남았다(Q-E′). M5t-b 2판은 아직 
 PI36 은 2판에서 새로 더한 행이다. 4차 위임 결정에 맞춰 경고 되풀이(304)와 잡 비우기 중 로그(305)를 확인할 결과에 넣었다.
 
 ## 13. 구현하며 바뀐 것
+
+### PR1 서버 신원 키 · 짝짓기 창 · /pair 라우트 · 거절 MAC (#293)
+
+PR #293 본문의 「Differs from the spec」 과 같은 목록이다. 구현 라운드(P2-1 · P2-2 · P6-1)에서 적은 것을 옮겼다.
+
+| # | 명세와 다름 / 명세에 없음 |
+|---|---|
+| 1 | 명세와 다름: `kind` 키가 없는 교환 본문은 고정 400 `bad_pair_request` 다. PI7 은 네 본문(client · admin · 모름 · kind 없음)이 같은 404 라고 하지만 §4.4 「교환 요청」 은 `kind` 문자열을 창을 찾기 전의 모양 규칙으로 둔다. 동결된 와이어(§4.4 · §4.7)를 따랐다. 400 은 창 상태와 무관해 신탁이 아니다(P3 · P5 확인). client · admin · 모름은 같은 404 다. |
+| 2 | 명세와 다름: 창을 열 때와 교환 답의 `presets_count` 는 `pairing.py` 의 `pair_presets_count(pool)` 가 §4.5 와 같은 규칙으로 센다. `spec_presets_for_pool` 은 PR2 의 몫이라, PR2 가 그것을 정의하고 이 함수가 그것을 부르게 바꾼다. |
+| 3 | 명세에 없음: 서버 로그 줄 셋을 더했다. `pair: <kind> window opened by <admin> until <UTC> (pool <P>)`, `pair: <kind> window cancelled`, `pair: <kind> window closed — the token could not be stored (<exception name>)`. 코드 · 키 · 토큰은 싣지 않는다. |
+| 4 | 명세에 없음: 교환의 이름 확인과 행 쓰기 사이에 다른 `rcm token add` 가 같은 이름을 쓰면 409 `name_taken` 이고 창은 열린 채 남는다(코드를 태우지 않는다). |
+| 5 | 명세에 없음: `GET /pair` 는 열린 창과 닫힌 채 남은 창을 `opened_at` 오래된 순으로 준다. |
+| 6 | §4.7 의 라우터 가지 다시 세기: M5t-a · M5t-b 가 더한 가지 12개(`/jobs/1/release-hold`, `/jobs/1/keep`, `/jobs/1/artifacts/ack`, `/jobs/1/priority`, `/jobs/1/artifacts/archive`, `/jobs/1/tree/manifest`, `/worker/jobs/1/log`, `/worker/jobs/1/artifacts`, `/worker/jobs/1/tree`, `/api/repos/app/release/versions`, `/api/repos/app/release/versions/1`, `/api/repos/app/release/versions/1/listing`)를 익명 쓰기 시험의 탐침 목록(`tests/test_pairing_server.py` `EXTRA_BRANCHES`)에 넣었다. 받는 집합은 none · basic 모두 §4.7 표와 같다. |
+| 7 | 명세와 다름: 창 잠금은 「창마다 하나」 대신 모든 창에 하나다. 동작은 같다(동시 교환 16 → 200 하나). 창을 열 때의 scrypt 는 P6-1 에서 잠금 밖으로 옮겼다(`test_pi47_d`). 같은 kind 창이 이미 열려 409 가 나는 열기도 scrypt 를 한 번 쓴다. |
+| 8 | 명세와 다름(P5 G2): 교환은 답에 실을 값(`presets_count` · `pair_secret` · `server_nonce`)을 토큰 행을 쓰기 전에 만들고, 창은 행이 생긴 뒤에야 `used` 가 된다. 커밋 뒤 예외로 코드만 태우는 일이 없다. |
+| 9 | 명세에 없음(P5 G4): 짝 토큰의 거절 MAC 을 계산하지 못하면 서버 로그에 `pair: no pair_reject_mac on a <status> answer (<exception name>)` 한 줄을 남긴다. 답은 그대로 MAC 없이 간다. 예외 문구는 토큰 · 경로 · DB 값을 실을 수 있어 이름만 싣는다. |
+| 10 | §7.5 에 없는 변이 여섯(P5 GAP 잠금): `pair-name-race-burns-code`, `pair-exchange-burns-code-before-commit`, `pair-cancel-without-lock`, `reject-mac-failure-not-logged`, `pair-key-temp-left-on-write-error`, `pair-token-info-kind-dropped`. |
+| 11 | 남은 것: `pair.key` 거절 문구가 가리키는 `rcm token list` 의 「paired from」 열은 PR4 가 낸다. 같은 마일스톤 출시 전에 생긴다. |
+| 12 | 남은 것(후속 후보): 디스크가 가득 차 키를 못 쓰면 `rcm serve` 는 `cannot start server: No space left on device` 만 내고 `pair.key` 를 말하지 않는다. |
