@@ -24,6 +24,9 @@
 - 2026-11-27 다른 프로젝트의 새 판에서 들인 규칙(다시 받는 계획-시험 대조, 사람에게 쓰는 커버리지
   낱말, P5 실기 레인, 압축 뒤 다시 열기, 머지 뒤 dev, 시계 주입, 변이 앵커)이 정본에 있고, 셈이 든
   규칙은 정본 밖에서 다시 적지 않는다(파일 끝 절).
+- 시험 서버 「Signals」 의 재확인 블록은 문서에서 꺼내 sh · zsh 로 실제로 돌린다. 적은 pid 와
+  시작 시각, 서버 · 워커면 명령줄의 `--config` 까지 맞을 때만 신호가 가고, 아니면 이유를 찍고
+  BLOCKED 로 끝난다. 그 블록은 운영 가드(`tools/guard_production.py`)의 그물에 걸리지 않는다.
 """
 
 from __future__ import annotations
@@ -348,7 +351,7 @@ ADOPTED = (
     ),
     # 서버 · 워커의 명령줄 조건은 산문이 아니라 블록의 비교다. 거부하면 이유를 찍는다.
     ("skills/_shared/test-server.md", "CMD=$(LC_ALL=C TZ=UTC ps -p $P -o command=)"),
-    ("skills/_shared/test-server.md", '*"--config $D/"*) MINE=yes'),
+    ("skills/_shared/test-server.md", 'grep -qF -- "--config $D/" && MINE=yes'),
     ("skills/_shared/test-server.md", 'echo "command: $CMD"; echo BLOCKED'),
     ("skills/_shared/test-server.md", "a client has no `--config`"),
     ("skills/_shared/test-server.md", "sends nothing, prints both start times"),
@@ -481,6 +484,27 @@ def test_the_ctrl_c_client_waits_on_a_slow_preset(tmp_path: Path) -> None:
     assert preset.timeout_seconds > int(sleep.group(1)), preset
 
 
+def _load_guard_production():
+    path = ROOT / "tools" / "guard_production.py"
+    spec = importlib.util.spec_from_file_location("guard_production", path)
+    assert spec is not None and spec.loader is not None, path
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_the_signal_check_block_passes_the_production_guard() -> None:
+    # 재확인 블록은 Bash 도구로 그대로 돈다. 빌드 머신의 `tools/guard_production.py` 는 명령 자리의
+    # 글롭(`case` 의 `*)` 패턴)을 「rcm setup 에 닿을 수 있다」로 읽고 막는다 — 막히면 신호를 보낼
+    # 길이 없다. 그물(`_setup_net`)에 걸리지 않아야 한다.
+    guard = _load_guard_production()
+    text = TEST_SERVER_CANON.read_text(encoding="utf-8")
+    blocks = [b for b in _sh_blocks(text) if "kill -$SIG" in b]
+    assert len(blocks) == 1, blocks
+    assert not guard._setup_net(blocks[0]), blocks[0]
+
+
 def _ps(pid: int, field: str) -> str:
     env = dict(os.environ, LC_ALL="C", TZ="UTC")
     out = subprocess.run(
@@ -532,11 +556,17 @@ def test_the_signal_check_block_signals_only_its_own_process(
         out = subprocess.run(
             [shell, "-c", block], env=env, capture_output=True, text=True, timeout=10
         )
+        # 신호가 갔으면 곧 끝난다. 안 갔어야 하는 쪽도 잠깐 기다려 본다 — 바로 poll 하면 막
+        # 받은 SIGTERM 을 아직 처리하지 않은 프로세스가 살아 있는 것처럼 보인다.
+        try:
+            rc = proc.wait(timeout=5 if signalled else 0.5)
+        except subprocess.TimeoutExpired:
+            rc = None
         if signalled:
-            assert proc.wait(timeout=5) == -signal.SIGTERM, out
+            assert rc == -signal.SIGTERM, out
             assert "BLOCKED" not in out.stdout, out
         else:
-            assert proc.poll() is None, out
+            assert rc is None, out
             lines = out.stdout.splitlines()
             assert lines and lines[-1] == "BLOCKED", out
             # 거부한 이유: 적은 시각 · 지금 시각 · 명령줄을 한 줄씩.
