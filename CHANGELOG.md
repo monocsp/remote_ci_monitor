@@ -28,6 +28,7 @@ of a key bumps that number and is listed here.
   (`403 pair_proof_invalid` with `reason` `bad_mac`, `expired` or `reused` when the proof is
   wrong). The server log names both addresses when a worker registers from a new one. See
   [a worker token's pool](docs/configuration.md#a-worker-tokens-pool-and-the-registration-proof).
+  ([#295](https://github.com/monocsp/remote_ci_monitor/pull/295))
 
 ### Added
 - **The server side of pairing.** An admin opens a short pairing window with `POST /pair`

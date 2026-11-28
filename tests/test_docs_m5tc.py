@@ -251,6 +251,8 @@ def test_pi14_changelog_announces_the_pool_filter_and_the_proof():
     for words in ("409 pool_mismatch", "403 pair_proof_required", "local_only"):
         assert words in entry, words
     assert "docs/configuration.md#a-worker-tokens-pool-and-the-registration-proof" in entry
+    # P3 r1: 그 PR 의 링크(PR1 의 test_pi29 처럼)
+    assert "([#295](https://github.com/monocsp/remote_ci_monitor/pull/295))" in entry
 
 
 def test_pi30_pool_tests_hold_no_secret_shaped_literals_and_only_test_addresses():
