@@ -266,6 +266,37 @@ def test_pi23_g_a_peeked_challenge_with_a_wrong_mac_does_not_burn_it(pp):
     assert body["name"] == w["name"]
 
 
+def test_pi23_g2_one_proof_sent_many_times_at_once_registers_once(pp):
+    """P6 G2: 같은 증명을 실은 등록 N 개가 한꺼번에 와도 하나만 통과한다. 쓴 챌린지 집합의 검사와
+    넣기는 한 잠금 안이다(`ChallengeLedger.burn`). 스레드는 배리어에서 같이 떠난다."""
+    w = pp.pair_worker()
+    sid = pp.session(w["name"])
+    body = pp.register_body(sid, pair_proof=pp.proof(w, sid))
+    n = 16
+    start = threading.Barrier(n)
+    got: list[tuple[int, Any, Any]] = []
+    got_lock = threading.Lock()
+
+    def send() -> None:
+        start.wait(timeout=10)
+        status, doc, _sent = pp.post_register(w["token"], body)
+        with got_lock:
+            got.append((status, doc.get("code"), doc.get("reason")))
+
+    threads = [threading.Thread(target=send) for _ in range(n)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=60)  # 멈춤 보호일 뿐 — 시간을 재는 시험이 아니다
+    assert len(got) == n, got
+    assert [g for g in got if g[0] == 200] == [(200, None, None)], got
+    assert [g for g in got if g[0] != 200] == [(403, "pair_proof_invalid", "reused")] * (n - 1)
+    rows = pp.store._conn().execute(
+        "SELECT id, fenced_at FROM worker_sessions WHERE worker_name = ?", (w["name"],)
+    )
+    assert [tuple(r) for r in rows] == [(sid, None)]
+
+
 def test_pi23_b_without_registering_the_token_gets_no_claim_and_only_its_pool_spec(pp):
     w = pp.pair_worker(pool="x")
     jid = pp.queued_job(preset="xbuild")

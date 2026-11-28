@@ -9532,6 +9532,32 @@ MUTANTS = (
             "tests/test_pairing_pool.py::test_pi16_b_an_unbound_token_reads_its_registered_pool_or_the_query_never_everything",
         ),
     ),
+    Mutant(
+        # 쓴 챌린지 집합의 검사와 넣기가 잠금 밖이고 그 사이에 틈이 있음 — 같은 증명을 한꺼번에
+        # 보낸 등록 여럿이 모두 통과한다(⑤ · P6 G2)
+        name="pair-challenge-burn-unlocked",
+        path="src/remote_ci_monitor/pairing.py",
+        old=(
+            "        with self.lock:\n"
+            "            floor = now - cp.PAIR_CHALLENGE_SECONDS"
+            " - cp.PAIR_CHALLENGE_FUTURE_SECONDS\n"
+            "            for c in [c for c, seen_t in self._seen.items() if seen_t < floor]:\n"
+            "                del self._seen[c]\n"
+            "            if challenge in self._seen:\n"
+            "                return False\n"
+            "            self._seen[challenge] = t\n"
+        ),
+        new=(
+            "        if True:\n"
+            "            if challenge in self._seen:\n"
+            "                return False\n"
+            "            threading.Event().wait(0.2)\n"
+            "            self._seen[challenge] = t\n"
+        ),
+        tests=(
+            "tests/test_pairing_pool.py::test_pi23_g2_one_proof_sent_many_times_at_once_registers_once",
+        ),
+    ),
 )
 
 
