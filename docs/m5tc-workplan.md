@@ -1666,3 +1666,18 @@ PR #293 본문의 「Differs from the spec」 과 같은 목록이다. 구현 �
 | 10 | §7.5 에 없는 변이 여섯(P5 GAP 잠금): `pair-name-race-burns-code`, `pair-exchange-burns-code-before-commit`, `pair-cancel-without-lock`, `reject-mac-failure-not-logged`, `pair-key-temp-left-on-write-error`, `pair-token-info-kind-dropped`. |
 | 11 | 남은 것: `pair.key` 거절 문구가 가리키는 `rcm token list` 의 「paired from」 열은 PR4 가 낸다. 같은 마일스톤 출시 전에 생긴다. |
 | 12 | 남은 것(후속 후보): 디스크가 가득 차 키를 못 쓰면 `rcm serve` 는 `cannot start server: No space left on device` 만 내고 `pair.key` 를 말하지 않는다. |
+
+### PR2 토큰에 묶인 풀 · 등록 증명 · spec 풀 거르기 (#295)
+
+PR #295 본문의 「Differs from the spec」 과 같은 목록이다. 구현 라운드(batch-1~3 · P6-1)에서 적은 것을 옮겼다.
+
+| # | 명세와 다름 / 명세에 없음 |
+|---|---|
+| 1 | 명세와 다름: 거르기 규칙 `spec_presets_for_pool(pool)` 은 명세대로 하나다. 어느 풀인지 고르는 순서(`tokens.pool` → `workers` 행의 풀 → 질의 `?pool=` → `default`)는 `capabilities.py` 의 `spec_pool_for(token, query_pool)` 에 따로 두었다. `worker_spec()` 은 `pool` 인자를 받고 `worker_spec_for(token, query_pool=None)` 이 풀을 정한다. |
+| 2 | 명세에 없음: 질의 `pool` 이 이름 꼴(`_NAME_RE`)에 맞지 않으면 400 `pool must be a name (letters, digits, . _ -)` 이다. 묶이지도 등록하지도 않은 토큰에서만 닿는다. |
+| 3 | 명세와 다름: `server.py` 에 shared 칸(`worker_spec_for` 한 곳) 밖의 줄 둘이 더해졌다. 성공한 등록 뒤 주소를 기록하는 줄(`note_register_addr`)과 `/worker/spec` 라우트가 질의 `pool` 을 넘기는 줄이다. 다른 주소 재등록 로그는 성공한 등록 뒤에만 남는다. |
+| 4 | 명세와 다름(§5 PR 표): `WorkerClient.spec()` 이 자기 풀을 싣는 일은 PR3(`client.py`) 몫이었으나 PR2 가 최소 부분을 가져왔다. 꼴은 `WorkerClient` 의 속성 `pool: str \| None = None` 이고, 값이 있으면 `spec()` · `spec_answer()` 가 `/worker/spec?pool=<퍼센트 인코딩>` 을 묻는다. 풀을 모르는 클라이언트는 지금처럼 질의를 싣지 않는다. 이 값을 `rcm worker` · `--check` · doctor 가 채우는 일과 등록 전 doctor 시험은 PR3 에 남겼다. |
+| 5 | 받아들인 범위 정정: `pairing.py` 의 `pair_presets_count` 가 `spec_presets_for_pool` 을 부른다(§13 「PR1」 2번). 기존 시험 일곱의 기대를 명세대로 바꿨다(`tests/test_server_m5n.py` 둘 · `tests/test_local_only.py` 하나 · `tests/test_pairing_server.py` 의 `test_pi46_h_…` · `tests/test_doctor_cli.py` 셋). 빠져야 할 프리셋이 응답에 없다는 단언을 더했고, 단언을 뺀 것은 없다. |
+| 6 | §7.5 에 없는 변이 다섯: `worker-spec-pool-query-dropped`(클라이언트가 풀 질의를 뺌), `spec-bound-pool-follows-query` · `spec-query-before-registered-pool`(P5 G1, 풀 순서), `pair-challenge-burn-unlocked`(P5 G2, 16 스레드 동시 등록 시험이 잡음), `register-addr-first-compared`(P5 G3). §7.5 의 PR2 일곱과 합쳐 열둘이다. |
+| 7 | 문서에 더한 한계(P5 G3): 다른 주소 재등록 로그의 기억은 메모리라 서버 재시작 뒤 첫 등록은 비교 없이 지나간다. 감지 보조일 뿐이고 펜싱 · 폐기는 그대로다. |
+| 8 | 남은 것: `PAIR_PROOF_REQUIRED` 의 안내가 가리키는 `rcm setup --role worker --pair` 는 PR4 가 낸다. |
