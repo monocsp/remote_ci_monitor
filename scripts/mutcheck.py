@@ -9493,6 +9493,17 @@ MUTANTS = (
             "tests/test_pairing_pool.py::test_pi23_g_a_peeked_challenge_with_a_wrong_mac_does_not_burn_it",
         ),
     ),
+    Mutant(
+        # `WorkerClient` 가 `/worker/spec` 에 자기 풀을 싣지 않음 — 등록 전 기본 풀이 아닌 워커가
+        # `default` 의 프리셋으로 판정한다(M5t-c §4.5 「질의 `pool`」 · PI16 b)
+        name="worker-spec-pool-query-dropped",
+        path="src/remote_ci_monitor/client.py",
+        old='        if self.pool is None:\n            return "/worker/spec"\n',
+        new='        if True:\n            return "/worker/spec"\n',
+        tests=(
+            "tests/test_pairing_pool.py::test_pi16_b_the_worker_client_sends_its_own_pool_before_registering",
+        ),
+    ),
 )
 
 
