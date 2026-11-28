@@ -582,6 +582,22 @@ def test_pi16_b_an_unbound_token_reads_its_registered_pool_or_the_query_never_ev
         assert preset_names(doc) != {p["name"] for p in POOL_PRESETS} - {"release"}
 
 
+def test_pi16_b_the_worker_client_sends_its_own_pool_before_registering(pp):
+    """§4.5 「질의 `pool`」: `WorkerClient.spec()` 이 자기 `pool` 을 싣는다. 등록 전 기본 풀이 아닌
+    워커가 `default` 의 프리셋을 보지 않게(V2-15 는 옛 빌드만의 일이다). 풀을 모르는 클라이언트는
+    오늘처럼 질의 없이 묻는다 — 서버가 `default` 로 거른다."""
+    from remote_ci_monitor.client import WorkerClient
+
+    client = WorkerClient(f"http://127.0.0.1:{pp.port}", pp.tokens["build-02"])
+    assert preset_names(client.spec()) == default_presets()  # 풀을 모른다 — 질의 없음
+    assert preset_names(client.spec_answer()) == default_presets()
+    client.pool = "linux"  # 세션 id 처럼 부르는 쪽이 자기 설정의 풀을 넣는다
+    assert preset_names(client.spec()) == {"lin", "anycap"}
+    assert preset_names(client.spec_answer()) == {"lin", "anycap"}
+    client.pool = "x"
+    assert preset_names(client.spec()) == x_presets()
+
+
 def test_pi16_the_window_count_uses_the_same_filter_as_the_spec(pp):
     for pool in ("default", "x", "linux"):
         doc = pp.opened("worker", pool=pool)
