@@ -9558,6 +9558,17 @@ MUTANTS = (
             "tests/test_pairing_pool.py::test_pi23_g2_one_proof_sent_many_times_at_once_registers_once",
         ),
     ),
+    Mutant(
+        # 재시작 뒤 첫 등록이 없는 앞 주소와 비교됨 — 주소 기억이 메모리뿐인 지금 동작(첫 등록은 줄
+        # 없음)이 깨진다(M5t-c T6 · P6 G3)
+        name="register-addr-first-compared",
+        path="src/remote_ci_monitor/remote_workers.py",
+        old="            before = self._register_addrs.get(name)\n",
+        new='            before = self._register_addrs.get(name, "")\n',
+        tests=(
+            "tests/test_pairing_pool.py::test_pi23_c_g3_the_first_registration_after_a_restart_logs_no_address_line",
+        ),
+    ),
 )
 
 

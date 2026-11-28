@@ -20,6 +20,7 @@ from typing import Any
 import pytest
 
 from remote_ci_monitor import __version__
+from remote_ci_monitor import server as server_mod
 from remote_ci_monitor.core import pairing as cp
 from remote_ci_monitor.core.model import QUEUED, RUNNING, SUCCEEDED
 from remote_ci_monitor.store import Store
@@ -350,6 +351,35 @@ def test_pi23_c_a_paired_worker_moving_address_is_logged_too(pp):
         f"worker {w['name']} registered from 127.0.0.1 — its previous registration came from "
         "192.0.2.9"
     ) in pp.logs
+
+
+def test_pi23_c_g3_the_first_registration_after_a_restart_logs_no_address_line(pp):
+    """P6 G3: 앞 등록 주소는 메모리에만 있다(`_register_addrs`). 재시작한 서버(같은 DB 위의 새
+    App)의 첫 등록은 비교할 주소가 없어 줄을 남기지 않는다. 펜싱은 그대로이고, 그 다음 다른 주소의
+    등록부터 다시 줄이 남는다(docs/configuration.md 「A worker token's pool and the registration
+    proof」)."""
+    name = "build-02"
+    first = pp.session(name)
+    pp.registered(name)
+    pp.app.note_register_addr(name, "192.0.2.7")  # 재시작 전 서버가 기억한 주소
+    restarted = server_mod.App(pp.cfg, pp.store, now_fn=pp.clock, mono_fn=pp.clock.mono)
+    logs: list[str] = []
+    restarted.log = logs.append  # type: ignore[method-assign]
+    info = pp.store.verify_token(pp.tokens[name])
+    pp.new_process(name)
+    second = pp.session(name)
+    assert restarted.worker_register(info, pp.register_body(second))["name"] == name
+    restarted.note_register_addr(name, "192.0.2.8")
+    assert not [line for line in logs if "registered from" in line], logs
+    assert pp.store.get_session(first).fenced_at is not None
+    # 그 다음 다른 주소의 등록은 다시 줄을 남긴다
+    pp.new_process(name)
+    restarted.worker_register(info, pp.register_body(pp.session(name)))
+    restarted.note_register_addr(name, "192.0.2.9")
+    assert [line for line in logs if "registered from" in line] == [
+        f"worker {name} registered from 192.0.2.9 — its previous registration came from 192.0.2.8"
+    ], logs
+    assert pp.store.get_session(second).fenced_at is not None
 
 
 def test_pi23_d_the_paired_worker_token_cannot_use_client_or_pair_admin_routes(pp):

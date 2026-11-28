@@ -260,3 +260,13 @@ def test_pi30_pool_tests_hold_no_secret_shaped_literals_and_only_test_addresses(
     assert not re.search(r"(?<![0-9a-f])[0-9a-f]{32}(?![0-9a-f])", text)
     for ip in re.findall(r"\b\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}\b", text):
         assert ip.startswith(("127.0.0.", "192.0.2.")), ip
+
+
+def test_pi23_c_g3_configuration_says_the_address_memory_ends_at_a_restart():
+    """P6 G3: 다른 주소 재등록 줄은 감지 보조일 뿐이고 그 기억은 메모리에만 있다 — 재시작 뒤 첫
+    등록은 비교하지 않는다는 한계를 문서가 말한다."""
+    body = flat(section(CONFIGURATION, "A worker token's pool and the registration proof"))
+    assert (
+        "The server keeps these addresses in memory only, so the first registration after a "
+        "restart is not compared." in body
+    )
