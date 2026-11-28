@@ -9,10 +9,16 @@
   M5t-c PR1 — `pair-*` · `reject-mac-*` 스물일곱: hello · 교환 · 짝짓기 창 · `pair.key` 수명 주기 ·
      거절 MAC 의 검사를 하나씩 지운다(`core/pairing.py` · `pairing.py` · `server.py` · `store.py`,
      `docs/m5tc-workplan.md` §7 「변이」 · `tests/test_pairing_*.py`)
-  M5t-c PR2 — `register-*` · `spec-null-pool-unfiltered` · `pair-challenge-reusable` 일곱:
-     등록 증명 · 쓴 챌린지 · 묶인 풀 검사와 `/worker/spec` 풀 거르기를 하나씩 지운다
-     (`remote_workers.py` · `server.py` · `pairing.py` · `core/pairing.py`,
-     `docs/m5tc-workplan.md` §7 「변이」 · `tests/test_pairing_pool.py`)
+  M5t-c PR2 — 열둘: `register-*` 여섯(`register-pool-check-skipped` · `register-proof-skipped` ·
+     `register-proof-unbound-session` · `register-challenge-mac-skipped` ·
+     `register-challenge-burned-before-mac` · `register-addr-first-compared`), `spec-*` 셋
+     (`spec-null-pool-unfiltered` · `spec-bound-pool-follows-query` ·
+     `spec-query-before-registered-pool`), `pair-challenge-reusable` ·
+     `pair-challenge-burn-unlocked`, `worker-spec-pool-query-dropped`: 등록 증명 · 쓴 챌린지(동시
+     등록 포함) · 묶인 풀 검사 · `/worker/spec` 풀 거르기와 그 순서 · 클라이언트의 `?pool=` ·
+     재시작 뒤 첫 등록의 주소 줄을 하나씩 깬다(`remote_workers.py` · `server.py` ·
+     `capabilities.py` · `pairing.py` · `core/pairing.py` · `client.py`,
+     `docs/m5tc-workplan.md` §7 「변이」 · P6-1 GAP G1~G3 · `tests/test_pairing_pool.py`)
   WW (Windows · WSL 안내) — `ww1-native-windows-not-refused`: 네이티브 Windows 에서 traceback
      으로 죽음 · `ww2-none-found-without-the-address-hint`: 서버를 못 찾았을 때 `--server` 길을
      말하지 않음 · `ww3-wsl-hint-never-added`: WSL 안에서 NAT 망을 말하지 않음
