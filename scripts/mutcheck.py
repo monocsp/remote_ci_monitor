@@ -9504,6 +9504,34 @@ MUTANTS = (
             "tests/test_pairing_pool.py::test_pi16_b_the_worker_client_sends_its_own_pool_before_registering",
         ),
     ),
+    # ── M5t-c PR2 · P6-1(엣지 감사 GAP G1~G3) ──
+    Mutant(
+        # 묶인 토큰이 질의 `?pool=` 을 따름 — 풀 X 에 묶인 토큰이 다른 풀 프리셋의 env 를 읽는다
+        # (M5t-c §4.5 「묶인 토큰은 질의를 보지 않는다」 · 결정 294 · P6 G1)
+        name="spec-bound-pool-follows-query",
+        path="src/remote_ci_monitor/capabilities.py",
+        old="        if token.pool is not None:\n            return str(token.pool)\n",
+        new=(
+            "        if token.pool is not None and query_pool is None:\n"
+            "            return str(token.pool)\n"
+        ),
+        tests=(
+            "tests/test_pairing_pool.py::test_pi14_a_token_bound_to_x_reads_only_x_and_any_capable_presets",
+        ),
+    ),
+    Mutant(
+        # 등록한 워커의 풀보다 질의가 먼저 옴 — 등록한 묶이지 않은 토큰이 질의로 다른 풀을 읽는다
+        # (M5t-c §4.5 「등록한 뒤에는 그 풀」 · P6 G1)
+        name="spec-query-before-registered-pool",
+        path="src/remote_ci_monitor/capabilities.py",
+        old="        if row is not None:\n            return str(row.pool)\n",
+        new=(
+            "        if row is not None and query_pool is None:\n            return str(row.pool)\n"
+        ),
+        tests=(
+            "tests/test_pairing_pool.py::test_pi16_b_an_unbound_token_reads_its_registered_pool_or_the_query_never_everything",
+        ),
+    ),
 )
 
 
