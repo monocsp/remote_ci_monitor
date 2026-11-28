@@ -20,6 +20,7 @@ import tarfile
 import tempfile
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from collections.abc import Callable, Iterable, Iterator
 from dataclasses import dataclass
@@ -103,6 +104,10 @@ class WorkerClient:
         #: 본문은 `worker_session_id`, 본문이 없는 라우트는 `X-RCM-Worker-Session` 헤더로.
         #: 클라이언트 하나가 프로세스 하나의 세션이다. `RemoteWorker` 는 자기 세션으로 덮어쓴다
         self.session_id: str | None = secrets.token_hex(16)
+        #: 이 워커의 풀(M5t-c §4.5 「질의 `pool`」). 있으면 `/worker/spec` 이 `?pool=` 로 싣는다 —
+        #: 등록 전의 서버가 `default` 가 아니라 이 풀로 거르게. 부르는 쪽이 설정의 풀을 넣는다.
+        #: None 이면 오늘처럼 질의가 없다(서버는 등록 풀, 등록 전이면 `default` 로 거른다)
+        self.pool: str | None = None
         # claim · heartbeat 순번(결정 339-a). 부르는 쪽이 값을 주면 그것을 쓴다(`RemoteWorker`).
         # 안 주면 이 클라이언트가 센다 — 호출이 차례로 끝나므로 마지막 claim 번호가 끝난 claim 이다
         self._claim_seq = 0
@@ -147,14 +152,19 @@ class WorkerClient:
 
     def spec(self) -> dict[str, Any]:
         """`GET /worker/spec` — 잴 프로브와 프리셋 요구 사항(M5n §4.2)."""
-        status, _, raw = self._inner._request("GET", "/worker/spec")
+        status, _, raw = self._inner._request("GET", self._spec_path())
         return json.loads(raw) if raw else {}
+
+    def _spec_path(self) -> str:
+        if self.pool is None:
+            return "/worker/spec"
+        return "/worker/spec?pool=" + urllib.parse.quote(self.pool, safe="")
 
     def spec_answer(self) -> Any:
         """`GET /worker/spec` 의 본문 그대로(빈 본문은 None). `spec()` 은 빈 본문을 `{}` 로 바꿔
         워커 루프가 멈추지 않게 하지만, `rcm doctor` 는 그것을 「서버가 알아볼 수 없는 답을
         줬다」로 보여야 한다 — 빈 명세를 「올 프리셋 0개」로 읽지 않게."""
-        return self._inner.get_json("/worker/spec")
+        return self._inner.get_json(self._spec_path())
 
     def capabilities(self, body: dict[str, Any]) -> dict[str, Any]:
         """`POST /worker/capabilities` — 이 워커가 잰 지문과 프리셋별 도구(M5n §4.2)."""
