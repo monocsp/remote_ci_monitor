@@ -652,7 +652,9 @@ def _worker_spec(s: M5nServer) -> None:
     assert status == 200, spec
     names = [p["name"] for p in spec["presets"]]
     assert LOCAL_ONLY.isdisjoint(names), names
-    assert {"gate", "gateany", "simcheck", "qa", "qadef", "relgit"} <= set(names)
+    assert {"gate", "gateany", "simcheck", "qadef", "relgit"} <= set(names)
+    # 기본 풀 워커의 명세는 그 풀로 거른다 — mac2 의 qa 도 빠진다(M5t-c 결정 294 · F9)
+    assert "qa" not in names, names
     # env 도 함께 빠진다 — 값도 이름도 명세 어디에도 없다
     text = json.dumps(spec)
     assert REL_ENV not in text and "RCM_LO_MARK" not in text

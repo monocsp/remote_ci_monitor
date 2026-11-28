@@ -9,6 +9,16 @@
   M5t-c PR1 — `pair-*` · `reject-mac-*` 스물일곱: hello · 교환 · 짝짓기 창 · `pair.key` 수명 주기 ·
      거절 MAC 의 검사를 하나씩 지운다(`core/pairing.py` · `pairing.py` · `server.py` · `store.py`,
      `docs/m5tc-workplan.md` §7 「변이」 · `tests/test_pairing_*.py`)
+  M5t-c PR2 — 열둘: `register-*` 여섯(`register-pool-check-skipped` · `register-proof-skipped` ·
+     `register-proof-unbound-session` · `register-challenge-mac-skipped` ·
+     `register-challenge-burned-before-mac` · `register-addr-first-compared`), `spec-*` 셋
+     (`spec-null-pool-unfiltered` · `spec-bound-pool-follows-query` ·
+     `spec-query-before-registered-pool`), `pair-challenge-reusable` ·
+     `pair-challenge-burn-unlocked`, `worker-spec-pool-query-dropped`: 등록 증명 · 쓴 챌린지(동시
+     등록 포함) · 묶인 풀 검사 · `/worker/spec` 풀 거르기와 그 순서 · 클라이언트의 `?pool=` ·
+     재시작 뒤 첫 등록의 주소 줄을 하나씩 깬다(`remote_workers.py` · `server.py` ·
+     `capabilities.py` · `pairing.py` · `core/pairing.py` · `client.py`,
+     `docs/m5tc-workplan.md` §7 「변이」 · P6-1 GAP G1~G3 · `tests/test_pairing_pool.py`)
   WW (Windows · WSL 안내) — `ww1-native-windows-not-refused`: 네이티브 Windows 에서 traceback
      으로 죽음 · `ww2-none-found-without-the-address-hint`: 서버를 못 찾았을 때 `--server` 길을
      말하지 않음 · `ww3-wsl-hint-never-added`: WSL 안에서 NAT 망을 말하지 않음
@@ -9382,6 +9392,187 @@ MUTANTS = (
         tests=(
             "tests/test_pairing_server.py::"
             "test_pi27_g6_events_shelf_and_driver_tokens_keep_their_shape",
+        ),
+    ),
+    Mutant(
+        # 등록의 풀 검사를 지움 — 풀 X 에 묶인 토큰이 다른 풀로 등록해 그 풀의 잡을 받는다
+        # (M5t-c §4.5 · 결정 294 · PI13)
+        name="register-pool-check-skipped",
+        path="src/remote_ci_monitor/remote_workers.py",
+        old=(
+            "        if bound is not None and pool != bound:"
+            "  # mutcheck: register-pool-check-skipped\n"
+        ),
+        new="        if False:\n",
+        tests=(
+            "tests/test_pairing_pool.py::test_pi13_a_b_a_bound_token_registering_another_pool_is_409_and_changes_nothing",
+            "tests/test_pairing_pool.py::test_pi46_e_the_register_route_puts_a_mac_on_required_bad_mac_and_pool_mismatch",
+        ),
+    ),
+    Mutant(
+        # `tokens.pool` 이 NULL 인 옛 토큰에는 `/worker/spec` 을 거르지 않음 — 다른 풀 프리셋의
+        # env 와 `local_only` 프리셋까지 나간다(M5t-c §4.5 「거르지 않은 전체를 주는 길은 없다」,
+        # N2 · PI16 · PI14)
+        name="spec-null-pool-unfiltered",
+        path="src/remote_ci_monitor/server.py",
+        old="        return self.worker_spec(pool)\n",
+        new=(
+            "        if token.pool is None:\n"
+            "            self.spec_presets_for_pool = lambda _pool: list(self.config.presets)\n"
+            "        return self.worker_spec(pool)\n"
+        ),
+        tests=(
+            "tests/test_pairing_pool.py::test_pi16_b_an_unbound_token_reads_its_registered_pool_or_the_query_never_everything",
+            "tests/test_pairing_pool.py::test_pi14_a_token_bound_to_x_reads_only_x_and_any_capable_presets",
+        ),
+    ),
+    Mutant(
+        # 짝지은 토큰의 등록 증명 검사를 지움 — 샌 토큰만으로 정당한 워커를 펜싱한다
+        # (M5t-c §4.2 「등록 증명」 · 결정 287 · PI23)
+        name="register-proof-skipped",
+        path="src/remote_ci_monitor/remote_workers.py",
+        old="        if token.pair_id is not None:  # mutcheck: register-proof-skipped\n",
+        new="        if False:\n",
+        tests=(
+            "tests/test_pairing_pool.py::test_pi23_a_a_stolen_paired_token_cannot_register_without_a_valid_proof",
+            "tests/test_pairing_pool.py::test_pi46_e_the_register_route_puts_a_mac_on_required_bad_mac_and_pool_mismatch",
+        ),
+    ),
+    Mutant(
+        # 쓴 챌린지 집합을 지움 — 엿본 등록 요청을 120초 안에 다시 보내면 통과한다(⑤, PI23)
+        name="pair-challenge-reusable",
+        path="src/remote_ci_monitor/pairing.py",
+        old="            if challenge in self._seen:\n                return False\n",
+        new="            if False:\n                return False\n",
+        tests=(
+            "tests/test_pairing_pool.py::test_pi23_a_a_stolen_paired_token_cannot_register_without_a_valid_proof",
+            "tests/test_pairing_pool.py::test_pi46_e_the_register_route_puts_a_mac_on_required_bad_mac_and_pool_mismatch",
+        ),
+    ),
+    Mutant(
+        # 증명 MAC 에서 세션 id 를 뺌 — 엿본 증명을 다른 세션 id 로 쓸 수 있다(F31 · PI23).
+        # 시험은 증명을 독립 구현으로 만들므로 정당한 등록부터 거절된다
+        name="register-proof-unbound-session",
+        path="src/remote_ci_monitor/core/pairing.py",
+        old="    return pair_mac(k, LABEL_REGISTER, pair_id, challenge, worker_session_id)\n",
+        new="    return pair_mac(k, LABEL_REGISTER, pair_id, challenge)\n",
+        tests=(
+            "tests/test_pairing_pool.py::test_pi23_a_a_stolen_paired_token_cannot_register_without_a_valid_proof",
+            "tests/test_pairing_pool.py::test_pi23_g_a_peeked_challenge_with_a_wrong_mac_does_not_burn_it",
+        ),
+    ),
+    Mutant(
+        # 챌린지 MAC 검사(토큰의 pair_id)를 건너뜀 — 다른 pair_id 의 챌린지 · 지어낸 챌린지가
+        # 통과한다(②, 313 · PI23)
+        name="register-challenge-mac-skipped",
+        path="src/remote_ci_monitor/core/pairing.py",
+        old=(
+            "    if not hmac.compare_digest("
+            "mac, pair_mac(key, LABEL_CHALLENGE, pair_id, str(t), r)):\n"
+        ),
+        new="    if False:\n",
+        tests=(
+            "tests/test_pairing_pool.py::test_pi23_a_a_stolen_paired_token_cannot_register_without_a_valid_proof",
+        ),
+    ),
+    Mutant(
+        # 증명 MAC 검사 전에 챌린지를 쓴 집합에 넣음 — 엿본 챌린지에 틀린 MAC 을 실은 요청이
+        # 정당한 워커의 챌린지를 태운다(⑥ · V2-6 · PI23 g)
+        name="register-challenge-burned-before-mac",
+        path="src/remote_ci_monitor/pairing.py",
+        old=(
+            "        verdict = cp.register_proof_verdict(\n"
+            "            self.pair_key, token_pair_id, challenge, mac, worker_session_id, at\n"
+            "        )\n"
+        ),
+        new=(
+            "        t0 = cp.challenge_time(challenge)\n"
+            "        if t0 is not None and not self._pair_challenges.burn(challenge, t0, at):\n"
+            '            return "reused"\n'
+            "        verdict = cp.register_proof_verdict(\n"
+            "            self.pair_key, token_pair_id, challenge, mac, worker_session_id, at\n"
+            "        )\n"
+            "        if verdict is None:\n"
+            "            return None\n"
+        ),
+        tests=(
+            "tests/test_pairing_pool.py::test_pi23_g_a_peeked_challenge_with_a_wrong_mac_does_not_burn_it",
+        ),
+    ),
+    Mutant(
+        # `WorkerClient` 가 `/worker/spec` 에 자기 풀을 싣지 않음 — 등록 전 기본 풀이 아닌 워커가
+        # `default` 의 프리셋으로 판정한다(M5t-c §4.5 「질의 `pool`」 · PI16 b)
+        name="worker-spec-pool-query-dropped",
+        path="src/remote_ci_monitor/client.py",
+        old='        if self.pool is None:\n            return "/worker/spec"\n',
+        new='        if True:\n            return "/worker/spec"\n',
+        tests=(
+            "tests/test_pairing_pool.py::test_pi16_b_the_worker_client_sends_its_own_pool_before_registering",
+        ),
+    ),
+    # ── M5t-c PR2 · P6-1(엣지 감사 GAP G1~G3) ──
+    Mutant(
+        # 묶인 토큰이 질의 `?pool=` 을 따름 — 풀 X 에 묶인 토큰이 다른 풀 프리셋의 env 를 읽는다
+        # (M5t-c §4.5 「묶인 토큰은 질의를 보지 않는다」 · 결정 294 · P6 G1)
+        name="spec-bound-pool-follows-query",
+        path="src/remote_ci_monitor/capabilities.py",
+        old="        if token.pool is not None:\n            return str(token.pool)\n",
+        new=(
+            "        if token.pool is not None and query_pool is None:\n"
+            "            return str(token.pool)\n"
+        ),
+        tests=(
+            "tests/test_pairing_pool.py::test_pi14_a_token_bound_to_x_reads_only_x_and_any_capable_presets",
+        ),
+    ),
+    Mutant(
+        # 등록한 워커의 풀보다 질의가 먼저 옴 — 등록한 묶이지 않은 토큰이 질의로 다른 풀을 읽는다
+        # (M5t-c §4.5 「등록한 뒤에는 그 풀」 · P6 G1)
+        name="spec-query-before-registered-pool",
+        path="src/remote_ci_monitor/capabilities.py",
+        old="        if row is not None:\n            return str(row.pool)\n",
+        new=(
+            "        if row is not None and query_pool is None:\n            return str(row.pool)\n"
+        ),
+        tests=(
+            "tests/test_pairing_pool.py::test_pi16_b_an_unbound_token_reads_its_registered_pool_or_the_query_never_everything",
+        ),
+    ),
+    Mutant(
+        # 쓴 챌린지 집합의 검사와 넣기가 잠금 밖이고 그 사이에 틈이 있음 — 같은 증명을 한꺼번에
+        # 보낸 등록 여럿이 모두 통과한다(⑤ · P6 G2)
+        name="pair-challenge-burn-unlocked",
+        path="src/remote_ci_monitor/pairing.py",
+        old=(
+            "        with self.lock:\n"
+            "            floor = now - cp.PAIR_CHALLENGE_SECONDS"
+            " - cp.PAIR_CHALLENGE_FUTURE_SECONDS\n"
+            "            for c in [c for c, seen_t in self._seen.items() if seen_t < floor]:\n"
+            "                del self._seen[c]\n"
+            "            if challenge in self._seen:\n"
+            "                return False\n"
+            "            self._seen[challenge] = t\n"
+        ),
+        new=(
+            "        if True:\n"
+            "            if challenge in self._seen:\n"
+            "                return False\n"
+            "            threading.Event().wait(0.2)\n"
+            "            self._seen[challenge] = t\n"
+        ),
+        tests=(
+            "tests/test_pairing_pool.py::test_pi23_g2_one_proof_sent_many_times_at_once_registers_once",
+        ),
+    ),
+    Mutant(
+        # 재시작 뒤 첫 등록이 없는 앞 주소와 비교됨 — 주소 기억이 메모리뿐인 지금 동작(첫 등록은 줄
+        # 없음)이 깨진다(M5t-c T6 · P6 G3)
+        name="register-addr-first-compared",
+        path="src/remote_ci_monitor/remote_workers.py",
+        old="            before = self._register_addrs.get(name)\n",
+        new='            before = self._register_addrs.get(name, "")\n',
+        tests=(
+            "tests/test_pairing_pool.py::test_pi23_c_g3_the_first_registration_after_a_restart_logs_no_address_line",
         ),
     ),
 )

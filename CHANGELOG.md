@@ -18,6 +18,18 @@ of a key bumps that number and is listed here.
   [the server's identity key](docs/configuration.md#the-servers-identity-key-pairkey).
   ([#293](https://github.com/monocsp/remote_ci_monitor/pull/293))
 
+### Changed
+- **A worker token reads only its own pool's presets.** `GET /worker/spec` now lists the presets
+  of the token's pool, every `any-capable` preset and no `local_only` preset: the pool a paired
+  token is bound to, otherwise the pool the worker registered with, otherwise `?pool=<name>` or
+  `default`. Another pool's preset names and `env` values no longer reach that worker. A token
+  made by pairing is bound to its window's pool: registering with another `pool` is
+  `409 pool_mismatch`, and registering without the pairing proof is `403 pair_proof_required`
+  (`403 pair_proof_invalid` with `reason` `bad_mac`, `expired` or `reused` when the proof is
+  wrong). The server log names both addresses when a worker registers from a new one. See
+  [a worker token's pool](docs/configuration.md#a-worker-tokens-pool-and-the-registration-proof).
+  ([#295](https://github.com/monocsp/remote_ci_monitor/pull/295))
+
 ### Added
 - **The server side of pairing.** An admin opens a short pairing window with `POST /pair`
   (one per kind, 10 minutes by default and at most 60, kept only in the server's memory); the

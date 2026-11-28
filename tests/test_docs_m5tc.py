@@ -172,3 +172,103 @@ def test_pi30_every_pr1_mutant_of_the_workplan_is_in_mutcheck():
     wanted = pr1_mutants_in_workplan()
     assert len(wanted) == 27, sorted(wanted)
     assert wanted <= names, sorted(wanted - names)
+
+
+# ── PR2 묶인 풀 · 등록 증명 ────────────────────────────────────────────────
+
+REMOTE_WORKERS_SRC = (ROOT / "src" / "remote_ci_monitor" / "remote_workers.py").read_text()
+POOL_TESTS = ROOT / "tests" / "test_pairing_pool.py"
+
+
+def pr_mutants_in_workplan(pr: str) -> set[str]:
+    body = section(WORKPLAN, "변이")
+    names = set()
+    for line in body.splitlines():
+        m = re.match(r"^\| `([a-z0-9-]+)` \|.*\| (PR[0-9 ·]+) \|$", line)
+        if m and pr in m.group(2).split(" · "):
+            names.add(m.group(1))
+    return names
+
+
+def test_pi30_every_pr2_mutant_of_the_workplan_is_in_mutcheck():
+    spec = importlib.util.spec_from_file_location(
+        "mutcheck_m5tc2", ROOT / "scripts" / "mutcheck.py"
+    )
+    assert spec and spec.loader
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules["mutcheck_m5tc2"] = mod
+    spec.loader.exec_module(mod)
+    by_name = {m.name: m for m in mod.MUTANTS}
+    wanted = pr_mutants_in_workplan("PR2")
+    assert len(wanted) == 7, sorted(wanted)
+    assert wanted <= set(by_name), sorted(wanted - set(by_name))
+    for name in wanted:  # 그 PR 의 시험(V1-7)
+        assert all(t.startswith("tests/test_pairing_pool.py::") for t in by_name[name].tests), name
+
+
+def test_pi13_pi23_configuration_quotes_the_refusals_the_server_sends():
+    body = flat(section(CONFIGURATION, "A worker token's pool and the registration proof"))
+    joined = re.sub(r'"\s*\n\s*f?[\'"]', "", REMOTE_WORKERS_SRC)
+    for doc_words, src_words in (
+        (
+            "this worker token is bound to pool '<P>' — set pool = \"<P>\" in worker.toml or "
+            "pair again",
+            "this worker token is bound to pool '{bound}' — set pool = \"{bound}\" in "
+            "worker.toml or pair again",
+        ),
+        (
+            "this worker token was paired — its pairing proof is missing: upgrade rcm on this "
+            "worker and pair it",
+            "this worker token was paired — its pairing proof is missing: upgrade rcm on this "
+            "worker and pair it",
+        ),
+        (
+            "registered from <address> — its previous registration came from <address>",
+            "registered from {addr} — its previous registration came from {before}",
+        ),
+    ):
+        assert doc_words in body, doc_words
+        assert src_words in joined, src_words
+    for code in ("409 pool_mismatch", "403 pair_proof_required", "403 pair_proof_invalid"):
+        assert code in body, code
+    for reason in ("`bad_mac`", "`expired`", "`reused`"):
+        assert reason in body, reason
+
+
+def test_pi14_pi16_configuration_names_the_pool_order_of_worker_spec():
+    body = flat(section(CONFIGURATION, "A worker token's pool and the registration proof"))
+    assert "GET /worker/spec?pool=<name>" in body
+    assert "No token reads the presets of every pool at once." in body
+    assert '`placement = "any-capable"`' in body and "`local_only`" in body
+
+
+def test_pi14_changelog_announces_the_pool_filter_and_the_proof():
+    unreleased = CHANGELOG.split("## [Unreleased]", 1)[1].split("\n## [", 1)[0]
+    body = flat(unreleased)
+    heading = "**A worker token reads only its own pool's presets.**"
+    assert heading in body
+    entry = body.split(heading, 1)[1].split(" - **", 1)[0]
+    for words in ("409 pool_mismatch", "403 pair_proof_required", "local_only"):
+        assert words in entry, words
+    assert "docs/configuration.md#a-worker-tokens-pool-and-the-registration-proof" in entry
+    # P3 r1: 그 PR 의 링크(PR1 의 test_pi29 처럼)
+    assert "([#295](https://github.com/monocsp/remote_ci_monitor/pull/295))" in entry
+
+
+def test_pi30_pool_tests_hold_no_secret_shaped_literals_and_only_test_addresses():
+    """§8: 시험 값은 실행 중에 만든다(PR1 의 같은 시험을 이 PR 의 시험 파일에)."""
+    text = POOL_TESTS.read_text()
+    assert not re.search(r"(?<![0-9a-f])[0-9a-f]{64}(?![0-9a-f])", text)
+    assert not re.search(r"(?<![0-9a-f])[0-9a-f]{32}(?![0-9a-f])", text)
+    for ip in re.findall(r"\b\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}\b", text):
+        assert ip.startswith(("127.0.0.", "192.0.2.")), ip
+
+
+def test_pi23_c_g3_configuration_says_the_address_memory_ends_at_a_restart():
+    """P6 G3: 다른 주소 재등록 줄은 감지 보조일 뿐이고 그 기억은 메모리에만 있다 — 재시작 뒤 첫
+    등록은 비교하지 않는다는 한계를 문서가 말한다."""
+    body = flat(section(CONFIGURATION, "A worker token's pool and the registration proof"))
+    assert (
+        "The server keeps these addresses in memory only, so the first registration after a "
+        "restart is not compared." in body
+    )

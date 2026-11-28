@@ -4499,9 +4499,15 @@ class App(RemoteWorkersMixin, CapabilitiesMixin, ShelfAppMixin, PairingMixin):
             "fingerprint_hash": fingerprint,
         }
 
-    def worker_spec_for(self, token: TokenInfo) -> dict[str, Any]:
-        """`GET /worker/spec` — 워커 토큰이면 누구나(등록 전에도 잴 수 있다)."""
-        return self.worker_spec()
+    def worker_spec_for(self, token: TokenInfo, query_pool: str | None = None) -> dict[str, Any]:
+        """`GET /worker/spec` — 워커 토큰이면 누구나(등록 전에도 잴 수 있다). 그 토큰의 풀로
+        거른다(M5t-c §4.5 · 결정 294 — 풀은 `spec_pool_for`, 프리셋은 `spec_presets_for_pool`).
+        거르지 않은 전체를 주는 길은 없다(N2)."""
+        try:
+            pool = self.spec_pool_for(token, query_pool)
+        except CapabilityError as e:
+            raise ApiError(e.status, e.message) from e
+        return self.worker_spec(pool)
 
     def worker_capabilities(self, token: TokenInfo, body: Any) -> dict[str, Any]:
         """`POST /worker/capabilities` — 등록된 워커의 보고(§4.2). 세대가 다르면 409.
@@ -6117,7 +6123,7 @@ class Handler(ShelfHandlerMixin, BaseHTTPRequestHandler):
         if path == "/worker/spec":
             self._only(method, "GET")
             t = self.app.require_worker_token(self._token())
-            self._send_json(200, self.app.worker_spec_for(t))
+            self._send_json(200, self.app.worker_spec_for(t, (query.get("pool") or [None])[0]))
             return
         if path.startswith("/worker/"):
             self._worker_route(method, path)
@@ -6513,7 +6519,10 @@ class Handler(ShelfHandlerMixin, BaseHTTPRequestHandler):
             what = m.group(1)
             body = self._json_body()
             if what == "register":
-                self._send_json(200, self.app.worker_register(t, body))
+                answer = self.app.worker_register(t, body)
+                # 다른 주소의 재등록을 서버 로그에(M5t-c T6) — 성공한 등록만
+                self.app.note_register_addr(t.name, str(self.client_address[0]))
+                self._send_json(200, answer)
             elif what == "capabilities":
                 self._send_json(200, self.app.worker_capabilities(t, body))
             elif what == "claim":

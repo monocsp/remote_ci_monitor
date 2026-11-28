@@ -372,8 +372,10 @@ Each preset shows one state: `ready` (it starts taking jobs once the service rep
 check` (its tools are there and rcm runs its check presets once after the worker registers — not
 "ok" yet), `missing` (with the install hint and docs link from the coordinator's `[[tools]]` when
 there is one), or `unknown`. An `any-capable` preset that misses a tool is "not coming to this
-machine" — a warning, not a failure. A preset for another pool is listed and left out. On a remote
-worker, a preset whose `checks` name a `local_only` check is "not coming (check is local-only)",
+machine" — a warning, not a failure. A preset for another pool is not listed: the server sends a
+worker only its own pool's presets (a worker outside `default` that has not registered yet is
+checked against `default` for now). On a remote worker, a preset whose `checks` name a
+`local_only` check is "not coming (check is local-only)",
 not "needs check": that check never runs there. The server names those checks for each preset in
 `GET /worker/spec` (`unreachable_checks`), and `rcm doctor` reads only that key; it does not guess
 from which presets the spec leaves out. Against a server that does not send the key, a preset with
