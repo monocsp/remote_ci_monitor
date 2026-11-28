@@ -102,6 +102,9 @@ argv = ["sh", "-c", "echo qa"]
 #: reload 시나리오가 붙이는 프리셋 하나 — 파일이 실제로 바뀌어야 「다시 읽었다」가 확실하다
 LATE = '\n[[presets]]\nname = "late"\nargv = ["true"]\n'
 PRESET_NAMES = ["ok", "needtool", "capgate", "anywhere", "simcheck", "scenario"]
+#: `/worker/spec` 은 그 워커의 풀로 거른다(M5t-c 결정 294 · F9) — 그 풀 것과 any-capable 만
+MAC2_NAMES = ["needtool", "capgate", "anywhere", "scenario"]
+DEFAULT_NAMES = ["ok", "capgate", "anywhere", "simcheck"]
 WORKERS = ("build-02", "mac2-worker", "mbp")
 
 
@@ -315,7 +318,14 @@ def test_worker_spec_is_the_probes_and_the_preset_requirements(srv):
     assert spec["probes"] == [
         {"name": "xc", "argv": [PY, "-c", "print('Xc 1')"], "timeout_seconds": 10}
     ]
-    assert [p["name"] for p in spec["presets"]] == PRESET_NAMES
+    # build-02 는 mac2 로 등록했다 — 기본 풀 전용(ok · simcheck)은 이름도 싣지 않는다
+    names = [p["name"] for p in spec["presets"]]
+    assert names == MAC2_NAMES
+    assert {"ok", "simcheck"}.isdisjoint(names), names
+    srv.generation("mbp", pool="default")
+    dnames = [p["name"] for p in srv.spec("mbp")[1]["presets"]]
+    assert dnames == DEFAULT_NAMES
+    assert {"needtool", "scenario"}.isdisjoint(dnames), dnames
     capgate = next(p for p in spec["presets"] if p["name"] == "capgate")
     # claim payload 에 이미 실리던 것과 같은 범위 — argv · 비밀 · 저장소는 안 실린다
     # M5t-a TD15 · TD51 · TO18 이 배치 키 · git_ref 키 · unreachable_checks 를 더했다 —
@@ -414,7 +424,11 @@ def test_reload_bumps_the_generation_and_the_spec_follows(srv):
     epoch, n = gen.split(":")
     status, hb = srv.heartbeat("build-02")
     assert hb["generation"] == f"{epoch}:{int(n) + 1}"
-    assert [p["name"] for p in srv.spec()[1]["presets"]] == [*PRESET_NAMES, "late"]
+    # late 는 기본 풀 프리셋이다 — 기본 풀 워커의 명세에만 붙고 mac2 의 것에는 없다(결정 294)
+    srv.generation("mbp", pool="default")
+    assert [p["name"] for p in srv.spec("mbp")[1]["presets"]] == [*DEFAULT_NAMES, "late"]
+    mac2 = [p["name"] for p in srv.spec()[1]["presets"]]
+    assert mac2 == MAC2_NAMES and "late" not in mac2, mac2
     # 옛 세대로 잰 보고는 이제 거절된다 — 워커는 명세를 다시 받는다
     assert srv.report("build-02", gen)[0] == 409
     assert srv.machines_doc()["generation"] == hb["generation"]

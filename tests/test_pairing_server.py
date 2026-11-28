@@ -1805,7 +1805,8 @@ def test_pi46_g_success_answers_carry_no_mac(ps):
 
 def test_pi46_h_fenced_and_protocol_409s_of_a_paired_token_carry_a_mac(ps):
     out = ps.paired_by_exchange("worker", "build-01")
-    name, pair_id = out["name"], cp.parse_pair_secret(out["pair_secret"])[0]
+    name = out["name"]
+    pair_id, k = cp.parse_pair_secret(out["pair_secret"])
     ps.tokens[name] = out["token"]
     ps.worker_names.add(name)
     # protocol_required — 세션 없는 heartbeat
@@ -1818,10 +1819,19 @@ def test_pi46_h_fenced_and_protocol_409s_of_a_paired_token_carry_a_mac(ps):
     assert doc["pair_reject_mac"] == want_reject(
         ps, pair_id, "POST", "/worker/heartbeat", 409, "protocol_required", "", nonce, body
     )
-    # session_fenced — 같은 이름의 새 세션이 옛 세션을 펜싱한다
-    ps.registered(name)
+
+    # session_fenced — 같은 이름의 새 세션이 옛 세션을 펜싱한다. 짝지은 토큰은 등록마다 그
+    # 세션의 등록 증명을 싣는다(M5t-c PR2, §4.2 「등록 증명」)
+    def proof_registered() -> None:
+        _req, (status, hello) = ps.hello(pair_id)
+        assert status == 200, hello
+        c, sid = hello["challenge"], ps.session(name)
+        mac = ref_mac(k, "rcm-register-v1", pair_id, c, sid)
+        ps.registered(name, pair_proof={"challenge": c, "mac": mac})
+
+    proof_registered()
     old = ps.new_process(name)
-    ps.registered(name)
+    proof_registered()
     nonce = secrets.token_hex(32)
     body = json.dumps({"lane": 1, "worker_session_id": old, "seq": 1, "claims_settled": 0}).encode()
     status, _h, doc = raw_request(

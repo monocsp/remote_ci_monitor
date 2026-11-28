@@ -1454,9 +1454,17 @@ def test_td15_worker_spec_carries_pool_pools_placement_checks_and_tools(tmp_path
         assert (need.get("pool"), need.get("placement")) == ("mac2", "pool"), need
         assert by["capgate"].get("placement") == "any-capable", by["capgate"]
         assert by["scenario"].get("checks") == ["simcheck"], by["scenario"]
-        sim = by["simcheck"]
-        assert (sim.get("source_modes"), sim.get("repo")) == (["git_ref"], "app"), sim
+        # M5t-c 결정 294(PI14 · PI16): mac2 로 등록한 워커는 기본 풀 프리셋을 받지 않는다
+        assert {"ok", "simcheck"}.isdisjoint(by), sorted(by)
         assert all({"pool", "pools", "placement", "checks"} <= set(p) for p in by.values()), by
+        # git_ref 키는 그 프리셋이 오는 기본 풀 워커의 명세에서 본다
+        srv.generation("mbp", pool="default")
+        status, dspec = srv.spec("mbp")
+        assert status == 200, dspec
+        dby = {p["name"]: p for p in dspec["presets"]}
+        sim = dby["simcheck"]
+        assert (sim.get("source_modes"), sim.get("repo")) == (["git_ref"], "app"), sim
+        assert {"needtool", "scenario"}.isdisjoint(dby), sorted(dby)
         assert spec.get("tools") == [
             {"name": "rcm-m5n-faketool", "docs": "", "install": {"any": "td15-install"}}
         ]
@@ -1490,6 +1498,9 @@ def test_td15_doctor_reads_the_real_servers_spec(tmp_path, monkeypatch, capsys):
     monkeypatch.setenv("HOME", str(home))
     srv = m5n(tmp_path)
     try:
+        # M5t-c 결정 294: 서버는 등록한 풀(mac2)로 거른다. 등록 전 doctor 가 자기 풀을 싣는
+        # 것(`WorkerClient.pool`)은 doctor 를 고치는 M5t-c PR3 의 몫이다
+        srv.generation("build-02")
         monkeypatch.setenv("RCM_WORKER_TOKEN", srv.tokens["build-02"])
         cfg = worker_toml(tmp_path, f"http://127.0.0.1:{srv.port}", pool="mac2", extra=REPO)
         sf = plist(tmp_path / "svc", "/usr/bin:/bin")
@@ -1502,7 +1513,9 @@ def test_td15_doctor_reads_the_real_servers_spec(tmp_path, monkeypatch, capsys):
             row(doc, "needtool")["applies"] == "pool" and row(doc, "needtool")["state"] == "missing"
         )
         assert row(doc, "capgate")["applies"] == "not_coming", row(doc, "capgate")
-        assert row(doc, "ok")["applies"] == "other_pool", row(doc, "ok")  # 기본 풀 전용
+        # 기본 풀 전용 프리셋은 이 워커의 명세에 없다 — 이름도 doctor 에 닿지 않는다(PI14)
+        names = {p["name"] for p in doc["presets"]}
+        assert {"ok", "simcheck"}.isdisjoint(names), sorted(names)
         assert code == 1, doc
     finally:
         srv.close()
@@ -1577,6 +1590,7 @@ def test_to18_doctor_reads_the_real_servers_unreachable_checks(tmp_path, monkeyp
     monkeypatch.setenv("HOME", str(home))
     srv = m5n(tmp_path, presets=PRESETS + GATED)
     try:
+        srv.generation("build-02")  # 등록한 풀(mac2)로 거른다(M5t-c 결정 294, 위 TD15 와 같다)
         monkeypatch.setenv("RCM_WORKER_TOKEN", srv.tokens["build-02"])
         cfg = worker_toml(tmp_path, f"http://127.0.0.1:{srv.port}", pool="mac2", extra=REPO)
         sf = plist(tmp_path / "svc", "/usr/bin:/bin")
